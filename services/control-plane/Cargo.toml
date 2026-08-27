@@ -2,6 +2,17 @@
 #
 # Owner: control-plane. The WORKSPACE manifest at services/Cargo.toml is owned by the
 # integration lead and must not be edited from this domain.
+#
+# Every dependency below is already declared in services/Cargo.toml's
+# [workspace.dependencies]. No version is named here, so no domain can drift one.
+#
+# `rustls` is deliberately NOT named. ownership.md §8 W-12 puts the TLS
+# implementation, the raw-public-key verifier and the CryptoProvider in
+# `twinvpn-crypto`, and `quinn` is the transport this crate may declare. `quinn`
+# re-exports the `rustls` types its own feature selection compiled (`rustls-ring`),
+# so naming `rustls` here would only risk activating a SECOND provider
+# (`aws-lc-rs` is `rustls`'s default feature) and with it a second answer to
+# "what cryptography do we use". See README.md §7.
 [package]
 name    = "twinvpn-control-plane"
 version.workspace      = true
@@ -12,14 +23,45 @@ repository.workspace   = true
 description = "the C1 command surface and the C2 durable event log (ADR-0002, ADR-0008, ADR-0009)"
 publish = false
 
+[lib]
+name = "twinvpn_control_plane"
+path = "src/lib.rs"
+
 [[bin]]
 name = "twinvpn-control-plane"
 path = "src/main.rs"
 
+[features]
+default = []
+# The wrong-publisher forgery and the scripted verifier. **Never shipped**,
+# exactly as `twinvpn-cp-client`'s `testing` and `twinvpn-env`'s `test-support`
+# are never shipped (ADR-0018 CD-5). Without it the sole-publisher rejection has
+# nothing to reject and its test would be vacuous.
+test-support = []
+
 [dependencies]
+twinvpn-service-common = { workspace = true }
 twinvpn-schema = { workspace = true }
 twinvpn-types  = { workspace = true }
-thiserror      = { workspace = true }
-tracing        = { workspace = true }
-twinvpn-service-common = { workspace = true }
-tokio = { workspace = true }
+
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+tokio     = { workspace = true }
+bytes     = { workspace = true }
+prost     = { workspace = true }
+futures   = { workspace = true }
+
+# ADR-0002 §11.2 rung 1: QUIC + TLS 1.3. A transport protocol implementation
+# that takes its cryptography from rustls and implements none itself (W-12).
+quinn = { workspace = true }
+
+# ADR-0002 §11.3 / B-3: the durable event log lives in the SAME transactional
+# store as control-plane state, with net_seq allocated inside the mutating
+# transaction. That co-location is the correctness property.
+sqlx = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+# Self-dependency so `cargo test` and the integration tests in `tests/` both see
+# `test-support`. The pattern `twinvpn-cp-client` uses for the same reason.
+twinvpn-control-plane = { path = ".", features = ["test-support"] }
