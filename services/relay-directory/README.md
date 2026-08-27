@@ -149,8 +149,8 @@ by publishing weights, not by touching clients" (§10).
 
 The hash is injected (`rank::Hrw64`) for the same CD-I2 reason as §7, and because
 testing-strategy A-14 requires it to be **seedable** for a deterministic
-region-failure test. §7.1 records that the reduction is now byte-identical to
-`twinvpn-relay-client`'s, and that the digest itself is not yet bindable.
+region-failure test. [`rank::Blake2sHrw`](src/rank.rs) is the production binding;
+§7.1 records that the reduction is byte-identical to `twinvpn-relay-client`'s.
 
 ---
 
@@ -209,9 +209,18 @@ four choices. An earlier revision here used a `u128` product over a `u64` hash a
 clamped capacity up to 1; the second of those would have let a relay an operator
 drained to zero keep taking pairs.
 
-The digest itself is `BLAKE2s(relay_id ‖ pair_id)` and is **not bindable**:
-`twinvpn-crypto` exposes no BLAKE2s. `twinvpn-relay-client/src/hrw.rs` carries the
-identical open item, so it is one shared gap — see `services/relay/README.md` §8.
+The digest itself is now **bound**: [`rank::Blake2sHrw`](src/rank.rs) calls
+`twinvpn_crypto::hrw_weight_digest`, the same function `twinvpn-relay-client`
+calls, asserted against it directly rather than against a copy of the algorithm.
+The trait stays because testing-strategy A-14 needs a seedable hash, and because a
+spread test built on the real one would assert a distribution rather than the
+algorithm — so both are tested: the double for the algorithm, the real hash for
+the spread.
+
+A width mismatch yields a **zero digest**, hence a weight of zero — "take no new
+pairs". It is unreachable through `RelayRecord`, whose `relay_id` is fixed at 8
+bytes; the direction is chosen anyway, because a relay silently ranked *first* on
+a truncated input would be worse than one ranked last.
 
 ## 8. Known limitations
 
@@ -232,14 +241,12 @@ identical open item, so it is one shared gap — see `services/relay/README.md` 
    periodic rebuild-and-publish task is not wired, because with (1) there is
    nothing to rebuild *from*.
 5. **No container has been built or run.** Docker is absent from this host.
-6. **HRW cannot be computed in production.** §7.1 — the reduction matches the
-   client byte for byte, but `BLAKE2s` is unavailable to either side.
-7. **The frozen `relay-map` has no regions field.** `map_cbor` therefore does not
+6. **The frozen `relay-map` has no regions field.** `map_cbor` therefore does not
    encode adjacency, and it is flagged in the module rather than invented:
    adjacency reaches a device through `RelayAssignment` in `relay.proto` instead.
    If ADR-0006 §11.1's `regions[]` is meant to be *inside* the signed document,
    the CDDL and the ADR disagree and the CDDL is frozen.
-8. **The `+100` cap and the `+120` self-hosted bonus.** §11.2's composition
+7. **The `+100` cap and the `+120` self-hosted bonus.** §11.2's composition
    sentence says "the server's total contribution is capped at +100", while its own
    table lists `Self-hosted +120`. This crate reads the cap as applying to the
    `server_rank` term, which is what §11.2's self-hosted paragraph then says

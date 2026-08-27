@@ -58,6 +58,7 @@ pub mod sign;
 pub use config::{DirectoryConfig, DirectoryConfigError};
 pub use fleet::{FleetStore, InMemoryFleet, RelayRecord};
 pub use map::{PublicationFloor, RelayMap};
+pub use rank::Blake2sHrw;
 
 /// The component every `ServiceError` from this crate is observed by.
 ///

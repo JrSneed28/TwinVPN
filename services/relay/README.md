@@ -223,8 +223,8 @@ It logs a `WARN` at startup instead.
 | Carriage | Status | Why |
 |---|---|---|
 | `R-UDP` (UDP/41641 and UDP/443) | **bound and serving**, IPv4, IPv6, dual-stack and IPv6-only | a real `tokio::net::UdpSocket` with a live receive loop ([`loop_udp`](src/loop_udp.rs)) |
-| `R-QUIC` (UDP/443, QUIC DATAGRAM) | **not bound** | `quinn` is in `services/Cargo.toml`'s workspace set but no member has built it, so it is absent from `services/Cargo.lock` and cannot be resolved on this host; the leg additionally needs the RFC 8446 exporter §7 has no provider for |
-| `R-TLS` (TCP/443, TLS 1.3) | **not bound** | same two reasons (`rustls`, RFC 7250 raw-public-key client auth) |
+| `R-QUIC` (UDP/443, QUIC DATAGRAM) | **not bound** | `quinn` is in `services/Cargo.toml`'s workspace set but no member has built it, so it is absent from `services/Cargo.lock` and cannot be resolved on this host; the leg additionally needs the RFC 8446 exporter no provider supplies |
+| `R-TLS` (TCP/443, TLS 1.3) | **not bound** | same two reasons (`rustls`, and RFC 7250 raw-public-key client auth) |
 
 `CarriageSet::bind` **fails closed**: an unavailable carriage is recorded, logged
 at `ERROR`, and makes `/readyz` red. It does **not** bind a bare TCP socket on 443
@@ -283,29 +283,38 @@ admission policy be tested with no provider at all — and
 behind it. [`crypto::FailClosed`](src/crypto.rs) remains the default when none is
 configured, so an unconfigured relay is still a closed relay.
 
-| Primitive | ADR | Bound to | Status |
-|---|---|---|---|
-| COSE_Sign1 verification **over the received octets** | §11.3 | `twinvpn_crypto::verify_cose_sign1` | **real** |
-| one-way 16-byte digest (daily `relay_sub` re-hash) | §10 | `twinvpn_crypto::hkdf_sha256` | **real** |
-| keyed BLAKE2s frame MAC, truncated to 64 bits | §9.1 | — | **not bound** |
+| Primitive | ADR | Bound to |
+|---|---|---|
+| COSE_Sign1 verification **over the received octets** | §11.3 | `twinvpn_crypto::verify_cose_sign1` |
+| keyed BLAKE2s frame MAC, truncated to 64 bits | §9.1 | `twinvpn_crypto::frame_mac` / `verify_frame_mac` |
+| one-way 16-byte digest (daily `relay_sub` re-hash) | §10 | `twinvpn_crypto::hkdf_sha256` |
 
-**The frame MAC is the one gap, and it is not a shortcut.** `twinvpn-crypto`
-declares `blake2` as a dependency but **exposes no BLAKE2s function** — its public
-API is `verify_cose_sign1`, `hkdf_sha256`, `hkdf_expand_label`, `sha256`,
-`sha256_parts`, the Noise session types and the statement decoders, with no
-keyed-MAC entry point of any kind. Substituting SHA-256 would be worse than
-leaving it unbound, because the MAC is **on the wire**: §9.1 fixes it and the
-peer's `twinvpn-relay-client` computes the same value, so a relay that MACs with a
-different primitive rejects every legitimate frame while looking configured.
+All three are real. `frame_mac_available()` is kept rather than deleted: a build
+that again could not MAC must say so in one startup `ERROR`, not present as a
+flood of dropped frames.
 
-`core-dataplane`'s `twinvpn-relay-client/src/hrw.rs` carries the identical open
-item in its own words — "`twinvpn-crypto` supplies `blake2s(relay_id ‖ pair_id)`"
-— so this is **one shared gap with two waiting consumers**, and the ask is one
-function on `twinvpn-crypto`'s public API.
+**The truncation is the part worth checking twice.** ADR-0005 §9.1 says
+"truncated to 64 bits", and BLAKE2 parameterises output length *inside the
+initialisation block* — so `BLAKE2s(digest_length = 8)` and
+`BLAKE2s(digest_length = 32)[0..8]` are **different functions over the same key
+and the same input**. "Truncated" is the second. `twinvpn-crypto` pins both
+readings and names the rejected one; this crate pins it **again from the consumer
+side**, against the same published vector, because the consequence lands here — a
+relay computing the other reading verifies nothing while looking correctly
+configured.
 
-Until it lands, `frame_mac`/`verify_frame_mac` behave exactly like `FailClosed`
-and **no `DATA` frame is forwarded**. Startup says so once, at `ERROR`, rather
-than presenting as a flood of dropped frames.
+More important than either, and the assertion that actually catches a cross-crate
+divergence: `this_crates_mac_input_matches_the_shared_golden_vector` builds the
+vector's frame through **this crate's own** `RelayFrame::mac_input` and compares
+it byte for byte. `twinvpn-crypto` owns the MAC and the truncation; this crate
+owns the frame layout; if the two disagree about §9.1's field order or widths,
+every legitimate frame is dropped and both sides look correct.
+
+**The MAC input is not length-prefixed, deliberately.** §9.1's fields are
+fixed-width except `payload`, which is last, so the encoding is already
+unambiguous — the opposite call from the ADR-0020 §11.5 record AAD, where two
+*variable-length* fields genuinely were ambiguous. Prefixing a specified wire
+format would make this relay reject every legitimate frame.
 
 ### 8.1 Verification order, and why it changed
 
@@ -370,36 +379,39 @@ The runtime image has no shell, so `docker compose exec relay-a sh` will not wor
 
 Stated here rather than discovered later.
 
-1. **The keyed BLAKE2s frame MAC is not bound.** §8. Every *other* primitive is
-   real. The consequence is concrete: admission, the epoch floor and the log
-   subject all work, and **no `DATA` frame is forwarded**, because a frame whose
-   MAC cannot be checked must not be. One `ERROR` at startup says so.
-2. **No leg can be established.** `K_leg` comes from the Noise_IK handshake
+1. **No leg can be established.** `K_leg` comes from the Noise_IK handshake
    (`R-UDP`) or an RFC 8446 exporter (`R-QUIC`/`R-TLS`) — ADR-0005 §11.1(2) —
    and neither is implemented. [`pump::LegRegistry`](src/pump.rs) is therefore
    empty in production and every received datagram is dropped with **zero bytes**
    in reply. That is the fail-closed direction, it is asserted over a real socket
-   (§12), and a `WARN` at startup says so.
-3. **`R-QUIC` and `R-TLS` are not served.** §6. `R-UDP` is, on all four address
+   (§12), and a `WARN` at startup says so. **This is now the only thing between
+   the relay and a working data plane**: with legs supplied by a test, a real
+   frame traverses a real relay between two real sockets today.
+2. **`R-QUIC` and `R-TLS` are not served.** §6. `R-UDP` is, on all four address
    configurations, with the receive loop running.
-4. **No container has been built or run.** Docker is absent from this host, as
+3. **No container has been built or run.** Docker is absent from this host, as
    `infra/README.md` §9 records. Everything in §10 involving `docker compose` is
    unexercised.
-5. **The `RELAY_STATUS` body encoding is proposed, not frozen.** ADR-0005 §9.1
+4. **The `RELAY_STATUS` body encoding is proposed, not frozen.** ADR-0005 §9.1
    assigns the type byte but specifies no body, and B4 has no schema artifact by
    design (ADR-0003 R7). [`status`](src/status.rs) contributes the smallest
-   encoding that satisfies §11.5 and §11.7 and asks ADR-0005's owner to confirm
-   it. It is versioned by the frame's `ver` nibble, so changing it is an ADR-0014
-   event rather than a silent break.
-6. **`BIND`, `BOUND`, `DRAIN`, `CAPS` and `REBIND` are not routed by the pump.**
+   encoding satisfying §11.5 and §11.7, versioned by the frame's `ver` nibble so
+   changing it is an ADR-0014 event. Recorded for ADR-0005's owner.
+5. **`BIND`, `BOUND`, `DRAIN`, `CAPS` and `REBIND` are not routed by the pump.**
    They are the leg-setup and control surface and belong with the leg state
-   machine in (2); routing them on the forwarding path would put admission on the
+   machine in (1); routing them on the forwarding path would put admission on the
    packet path. `RelayEngine::bind` and `DrainPlan` implement the transitions and
    are tested; what is missing is the frame parsing that feeds them.
-7. **`limits.json` has no B4 cap family.** [`frame::MAX_DATA_PAYLOAD_BYTES`](src/frame.rs)
+6. **`limits.json` has no B4 cap family.** [`frame::MAX_DATA_PAYLOAD_BYTES`](src/frame.rs)
    is derived from ADR-0005 §9.2 and enforced first; the `Channel` handed to
-   `Verbatim::from_opaque` is only an outer backstop, and it reads as `c1_c2_c7`
-   in a `Debug` line, which is mildly misleading. Reported.
+   `Verbatim::from_opaque` is only an outer backstop. One visible consequence: a
+   relay payload's `Verbatim` renders as `on c1_c2_c7`, which is an artefact of
+   `Channel` having no B4 variant to name. Commented at the call site.
+7. **The COSE_Sign1 token path has no golden vector here.** It is exercised
+   against malformed input and against the real `twinvpn-crypto`, but producing a
+   *valid* token needs an Ed25519 keypair this build cannot sign with — the same
+   custody gap as the map issuer. The admission *policy* is fully tested against
+   a double.
 
 ## 12. What is actually exercised, and what is not
 
@@ -409,12 +421,18 @@ Stated here rather than discovered later.
 | bytes out equal bytes in, incl. protobuf-with-unknown-field | corpus test | **yes** |
 | protobuf framing refuses ciphertext, opaque framing carries it | both halves in one test | **yes** |
 | the payload bound clears the 1280 overlay floor | derivation + parse test | **yes** |
-| COSE_Sign1 verification over received octets | real `twinvpn-crypto` | **yes**, against malformed input; **no** golden vector, because signing needs a keypair this build cannot produce |
-| the daily `relay_sub` re-hash rotates | real HKDF-SHA-256 | **yes** |
-| **zero bytes** for unsolicited input | a real UDP socket on loopback, v4 and v6 | **yes** |
+| the frame MAC is a truncation, not a short-output BLAKE2s | shared golden vector, both readings | **yes** |
+| this crate's `mac_input` matches `twinvpn-crypto`'s vector | byte-for-byte | **yes** |
+| the MAC covers type, flags, full counter, `flow_id`, payload | six negative assertions | **yes** |
+| a forged or cross-key tag is refused | real constant-time verify | **yes** |
+| **a real frame traverses a real relay between two real sockets** | UDP loopback, real MAC both legs | **yes** |
+| the forwarded tag verifies under the **egress** key and not the ingress one | same test | **yes** |
+| **zero bytes** for unsolicited or forged input | real UDP socket, v4 and v6 | **yes** |
 | the loop survives a flood and stops cleanly | 200 datagrams on loopback | **yes** |
+| the daily `relay_sub` re-hash rotates | real HKDF-SHA-256 | **yes** |
 | a drain does not stampede | 10 000 draws, bucketed | **yes** |
 | two-tier DRR fairness | measured, and on the forwarding path | **yes** |
 | `RELAY_STATUS` on throttle | pump test, end to end through the engine | **yes** |
-| an end-to-end relayed flow between two devices | — | **no**: needs (1) and (2) |
+| COSE_Sign1 token verification | real `twinvpn-crypto` | **partly** — malformed input yes, a valid token no (§11.7) |
+| a device establishing a leg | — | **no**: no handshake (§11.1) |
 | anything in a container | — | **no**: no Docker |

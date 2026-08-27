@@ -224,11 +224,9 @@ pub const HRW_K: usize = 3;
 /// A-14, which requires the HRW hash to be **seedable** for a deterministic
 /// region-failure test.
 ///
-/// **This is currently unbindable in production.** `twinvpn-crypto` declares
-/// `blake2` as a dependency but exposes no BLAKE2s function, so neither this
-/// service nor `twinvpn-relay-client` can supply one — the client's `hrw.rs`
-/// carries the identical open integration item in its own words. See
-/// `README.md` §7.
+/// [`Blake2sHrw`] is the production binding; the trait stays because A-14 needs
+/// a seedable one and because a spread test that used the real hash would assert
+/// a distribution rather than the algorithm.
 pub trait Hrw64: Send + Sync {
     /// `BLAKE2s(relay_id ‖ pair_id)`, 32 bytes.
     ///
@@ -236,6 +234,32 @@ pub trait Hrw64: Send + Sync {
     /// implementations of HRW in this system cannot disagree about which bytes
     /// become the number or in which endianness.
     fn weight_digest(&self, relay_id: &[u8], pair_id: &[u8]) -> [u8; 32];
+}
+
+/// The production HRW hash: `twinvpn_crypto::hrw_weight_digest`.
+///
+/// The same function `twinvpn-relay-client` calls, so a device and this service
+/// rank the same fleet identically — which is the whole of ADR-0006 §11.5's
+/// coordination-free convergence.
+///
+/// A width mismatch yields a **zero digest**, which [`hrw_weight`] turns into a
+/// weight of zero — "take no new pairs". `relay_id` is fixed at 8 bytes by
+/// `RelayRecord` and `pair_id` at 16 by the derivation, so it is unreachable; the
+/// failure direction is chosen anyway, because a relay silently ranked first on a
+/// truncated input would be worse than one ranked last.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Blake2sHrw;
+
+impl Hrw64 for Blake2sHrw {
+    fn weight_digest(&self, relay_id: &[u8], pair_id: &[u8]) -> [u8; 32] {
+        let (Ok(r), Ok(p)) = (
+            <&[u8; 8]>::try_from(relay_id),
+            <&[u8; 16]>::try_from(pair_id),
+        ) else {
+            return [0_u8; 32];
+        };
+        twinvpn_crypto::hrw_weight_digest(r, p)
+    }
 }
 
 /// One relay's HRW weight — **byte-identical to `twinvpn-relay-client`'s**.
@@ -632,6 +656,61 @@ mod tests {
                 hrw_top_k(&fleet, &pair.to_be_bytes(), 1, &Mixed)[0].relay_id[0],
                 1,
                 "a zero-capacity relay was still taking pairs"
+            );
+        }
+    }
+
+    #[test]
+    fn the_production_hash_is_the_one_the_client_calls() {
+        // ADR-0006 §11.5's convergence is coordination-free, so it holds only if
+        // both sides compute the identical function. Asserted against
+        // `twinvpn-crypto` directly rather than against a copy of the algorithm.
+        let relay_id = [0x0a; 8];
+        let pair_id = [0x5c; 16];
+        assert_eq!(
+            Blake2sHrw.weight_digest(&relay_id, &pair_id),
+            twinvpn_crypto::hrw_weight_digest(&relay_id, &pair_id)
+        );
+        // And it is not a constant: different inputs give different digests.
+        assert_ne!(
+            Blake2sHrw.weight_digest(&relay_id, &pair_id),
+            Blake2sHrw.weight_digest(&[0x0b; 8], &pair_id)
+        );
+        assert_ne!(
+            Blake2sHrw.weight_digest(&relay_id, &pair_id),
+            Blake2sHrw.weight_digest(&relay_id, &[0x5d; 16])
+        );
+    }
+
+    #[test]
+    fn a_width_mismatch_ranks_last_rather_than_first() {
+        // Unreachable through `RelayRecord`, whose relay_id is fixed at 8 bytes.
+        // The direction is still chosen: a relay silently ranked FIRST on a
+        // truncated input would be worse than one ranked last.
+        assert_eq!(Blake2sHrw.weight_digest(&[0; 7], &[0; 16]), [0_u8; 32]);
+        assert_eq!(Blake2sHrw.weight_digest(&[0; 8], &[0; 15]), [0_u8; 32]);
+        assert_eq!(hrw_weight([0_u8; 32], 1_000), 0);
+    }
+
+    #[test]
+    fn the_production_hash_spreads_pairs_across_a_real_fleet() {
+        // The spread property with the REAL hash rather than the test double, so
+        // the binding is exercised and not merely constructed.
+        let fleet: Vec<RelayRecord> = (1..=6_u8)
+            .map(|n| sample(n, "eu-west", if n % 2 == 0 { "fd-b" } else { "fd-a" }))
+            .collect();
+        let mut chosen = std::collections::BTreeMap::<u8, usize>::new();
+        for pair in 0..600_u32 {
+            let mut pair_id = [0_u8; 16];
+            pair_id[..4].copy_from_slice(&pair.to_be_bytes());
+            let top = hrw_top_k(&fleet, &pair_id, 1, &Blake2sHrw);
+            *chosen.entry(top[0].relay_id[0]).or_default() += 1;
+        }
+        assert_eq!(chosen.len(), 6, "some relay received no share at all");
+        for (id, n) in &chosen {
+            assert!(
+                *n > 40 && *n < 200,
+                "relay {id} took {n} of 600 pairs: the spread is not proportional"
             );
         }
     }

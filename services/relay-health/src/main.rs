@@ -27,8 +27,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let hc = HealthConfig::load(&svc::config::SystemEnv)?;
 
+    // A literal here made every relay-health process report the same
+    // `service.instance.id`, which is the same defect as the other two and worse:
+    // it could never distinguish anything.
     let metrics = svc::metrics::Metrics::new();
-    let obs = svc::obs::init(&cfg.observability_config("relay-health"), metrics.clone())?;
+    let obs = svc::obs::init(&cfg.observability(), metrics.clone())?;
+    cfg.log_instance_id_resolution();
 
     let aggregate = Arc::new(RwLock::new(Aggregate::new(hc.thresholds)));
 

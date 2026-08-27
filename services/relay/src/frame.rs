@@ -267,6 +267,12 @@ impl RelayFrame {
         // larger is passed deliberately, because the real bound was already
         // enforced two lines up and a backstop must never be tighter than the
         // rule it backs. Reported as a limits.json gap.
+        //
+        // ONE MISLEADING CONSEQUENCE, NAMED HERE SO IT DOES NOT MISLEAD: this
+        // payload's `Verbatim` renders as `on c1_c2_c7` in a `Debug` line. It is
+        // NOT a control-channel value — it is a B4 relay payload whose operative
+        // bound is MAX_DATA_PAYLOAD_BYTES. The channel token is an artefact of
+        // `limits.json` having no B4 cap family to name.
         let payload =
             Verbatim::from_opaque(datagram.slice(HEADER_LEN..), Channel::ControlAndTelemetry)?;
 
@@ -339,6 +345,34 @@ impl RelayFrame {
         out.push((self.version << 4) | self.flags);
         out.extend_from_slice(&counter_full.to_be_bytes());
         out.extend_from_slice(&self.flow_id.to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// The MAC input for the **outgoing** frame, over the rewritten `flow_id`.
+    ///
+    /// # Why this exists, and the bug it fixes
+    ///
+    /// [`RelayFrame::reframe`] rewrites `flow_id` and `counter_low` for the
+    /// egress half-flow, so the egress MAC must cover **those** values. Using
+    /// [`RelayFrame::mac_input`] for the outgoing tag computes it over the
+    /// *ingress* `flow_id` while the wire carries the egress one, and the peer
+    /// then cannot verify a single frame.
+    ///
+    /// That was a real defect here, and it was invisible for as long as
+    /// `frame_mac` returned `None`: nothing verified, so nothing disagreed. It
+    /// was caught the moment a real MAC met a real socket, by
+    /// `loop_udp::tests::a_real_frame_traverses_a_real_relay_between_two_real_sockets`
+    /// — which is the argument for having written that test rather than trusting
+    /// the unit-level one.
+    #[must_use]
+    pub fn egress_mac_input(&self, flow_id: u32, counter_full: u64) -> Vec<u8> {
+        let payload = self.payload.as_bytes();
+        let mut out = Vec::with_capacity(2 + 8 + 4 + payload.len());
+        out.push(self.kind.to_wire());
+        out.push((self.version << 4) | self.flags);
+        out.extend_from_slice(&counter_full.to_be_bytes());
+        out.extend_from_slice(&flow_id.to_be_bytes());
         out.extend_from_slice(payload);
         out
     }

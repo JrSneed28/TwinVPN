@@ -51,11 +51,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let relay_cfg = RelayConfig::load(&svc::config::SystemEnv)?;
 
     // 2. Metrics, then observability.
+    //
+    // `observability()` uses the RESOLVED `TWINVPN_INSTANCE_ID`, which compose
+    // supplies from the container hostname. Passing `relay_id_hex` here instead
+    // looked stable — it is per-instance and comes from configuration — but it
+    // ignores the id the operator actually chose, so a fleet query keyed on
+    // `service.instance.id` would not match anything an operator set.
     let metrics = svc::metrics::Metrics::new();
-    let obs = svc::obs::init(
-        &cfg.observability_config(&relay_cfg.relay_id_hex),
-        metrics.clone(),
-    )?;
+    let obs = svc::obs::init(&cfg.observability(), metrics.clone())?;
+    // Logged AFTER the subscriber is installed, so the WARN on the per-process
+    // fallback actually reaches a log.
+    cfg.log_instance_id_resolution();
 
     // 3. The issuer key set. Empty is legal and means "admit nothing".
     let issuers = IssuerKeySet::load(&relay_cfg.issuer_keys_path, &relay_cfg.operator_group_id)?;
@@ -68,16 +74,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 4. The cryptographic provider. `twinvpn-crypto` (ADR-0018 CD-I2, DP-8):
-    //    COSE_Sign1 verification over the received octets, and the daily
-    //    relay_sub digest. The frame MAC is not bound in this build and says so,
-    //    once, rather than presenting as a flood of dropped frames.
+    //    COSE_Sign1 verification over the received octets, the keyed BLAKE2s
+    //    frame MAC, and the daily relay_sub digest. All three are bound.
     let crypto = CryptoProvider::new();
     if !crypto.frame_mac_available() {
+        // Kept rather than deleted: a build that again could not MAC must say so
+        // once, rather than present as a flood of dropped frames.
         tracing::error!(
             outcome = "partial_provider",
-            "the keyed BLAKE2s frame MAC (ADR-0005 §9.1) is not available from \
-             twinvpn-crypto in this build: admission and the epoch floor are live, \
-             but NO DATA FRAME WILL BE FORWARDED. See services/relay/README.md §8."
+            "the keyed BLAKE2s frame MAC (ADR-0005 §9.1) is unavailable in this \
+             build: admission and the epoch floor are live, but NO DATA FRAME \
+             WILL BE FORWARDED. See services/relay/README.md §8."
         );
     }
 
@@ -106,7 +113,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         outcome = "no_legs",
         "no leg handshake is implemented in this build, so no device can \
          establish K_leg and every received frame is dropped with zero bytes in \
-         reply. See services/relay/README.md §11."
+         reply. The forwarding path itself is complete and MAC-verified end to \
+         end; this is the one thing still missing. See services/relay/README.md §11."
     );
 
     // 7. Health. NoControlPlaneCalls REFUSES a ProbeKind::ControlPlane probe,

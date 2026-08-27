@@ -259,6 +259,228 @@ mod tests {
         let _ = handle.await;
     }
 
+    /// A provider with **real cryptography on the forwarding path** and a stub
+    /// only for admission.
+    ///
+    /// `verify_statement` needs an Ed25519 keypair and a canonical COSE_Sign1
+    /// envelope, which this build cannot produce; that path is tested against the
+    /// real `twinvpn-crypto` separately in `provider.rs`. Everything the
+    /// *datapath* touches — the keyed BLAKE2s MAC, its truncation, the
+    /// constant-time verify — is the genuine article here.
+    struct RealMacProvider(crate::token::testkit::Doubles);
+
+    impl RelayCrypto for RealMacProvider {
+        fn verify_statement(
+            &self,
+            key: &crate::crypto::IssuerPublicKey,
+            kind: crate::crypto::Statement,
+            envelope: &[u8],
+        ) -> Option<crate::claims::VerifiedClaims> {
+            self.0.verify_statement(key, kind, envelope)
+        }
+        fn verify_frame_mac(&self, k: &crate::crypto::LegKey, input: &[u8], tag: [u8; 8]) -> bool {
+            crate::provider::CryptoProvider::new().verify_frame_mac(k, input, tag)
+        }
+        fn frame_mac(&self, k: &crate::crypto::LegKey, input: &[u8]) -> Option<[u8; 8]> {
+            crate::provider::CryptoProvider::new().frame_mac(k, input)
+        }
+        fn digest16(&self, domain: &[u8], input: &[u8]) -> Option<[u8; 16]> {
+            crate::provider::CryptoProvider::new().digest16(domain, input)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_real_frame_traverses_a_real_relay_between_two_real_sockets() {
+        // The end-to-end datapath, unlocked by the frame-MAC binding: two client
+        // sockets, a relay on a third, real UDP, and a real keyed BLAKE2s MAC at
+        // every step. Before the binding this could not run at all — every frame
+        // died at `MacInvalid`.
+        use crate::crypto::LegKey;
+        use crate::flow::PairTag;
+        use crate::token::testkit::{claims, good_envelope, Doubles};
+        use crate::RelaySub;
+        use std::time::Instant;
+
+        const LEG_A: [u8; 32] = [0xA1; 32];
+        const LEG_B: [u8; 32] = [0xB2; 32];
+        const LEG_KEY_CLAIM: &[u8] = b"RLK-cose-key";
+
+        let alice = UdpSocket::bind("[::1]:0").await.expect("alice");
+        let bob = UdpSocket::bind("[::1]:0").await.expect("bob");
+        let (alice_addr, bob_addr) = (
+            alice.local_addr().expect("addr"),
+            bob.local_addr().expect("addr"),
+        );
+
+        // Admission, then two BINDs on one pair_tag — the second binds the pair.
+        let issuers = IssuerKeySet::parse(
+            r#"{"operator_group_id":"local-operator","issuers":[
+               {"key_id":"k1","alg":"Ed25519","cose_key_hex":"0102"}]}"#,
+            "local-operator",
+            "x",
+        )
+        .expect("parses");
+        let mut engine = RelayEngine::new(relay_config(), issuers, 3);
+        let now = Instant::now();
+        let mut c = claims();
+        c.epoch = 3;
+        c.not_before_ms = 0;
+        c.not_after_ms = 86_400_000;
+        let token = crate::token::PresentedToken::new("k1".into(), good_envelope());
+
+        let first = RealMacProvider(Doubles::new(c.clone()));
+        let v1 = engine
+            .admit(&token, LEG_KEY_CLAIM, &first, 1_000)
+            .expect("alice admitted");
+        let tag = PairTag::from_wire(&[0x5A; 16]).expect("16");
+        let crate::engine::BindResult::Pending(flow_a) =
+            engine.bind(tag, alice_addr, &v1, now, 1_000)
+        else {
+            panic!("the first BIND pends");
+        };
+        let mut c2 = c;
+        c2.jti = [2; 16];
+        c2.subject = [8; 16];
+        let second = RealMacProvider(Doubles::new(c2));
+        let v2 = engine
+            .admit(&token, LEG_KEY_CLAIM, &second, 1_000)
+            .expect("bob admitted");
+        let crate::engine::BindResult::Bound { .. } = engine.bind(tag, bob_addr, &v2, now, 1_000)
+        else {
+            panic!("the second BIND binds");
+        };
+        let _ = RelaySub::from_verified_claim([0; 16]);
+
+        // The legs a handshake would have established.
+        let mut legs = LegRegistry::new(16);
+        assert!(legs.establish(alice_addr, LegKey::new(LEG_A)));
+        assert!(legs.establish(bob_addr, LegKey::new(LEG_B)));
+
+        let socket = Arc::new(UdpSocket::bind("[::1]:0").await.expect("relay"));
+        let relay_addr = socket.local_addr().expect("addr");
+        let runtime = Arc::new(Mutex::new(RelayRuntime {
+            engine,
+            legs,
+            scheduler: TwoTierDrr::with_default_quantum(),
+        }));
+        let (stop, rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(serve_udp(
+            socket,
+            runtime,
+            Arc::new(RealMacProvider(Doubles::new(claims()))),
+            || 0,
+            async move {
+                let _ = rx.await;
+            },
+        ));
+
+        // Alice builds a DATA frame and MACs it for real under her own K_leg.
+        let payload: Vec<u8> = (0..=255_u8).collect();
+        let counter: u64 = 1;
+        let mut header = vec![0x01_u8, 1 << 4];
+        #[allow(clippy::cast_possible_truncation)]
+        header.extend_from_slice(&(counter as u16).to_be_bytes());
+        header.extend_from_slice(&flow_a.get().to_be_bytes());
+        let mut mac_input = vec![0x01_u8, 1 << 4];
+        mac_input.extend_from_slice(&counter.to_be_bytes());
+        mac_input.extend_from_slice(&flow_a.get().to_be_bytes());
+        mac_input.extend_from_slice(&payload);
+        header.extend_from_slice(&twinvpn_crypto::frame_mac(&LEG_A, &mac_input));
+        header.extend_from_slice(&payload);
+        alice.send_to(&header, relay_addr).await.expect("send");
+
+        // Bob receives it.
+        let mut buf = vec![0_u8; RECV_BUFFER_BYTES];
+        let (n, from) = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            bob.recv_from(&mut buf),
+        )
+        .await
+        .expect("the relay forwarded within the timeout")
+        .expect("recv");
+        assert_eq!(from, relay_addr);
+        let received = &buf[..n];
+
+        // The payload arrived BYTE FOR BYTE, which is I1's observable half.
+        assert_eq!(&received[crate::frame::HEADER_LEN..], &payload[..]);
+        assert_eq!(n, crate::frame::HEADER_LEN + payload.len());
+        assert_eq!(received[0], 0x01, "still a DATA frame");
+
+        // The relay re-MACed for the EGRESS leg, so Bob can verify with his own
+        // K_leg and could not have verified with Alice's.
+        let out_flow = u32::from_be_bytes([received[4], received[5], received[6], received[7]]);
+        let out_counter = u16::from_be_bytes([received[2], received[3]]);
+        let mut out_input = vec![received[0], received[1]];
+        out_input.extend_from_slice(&u64::from(out_counter).to_be_bytes());
+        out_input.extend_from_slice(&out_flow.to_be_bytes());
+        out_input.extend_from_slice(&payload);
+        let out_tag: [u8; 8] = received[8..16].try_into().expect("8 bytes");
+        assert!(
+            twinvpn_crypto::verify_frame_mac(&LEG_B, &out_input, &out_tag),
+            "the forwarded frame does not verify under the egress leg key"
+        );
+        assert!(
+            !twinvpn_crypto::verify_frame_mac(&LEG_A, &out_input, &out_tag),
+            "the relay reused the ingress key on egress"
+        );
+        assert_ne!(out_flow, flow_a.get(), "flow_id was rewritten for the peer");
+
+        let _ = stop.send(());
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn a_frame_with_a_forged_mac_is_dropped_by_a_real_relay() {
+        // The same path with a wrong tag: an off-path injector who knows the
+        // flow_id but not K_leg gets zero bytes, over a real socket.
+        use crate::crypto::LegKey;
+        use crate::token::testkit::{claims, Doubles};
+
+        let socket = Arc::new(UdpSocket::bind("[::1]:0").await.expect("relay"));
+        let relay_addr = socket.local_addr().expect("addr");
+        let mut legs = LegRegistry::new(4);
+        let client = UdpSocket::bind("[::1]:0").await.expect("client");
+        let client_addr = client.local_addr().expect("addr");
+        legs.establish(client_addr, LegKey::new([0xA1; 32]));
+
+        let runtime = Arc::new(Mutex::new(RelayRuntime {
+            engine: RelayEngine::new(relay_config(), empty_issuers(), 0),
+            legs,
+            scheduler: TwoTierDrr::with_default_quantum(),
+        }));
+        let (stop, rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(serve_udp(
+            socket,
+            runtime,
+            Arc::new(RealMacProvider(Doubles::new(claims()))),
+            || 0,
+            async move {
+                let _ = rx.await;
+            },
+        ));
+
+        // A well-formed DATA frame with a garbage tag.
+        let mut frame = vec![0x01_u8, 1 << 4, 0, 1];
+        frame.extend_from_slice(&1_u32.to_be_bytes());
+        frame.extend_from_slice(&[0xFF; 8]); // forged
+        frame.extend_from_slice(&[0xC3; 64]);
+        client.send_to(&frame, relay_addr).await.expect("send");
+
+        let mut buf = [0_u8; 128];
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(150),
+                client.recv_from(&mut buf)
+            )
+            .await
+            .is_err(),
+            "a forged frame drew a reply"
+        );
+
+        let _ = stop.send(());
+        let _ = handle.await;
+    }
+
     #[tokio::test]
     async fn the_receive_buffer_is_bounded_by_the_derived_payload_ceiling() {
         assert_eq!(
