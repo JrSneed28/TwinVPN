@@ -38,42 +38,38 @@
 
 use std::sync::Arc;
 
-use twinvpn_crypto::{sha256, PublicVerifyingKey, StatementKind};
+use twinvpn_crypto::{PublicVerifyingKey, StatementKind};
 use twinvpn_platform::custody::{
     IdentityAttestation, IdentityCustody, IdentityKeyRef, IdentityPublic, Signature,
 };
-use twinvpn_types::{DeviceId, Identifier, IdentityId};
+use twinvpn_types::{DeviceId, Identifier};
 
 use crate::error::{Result, TrustError};
 
-/// The N-2 domain label, verbatim.
-pub const IDENTITY_LABEL: &[u8] = b"TwinVPN/DeviceIdentity/v1";
-
-/// Derives `identity_id` from a COSE_Key encoding of the identity public key.
+/// The N-2 derivation, re-exported from where it now lives.
 ///
-/// `ik_pub_cose` must be the **deterministic CBOR** COSE_Key. The caller gets it
-/// from a verified `DeviceIdentityRecord`, whose encoding
-/// [`twinvpn_crypto::dcbor`] has already proved canonical — which matters,
-/// because a non-canonical encoding of the same key would derive a different
-/// `identity_id` and so a different device.
-#[must_use]
-pub fn derive_identity_id(ik_pub_cose: &[u8]) -> IdentityId {
-    let mut buf = Vec::with_capacity(IDENTITY_LABEL.len() + 1 + ik_pub_cose.len());
-    buf.extend_from_slice(IDENTITY_LABEL);
-    buf.push(0x00);
-    buf.extend_from_slice(ik_pub_cose);
-    IdentityId::from_array(sha256(&buf))
-}
-
-/// Derives `device_id` from the **generation-0** identity key.
+/// # Why it moved, and why this re-export exists
 ///
-/// `identifiers.md` §2: "The generation-0 `identity_id` **is** the `device_id`."
-/// Passing a later generation's key here produces a value that is not this
-/// device's name, which is why the parameter is named for what it must be.
-#[must_use]
-pub fn derive_device_id(generation_zero_ik_pub_cose: &[u8]) -> DeviceId {
-    derive_identity_id(generation_zero_ik_pub_cose).as_generation_zero_device_id()
-}
+/// `identity_id = SHA-256("TwinVPN/DeviceIdentity/v1" || 0x00 ||
+/// dCBOR(COSE_Key(IK_pub)))` is SHA-256 over deterministic CBOR of a COSE_Key —
+/// all three of which are `twinvpn-crypto`'s. It was implemented here first
+/// because this is where identity lives, but `services/rendezvous` and
+/// `services/presence` need it to bind a TLS channel identity to a claimed
+/// `device_id`, and `services/Cargo.toml` does not permit a service artifact an
+/// edge to `twinvpn-trust` — CD-I5 puts this crate on the control-plane-client
+/// side, and a hash should not drag a trust engine into three server artifacts.
+///
+/// Both services correctly refused to re-implement it, citing W-23: a specified
+/// derivation is not ours to improve, and a wrong one here names the wrong
+/// device. So the primitive moved to [`twinvpn_crypto::deviceid`] and this
+/// re-export keeps every existing call site unchanged.
+///
+/// `identity_derivation_agrees_across_both_paths` asserts the two paths produce
+/// identical bytes, so the re-export cannot drift from the original.
+pub use twinvpn_crypto::deviceid::{
+    derive_device_id, derive_device_id_checked, derive_identity_id, derive_identity_id_checked,
+    IDENTITY_LABEL,
+};
 
 /// Checks a server's `device_id_echo` against the local derivation.
 ///
@@ -272,39 +268,65 @@ pub fn parse_identity_key(ik_pub_cose: &[u8]) -> Result<PublicVerifyingKey> {
 mod tests {
     use super::*;
 
-    /// N-2's derivation, pinned. Every `device_id` in the fleet depends on these
-    /// exact bytes, so a change here is a fleet-wide identity change.
+    /// The re-export and the implementation are the same function.
+    ///
+    /// The derivation moved to `twinvpn_crypto::deviceid` so `services/` could
+    /// reach it without an edge to this crate, and it is re-exported here so no
+    /// existing call site changed. **Two implementations of one identifier is
+    /// how devices end up with different names for each other**, so this test
+    /// asserts there is only one: both paths, over the same input, byte for
+    /// byte.
+    ///
+    /// The derivation's own golden vector lives with the implementation, in
+    /// `twinvpn_crypto::deviceid::tests::the_derivation_matches_identifiers_md_section_2`.
     #[test]
-    fn the_identity_derivation_is_n_2s_expression() {
-        let cose = b"a-cose-key-encoding";
-        let id = derive_identity_id(cose);
+    fn identity_derivation_agrees_across_both_paths() {
+        // A canonical dCBOR COSE_Key (EC2/P-256) over the NIST P-256 generator
+        // `G` — a real point on the curve, so the checked path accepts it and
+        // all four entry points can be compared.
+        const GX: [u8; 32] = [
+            0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4,
+            0x40, 0xf2, 0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45,
+            0xd8, 0x98, 0xc2, 0x96,
+        ];
+        const GY: [u8; 32] = [
+            0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a, 0x7c, 0x0f,
+            0x9e, 0x16, 0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40, 0x68,
+            0x37, 0xbf, 0x51, 0xf5,
+        ];
+        let mut key = vec![0xa4, 0x01, 0x02, 0x20, 0x01, 0x21, 0x58, 0x20];
+        key.extend_from_slice(&GX);
+        key.extend_from_slice(&[0x22, 0x58, 0x20]);
+        key.extend_from_slice(&GY);
 
-        let mut expected = Vec::new();
-        expected.extend_from_slice(b"TwinVPN/DeviceIdentity/v1");
-        expected.push(0x00);
-        expected.extend_from_slice(cose);
-        assert_eq!(id.as_bytes(), &sha256(&expected));
-        assert_eq!(id.as_bytes().len(), 32, "untruncated");
-    }
-
-    /// **Attack test.** The `0x00` separator is what stops a key encoding that
-    /// begins with the tail of the label from colliding with a different one.
-    #[test]
-    fn the_separator_prevents_a_label_boundary_collision() {
-        // Without the 0x00, "…v1" + "\x00X" and "…v1\x00" + "X" would hash the
-        // same input. With it, the two are distinct.
-        let a = derive_identity_id(b"\x00X");
-        let b = derive_identity_id(b"X");
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn the_generation_zero_identity_is_the_device_id() {
-        let cose = b"gen-0-key";
+        // The re-export (`crate::identity::…`) against the original.
         assert_eq!(
-            derive_device_id(cose).as_bytes(),
-            derive_identity_id(cose).as_bytes()
+            derive_identity_id(&key),
+            twinvpn_crypto::deviceid::derive_identity_id(&key)
         );
+        assert_eq!(
+            derive_device_id(&key),
+            twinvpn_crypto::deviceid::derive_device_id(&key)
+        );
+        assert_eq!(
+            derive_identity_id_checked(&key).expect("canonical"),
+            twinvpn_crypto::deviceid::derive_identity_id_checked(&key).expect("canonical")
+        );
+        assert_eq!(
+            derive_device_id_checked(&key).expect("canonical"),
+            twinvpn_crypto::deviceid::derive_device_id_checked(&key).expect("canonical")
+        );
+
+        // And the checked path agrees with the unchecked one on canonical
+        // input, so which entry point a caller picks is never a choice of
+        // identifier.
+        assert_eq!(
+            derive_device_id_checked(&key).expect("canonical"),
+            derive_device_id(&key)
+        );
+
+        // The label came across with them.
+        assert_eq!(IDENTITY_LABEL, b"TwinVPN/DeviceIdentity/v1");
     }
 
     /// **Attack test.** `device_id_echo` is an echo. A server that returns a

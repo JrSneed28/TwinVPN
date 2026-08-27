@@ -80,6 +80,7 @@ pub mod aead;
 pub mod binding;
 pub mod cose;
 pub mod dcbor;
+pub mod deviceid;
 pub mod emit;
 pub mod error;
 pub mod kdf;
@@ -97,6 +98,9 @@ pub mod transcript;
 pub use aead::{AeadOpenError, StoreKey};
 pub use binding::{verify_tunnel_key_binding, VerifiedTunnelKey};
 pub use cose::{verify_cose_sign1, PublicVerifyingKey, VerifiedStatement};
+pub use deviceid::{
+    derive_device_id, derive_device_id_checked, derive_identity_id, derive_identity_id_checked,
+};
 pub use error::{CryptoError, Result, StatementKind};
 pub use kdf::{hkdf_expand_label, hkdf_sha256, sha256, HkdfSha256};
 pub use locked::{LockedBytes, LockedMemoryReport};
