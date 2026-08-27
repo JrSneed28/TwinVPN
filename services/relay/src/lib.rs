@@ -26,6 +26,10 @@
 //! - [`config`] — every `TWINVPN_RELAY_*` variable, validated at startup.
 //! - [`crypto`] — the injected primitive seam. The default provider refuses
 //!   everything, so an unconfigured relay is a closed relay.
+//! - [`provider`] — the production binding on `twinvpn-crypto` (ADR-0018 CD-I2,
+//!   DP-8). It states plainly which primitives are bound and which is not.
+//! - [`claims`] — the claims a relay reads **out of a verified payload**, with no
+//!   constructor from wire bytes.
 //! - [`issuer`] — the issuer public-key set. **Empty means no token verifies.**
 //! - [`token`] — offline `RelayCapabilityToken` verification, a pure function.
 //! - [`epoch`] — the monotone, Owner-signed `RelayEpochFloor`.
@@ -43,7 +47,12 @@
 //! - [`condition`] — every ADR-0005 §11.7 condition, mapped to a **registered**
 //!   `reason_code`.
 //! - [`engine`] — the glue: a `RelayEngine` that owns the tables and the limits.
-//! - [`net`] — the `R-UDP` carriage over a real dual-stack socket.
+//! - [`status`] — `RELAY_STATUS`: overload is never silent (§11.5, I6).
+//! - [`pump`] — one datagram in, **at most one** out. The amplification factor
+//!   is a property of the return type.
+//! - [`loop_udp`] — the receive loop, the one place this crate `.await`s.
+//! - [`net`] — the `R-UDP` carriage over a real dual-stack socket, and the
+//!   receive loop that drives [`pump`].
 //!
 //! # What it deliberately does not do
 //!
@@ -60,6 +69,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod claims;
 pub mod condition;
 pub mod config;
 pub mod crypto;
@@ -71,18 +81,24 @@ pub mod flow;
 pub mod forward;
 pub mod frame;
 pub mod issuer;
+pub mod loop_udp;
 pub mod net;
 pub mod observe;
+pub mod provider;
+pub mod pump;
 pub mod replay;
 pub mod resource;
+pub mod status;
 pub mod subject;
 pub mod token;
 
+pub use claims::Quota;
 pub use condition::{Condition, Fidelity};
 pub use config::{RelayConfig, RelayConfigError};
-pub use crypto::{FailClosed, LegKey, RelayCrypto};
+pub use crypto::{FailClosed, LegKey, RelayCrypto, Statement};
 pub use engine::RelayEngine;
 pub use flow::{FlowId, PairTable, PairTag};
+pub use provider::CryptoProvider;
 pub use subject::RelaySub;
 
 /// The component every `ServiceError` from this crate is observed by.

@@ -138,19 +138,20 @@ async fn serve_map(
     }
 }
 
-/// The bytes served: the canonical encoding followed by the detached signature.
+/// The bytes served: **the COSE_Sign1 envelope, and nothing else**.
+///
+/// One document, self-contained and self-authenticating. A device verifies it
+/// with `verify_cose_sign1` against a held issuer key and reads `map_version`,
+/// the relays and `not_after_ms` out of the verified payload — the same rule
+/// `relay.proto` states for the token ("read the claims FROM THE VERIFIED
+/// PAYLOAD").
+///
+/// An earlier revision appended the key id and signature to a bespoke encoding.
+/// Serving anything *beside* the envelope invites a reader to use the beside-part,
+/// which is unsigned by construction; there is now nothing beside it.
 #[must_use]
 pub fn render(map: &RelayMap) -> Vec<u8> {
-    let mut out = crate::map::canonical_encoding(
-        map.map_version,
-        map.issued_at_ms,
-        &map.operator_group_id,
-        &map.regions,
-        &map.relays,
-    );
-    out.extend_from_slice(map.signer_key_id.as_bytes());
-    out.extend_from_slice(&map.signature);
-    out
+    map.cose_sign1.clone()
 }
 
 #[cfg(test)]
@@ -266,10 +267,13 @@ mod tests {
     }
 
     #[test]
-    fn the_rendered_document_covers_the_version_and_the_signature() {
+    fn the_rendered_document_is_the_cose_envelope_and_nothing_beside_it() {
+        // Serving anything beside the envelope invites a reader to use the
+        // beside-part, which is unsigned by construction.
         let m = published();
         let bytes = render(&m);
-        assert!(bytes.ends_with(&m.signature));
-        assert!(bytes.starts_with(&1_u64.to_be_bytes()));
+        assert_eq!(bytes, m.cose_sign1);
+        let parsed = twinvpn_crypto::dcbor::parse_canonical(&bytes).expect("canonical");
+        assert_eq!(parsed.as_array().expect("array").len(), 4);
     }
 }

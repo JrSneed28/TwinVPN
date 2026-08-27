@@ -51,6 +51,7 @@ pub mod api;
 pub mod config;
 pub mod fleet;
 pub mod map;
+pub mod map_cbor;
 pub mod rank;
 pub mod sign;
 

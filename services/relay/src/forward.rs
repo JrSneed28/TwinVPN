@@ -86,6 +86,11 @@ pub enum ForwardRefusal {
     CounterRejected,
     /// The relay could not compute an outgoing MAC — no crypto provider.
     NoEgressMac,
+    /// The egress subject's hourly byte quota is spent (ADR-0005 §11.5).
+    ///
+    /// Unlike the others this is **not** a silent drop: §11.5 requires a
+    /// `RELAY_STATUS` on the affected flow, which [`crate::pump`] emits.
+    QuotaExceeded,
 }
 
 /// The forwarding engine.
@@ -195,13 +200,19 @@ impl<'a> Forwarder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{FailClosed, IssuerPublicKey};
+    use crate::claims::VerifiedClaims;
+    use crate::crypto::{FailClosed, IssuerPublicKey, Statement};
     use crate::flow::{BindOutcome, PairTag};
 
     struct MacAlwaysOk;
     impl RelayCrypto for MacAlwaysOk {
-        fn verify_signature(&self, _: &IssuerPublicKey, _: &[u8], _: &[u8]) -> bool {
-            false
+        fn verify_statement(
+            &self,
+            _: &IssuerPublicKey,
+            _: Statement,
+            _: &[u8],
+        ) -> Option<VerifiedClaims> {
+            None
         }
         fn verify_frame_mac(&self, _: &LegKey, _: &[u8], _: [u8; 8]) -> bool {
             true

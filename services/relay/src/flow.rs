@@ -129,6 +129,21 @@ impl BoundPair {
         }
     }
 
+    /// The transport peer of the half-flow `flow_id` names.
+    ///
+    /// Used to address a `RELAY_STATUS` back to the device whose flow is being
+    /// shed — the *affected* flow, per ADR-0005 §11.5.
+    #[must_use]
+    pub fn ingress_peer(&self, flow_id: FlowId) -> Option<std::net::SocketAddr> {
+        if self.a.flow_id == flow_id {
+            Some(self.a.peer)
+        } else if self.b.flow_id == flow_id {
+            Some(self.b.peer)
+        } else {
+            None
+        }
+    }
+
     /// The ingress half-flow for `flow_id`, mutably.
     pub fn ingress_for_mut(&mut self, flow_id: FlowId) -> Option<&mut HalfFlow> {
         if self.a.flow_id == flow_id {

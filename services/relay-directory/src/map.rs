@@ -56,8 +56,10 @@ pub struct RelayMap {
     pub relays: Vec<RelayRecord>,
     /// The issuer key id that signed it.
     pub signer_key_id: String,
-    /// The COSE_Sign1 signature over the canonical encoding.
-    pub signature: Vec<u8>,
+    /// The complete COSE_Sign1 envelope: protected header, payload and signature,
+    /// assembled by `twinvpn_crypto::emit` so it is the document a device's
+    /// `verify_cose_sign1` will accept — not a signature beside some bytes.
+    pub cose_sign1: Vec<u8>,
 }
 
 /// Why a map could not be published.
@@ -230,111 +232,35 @@ impl MapBuilder {
         }
         self.floor.check(&records)?;
 
-        let canonical =
-            canonical_encoding(version, now_ms, &self.operator_group_id, &regions, &records);
-        let signature = signer.sign(&canonical)?;
+        let not_after_ms = now_ms.saturating_add(self.ttl_ms);
+        // The frozen `relay-map` CDDL as ADR-0003 deterministic CBOR, wrapped in
+        // an RFC 9052 Sig_structure with `alg` in the PROTECTED header.
+        let unsigned = crate::map_cbor::to_be_signed(
+            &self.operator_group_id,
+            version,
+            not_after_ms,
+            &records,
+            &regions,
+            signer.key_id(),
+        )
+        .map_err(|_| PublishError::Unsigned(SignError::Encoding))?;
+        let signature = signer.sign(unsigned.to_be_signed())?;
+        let cose_sign1 = unsigned
+            .assemble(&signature)
+            .map_err(|_| PublishError::Unsigned(SignError::Encoding))?;
 
         self.current_version = version;
         Ok(RelayMap {
             map_version: version,
             issued_at_ms: now_ms,
-            not_after_ms: now_ms.saturating_add(self.ttl_ms),
+            not_after_ms,
             operator_group_id: self.operator_group_id.clone(),
             regions,
             relays: records,
             signer_key_id: signer.key_id().to_owned(),
-            signature,
+            cose_sign1,
         })
     }
-}
-
-/// A deterministic byte encoding of the map's signed fields.
-///
-/// **Not CBOR.** ADR-0003 fixes the canonical encoding and ADR-0006 §11.1 names
-/// COSE_Sign1/CBOR, which needs `ciborium`/`coset` — cryptographic-adjacent
-/// dependencies this workspace does not carry (see `README.md` §7). What this
-/// function provides is the *determinism* property the signature depends on:
-/// the same fleet always produces the same bytes, in a fixed field order, with
-/// no map iteration anywhere. Substituting a real CBOR encoder changes these
-/// bytes and nothing else.
-#[must_use]
-pub fn canonical_encoding(
-    version: u64,
-    issued_at_ms: u64,
-    operator_group_id: &str,
-    regions: &[Region],
-    records: &[RelayRecord],
-) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&version.to_be_bytes());
-    out.extend_from_slice(&issued_at_ms.to_be_bytes());
-    push_str(&mut out, operator_group_id);
-
-    let mut regions: Vec<&Region> = regions.iter().collect();
-    regions.sort_unstable_by(|a, b| a.region_id.cmp(&b.region_id));
-    out.extend_from_slice(
-        &u32::try_from(regions.len())
-            .unwrap_or(u32::MAX)
-            .to_be_bytes(),
-    );
-    for r in regions {
-        push_str(&mut out, &r.region_id);
-        push_str(&mut out, &r.geo_hint);
-        let mut adj = r.adjacent_regions.clone();
-        adj.sort_unstable();
-        out.extend_from_slice(&u32::try_from(adj.len()).unwrap_or(u32::MAX).to_be_bytes());
-        for (id, rtt, order) in adj {
-            push_str(&mut out, &id);
-            out.extend_from_slice(&rtt.to_be_bytes());
-            out.extend_from_slice(&order.to_be_bytes());
-        }
-    }
-
-    let mut records: Vec<&RelayRecord> = records.iter().collect();
-    records.sort_unstable_by(|a, b| a.relay_id.cmp(&b.relay_id));
-    out.extend_from_slice(
-        &u32::try_from(records.len())
-            .unwrap_or(u32::MAX)
-            .to_be_bytes(),
-    );
-    for r in records {
-        out.extend_from_slice(&r.relay_id);
-        push_str(&mut out, &r.region_id);
-        push_str(&mut out, &r.failure_domain);
-        out.extend_from_slice(&r.static_noise_public_key);
-        for e in &r.endpoints_v4 {
-            push_str(&mut out, &e.to_string());
-        }
-        for e in &r.endpoints_v6 {
-            push_str(&mut out, &e.to_string());
-        }
-        let mut carriages = r.carriages.clone();
-        carriages.sort_unstable();
-        for c in carriages {
-            out.push(match c {
-                crate::fleet::Carriage::Udp => 1,
-                crate::fleet::Carriage::Quic => 2,
-                crate::fleet::Carriage::Tls => 3,
-            });
-        }
-        out.push(r.server_rank);
-        out.push(r.load_class);
-        out.extend_from_slice(&r.capacity_weight.to_be_bytes());
-        out.push(match r.admin_state {
-            AdminState::Active => 1,
-            AdminState::Draining => 2,
-            AdminState::Retired => 3,
-        });
-        out.push(u8::from(r.self_hosted));
-        out.push(u8::from(r.supports_drain));
-        out.push(u8::from(r.supports_caps));
-    }
-    out
-}
-
-fn push_str(out: &mut Vec<u8>, s: &str) {
-    out.extend_from_slice(&u32::try_from(s.len()).unwrap_or(u32::MAX).to_be_bytes());
-    out.extend_from_slice(s.as_bytes());
 }
 
 #[cfg(test)]
@@ -377,7 +303,9 @@ mod tests {
             .expect("publishes");
         assert_eq!(m.map_version, 1);
         assert_eq!(m.signer_key_id, "map-k1");
-        assert!(!m.signature.is_empty());
+        // A real four-element COSE_Sign1 array, not a signature beside some bytes.
+        let parsed = twinvpn_crypto::dcbor::parse_canonical(&m.cose_sign1).expect("canonical");
+        assert_eq!(parsed.as_array().expect("array").len(), 4);
     }
 
     #[test]
@@ -560,17 +488,66 @@ mod tests {
     }
 
     #[test]
-    fn the_canonical_encoding_is_order_independent_and_deterministic() {
+    fn the_published_document_is_the_one_the_contract_defines() {
+        // An earlier revision signed a bespoke big-endian layout. It was
+        // deterministic, which a signature needs — but no device could have
+        // verified it, because it was not a `relay-map`. Now the payload inside
+        // the envelope parses as the frozen CDDL with its own key numbers.
+        let mut b = MapBuilder::new(
+            "local-operator".into(),
+            PublicationFloor::default(),
+            3_600_000,
+        );
+        let m = b
+            .publish(healthy_region(), regions(), 4, 1_000, &FixedSigner)
+            .expect("publishes");
+
+        let envelope =
+            twinvpn_crypto::dcbor::parse_canonical(&m.cose_sign1).expect("canonical envelope");
+        let parts = envelope.as_array().expect("COSE_Sign1 array");
+        let payload =
+            twinvpn_crypto::dcbor::parse_canonical(parts[2].as_bytes().expect("payload bstr"))
+                .expect("canonical payload");
+
+        assert_eq!(
+            payload
+                .map_get(1)
+                .and_then(twinvpn_crypto::dcbor::Value::as_text),
+            Some("local-operator")
+        );
+        assert_eq!(
+            payload
+                .map_get(2)
+                .and_then(twinvpn_crypto::dcbor::Value::as_uint),
+            Some(4),
+            "map_version is INSIDE the signed payload"
+        );
+        assert_eq!(
+            payload
+                .map_get(3)
+                .expect("relays")
+                .as_array()
+                .expect("array")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn the_signed_bytes_are_a_pure_function_of_the_fleet() {
         // A signature over a non-deterministic encoding is a signature over
-        // whatever the hash map felt like this run.
-        let a = canonical_encoding(1, 7, "g", &regions(), &healthy_region());
+        // whatever iteration order the process happened to produce.
         let mut reversed = healthy_region();
         reversed.reverse();
-        let b = canonical_encoding(1, 7, "g", &regions(), &reversed);
+        let a = crate::map_cbor::canonical_payload("g", 1, 7, &healthy_region(), &regions())
+            .expect("encodes");
+        let b =
+            crate::map_cbor::canonical_payload("g", 1, 7, &reversed, &regions()).expect("encodes");
         assert_eq!(a, b);
         assert_ne!(
             a,
-            canonical_encoding(2, 7, "g", &regions(), &healthy_region()),
+            crate::map_cbor::canonical_payload("g", 2, 7, &healthy_region(), &regions())
+                .expect("encodes"),
             "the version must be covered by the signature"
         );
     }

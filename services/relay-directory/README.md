@@ -140,7 +140,8 @@ best surviving relay' — is precisely what creates the hot spot, and is why HRW
 rather than score decides *redistribution* while score decides *ordinary
 selection*."
 
-`rank::hrw_top_k` implements `w(r) = hash(relay_id ‖ pair_id) × capacity_weight`,
+`rank::hrw_top_k` implements `w(r) = hash(relay_id ‖ pair_id) × capacity_weight`
+by way of [`rank::hrw_weight`](src/rank.rs),
 takes the top `k = 3`, breaks ties on `relay_id` so two devices with the same map
 agree exactly, and skips non-`ACTIVE` relays. Tested for proportional spread,
 determinism, and capacity-weight sensitivity — "an operator changes fleet balance
@@ -148,31 +149,69 @@ by publishing weights, not by touching clients" (§10).
 
 The hash is injected (`rank::Hrw64`) for the same CD-I2 reason as §7, and because
 testing-strategy A-14 requires it to be **seedable** for a deterministic
-region-failure test.
+region-failure test. §7.1 records that the reduction is now byte-identical to
+`twinvpn-relay-client`'s, and that the digest itself is not yet bindable.
 
 ---
 
-## 7. Signing — an injected seam, and a decision needed
+## 7. Signing — the contract document, with one seam left
 
 ADR-0006 §11.1: one COSE_Sign1/CBOR document per operator group, "issuer Ed25519
-over the canonical encoding". Ed25519, CBOR and COSE all need dependencies
-ADR-0018 CD-I2 keeps in `twinvpn-crypto`, which `services/Cargo.toml` does not make
-available (the same constraint as `services/relay/README.md` §8).
+over the canonical encoding (ADR-0003)". `twinvpn-crypto` is now a permitted edge
+for the relay plane, and most of that is bound for real.
 
-So [`sign::MapSigner`](src/sign.rs) is a trait and the default provider
-[`sign::Unsigned`] **signs nothing**, and an unsigned map is **refused rather than
-published**: §10 says "a bad publish must not disarm the fleet", and a document
-nobody can verify would burn a `map_version` for nothing. A failed publish does not
-advance the version, which a test pins.
+**What changed, and why it matters.** An earlier revision signed a bespoke
+big-endian byte layout. It had the *determinism* a signature needs — fixed field
+order, sorted collections, no map iteration — but nothing else: **no device could
+have verified it, because it was not the document the contract defines**.
+`map_version` being covered by a signature is worth nothing if the thing signed is
+not a `relay-map`.
 
-`map::canonical_encoding` provides the *determinism* the signature depends on —
-fixed field order, sorted collections, no map iteration anywhere. Substituting a
-real CBOR encoder changes those bytes and nothing else.
+[`map_cbor`](src/map_cbor.rs) now encodes the frozen
+`contracts/cddl/twinvpn/v1/signed_statements.cddl` §15 `relay-map` — with the CDDL
+key number in every field's comment — as ADR-0003 deterministic CBOR through
+`twinvpn_crypto::emit`, and wraps it in a real RFC 9052 §4.4 `Sig_structure` with
+`alg` in the **protected** header. `render` serves the assembled envelope **and
+nothing beside it**: anything beside it is unsigned by construction and invites a
+reader to use it.
 
-**Decision needed:** as for `services/relay`, either `twinvpn-crypto` becomes a
-permitted edge or the primitive crates enter the services workspace set.
+Two consequences worth naming:
 
----
+- **Endpoints are `[bstr .size 4|16, uint]`.** A hostname has no representation in
+  that shape, so ADR-0006 §11.1 rule 1 holds at the *encoding* as well as at
+  `RelayRecord`'s `SocketAddr`. A family mismatch is dropped, not coerced.
+- **The `crit` set names `map_version`** (CDDL key 5), so a verifier that does not
+  understand version monotonicity must refuse the document rather than apply it —
+  which is what stops an older build silently accepting a rollback.
+
+**The one seam left is the raw Ed25519 operation.** `twinvpn-crypto` verifies
+(`verify_cose_sign1`) and assembles, but signing goes through a custody boundary —
+its own docs hand `to_be_signed()` to `IdentityCustody::identity_sign` — and there
+is no server-side custody implementation. So [`sign::MapSigner`](src/sign.rs) is
+the seam for exactly that one operation, [`sign::Unsigned`] is the default, and an
+unsigned map is **refused rather than published**: §10 says "a bad publish must
+not disarm the fleet", and a failed publish does not advance `map_version` (a
+test pins it).
+
+**Decision needed:** a server-side Ed25519 signing path for the map issuer —
+either an `IdentityCustody` implementation for `services/`, or a signing entry
+point on `twinvpn-crypto` for keys that legitimately live in a file.
+
+### 7.1 HRW is now byte-identical to the client's
+
+ADR-0006 §11.5's cold-start convergence works only if the device and this service
+compute the *same* function — "both devices compute this from their own cached
+maps, with no message exchanged". [`rank::hrw_weight`](src/rank.rs) is therefore
+`twinvpn-relay-client::hrw::weight` transcribed exactly: the **leading eight
+bytes** of the digest, as a **little-endian** `u64`, `>> 16`, times
+`capacity_weight` — with `HRW_K = 3` to match, and a test that pins each of those
+four choices. An earlier revision here used a `u128` product over a `u64` hash and
+clamped capacity up to 1; the second of those would have let a relay an operator
+drained to zero keep taking pairs.
+
+The digest itself is `BLAKE2s(relay_id ‖ pair_id)` and is **not bindable**:
+`twinvpn-crypto` exposes no BLAKE2s. `twinvpn-relay-client/src/hrw.rs` carries the
+identical open item, so it is one shared gap — see `services/relay/README.md` §8.
 
 ## 8. Known limitations
 
@@ -182,7 +221,9 @@ permitted edge or the primitive crates enter the services workspace set.
    it, so it is absent from `services/Cargo.lock` and cannot be resolved on this
    host (no network). `twinvpn_relay_directory` **is not durable yet**, and S-09 is
    a durable, authoritative row.
-2. **Nothing signs.** §7.
+2. **Nothing signs.** §7 — the document is now the contract's, but the raw
+   Ed25519 operation has no server-side implementation, so `MapBuilder::publish`
+   refuses rather than emitting an unverifiable map.
 3. **The map is served over plain HTTP.** The TLS paths are loaded and validated,
    but `rustls` is likewise absent from the lock. The map is a signed document, so
    its *integrity* does not depend on the transport — but the transport is not what
@@ -191,7 +232,14 @@ permitted edge or the primitive crates enter the services workspace set.
    periodic rebuild-and-publish task is not wired, because with (1) there is
    nothing to rebuild *from*.
 5. **No container has been built or run.** Docker is absent from this host.
-6. **The `+100` cap and the `+120` self-hosted bonus.** §11.2's composition
+6. **HRW cannot be computed in production.** §7.1 — the reduction matches the
+   client byte for byte, but `BLAKE2s` is unavailable to either side.
+7. **The frozen `relay-map` has no regions field.** `map_cbor` therefore does not
+   encode adjacency, and it is flagged in the module rather than invented:
+   adjacency reaches a device through `RelayAssignment` in `relay.proto` instead.
+   If ADR-0006 §11.1's `regions[]` is meant to be *inside* the signed document,
+   the CDDL and the ADR disagree and the CDDL is frozen.
+8. **The `+100` cap and the `+120` self-hosted bonus.** §11.2's composition
    sentence says "the server's total contribution is capped at +100", while its own
    table lists `Self-hosted +120`. This crate reads the cap as applying to the
    `server_rank` term, which is what §11.2's self-hosted paragraph then says

@@ -90,7 +90,8 @@ impl std::fmt::Debug for LogSubject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{FailClosed, IssuerPublicKey, LegKey};
+    use crate::claims::VerifiedClaims;
+    use crate::crypto::{FailClosed, IssuerPublicKey, LegKey, Statement};
 
     /// A deterministic, NON-CRYPTOGRAPHIC stand-in. It exists only so the
     /// rotation property can be tested without a real digest; it is `cfg(test)`
@@ -98,8 +99,13 @@ mod tests {
     struct CountingDigest;
 
     impl RelayCrypto for CountingDigest {
-        fn verify_signature(&self, _: &IssuerPublicKey, _: &[u8], _: &[u8]) -> bool {
-            false
+        fn verify_statement(
+            &self,
+            _: &IssuerPublicKey,
+            _: Statement,
+            _: &[u8],
+        ) -> Option<VerifiedClaims> {
+            None
         }
         fn verify_frame_mac(&self, _: &LegKey, _: &[u8], _: [u8; 8]) -> bool {
             false

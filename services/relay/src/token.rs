@@ -8,83 +8,62 @@
 //! > within skew → `epoch ≥ epoch_floor` → `jti` unseen. **No control-plane call,
 //! > per packet, per bind, or per reconnect.**
 //!
-//! [`verify`] is that function, in that order, and it is `fn` — not `async fn`.
-//! **That is the structural form of I5**: a synchronous, non-`async` function
-//! taking only already-held state cannot make a network call, so no future
-//! maintainer can add one without changing the signature and every caller.
+//! [`verify`] is that function, **in that order**, and it is `fn` — not
+//! `async fn`. That is the structural form of I5: a synchronous, non-`async`
+//! function taking only already-held state cannot make a network call, so no
+//! future maintainer can add one without changing the signature and every caller.
 //!
-//! `contracts/proto/twinvpn/v1/relay.proto` warns about the other half:
+//! # The signature comes first, and every claim after it is verified
 //!
-//! > A verifier MUST verify the COSE signature and read the claims FROM THE
-//! > VERIFIED PAYLOAD. The decoded fields here are attacker-controlled until then.
+//! `contracts/proto/twinvpn/v1/relay.proto`:
 //!
-//! [`PresentedToken`] is therefore the *untrusted* shape, [`VerifiedToken`] the
-//! trusted one, and the only way to obtain the latter is [`verify`]. Nothing in
-//! this crate constructs a `VerifiedToken` by any other route.
+//! > A verifier MUST verify the COSE signature and read the claims **FROM THE
+//! > VERIFIED PAYLOAD**. The decoded fields here are attacker-controlled until
+//! > then.
+//!
+//! [`PresentedToken`] therefore carries **only** the issuer key id needed to
+//! select a key and the COSE_Sign1 envelope exactly as it arrived. There are no
+//! decoded claims on it to be tempted by, and [`VerifiedToken`] — the only type
+//! carrying claims — has no constructor but [`verify`].
+//!
+//! An earlier revision checked `aud`, the validity window and `cnf` *before* the
+//! signature, to avoid an asymmetric operation for obviously-wrong input. That
+//! concern is real but is solved elsewhere: ADR-0005 §11.5's cookie gate
+//! ([`crate::resource::CookieGate`]) already guarantees "no asymmetric operation
+//! for an unvalidated source address". Reading unverified claims to re-solve it
+//! was the wrong trade, and it is not made here.
 
+use crate::claims::Quota;
 use crate::condition::Condition;
-use crate::crypto::RelayCrypto;
+use crate::crypto::{RelayCrypto, Statement};
 use crate::epoch::EpochFloor;
 use crate::issuer::IssuerKeySet;
-use crate::replay::{Jti, ReplayCache, ReplayVerdict};
+use crate::replay::{ReplayCache, ReplayVerdict};
 use crate::subject::RelaySub;
 
-/// The quota claims a token carries (ADR-0005 §11.3, `relay.proto RelayQuota`).
+/// A token as it arrived: **nothing here is trusted until [`verify`] returns**.
 ///
-/// Quota values travel **in the token** so a relay enforces the issuer's policy
-/// with no lookup (§11.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Quota {
-    /// ADR-0005 §11.5 default 64.
-    pub max_concurrent_flows: u32,
-    /// Default 20 Mbit/s.
-    pub max_bitrate_kbps: u32,
-    /// Default 20 GiB.
-    pub max_bytes_per_hour: u64,
-    /// Default 30. ADR-0006 §11.15(b) requires this to be raisable for
-    /// gateway-class devices, or the ≈15-peer rendezvous-listening ceiling stands.
-    pub max_binds_per_min: u32,
-}
-
-impl Default for Quota {
-    fn default() -> Self {
-        Self {
-            max_concurrent_flows: 64,
-            max_bitrate_kbps: 20_000,
-            max_bytes_per_hour: 20 * 1024 * 1024 * 1024,
-            max_binds_per_min: 30,
-        }
-    }
-}
-
-/// A token as it arrived: **attacker-controlled until [`verify`] returns `Ok`.**
-///
-/// `signed_bytes` are the COSE_Sign1 payload octets exactly as received. They are
-/// verified verbatim and never decoded-then-re-encoded (W-4).
+/// Two fields, and no more. `issuer_key_id` selects a candidate key and is itself
+/// attacker-controlled — naming the wrong key can only cause a refusal, never an
+/// acceptance, because the signature is then checked under the key that was
+/// named. `cose_sign1` is verified verbatim and never decoded-then-re-encoded.
 #[derive(Debug, Clone)]
 pub struct PresentedToken {
-    /// `iss`.
+    /// The `iss` the bearer claims. A *hint for key selection only*.
     pub issuer_key_id: String,
-    /// The signed payload, verbatim.
-    pub signed_bytes: Vec<u8>,
-    /// The detached signature.
-    pub signature: Vec<u8>,
-    /// `aud` — the **operator group**, never a single `relay_id`.
-    pub audience_operator_group_id: String,
-    /// `sub` — the per-operator, per-day pseudonym. Never `device_id`.
-    pub subject: [u8; 16],
-    /// `cnf` — RFC 7800, carrying `RLK_pub`.
-    pub confirmation_key: Vec<u8>,
-    /// `nbf`.
-    pub not_before_ms: u64,
-    /// `exp`.
-    pub not_after_ms: u64,
-    /// `epoch` — the S-03 trust epoch at issuance.
-    pub epoch: u64,
-    /// `quota`.
-    pub quota: Quota,
-    /// `jti` — 16 random bytes for the bounded replay cache.
-    pub jti: Jti,
+    /// The COSE_Sign1 envelope, exactly as received.
+    pub cose_sign1: Vec<u8>,
+}
+
+impl PresentedToken {
+    /// A presented token.
+    #[must_use]
+    pub const fn new(issuer_key_id: String, cose_sign1: Vec<u8>) -> Self {
+        Self {
+            issuer_key_id,
+            cose_sign1,
+        }
+    }
 }
 
 /// A token that has passed every check in ADR-0005 §11.3.
@@ -98,6 +77,7 @@ pub struct VerifiedToken {
     epoch: u64,
     not_after_ms: u64,
     quota: Quota,
+    renewed_by_relay: bool,
 }
 
 impl VerifiedToken {
@@ -124,6 +104,12 @@ impl VerifiedToken {
     pub const fn quota(&self) -> Quota {
         self.quota
     }
+
+    /// Whether a relay, rather than the control plane, last extended it.
+    #[must_use]
+    pub const fn renewed_by_relay(&self) -> bool {
+        self.renewed_by_relay
+    }
 }
 
 /// Everything [`verify`] needs, all of it already held by the relay.
@@ -138,8 +124,9 @@ pub struct VerifyContext<'a> {
     pub issuers: &'a IssuerKeySet,
     /// The current trust-epoch floor.
     pub floor: &'a EpochFloor,
-    /// The relay-leg static key the device actually proved possession of, which
-    /// `cnf` must equal (ADR-0005 §7.6 — a stolen token without `RLK` is inert).
+    /// The COSE_Key octets of the relay-leg static the device actually proved
+    /// possession of, which `cnf` must equal (ADR-0005 §7.6 — a stolen token
+    /// without `RLK` is inert).
     pub presented_leg_key: &'a [u8],
     /// The relay's own current time, in milliseconds.
     pub now_ms: u64,
@@ -147,13 +134,7 @@ pub struct VerifyContext<'a> {
     pub clock_skew_ms: u64,
 }
 
-/// Verifies a presented token, entirely offline.
-///
-/// The order is ADR-0005 §11.3's, and it is load-bearing: the cheap, purely local
-/// checks that cannot be influenced into an asymmetric operation run first, so a
-/// flood of tokens for the wrong operator group costs no signature verification
-/// (§11.5's "the relay performs no asymmetric operation for an unvalidated source
-/// address" applied one layer up).
+/// Verifies a presented token, entirely offline, in ADR-0005 §11.3's order.
 ///
 /// # Errors
 ///
@@ -165,71 +146,77 @@ pub fn verify(
     crypto: &dyn RelayCrypto,
     replay: &mut ReplayCache,
 ) -> Result<VerifiedToken, Condition> {
-    // 0. Structural: a token with no signature or no payload is TOKEN_MISSING,
-    //    not TOKEN_INVALID — the device presented nothing to check.
-    if presented.signed_bytes.is_empty() || presented.signature.is_empty() {
+    // 0. Structural: nothing was presented to check.
+    if presented.cose_sign1.is_empty() {
         return Err(Condition::TokenMissing);
     }
 
-    // 1. `aud` matches this operator group. Purely local, no allocation, and it
-    //    rejects a whole TwinNet's traffic aimed at the wrong operator before any
-    //    cryptography runs. ADR-0005 §10: `aud` scoping makes cross-TwinNet abuse
-    //    structurally impossible.
-    if presented.audience_operator_group_id != ctx.operator_group_id {
-        return Err(Condition::TokenAudienceMismatch);
-    }
-
-    // 2. Validity window with the frozen skew. Also cheap and local, and it is
-    //    the single most common legitimate refusal.
-    if presented.now_is_before_window(ctx.now_ms, ctx.clock_skew_ms) {
-        return Err(Condition::TokenNotYetValid);
-    }
-    if presented.now_is_after_window(ctx.now_ms, ctx.clock_skew_ms) {
-        return Err(Condition::TokenExpired);
-    }
-
-    // 3. Proof of possession. `cnf` must equal the leg key the device actually
-    //    used, so a stolen token without `RLK` is inert (§7.6). Compared before
-    //    the signature so a token harvested from another device costs nothing.
-    if presented.confirmation_key.is_empty()
-        || presented.confirmation_key.as_slice() != ctx.presented_leg_key
-    {
-        return Err(Condition::TokenPopFailed);
-    }
-
-    // 4. The issuer must be held. An EMPTY key set lands here and refuses —
-    //    the fail-closed default (infra/scripts/bootstrap-local.sh).
+    // 1. The issuer must be held. An EMPTY key set lands here and refuses — the
+    //    fail-closed default (infra/scripts/bootstrap-local.sh). This is a map
+    //    lookup, not an asymmetric operation, so it costs nothing to do first.
     let Some(key) = ctx.issuers.find(&presented.issuer_key_id) else {
         return Err(Condition::IssuerUnknown);
     };
 
-    // 5. The signature, over the received octets verbatim.
-    if !crypto.verify_signature(key, &presented.signed_bytes, &presented.signature) {
+    // 2. THE SIGNATURE, over the received octets. Everything after this line
+    //    reads `claims`, which came out of the verified payload; nothing after it
+    //    reads `presented`.
+    let Some(verified) =
+        crypto.verify_statement(key, Statement::RelayCapabilityToken, &presented.cose_sign1)
+    else {
         return Err(Condition::TokenInvalid);
+    };
+    let Some(claims) = verified.as_token() else {
+        // A verified statement of the wrong kind. Cannot happen through
+        // `Statement::RelayCapabilityToken`, and is a refusal if it ever does.
+        return Err(Condition::TokenInvalid);
+    };
+
+    // 3. `aud` matches this operator group. ADR-0005 §10: `aud` scoping is what
+    //    makes cross-TwinNet abuse structurally impossible.
+    if claims.audience_operator_group_id != ctx.operator_group_id {
+        return Err(Condition::TokenAudienceMismatch);
+    }
+
+    // 4. `cnf` equals the leg key the device actually used, so a stolen token
+    //    without `RLK` is inert (§7.6).
+    if claims.confirmation_key.is_empty()
+        || claims.confirmation_key.as_slice() != ctx.presented_leg_key
+    {
+        return Err(Condition::TokenPopFailed);
+    }
+
+    // 5. `nbf`/`exp` within the frozen skew.
+    if ctx.now_ms < claims.not_before_ms.saturating_sub(ctx.clock_skew_ms) {
+        return Err(Condition::TokenNotYetValid);
+    }
+    if ctx.now_ms > claims.not_after_ms.saturating_add(ctx.clock_skew_ms) {
+        return Err(Condition::TokenExpired);
     }
 
     // 6. `epoch >= epoch_floor`. Defence in depth: revocation is enforced at the
-    //    peer (ADR-0005 §11.3), so a lagging floor leaks no confidentiality.
-    if !ctx.floor.admits(presented.epoch) {
+    //    peer (§11.3), so a lagging floor leaks no confidentiality.
+    if !ctx.floor.admits(claims.epoch) {
         return Err(Condition::TokenEpochStale);
     }
 
     // 7. `jti` unseen, against a bounded cache. Last, because it MUTATES: an
     //    earlier position would let an attacker burn cache entries with tokens
     //    that were going to be refused anyway.
-    if replay.admit(presented.jti, ctx.now_ms) == ReplayVerdict::Replayed {
+    if replay.admit(claims.jti, ctx.now_ms) == ReplayVerdict::Replayed {
         return Err(Condition::TokenReplayed);
     }
 
     Ok(VerifiedToken {
-        subject: RelaySub::from_verified_claim(presented.subject),
-        epoch: presented.epoch,
-        not_after_ms: presented.not_after_ms,
-        quota: presented.quota,
+        subject: RelaySub::from_verified_claim(claims.subject),
+        epoch: claims.epoch,
+        not_after_ms: claims.not_after_ms,
+        quota: claims.quota,
+        renewed_by_relay: claims.renewed_by_relay,
     })
 }
 
-/// Whether a relay may renew this token itself (ADR-0005 §11.3, normative).
+/// Whether a relay may renew a **verified** token itself (ADR-0005 §11.3).
 ///
 /// All three conditions, and no others:
 ///
@@ -241,56 +228,133 @@ pub fn verify(
 /// Renewal "is **not** a new grant: a relay can only extend an authority the
 /// control plane already issued, at an epoch the control plane already published,
 /// and never above its own `epoch_floor`."
+///
+/// It takes a [`VerifiedToken`] rather than a [`PresentedToken`], so condition 1's
+/// "the token verifies" half is discharged by the type.
 #[must_use]
 pub fn may_relay_renew(
-    presented: &PresentedToken,
+    token: &VerifiedToken,
     floor: &EpochFloor,
     pop_proven_on_live_leg: bool,
     now_ms: u64,
     grace_ms: u64,
 ) -> bool {
     pop_proven_on_live_leg
-        && floor.permits_relay_renewal(presented.epoch)
-        && now_ms <= presented.not_after_ms.saturating_add(grace_ms)
-}
-
-impl PresentedToken {
-    fn now_is_before_window(&self, now_ms: u64, skew_ms: u64) -> bool {
-        now_ms < self.not_before_ms.saturating_sub(skew_ms)
-    }
-
-    fn now_is_after_window(&self, now_ms: u64, skew_ms: u64) -> bool {
-        now_ms > self.not_after_ms.saturating_add(skew_ms)
-    }
+        && floor.permits_relay_renewal(token.epoch())
+        && now_ms <= token.not_after_ms().saturating_add(grace_ms)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::crypto::{FailClosed, IssuerPublicKey, LegKey};
+pub(crate) mod testkit {
+    //! A [`RelayCrypto`] double that verifies a token the tests construct.
+    //!
+    //! It exists because the real provider needs an Ed25519 keypair and a
+    //! canonical COSE_Sign1 envelope to produce anything, and the *policy* under
+    //! test is the ordering and the checks, not the signature arithmetic.
+    //! `provider.rs` tests the real binding separately.
 
-    struct AlwaysVerifies;
-    impl RelayCrypto for AlwaysVerifies {
-        fn verify_signature(&self, _: &IssuerPublicKey, _: &[u8], _: &[u8]) -> bool {
-            true
+    use crate::claims::{EpochFloorClaims, VerifiedClaims};
+    use crate::claims::{Quota, TokenClaims};
+    use crate::crypto::{IssuerPublicKey, LegKey, RelayCrypto, Statement};
+
+    /// Verifies any envelope that starts with `b"GOOD"`, yielding fixed claims.
+    pub struct Doubles {
+        /// The claims a successful verification returns.
+        pub claims: TokenClaims,
+        /// The epoch floor a successful `RelayEpochFloor` verification returns.
+        pub floor_epoch: u64,
+        /// Whether the frame MAC verifies.
+        pub mac_ok: bool,
+    }
+
+    impl Doubles {
+        /// A double returning `claims`.
+        pub fn new(claims: TokenClaims) -> Self {
+            Self {
+                claims,
+                floor_epoch: 0,
+                mac_ok: true,
+            }
+        }
+    }
+
+    /// The envelope prefix this double treats as a valid signature.
+    pub const GOOD: &[u8] = b"GOOD";
+
+    /// A well-formed envelope the double accepts.
+    pub fn good_envelope() -> Vec<u8> {
+        let mut v = GOOD.to_vec();
+        v.extend_from_slice(b"-cose-sign1-payload");
+        v
+    }
+
+    /// An envelope the double rejects, standing in for a bad signature.
+    pub fn bad_envelope() -> Vec<u8> {
+        b"BAD-cose-sign1-payload".to_vec()
+    }
+
+    /// Claims a test can start from.
+    pub fn claims() -> TokenClaims {
+        TokenClaims {
+            issuer_key_id: "k1".into(),
+            audience_operator_group_id: "local-operator".into(),
+            subject: [9; 16],
+            confirmation_key: b"RLK-cose-key".to_vec(),
+            not_before_ms: 1_000_000,
+            not_after_ms: 1_000_000 + 86_400_000,
+            epoch: 5,
+            quota: Quota::default(),
+            jti: [3; 16],
+            renewed_by_relay: false,
+        }
+    }
+
+    impl RelayCrypto for Doubles {
+        fn verify_statement(
+            &self,
+            _key: &IssuerPublicKey,
+            kind: Statement,
+            envelope: &[u8],
+        ) -> Option<VerifiedClaims> {
+            if !envelope.starts_with(GOOD) {
+                return None;
+            }
+            Some(match kind {
+                Statement::RelayCapabilityToken => {
+                    VerifiedClaims::Token(Box::new(self.claims.clone()))
+                }
+                Statement::RelayEpochFloor => VerifiedClaims::EpochFloor(EpochFloorClaims {
+                    twinnet_id: "t".into(),
+                    operator_group_id: "local-operator".into(),
+                    epoch_floor: self.floor_epoch,
+                    not_after_ms: u64::MAX,
+                }),
+            })
         }
         fn verify_frame_mac(&self, _: &LegKey, _: &[u8], _: [u8; 8]) -> bool {
-            true
+            self.mac_ok
         }
         fn frame_mac(&self, _: &LegKey, _: &[u8]) -> Option<[u8; 8]> {
-            Some([0; 8])
+            self.mac_ok.then_some([0xEE; 8])
         }
         fn digest16(&self, _: &[u8], _: &[u8]) -> Option<[u8; 16]> {
             Some([1; 16])
         }
     }
+}
 
-    const LEG: &[u8] = b"RLK-public-bytes";
+#[cfg(test)]
+mod tests {
+    use super::testkit::{bad_envelope, claims, good_envelope, Doubles};
+    use super::*;
+    use crate::crypto::FailClosed;
+
+    const LEG: &[u8] = b"RLK-cose-key";
     const SKEW: u64 = 300_000;
 
     fn issuers(populated: bool) -> IssuerKeySet {
         let raw = if populated {
-            r#"{"operator_group_id":"local-operator","issuers":[{"key_id":"k1","alg":"Ed25519","public_key_hex":"0102"}]}"#
+            r#"{"operator_group_id":"local-operator","issuers":[{"key_id":"k1","alg":"Ed25519","cose_key_hex":"0102"}]}"#
         } else {
             r#"{"operator_group_id":"local-operator","issuers":[]}"#
         };
@@ -298,19 +362,7 @@ mod tests {
     }
 
     fn token() -> PresentedToken {
-        PresentedToken {
-            issuer_key_id: "k1".into(),
-            signed_bytes: b"cose-payload".to_vec(),
-            signature: b"sig".to_vec(),
-            audience_operator_group_id: "local-operator".into(),
-            subject: [9; 16],
-            confirmation_key: LEG.to_vec(),
-            not_before_ms: 1_000_000,
-            not_after_ms: 1_000_000 + 86_400_000,
-            epoch: 5,
-            quota: Quota::default(),
-            jti: [3; 16],
-        }
+        PresentedToken::new("k1".into(), good_envelope())
     }
 
     fn ctx<'a>(issuers: &'a IssuerKeySet, floor: &'a EpochFloor, now_ms: u64) -> VerifyContext<'a> {
@@ -328,9 +380,16 @@ mod tests {
     fn a_good_token_verifies() {
         let (i, f) = (issuers(true), EpochFloor::starting_at(5));
         let mut r = ReplayCache::frozen_default();
-        let v = verify(&token(), &ctx(&i, &f, 1_500_000), &AlwaysVerifies, &mut r).expect("ok");
+        let v = verify(
+            &token(),
+            &ctx(&i, &f, 1_500_000),
+            &Doubles::new(claims()),
+            &mut r,
+        )
+        .expect("ok");
         assert_eq!(v.epoch(), 5);
         assert_eq!(v.quota().max_concurrent_flows, 64);
+        assert!(!v.renewed_by_relay());
     }
 
     #[test]
@@ -338,7 +397,13 @@ mod tests {
         let (i, f) = (issuers(false), EpochFloor::starting_at(5));
         let mut r = ReplayCache::frozen_default();
         assert_eq!(
-            verify(&token(), &ctx(&i, &f, 1_500_000), &AlwaysVerifies, &mut r).unwrap_err(),
+            verify(
+                &token(),
+                &ctx(&i, &f, 1_500_000),
+                &Doubles::new(claims()),
+                &mut r
+            )
+            .unwrap_err(),
             Condition::IssuerUnknown
         );
     }
@@ -354,11 +419,46 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_signature_is_refused_before_any_claim_is_consulted() {
+        // The ordering property. The envelope below carries claims that would
+        // ALSO fail on `aud`, on `cnf` and on the validity window — and the
+        // refusal is TokenInvalid, because the signature is checked first and
+        // nothing after it ran.
+        let (i, f) = (issuers(true), EpochFloor::starting_at(5));
+        let mut r = ReplayCache::frozen_default();
+        let mut hostile = claims();
+        hostile.audience_operator_group_id = "someone-else".into();
+        hostile.confirmation_key = b"wrong".to_vec();
+        hostile.not_after_ms = 0;
+        let presented = PresentedToken::new("k1".into(), bad_envelope());
+        assert_eq!(
+            verify(
+                &presented,
+                &ctx(&i, &f, 1_500_000),
+                &Doubles::new(hostile),
+                &mut r
+            )
+            .unwrap_err(),
+            Condition::TokenInvalid
+        );
+        assert!(
+            r.is_empty(),
+            "a refused token must not consume a replay slot"
+        );
+    }
+
+    #[test]
     fn a_token_below_the_floor_must_not_be_used() {
         let (i, f) = (issuers(true), EpochFloor::starting_at(9));
         let mut r = ReplayCache::frozen_default();
         assert_eq!(
-            verify(&token(), &ctx(&i, &f, 1_500_000), &AlwaysVerifies, &mut r).unwrap_err(),
+            verify(
+                &token(),
+                &ctx(&i, &f, 1_500_000),
+                &Doubles::new(claims()),
+                &mut r
+            )
+            .unwrap_err(),
             Condition::TokenEpochStale
         );
     }
@@ -367,21 +467,16 @@ mod tests {
     fn an_expired_token_is_refused_and_the_skew_window_is_honoured() {
         let (i, f) = (issuers(true), EpochFloor::starting_at(5));
         let mut r = ReplayCache::frozen_default();
-        let t = token();
+        let c = claims();
+        let d = Doubles::new(c.clone());
         // Exactly at exp + skew: still accepted.
-        assert!(verify(
-            &t,
-            &ctx(&i, &f, t.not_after_ms + SKEW),
-            &AlwaysVerifies,
-            &mut r
-        )
-        .is_ok());
+        assert!(verify(&token(), &ctx(&i, &f, c.not_after_ms + SKEW), &d, &mut r).is_ok());
         // One millisecond past: refused.
         assert_eq!(
             verify(
-                &t,
-                &ctx(&i, &f, t.not_after_ms + SKEW + 1),
-                &AlwaysVerifies,
+                &token(),
+                &ctx(&i, &f, c.not_after_ms + SKEW + 1),
+                &d,
                 &mut r
             )
             .unwrap_err(),
@@ -393,12 +488,12 @@ mod tests {
     fn a_not_yet_valid_token_is_distinguished_from_an_expired_one() {
         let (i, f) = (issuers(true), EpochFloor::starting_at(5));
         let mut r = ReplayCache::frozen_default();
-        let t = token();
+        let c = claims();
         assert_eq!(
             verify(
-                &t,
-                &ctx(&i, &f, t.not_before_ms - SKEW - 1),
-                &AlwaysVerifies,
+                &token(),
+                &ctx(&i, &f, c.not_before_ms - SKEW - 1),
+                &Doubles::new(c.clone()),
                 &mut r
             )
             .unwrap_err(),
@@ -413,34 +508,38 @@ mod tests {
         let mut c = ctx(&i, &f, 1_500_000);
         c.presented_leg_key = b"some-other-devices-RLK";
         assert_eq!(
-            verify(&token(), &c, &AlwaysVerifies, &mut r).unwrap_err(),
+            verify(&token(), &c, &Doubles::new(claims()), &mut r).unwrap_err(),
             Condition::TokenPopFailed
         );
     }
 
     #[test]
-    fn a_token_for_another_operator_group_is_refused_before_any_cryptography() {
+    fn a_token_for_another_operator_group_is_refused() {
         let (i, f) = (issuers(true), EpochFloor::starting_at(5));
         let mut r = ReplayCache::frozen_default();
-        let mut t = token();
-        t.audience_operator_group_id = "someone-elses-fleet".into();
+        let mut hostile = claims();
+        hostile.audience_operator_group_id = "someone-elses-fleet".into();
         assert_eq!(
-            verify(&t, &ctx(&i, &f, 1_500_000), &AlwaysVerifies, &mut r).unwrap_err(),
+            verify(
+                &token(),
+                &ctx(&i, &f, 1_500_000),
+                &Doubles::new(hostile),
+                &mut r
+            )
+            .unwrap_err(),
             Condition::TokenAudienceMismatch
         );
-        assert!(
-            r.is_empty(),
-            "a refused token must not consume a replay slot"
-        );
+        assert!(r.is_empty());
     }
 
     #[test]
     fn a_replayed_jti_is_refused_the_second_time() {
         let (i, f) = (issuers(true), EpochFloor::starting_at(5));
         let mut r = ReplayCache::frozen_default();
-        assert!(verify(&token(), &ctx(&i, &f, 1_500_000), &AlwaysVerifies, &mut r).is_ok());
+        let d = Doubles::new(claims());
+        assert!(verify(&token(), &ctx(&i, &f, 1_500_000), &d, &mut r).is_ok());
         assert_eq!(
-            verify(&token(), &ctx(&i, &f, 1_500_001), &AlwaysVerifies, &mut r).unwrap_err(),
+            verify(&token(), &ctx(&i, &f, 1_500_001), &d, &mut r).unwrap_err(),
             Condition::TokenReplayed
         );
     }
@@ -449,44 +548,73 @@ mod tests {
     fn a_token_that_would_fail_anyway_does_not_burn_a_replay_slot() {
         let (i, f) = (issuers(true), EpochFloor::starting_at(9));
         let mut r = ReplayCache::frozen_default();
-        let _ = verify(&token(), &ctx(&i, &f, 1_500_000), &AlwaysVerifies, &mut r);
+        let _ = verify(
+            &token(),
+            &ctx(&i, &f, 1_500_000),
+            &Doubles::new(claims()),
+            &mut r,
+        );
         assert!(r.is_empty());
     }
 
     #[test]
-    fn an_empty_token_is_missing_rather_than_invalid() {
+    fn an_empty_envelope_is_missing_rather_than_invalid() {
         let (i, f) = (issuers(true), EpochFloor::starting_at(5));
         let mut r = ReplayCache::frozen_default();
-        let mut t = token();
-        t.signature.clear();
+        let presented = PresentedToken::new("k1".into(), Vec::new());
         assert_eq!(
-            verify(&t, &ctx(&i, &f, 1_500_000), &AlwaysVerifies, &mut r).unwrap_err(),
+            verify(
+                &presented,
+                &ctx(&i, &f, 1_500_000),
+                &Doubles::new(claims()),
+                &mut r
+            )
+            .unwrap_err(),
             Condition::TokenMissing
         );
     }
 
     #[test]
-    fn relay_renewal_requires_epoch_equality_grace_and_live_pop() {
+    fn a_presented_token_carries_no_claim_a_caller_could_read() {
+        // relay.proto: "the decoded fields here are attacker-controlled until
+        // then". The type has nothing to be tempted by.
         let t = token();
-        let floor = EpochFloor::starting_at(5);
-        let grace = 21_600_000; // T_RELAY_GRACE = 6 h
-        let past_exp = t.not_after_ms + 1;
+        let rendered = format!("{t:?}");
+        assert!(!rendered.contains("epoch"));
+        assert!(!rendered.contains("quota"));
+        assert!(!rendered.contains("subject"));
+        assert!(!rendered.contains("not_after"));
+    }
 
-        assert!(may_relay_renew(&t, &floor, true, past_exp, grace));
+    #[test]
+    fn relay_renewal_requires_epoch_equality_grace_and_live_pop() {
+        let (i, f) = (issuers(true), EpochFloor::starting_at(5));
+        let mut r = ReplayCache::frozen_default();
+        let v = verify(
+            &token(),
+            &ctx(&i, &f, 1_500_000),
+            &Doubles::new(claims()),
+            &mut r,
+        )
+        .expect("verified");
+        let grace = 21_600_000; // T_RELAY_GRACE = 6 h
+        let past_exp = v.not_after_ms() + 1;
+
+        assert!(may_relay_renew(&v, &f, true, past_exp, grace));
         // No proof of possession on the live leg.
-        assert!(!may_relay_renew(&t, &floor, false, past_exp, grace));
+        assert!(!may_relay_renew(&v, &f, false, past_exp, grace));
         // Past the grace window.
         assert!(!may_relay_renew(
-            &t,
-            &floor,
+            &v,
+            &f,
             true,
-            t.not_after_ms + grace + 1,
+            v.not_after_ms() + grace + 1,
             grace
         ));
         // The floor moved: epoch equality no longer holds, so a revocation may
         // have intervened and the relay must not extend the authority.
         assert!(!may_relay_renew(
-            &t,
+            &v,
             &EpochFloor::starting_at(6),
             true,
             past_exp,
@@ -499,13 +627,13 @@ mod tests {
         // The compile-time property: `verify` is `fn`, not `async fn`, and its
         // context holds no client and no address. A future maintainer cannot add
         // a control-plane call without changing the signature and every caller.
-        // This test exists so that change is visibly a test edit (I5).
-        let f: fn(
+        type Verify = fn(
             &PresentedToken,
             &VerifyContext<'_>,
             &dyn RelayCrypto,
             &mut ReplayCache,
-        ) -> Result<VerifiedToken, Condition> = verify;
+        ) -> Result<VerifiedToken, Condition>;
+        let f: Verify = verify;
         let _ = f;
     }
 }

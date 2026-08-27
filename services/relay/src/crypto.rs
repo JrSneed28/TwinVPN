@@ -4,22 +4,22 @@
 //!
 //! ADR-0018 **CD-I2** makes `twinvpn-crypto` the only crate permitted a
 //! cryptographic dependency, and `ownership.md` §6 forbids inventing
-//! cryptographic primitives. `services/Cargo.toml`'s `[workspace.dependencies]`
-//! — owned by the integration lead, not by this domain — declares no
-//! `ed25519-dalek`, no `blake2`, no `coset` and no `ciborium`, and its own
-//! comment restricts the edge into `/core` to `twinvpn-schema` and the framing
-//! crate. So this crate has three choices: violate CD-I2, edit a manifest it
-//! does not own, or take the primitives as a seam. It takes the seam.
+//! cryptographic primitives. `services/Cargo.toml` now declares `twinvpn-crypto`
+//! as a permitted edge for the relay plane, and [`crate::provider`] binds it
+//! behind this trait.
 //!
-//! The consequence is deliberate and is the *safe* direction: [`FailClosed`] —
-//! the default provider — refuses every signature, every MAC and every digest.
-//! **An unconfigured relay is a closed relay**, exactly as the empty issuer key
-//! set `infra/scripts/bootstrap-local.sh` ships is a closed relay.
+//! **The seam stays** even though the provider exists, for three reasons that
+//! all still hold:
 //!
-//! What a production wiring needs is recorded in `README.md` §8 and reported to
-//! the integration lead: either `twinvpn-crypto` becomes a permitted edge for
-//! `services/relay`, or the four primitive crates enter
-//! `services/Cargo.toml`'s workspace set.
+//! 1. It is what let every admission *policy* — ordering, skew, epoch floor,
+//!    replay, proof of possession, renewal — be tested with no provider at all.
+//! 2. [`FailClosed`] remains the **default**, so a relay with no provider
+//!    configured refuses every signature, every MAC and every digest. **An
+//!    unconfigured relay is a closed relay**, exactly as the empty issuer key set
+//!    `infra/scripts/bootstrap-local.sh` ships is a closed relay.
+//! 3. One primitive is still absent from `twinvpn-crypto`'s public API — the
+//!    keyed BLAKE2s frame MAC of ADR-0005 §9.1 — so the trait is currently the
+//!    only place that partial binding is visible. See [`crate::provider`].
 //!
 //! # The key inventory, and why it cannot decrypt
 //!
@@ -30,8 +30,20 @@
 //! schedule, and this trait exposes **no decrypt operation at all** — there is no
 //! method on [`RelayCrypto`] that takes ciphertext and returns plaintext, so a
 //! relay built on it has no decryption path to reach for.
+//!
+//! # Verification is over the received octets
+//!
+//! [`RelayCrypto::verify_statement`] takes the **whole COSE_Sign1 envelope
+//! exactly as it arrived** and returns typed claims read from the verified
+//! payload. There is no step between receipt and verification in which the bytes
+//! could be re-encoded, and there is no way to obtain a
+//! [`crate::claims::TokenClaims`] without having gone through it — which is
+//! `relay.proto`'s rule ("read the claims FROM THE VERIFIED PAYLOAD") expressed
+//! as a type rather than as a comment.
 
 use twinvpn_service_common::Secret;
+
+use crate::claims::VerifiedClaims;
 
 /// `K_leg` — the per-leg transport key.
 ///
@@ -68,14 +80,37 @@ impl std::fmt::Debug for LegKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssuerPublicKey {
     /// The `iss` claim value this key answers to.
+    /// CDDL `key-id = tstr .size (1..64)`.
     pub key_id: String,
     /// The algorithm label from the key set, e.g. `"Ed25519"`.
+    ///
+    /// ADR-0005 §11.3 fixes Ed25519 for the relay-credential issuer. It is held
+    /// as declared configuration so a key set naming something else fails at
+    /// startup rather than at the first token.
     pub alg: String,
-    /// The raw public key bytes.
+    /// The **COSE_Key** octets, deterministic CBOR (CDDL `cose-key = bstr`).
+    ///
+    /// Not a raw point: the algorithm and curve live inside the COSE_Key, so a
+    /// key cannot be reinterpreted under a different algorithm than the one it
+    /// was published for.
     pub key: Vec<u8>,
 }
 
-/// The three primitives a relay needs and may not implement.
+/// Which Owner-rooted statement is being verified.
+///
+/// The caller commits to the kind *before* verification, so a `RelayEpochFloor`
+/// can never be accepted where a `RelayCapabilityToken` was expected —
+/// `SignedStatement.statement_type` on the wire is "a HINT for dispatch only …
+/// an attacker controls this value".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Statement {
+    /// ADR-0005 §11.3; CDDL §13 `relay-capability-token`.
+    RelayCapabilityToken,
+    /// ADR-0005 §11.3 "Revocation and S-03"; CDDL §14 `relay-epoch-floor`.
+    RelayEpochFloor,
+}
+
+/// The four primitives a relay needs and may not implement.
 ///
 /// # Deliberately absent
 ///
@@ -83,11 +118,23 @@ pub struct IssuerPublicKey {
 /// trait's *shape* is half of I1's structural argument: a relay built against it
 /// has no method to call that would yield plaintext.
 pub trait RelayCrypto: Send + Sync + 'static {
-    /// Verifies a detached signature over `message` under a held issuer key.
+    /// Verifies a COSE_Sign1 envelope **over the received octets** and returns
+    /// the claims read from the verified payload.
     ///
-    /// Used for the `RelayCapabilityToken` (COSE_Sign1, ADR-0005 §11.3) and for
-    /// the Owner-signed `RelayEpochFloor` (§11.3 "Revocation and S-03").
-    fn verify_signature(&self, key: &IssuerPublicKey, message: &[u8], signature: &[u8]) -> bool;
+    /// `envelope` is passed exactly as it arrived and is never re-encoded — the
+    /// same rule `Auth.signed_payload` already states ("the verifier MUST verify
+    /// over the exact received octets … and MUST NOT re-serialize"), applied to
+    /// the relay's two Owner-rooted statements.
+    ///
+    /// `None` means "did not verify", for any reason. A verifier that
+    /// distinguished *why* on a pre-authentication path would be an oracle; the
+    /// caller maps every failure onto one registered code.
+    fn verify_statement(
+        &self,
+        key: &IssuerPublicKey,
+        kind: Statement,
+        envelope: &[u8],
+    ) -> Option<VerifiedClaims>;
 
     /// Verifies the 64-bit truncated BLAKE2s frame MAC under `K_leg`.
     ///
@@ -112,16 +159,21 @@ pub trait RelayCrypto: Send + Sync + 'static {
 /// The default provider: **refuses everything**.
 ///
 /// A relay wired with `FailClosed` starts, serves `/healthz` and `/readyz`,
-/// binds its carriages — and admits no flow, because no token verifies and no
-/// frame MAC checks. That is the same shape as the empty issuer key set: "a
-/// relay that admitted flows because it had no issuer keys would be an open
-/// relay" (`infra/scripts/bootstrap-local.sh`).
+/// binds its carriages — and admits no flow, because no statement verifies and no
+/// frame MAC checks. That is the same shape as the empty issuer key set: "a relay
+/// that admitted flows because it had no issuer keys would be an open relay"
+/// (`infra/scripts/bootstrap-local.sh`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FailClosed;
 
 impl RelayCrypto for FailClosed {
-    fn verify_signature(&self, _key: &IssuerPublicKey, _message: &[u8], _signature: &[u8]) -> bool {
-        false
+    fn verify_statement(
+        &self,
+        _key: &IssuerPublicKey,
+        _kind: Statement,
+        _envelope: &[u8],
+    ) -> Option<VerifiedClaims> {
+        None
     }
 
     fn verify_frame_mac(&self, _k_leg: &LegKey, _mac_input: &[u8], _tag: [u8; 8]) -> bool {
@@ -149,7 +201,12 @@ mod tests {
             alg: "Ed25519".into(),
             key: vec![0; 32],
         };
-        assert!(!c.verify_signature(&k, b"anything", b"anything"));
+        assert!(c
+            .verify_statement(&k, Statement::RelayCapabilityToken, b"anything")
+            .is_none());
+        assert!(c
+            .verify_statement(&k, Statement::RelayEpochFloor, b"anything")
+            .is_none());
         assert!(!c.verify_frame_mac(&LegKey::new([0; 32]), b"x", [0; 8]));
         assert!(c.frame_mac(&LegKey::new([0; 32]), b"x").is_none());
         assert!(c.digest16(b"d", b"x").is_none());

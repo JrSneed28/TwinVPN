@@ -247,13 +247,13 @@ mod tests {
         fn make() -> LogSubject {
             struct D;
             impl crate::crypto::RelayCrypto for D {
-                fn verify_signature(
+                fn verify_statement(
                     &self,
                     _: &crate::crypto::IssuerPublicKey,
+                    _: crate::crypto::Statement,
                     _: &[u8],
-                    _: &[u8],
-                ) -> bool {
-                    false
+                ) -> Option<crate::claims::VerifiedClaims> {
+                    None
                 }
                 fn verify_frame_mac(
                     &self,

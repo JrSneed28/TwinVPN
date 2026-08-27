@@ -4,10 +4,13 @@
 //! Ed25519 over the canonical encoding (ADR-0003)". `infra/scripts/bootstrap-local.sh`
 //! provisions the key at `relay-directory/map-signing.key`.
 //!
-//! Ed25519 is a cryptographic primitive and ADR-0018 CD-I2 keeps those in
-//! `twinvpn-crypto`, which this workspace's manifest does not make available to
-//! `services/` (see `README.md` §7). The signer is therefore an injected seam,
-//! and the default provider [`Unsigned`] **signs nothing**.
+//! `twinvpn-crypto` is now a permitted edge for the relay plane (ADR-0018 CD-I2,
+//! DP-8), and [`crate::map_cbor`] uses it for real: the document is the frozen
+//! `relay-map` CDDL encoded as ADR-0003 deterministic CBOR, wrapped in a genuine
+//! RFC 9052 `Sig_structure` with `alg` in the protected header. What remains a
+//! seam is the raw Ed25519 operation, because `twinvpn-crypto` verifies and
+//! assembles but signs through a custody boundary that has no server-side
+//! implementation. The default provider [`Unsigned`] therefore **signs nothing**.
 //!
 //! # Why an unsigned map is refused rather than published
 //!
@@ -77,18 +80,43 @@ pub enum SignError {
     /// No signer is installed. An unsigned map is never published.
     #[error("no map signer is installed; an unsigned RelayMap is never published")]
     NoSigner,
+    /// The map could not be encoded as deterministic CBOR.
+    ///
+    /// A caller defect (a duplicate map key), not an input problem: every key set
+    /// in [`crate::map_cbor`] is a constant.
+    #[error("relay-map encoding failed")]
+    Encoding,
 }
 
-/// Produces the COSE_Sign1 signature over a map's canonical encoding.
+/// Produces the raw Ed25519 signature over a COSE `Sig_structure`.
+///
+/// # What `twinvpn-crypto` supplies, and what it does not
+///
+/// The *structure* is `twinvpn_crypto::emit`'s and is now used for real
+/// ([`crate::map_cbor`]): the deterministic CBOR payload per the frozen
+/// `relay-map` CDDL, the protected header carrying `alg` where the signature
+/// covers it, the RFC 9052 §4.4 `Sig_structure`, and the four-element envelope
+/// assembly.
+///
+/// The **raw signature operation is not**. `twinvpn-crypto` verifies
+/// (`verify_cose_sign1`) and assembles, but the signing key lives behind a
+/// custody boundary — its own docs hand `to_be_signed()` to
+/// `IdentityCustody::identity_sign` — and there is no server-side custody
+/// implementation. So this trait is the seam for exactly one operation:
+/// Ed25519 over the bytes handed to it.
 pub trait MapSigner: Send + Sync {
-    /// Signs `canonical_bytes`.
+    /// Signs a COSE `Sig_structure`.
+    ///
+    /// The argument is `StatementToSign::to_be_signed()`, **not** the payload:
+    /// signing the payload alone would produce a signature no COSE verifier
+    /// accepts, and would leave `alg` uncovered by it.
     ///
     /// # Errors
     ///
     /// [`SignError::NoSigner`] when the provider cannot sign.
-    fn sign(&self, canonical_bytes: &[u8]) -> Result<Vec<u8>, SignError>;
+    fn sign(&self, to_be_signed: &[u8]) -> Result<Vec<u8>, SignError>;
 
-    /// The `iss` key id this signer's key answers to, for the map header.
+    /// The `kid` this signer's key answers to, for the protected header.
     fn key_id(&self) -> &str;
 }
 
@@ -97,7 +125,7 @@ pub trait MapSigner: Send + Sync {
 pub struct Unsigned;
 
 impl MapSigner for Unsigned {
-    fn sign(&self, _canonical_bytes: &[u8]) -> Result<Vec<u8>, SignError> {
+    fn sign(&self, _to_be_signed: &[u8]) -> Result<Vec<u8>, SignError> {
         Err(SignError::NoSigner)
     }
 
