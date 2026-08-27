@@ -13,7 +13,7 @@ SHELL := /bin/bash
 # server artifacts, the Linux shell and TwinLab are SEPARATE artifacts and
 # therefore separate workspaces, so that no domain silently acquires another's
 # dependency graph and each domain owns its own manifests.
-WORKSPACES := core services shells/linux lab
+WORKSPACES := core services shells/linux lab tests
 CARGO      := cargo
 
 BUF        := ./node_modules/.bin/buf
