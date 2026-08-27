@@ -1,0 +1,24 @@
+# twinvpn-tunnel - L-DATA handshake driver, rekey scheduling, replay window, key state (ADR-0001)
+#
+# Owner: core-dataplane. This manifest is owned by that agent; the WORKSPACE manifest
+# at core/Cargo.toml is owned by the integration lead and must not be edited here.
+[package]
+name    = "twinvpn-tunnel"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "L-DATA handshake driver, rekey scheduling, replay window, key state (ADR-0001)"
+
+[dependencies]
+twinvpn-types         = { workspace = true }
+twinvpn-env           = { workspace = true }
+twinvpn-schema        = { workspace = true }
+twinvpn-crypto        = { workspace = true }
+twinvpn-platform      = { workspace = true }
+thiserror             = { workspace = true }
+bytes                 = { workspace = true }
+
+[dev-dependencies]
+proptest              = { workspace = true }

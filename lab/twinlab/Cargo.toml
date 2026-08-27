@@ -1,0 +1,17 @@
+# twinlab — namespace/veth topology, NAT classes, netem impairment and the seeded scenario runtime
+#
+# Owner: test-engineering.
+[package]
+name    = "twinlab"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "namespace/veth topology, NAT classes, netem impairment and the seeded scenario runtime"
+publish = false
+
+[dependencies]
+twinvpn-types = { workspace = true }
+thiserror     = { workspace = true }
+tracing       = { workspace = true }

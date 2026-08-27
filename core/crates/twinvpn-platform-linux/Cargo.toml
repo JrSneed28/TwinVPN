@@ -1,0 +1,22 @@
+# twinvpn-platform-linux - the Linux/OpenWrt implementation of the twinvpn-platform trait (CB-3 permits cfg here)
+#
+# Owner: desktop-linux. This manifest is owned by that agent; the WORKSPACE manifest
+# at core/Cargo.toml is owned by the integration lead and must not be edited here.
+[package]
+name    = "twinvpn-platform-linux"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the Linux/OpenWrt implementation of the twinvpn-platform trait (CB-3 permits cfg here)"
+
+[dependencies]
+twinvpn-types         = { workspace = true }
+twinvpn-env           = { workspace = true }
+twinvpn-platform      = { workspace = true }
+thiserror             = { workspace = true }
+libc                  = { workspace = true }
+socket2               = { workspace = true }
+tokio                 = { workspace = true }
+tracing               = { workspace = true }

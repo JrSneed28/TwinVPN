@@ -1,0 +1,37 @@
+# twinvpn-core - the composition root - the ONLY crate that may name both planes (ADR-0018 CD-I5)
+#
+# Owner: core-composition. This manifest is owned by that agent; the WORKSPACE manifest
+# at core/Cargo.toml is owned by the integration lead and must not be edited here.
+[package]
+name    = "twinvpn-core"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the composition root - the ONLY crate that may name both planes (ADR-0018 CD-I5)"
+
+[dependencies]
+twinvpn-types         = { workspace = true }
+twinvpn-env           = { workspace = true }
+twinvpn-schema        = { workspace = true }
+twinvpn-platform      = { workspace = true }
+twinvpn-crypto        = { workspace = true }
+twinvpn-store         = { workspace = true }
+twinvpn-trust         = { workspace = true }
+twinvpn-cp-client     = { workspace = true }
+twinvpn-tunnel        = { workspace = true }
+twinvpn-path          = { workspace = true }
+twinvpn-relay-client  = { workspace = true }
+twinvpn-route         = { workspace = true }
+twinvpn-dns           = { workspace = true }
+twinvpn-enforce       = { workspace = true }
+twinvpn-gateway       = { workspace = true }
+twinvpn-session       = { workspace = true }
+twinvpn-diag          = { workspace = true }
+twinvpn-mgmt          = { workspace = true }
+thiserror             = { workspace = true }
+tracing               = { workspace = true }
+
+[dev-dependencies]
+proptest              = { workspace = true }

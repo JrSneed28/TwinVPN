@@ -1,0 +1,20 @@
+# twinvpn-env - the ONLY source of time, timers, randomness and the runtime (ADR-0018 CD-1..CD-4)
+#
+# Owner: core-foundation. This manifest is owned by that agent; the WORKSPACE manifest
+# at core/Cargo.toml is owned by the integration lead and must not be edited here.
+[package]
+name    = "twinvpn-env"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the ONLY source of time, timers, randomness and the runtime (ADR-0018 CD-1..CD-4)"
+
+[dependencies]
+twinvpn-types         = { workspace = true }
+thiserror             = { workspace = true }
+futures-core          = { workspace = true }
+
+[dev-dependencies]
+proptest              = { workspace = true }

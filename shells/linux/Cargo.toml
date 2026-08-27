@@ -1,0 +1,45 @@
+# The Linux shell. ADR-0018 §11.12: "/shells/linux/  twinvpnd (Rust) +
+# twinvpnctl (Rust)". ADR-0016 owns the privilege split between them.
+#
+# CB-2: a shell holds NO decision. It may translate, marshal, schedule and
+# render. With every shell deleted and a mock adapter bound, the core must still
+# make every decision correctly (the falsification test). A branch here on a
+# ConnectionState, a reason_code class, a policy verdict, a candidate priority,
+# a timer expiry or a version comparison is a defect, not a shortcut.
+#
+# THIS MANIFEST IS OWNED BY THE INTEGRATION LEAD.
+[workspace]
+resolver = "2"
+members = ["twinvpnd", "twinvpnctl"]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.90"
+license      = "Apache-2.0"
+repository   = "https://github.com/twinvpn/twinvpn"
+
+[workspace.dependencies]
+twinvpn-core           = { path = "../../core/crates/twinvpn-core" }
+twinvpn-types          = { path = "../../core/crates/twinvpn-types" }
+twinvpn-env            = { path = "../../core/crates/twinvpn-env" }
+twinvpn-platform       = { path = "../../core/crates/twinvpn-platform" }
+twinvpn-platform-linux = { path = "../../core/crates/twinvpn-platform-linux" }
+twinvpn-mgmt           = { path = "../../core/crates/twinvpn-mgmt" }
+twinvpn-diag           = { path = "../../core/crates/twinvpn-diag" }
+
+thiserror = "2.0"
+anyhow    = "1.0"
+clap      = { version = "4.5", features = ["derive"] }
+tokio     = { version = "1.48", features = ["full"] }
+tracing   = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+libc      = "0.2"
+serde     = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+lto           = "fat"
+codegen-units = 1
+strip         = "symbols"
+panic         = "unwind"

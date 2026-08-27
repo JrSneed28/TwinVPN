@@ -1,0 +1,140 @@
+# The TwinVPN shared core.
+#
+# ADR-0018 §11.12: "/core/ one cargo workspace, all twinvpn-* crates".
+# ADR-0018 §11.7 fixes the crate set and the dependency arrows between them.
+#
+# ============================================================================
+# THIS MANIFEST IS OWNED BY THE INTEGRATION LEAD.
+# ============================================================================
+# Implementation agents own their own crate directories and their own
+# per-crate Cargo.toml. They MUST NOT edit this file: it is the shared manifest
+# that CLAUDE.md reserves to the integration owner, and two writers here is the
+# concurrency failure the worktree split exists to prevent. A crate that needs a
+# new workspace-level dependency asks the integration lead for it.
+[workspace]
+resolver = "2"
+members = [
+  "crates/twinvpn-types",
+  "crates/twinvpn-env",
+  "crates/twinvpn-schema",
+  "crates/twinvpn-platform",
+  "crates/twinvpn-crypto",
+  "crates/twinvpn-store",
+  "crates/twinvpn-trust",
+  "crates/twinvpn-cp-client",
+  "crates/twinvpn-tunnel",
+  "crates/twinvpn-path",
+  "crates/twinvpn-relay-client",
+  "crates/twinvpn-route",
+  "crates/twinvpn-dns",
+  "crates/twinvpn-enforce",
+  "crates/twinvpn-gateway",
+  "crates/twinvpn-session",
+  "crates/twinvpn-diag",
+  "crates/twinvpn-mgmt",
+  "crates/twinvpn-core",
+  "crates/twinvpn-ffi",
+  "crates/twinvpn-platform-linux",
+  "xtask",
+]
+
+[workspace.package]
+version    = "0.1.0"
+edition    = "2021"
+rust-version = "1.90"
+license    = "Apache-2.0"
+repository = "https://github.com/twinvpn/twinvpn"
+
+# ---------------------------------------------------------------------------
+# Workspace dependencies. Every version is pinned to a single minor line so the
+# lockfile is the only place a version can move, and ADR-0018 §11.11's
+# supply-chain policy has one place to audit.
+#
+# CD-I2 (ADR-0018 §11.7): ONLY `twinvpn-crypto` may declare a dependency on a
+# cryptographic implementation. The crypto entries below exist so that crate can
+# name them; `cargo xtask lint` fails the build if any other crate does.
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# -- intra-workspace --------------------------------------------------------
+twinvpn-types          = { path = "crates/twinvpn-types" }
+twinvpn-env            = { path = "crates/twinvpn-env" }
+twinvpn-schema         = { path = "crates/twinvpn-schema" }
+twinvpn-platform       = { path = "crates/twinvpn-platform" }
+twinvpn-crypto         = { path = "crates/twinvpn-crypto" }
+twinvpn-store          = { path = "crates/twinvpn-store" }
+twinvpn-trust          = { path = "crates/twinvpn-trust" }
+twinvpn-cp-client      = { path = "crates/twinvpn-cp-client" }
+twinvpn-tunnel         = { path = "crates/twinvpn-tunnel" }
+twinvpn-path           = { path = "crates/twinvpn-path" }
+twinvpn-relay-client   = { path = "crates/twinvpn-relay-client" }
+twinvpn-route          = { path = "crates/twinvpn-route" }
+twinvpn-dns            = { path = "crates/twinvpn-dns" }
+twinvpn-enforce        = { path = "crates/twinvpn-enforce" }
+twinvpn-gateway        = { path = "crates/twinvpn-gateway" }
+twinvpn-session        = { path = "crates/twinvpn-session" }
+twinvpn-diag           = { path = "crates/twinvpn-diag" }
+twinvpn-mgmt           = { path = "crates/twinvpn-mgmt" }
+twinvpn-core           = { path = "crates/twinvpn-core" }
+twinvpn-platform-linux = { path = "crates/twinvpn-platform-linux" }
+
+# -- general ----------------------------------------------------------------
+thiserror       = "2.0"
+bytes           = "1.10"
+prost           = "0.13"
+prost-types     = "0.13"
+serde           = { version = "1.0", features = ["derive"] }
+serde_json      = "1.0"
+tracing         = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+arrayvec        = "0.7"
+hex             = "0.4"
+socket2         = "0.6"
+libc            = "0.2"
+
+# -- async ------------------------------------------------------------------
+# CD-1/CD-2: the runtime is a capability behind `twinvpn-env`. No crate outside
+# `twinvpn-env` and the shells may reach for tokio's time or rng modules; the
+# `xtask lint` deny-list enforces it.
+tokio      = { version = "1.48", default-features = false }
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+
+# -- cryptography: CD-I2 restricts these to `twinvpn-crypto` ----------------
+snow               = "0.10"
+x25519-dalek       = "3.0"
+ed25519-dalek      = "3.0"
+p256               = "0.14"
+chacha20poly1305   = "0.11"
+blake2             = "0.11"
+sha2               = "0.11"
+hkdf               = "0.13"
+zeroize            = { version = "1.9", features = ["derive"] }
+subtle             = "2.6"
+rand_core          = "0.9"
+ciborium           = "0.2"
+coset              = "0.4"
+
+# -- test-only --------------------------------------------------------------
+proptest   = "1.8"
+insta      = "1.44"
+
+# ---------------------------------------------------------------------------
+# ADR-0018 §11.3 release profile.
+#   panic = "unwind" in EVERY shipped profile - NOT abort - because F-7's
+#   containment requires catch_unwind at the FFI boundary.
+# ---------------------------------------------------------------------------
+[profile.release]
+lto           = "fat"
+codegen-units = 1
+strip         = "symbols"
+opt-level     = 3
+panic         = "unwind"
+
+# Router-class targets (OpenWrt, GC-0). Selected by `--profile release-small`.
+[profile.release-small]
+inherits      = "release"
+opt-level     = "z"
+panic         = "unwind"
+
+[profile.dev]
+panic = "unwind"

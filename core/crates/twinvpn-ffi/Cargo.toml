@@ -1,0 +1,22 @@
+# twinvpn-ffi - the twinvpn.h C ABI. The ONLY crate on the DP-4 unsafe allowlist besides twinvpn-crypto
+#
+# Owner: core-composition. This manifest is owned by that agent; the WORKSPACE manifest
+# at core/Cargo.toml is owned by the integration lead and must not be edited here.
+[package]
+name    = "twinvpn-ffi"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the twinvpn.h C ABI. The ONLY crate on the DP-4 unsafe allowlist besides twinvpn-crypto"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+twinvpn-core          = { workspace = true }
+twinvpn-types         = { workspace = true }
+twinvpn-env           = { workspace = true }
+twinvpn-diag          = { workspace = true }
+libc                  = { workspace = true }

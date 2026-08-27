@@ -1,0 +1,35 @@
+# TwinLab — the reproducible network laboratory. ADR-0018 §11.12: "/lab/
+# TwinLab; never shipped."
+#
+# docs/testing-strategy.md §3.1 REALIZATION PRINCIPLE (normative): every
+# condition TwinLab reproduces MUST be produced by a real mechanism, and a test
+# MUST NOT be able to detect that it is running in TwinLab by inspecting the
+# system under test. The unit of a node is a Linux network namespace (§3.2).
+#
+# THIS MANIFEST IS OWNED BY THE INTEGRATION LEAD.
+[workspace]
+resolver = "2"
+members = ["twinlab", "twinlab-scenarios"]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.90"
+license      = "Apache-2.0"
+repository   = "https://github.com/twinvpn/twinvpn"
+
+[workspace.dependencies]
+twinlab           = { path = "twinlab" }
+twinvpn-types     = { path = "../core/crates/twinvpn-types" }
+twinvpn-env       = { path = "../core/crates/twinvpn-env" }
+twinvpn-schema    = { path = "../core/crates/twinvpn-schema" }
+twinvpn-core      = { path = "../core/crates/twinvpn-core" }
+
+thiserror  = "2.0"
+anyhow     = "1.0"
+tokio      = { version = "1.48", features = ["full"] }
+tracing    = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap       = { version = "4.5", features = ["derive"] }

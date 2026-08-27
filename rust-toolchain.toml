@@ -1,0 +1,10 @@
+# ADR-0018 §11.3: "One exact toolchain version pinned in rust-toolchain.toml,
+# edition 2021 or later, advanced only by a reviewed commit that re-runs the
+# full §11.9 matrix."
+#
+# This file is OWNED BY THE INTEGRATION LEAD. An implementation agent that needs
+# a newer toolchain files an architecture conflict; it does not edit this file.
+[toolchain]
+channel = "1.90.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

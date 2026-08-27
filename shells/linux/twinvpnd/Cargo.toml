@@ -1,0 +1,19 @@
+# twinvpnd — the privileged Linux agent: hosts the core, owns the tun device, the routing table, nftables and resolv.conf (ADR-0016)
+#
+# Owner: desktop-linux.
+[package]
+name    = "twinvpnd"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the privileged Linux agent: hosts the core, owns the tun device, the routing table, nftables and resolv.conf (ADR-0016)"
+publish = false
+
+[dependencies]
+twinvpn-core  = { workspace = true }
+twinvpn-types = { workspace = true }
+thiserror     = { workspace = true }
+tokio         = { workspace = true }
+tracing       = { workspace = true }

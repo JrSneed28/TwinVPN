@@ -1,0 +1,26 @@
+# twinvpn-diag - the Tier-0 ring, event emission, redaction classification and bundle assembly (ADR-0015)
+#
+# Owner: core-composition. This manifest is owned by that agent; the WORKSPACE manifest
+# at core/Cargo.toml is owned by the integration lead and must not be edited here.
+[package]
+name    = "twinvpn-diag"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the Tier-0 ring, event emission, redaction classification and bundle assembly (ADR-0015)"
+
+[dependencies]
+twinvpn-types         = { workspace = true }
+twinvpn-env           = { workspace = true }
+twinvpn-schema        = { workspace = true }
+twinvpn-store         = { workspace = true }
+thiserror             = { workspace = true }
+serde                 = { workspace = true }
+serde_json            = { workspace = true }
+prost                 = { workspace = true }
+bytes                 = { workspace = true }
+
+[dev-dependencies]
+proptest              = { workspace = true }

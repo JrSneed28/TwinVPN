@@ -1,0 +1,35 @@
+# twinvpn-crypto - the ONLY crate permitted a cryptographic dependency (ADR-0018 CD-I2)
+#
+# Owner: core-security. This manifest is owned by that agent; the WORKSPACE manifest
+# at core/Cargo.toml is owned by the integration lead and must not be edited here.
+[package]
+name    = "twinvpn-crypto"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the ONLY crate permitted a cryptographic dependency (ADR-0018 CD-I2)"
+
+[dependencies]
+twinvpn-types         = { workspace = true }
+twinvpn-env           = { workspace = true }
+twinvpn-schema        = { workspace = true }
+thiserror             = { workspace = true }
+snow                  = { workspace = true }
+x25519-dalek          = { workspace = true }
+ed25519-dalek         = { workspace = true }
+p256                  = { workspace = true }
+chacha20poly1305      = { workspace = true }
+blake2                = { workspace = true }
+sha2                  = { workspace = true }
+hkdf                  = { workspace = true }
+zeroize               = { workspace = true }
+subtle                = { workspace = true }
+rand_core             = { workspace = true }
+ciborium              = { workspace = true }
+coset                 = { workspace = true }
+bytes                 = { workspace = true }
+
+[dev-dependencies]
+proptest              = { workspace = true }

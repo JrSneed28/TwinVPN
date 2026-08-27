@@ -1,0 +1,25 @@
+# control-plane — the C1 command surface and the C2 durable event log (ADR-0002, ADR-0008, ADR-0009)
+#
+# Owner: control-plane. The WORKSPACE manifest at services/Cargo.toml is owned by the
+# integration lead and must not be edited from this domain.
+[package]
+name    = "twinvpn-control-plane"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the C1 command surface and the C2 durable event log (ADR-0002, ADR-0008, ADR-0009)"
+publish = false
+
+[[bin]]
+name = "twinvpn-control-plane"
+path = "src/main.rs"
+
+[dependencies]
+twinvpn-schema = { workspace = true }
+twinvpn-types  = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+twinvpn-service-common = { workspace = true }
+tokio = { workspace = true }

@@ -1,0 +1,22 @@
+# twinvpn-route - route and address computation, MTU/MSS, collision detection (ADR-0010)
+#
+# Owner: core-dataplane. This manifest is owned by that agent; the WORKSPACE manifest
+# at core/Cargo.toml is owned by the integration lead and must not be edited here.
+[package]
+name    = "twinvpn-route"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "route and address computation, MTU/MSS, collision detection (ADR-0010)"
+
+[dependencies]
+twinvpn-types         = { workspace = true }
+twinvpn-env           = { workspace = true }
+twinvpn-schema        = { workspace = true }
+twinvpn-platform      = { workspace = true }
+thiserror             = { workspace = true }
+
+[dev-dependencies]
+proptest              = { workspace = true }

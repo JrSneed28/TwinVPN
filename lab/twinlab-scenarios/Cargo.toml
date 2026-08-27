@@ -1,0 +1,20 @@
+# twinlab-scenarios — the NAT-class matrix and the named scenario family of testing-strategy.md §3
+#
+# Owner: test-engineering.
+[package]
+name    = "twinlab-scenarios"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the NAT-class matrix and the named scenario family of testing-strategy.md §3"
+publish = false
+
+[dependencies]
+twinvpn-types = { workspace = true }
+thiserror     = { workspace = true }
+tracing       = { workspace = true }
+twinlab = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }

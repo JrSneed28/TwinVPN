@@ -1,0 +1,25 @@
+# rendezvous — the C4 ephemeral signaling / CALL service (ADR-0004, protocol.md §10)
+#
+# Owner: rendezvous-connectivity. The WORKSPACE manifest at services/Cargo.toml is owned by the
+# integration lead and must not be edited from this domain.
+[package]
+name    = "twinvpn-rendezvous"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the C4 ephemeral signaling / CALL service (ADR-0004, protocol.md §10)"
+publish = false
+
+[[bin]]
+name = "twinvpn-rendezvous"
+path = "src/main.rs"
+
+[dependencies]
+twinvpn-schema = { workspace = true }
+twinvpn-types  = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+twinvpn-service-common = { workspace = true }
+tokio = { workspace = true }

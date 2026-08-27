@@ -1,0 +1,25 @@
+# relay — the ciphertext-only relay data plane: BIND/BOUND, pair_tag forwarding (ADR-0005)
+#
+# Owner: relay-plane. The WORKSPACE manifest at services/Cargo.toml is owned by the
+# integration lead and must not be edited from this domain.
+[package]
+name    = "twinvpn-relay"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the ciphertext-only relay data plane: BIND/BOUND, pair_tag forwarding (ADR-0005)"
+publish = false
+
+[[bin]]
+name = "twinvpn-relay"
+path = "src/main.rs"
+
+[dependencies]
+twinvpn-schema = { workspace = true }
+twinvpn-types  = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+twinvpn-service-common = { workspace = true }
+tokio = { workspace = true }

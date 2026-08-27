@@ -1,0 +1,19 @@
+# twinvpnctl — the unprivileged Linux CLI over the local management interface (ADR-0017, ADR-0023)
+#
+# Owner: desktop-linux.
+[package]
+name    = "twinvpnctl"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the unprivileged Linux CLI over the local management interface (ADR-0017, ADR-0023)"
+publish = false
+
+[dependencies]
+twinvpn-core  = { workspace = true }
+twinvpn-types = { workspace = true }
+thiserror     = { workspace = true }
+tokio         = { workspace = true }
+tracing       = { workspace = true }

@@ -1,0 +1,25 @@
+# relay-health — relay health aggregation from self-reports (S-10; advisory, never a gate)
+#
+# Owner: relay-plane. The WORKSPACE manifest at services/Cargo.toml is owned by the
+# integration lead and must not be edited from this domain.
+[package]
+name    = "twinvpn-relay-health"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "relay health aggregation from self-reports (S-10; advisory, never a gate)"
+publish = false
+
+[[bin]]
+name = "twinvpn-relay-health"
+path = "src/main.rs"
+
+[dependencies]
+twinvpn-schema = { workspace = true }
+twinvpn-types  = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+twinvpn-service-common = { workspace = true }
+tokio = { workspace = true }

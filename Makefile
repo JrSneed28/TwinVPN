@@ -1,12 +1,20 @@
 # TwinVPN repository entry points.
 #
-# Phase 2 status: only the shared contract package exists. Targets that will
-# later cover production components are present and correct for what exists
-# today, and say plainly what they do not yet cover, rather than pretending.
+# Phase 3 status: the contract freeze is DECLARED (contracts/FROZEN) and
+# production implementation has begun under ADR-0018 §11.12's layout. The
+# targets below cover every workspace that exists; each says plainly what it
+# does not yet cover rather than pretending.
 
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 .DEFAULT_GOAL := help
+
+# The four cargo workspaces. ADR-0018 §11.12 makes /core one workspace; the
+# server artifacts, the Linux shell and TwinLab are SEPARATE artifacts and
+# therefore separate workspaces, so that no domain silently acquires another's
+# dependency graph and each domain owns its own manifests.
+WORKSPACES := core services shells/linux lab
+CARGO      := cargo
 
 BUF        := ./node_modules/.bin/buf
 BUF_VERSION := 1.72.0
@@ -17,7 +25,8 @@ BASELINE   := $(CONTRACTS)/.baseline.binpb
 
 .PHONY: help bootstrap toolchains contracts contracts-lint contracts-gen \
         contracts-breaking contracts-freshness verify-bindings test-contracts \
-        build lint test clean gate freeze
+        build lint test clean gate freeze freeze-scope build-rust lint-rust \
+        test-rust fmt arch-lint
 
 help:
 	@echo "TwinVPN"
@@ -30,7 +39,11 @@ help:
 	@echo "  make build            build everything currently buildable"
 	@echo "  make lint             lint handwritten code, schemas, and configuration"
 	@echo "  make test             run every test currently available"
-	@echo "  make gate             the Phase 2 contract freeze gate (all of the above)"
+	@echo "  make gate             the contract freeze gate (all of the above)"
+	@echo "  make freeze-scope     assert the contract freeze is declared and unbroken"
+	@echo "  make arch-lint        the ADR-0018 T1 architectural lints (CD-3, CD-I2, CD-I5, CB-3)"
+	@echo ""
+	@echo "  workspaces: $(WORKSPACES)"
 
 # ---------------------------------------------------------------------------
 # bootstrap
@@ -169,17 +182,22 @@ test-contracts: contracts-breaking
 # ---------------------------------------------------------------------------
 # build
 # ---------------------------------------------------------------------------
-# Builds everything currently buildable. In Phase 2 that is the contract
-# package and nothing else: no production service, engine, daemon, relay,
-# application or UI exists yet, and the freeze gate exists precisely to keep it
-# that way until the contracts are frozen.
-build: contracts verify-bindings
-	@echo "==> build complete (contracts only; no production component exists yet)"
+# Builds everything currently buildable: the contract package, then every
+# cargo workspace. A workspace that is skeleton-only still MUST compile - that
+# is what keeps `main` green while domains land one at a time.
+build: contracts verify-bindings build-rust
+	@echo "==> build complete"
+
+build-rust:
+	@for w in $(WORKSPACES); do \
+	  echo "==> build $$w"; \
+	  ( cd $$w && $(CARGO) build --workspace --all-targets ) || exit 1; \
+	done
 
 # ---------------------------------------------------------------------------
 # lint
 # ---------------------------------------------------------------------------
-lint: contracts-lint
+lint: contracts-lint lint-rust
 	@echo "==> linting python"
 	@python3 -m compileall -q $(CONTRACTS)/tests >/dev/null
 	@echo "==> linting javascript"
@@ -188,17 +206,49 @@ lint: contracts-lint
 	@python3 scripts/check_doc_links.py
 	@echo "==> lint OK"
 
+# rustfmt --check and clippy -D warnings across every workspace, then the
+# ADR-0018 T1 architectural lints. The architectural lints are NOT optional
+# extras: CD-3 says the deny-list "is the actual mechanism", and CD-I5 is the
+# artifact ADR-0002 §11.8 step 3 requires and B-19 blocks a release without.
+lint-rust:
+	@for w in $(WORKSPACES); do \
+	  echo "==> fmt+clippy $$w"; \
+	  ( cd $$w && $(CARGO) fmt --all -- --check && \
+	              $(CARGO) clippy --workspace --all-targets -- -D warnings ) || exit 1; \
+	done
+
+fmt:
+	@for w in $(WORKSPACES); do ( cd $$w && $(CARGO) fmt --all ); done
+
+# ADR-0018 CD-3 / CD-I2 / CD-I5 / CB-3. Owned by core-foundation.
+arch-lint:
+	@echo "==> ADR-0018 T1 architectural lints"
+	@cd core && $(CARGO) run -q -p xtask -- lint
+
 # ---------------------------------------------------------------------------
 # test
 # ---------------------------------------------------------------------------
-test: test-contracts
+test: test-contracts test-rust
 	@echo "==> all available tests passed"
+
+test-rust:
+	@for w in $(WORKSPACES); do \
+	  echo "==> test $$w"; \
+	  ( cd $$w && $(CARGO) test --workspace ) || exit 1; \
+	done
 
 # ---------------------------------------------------------------------------
 # gate: the Phase 2 contract freeze gate
 # ---------------------------------------------------------------------------
 gate: bootstrap lint contracts verify-bindings test-contracts
 	@python3 scripts/freeze_gate.py
+	@python3 scripts/check_freeze_scope.py
+
+# The freeze is a property of the build, not of anyone's memory: it fails if the
+# schema moved after contracts/FROZEN was written.
+freeze-scope:
+	@python3 scripts/check_freeze_scope.py
 
 clean:
 	@rm -rf $(GEN_DIR)
+	@for w in $(WORKSPACES); do ( cd $$w && $(CARGO) clean ); done

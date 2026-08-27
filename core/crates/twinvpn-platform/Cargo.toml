@@ -1,0 +1,18 @@
+# twinvpn-platform - the platform adapter TRAIT only - ADR-0018 §11.6, this crate is the seam
+#
+# Owner: core-foundation. This manifest is owned by that agent; the WORKSPACE manifest
+# at core/Cargo.toml is owned by the integration lead and must not be edited here.
+[package]
+name    = "twinvpn-platform"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the platform adapter TRAIT only - ADR-0018 §11.6, this crate is the seam"
+
+[dependencies]
+twinvpn-types         = { workspace = true }
+twinvpn-env           = { workspace = true }
+thiserror             = { workspace = true }
+futures-core          = { workspace = true }

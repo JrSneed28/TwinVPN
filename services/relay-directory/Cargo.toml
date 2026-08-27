@@ -1,0 +1,25 @@
+# relay-directory — the signed relay map and relay-selection surface (ADR-0006, S-09)
+#
+# Owner: relay-plane. The WORKSPACE manifest at services/Cargo.toml is owned by the
+# integration lead and must not be edited from this domain.
+[package]
+name    = "twinvpn-relay-directory"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the signed relay map and relay-selection surface (ADR-0006, S-09)"
+publish = false
+
+[[bin]]
+name = "twinvpn-relay-directory"
+path = "src/main.rs"
+
+[dependencies]
+twinvpn-schema = { workspace = true }
+twinvpn-types  = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+twinvpn-service-common = { workspace = true }
+tokio = { workspace = true }

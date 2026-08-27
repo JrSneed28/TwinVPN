@@ -1,0 +1,19 @@
+# twinvpn-service-common — shared server-side plumbing: config, health/readiness, OTel wiring, graceful shutdown, ErrorEnvelope mapping
+#
+# Owner: control-plane. The WORKSPACE manifest at services/Cargo.toml is owned by the
+# integration lead and must not be edited from this domain.
+[package]
+name    = "twinvpn-service-common"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "shared server-side plumbing: config, health/readiness, OTel wiring, graceful shutdown, ErrorEnvelope mapping"
+publish = false
+
+[dependencies]
+twinvpn-schema = { workspace = true }
+twinvpn-types  = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }

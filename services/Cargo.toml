@@ -1,0 +1,83 @@
+# TwinVPN server-side artifacts.
+#
+# ============================================================================
+# PLACEMENT IS AN INTEGRATION-LEAD DECISION, NOT A PHASE 1 ONE.
+# ============================================================================
+# ADR-0018 §11.12 fixes /core, /contracts, /shells, /build and /lab, and says of
+# the server side only that "the relay server is a separate artifact sharing
+# `twinvpn-schema` and the framing crate" (§11.2 row 2.11) and that the control
+# plane's "server-side is a different artifact" (row 2.8). It names no path.
+#
+# /services is therefore chosen by the integration lead, consistent with the
+# Phase 3 objective's ownership map and with scripts/check_freeze_scope.py,
+# which already lists `services` among the production paths it guards. It is
+# recorded here so a later reader does not mistake it for an ADR decision.
+#
+# These are a SEPARATE cargo workspace from /core deliberately: they are
+# separate artifacts, they must not accidentally acquire a core crate as a
+# workspace-implicit dependency, and each domain then owns its own manifests.
+# The only permitted edge into /core is a path dependency on `twinvpn-schema`
+# (and, for the relay, the framing crate) — ADR-0018 §11.2 rows 2.8/2.11.
+#
+# THIS MANIFEST IS OWNED BY THE INTEGRATION LEAD.
+[workspace]
+resolver = "2"
+members = [
+  "twinvpn-service-common",
+  "control-plane",
+  "rendezvous",
+  "presence",
+  "relay",
+  "relay-directory",
+  "relay-health",
+]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.90"
+license      = "Apache-2.0"
+repository   = "https://github.com/twinvpn/twinvpn"
+
+[workspace.dependencies]
+twinvpn-service-common = { path = "twinvpn-service-common" }
+
+# The one permitted edge into /core. ADR-0018 §11.2: the server side is a
+# different artifact that SHARES `twinvpn-schema`; it does not link the core.
+twinvpn-schema = { path = "../core/crates/twinvpn-schema" }
+twinvpn-types  = { path = "../core/crates/twinvpn-types" }
+
+thiserror   = "2.0"
+anyhow      = "1.0"
+bytes       = "1.10"
+prost       = "0.13"
+prost-types = "0.13"
+serde       = { version = "1.0", features = ["derive"] }
+serde_json  = "1.0"
+toml        = "0.9"
+
+tokio       = { version = "1.48", features = ["full"] }
+tokio-util  = "0.7"
+futures     = "0.3"
+
+axum        = "0.8"
+hyper       = "1.11"
+hyper-util  = "0.1"
+tower       = "0.5"
+tower-http  = { version = "0.6", features = ["trace", "timeout"] }
+quinn       = "0.11"
+rustls      = "0.23"
+
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.33"
+opentelemetry      = "0.32"
+opentelemetry_sdk  = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"] }
+
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "chrono", "uuid"] }
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+panic         = "unwind"

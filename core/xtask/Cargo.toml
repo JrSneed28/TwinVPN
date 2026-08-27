@@ -1,0 +1,17 @@
+# The T1 lint runner. ADR-0018 CD-3 calls the lint "the actual mechanism", and
+# CD-I5 / CD-I2 / CB-3 are each asserted here rather than left to review.
+#
+# Owner: core-foundation.
+[package]
+name    = "xtask"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "TwinVPN T1 architectural lints (ADR-0018 CD-3, CD-I2, CD-I5, CB-3)"
+publish = false
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }

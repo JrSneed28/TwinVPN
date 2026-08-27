@@ -1,0 +1,26 @@
+# twinvpn-cp-client - the control-plane CLIENT. CD-I5: MUST NOT depend on any data-plane crate
+#
+# Owner: core-controlplane. This manifest is owned by that agent; the WORKSPACE manifest
+# at core/Cargo.toml is owned by the integration lead and must not be edited here.
+[package]
+name    = "twinvpn-cp-client"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the control-plane CLIENT. CD-I5: MUST NOT depend on any data-plane crate"
+
+[dependencies]
+twinvpn-types         = { workspace = true }
+twinvpn-env           = { workspace = true }
+twinvpn-schema        = { workspace = true }
+twinvpn-store         = { workspace = true }
+twinvpn-trust         = { workspace = true }
+twinvpn-platform      = { workspace = true }
+thiserror             = { workspace = true }
+bytes                 = { workspace = true }
+prost                 = { workspace = true }
+
+[dev-dependencies]
+proptest              = { workspace = true }

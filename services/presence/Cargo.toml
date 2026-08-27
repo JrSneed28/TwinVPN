@@ -1,0 +1,25 @@
+# presence — the device-presence aggregator (architecture.md §2.13; ephemeral, never a gate)
+#
+# Owner: rendezvous-connectivity. The WORKSPACE manifest at services/Cargo.toml is owned by the
+# integration lead and must not be edited from this domain.
+[package]
+name    = "twinvpn-presence"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the device-presence aggregator (architecture.md §2.13; ephemeral, never a gate)"
+publish = false
+
+[[bin]]
+name = "twinvpn-presence"
+path = "src/main.rs"
+
+[dependencies]
+twinvpn-schema = { workspace = true }
+twinvpn-types  = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+twinvpn-service-common = { workspace = true }
+tokio = { workspace = true }

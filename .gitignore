@@ -24,3 +24,7 @@ __pycache__/
 # Toolchain install logs and binding-verification scratch (not source)
 build/toolchain/*.log
 build/verify/.work/
+
+# Cargo build output (four workspaces: core, services, shells/linux, lab)
+target/
+**/target/
