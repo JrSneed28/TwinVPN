@@ -1396,6 +1396,8 @@ dependencies = [
  "futures-core",
  "proptest",
  "thiserror",
+ "tokio",
+ "twinvpn-env",
  "twinvpn-types",
 ]
 
@@ -1457,6 +1459,7 @@ dependencies = [
  "futures-core",
  "thiserror",
  "twinvpn-env",
+ "twinvpn-platform",
  "twinvpn-types",
 ]
 
@@ -1581,6 +1584,7 @@ name = "twinvpn-types"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "serde_json",
  "thiserror",
 ]
 

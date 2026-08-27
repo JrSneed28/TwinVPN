@@ -1,0 +1,340 @@
+//! Every lint, seen to fail.
+//!
+//! ADR-0018 CD-3 calls the deny-list "the actual mechanism". A mechanism that has
+//! never been observed to fire is an assertion about itself, so each check here
+//! is given a deliberately planted violation and asserted to catch it — and a
+//! clean input, asserted not to.
+
+use xtask::checks::{self, Violation};
+use xtask::manifest::{Package, Workspace};
+use xtask::source::ScannedFile;
+
+fn dp(name: &str, deps: &[&str]) -> Package {
+    Package {
+        name: name.to_owned(),
+        manifest_path: format!("crates/{name}/Cargo.toml"),
+        dir: format!("crates/{name}"),
+        dependencies: deps.iter().map(|d| (*d).to_owned()).collect(),
+    }
+}
+
+fn ws(packages: Vec<Package>) -> Workspace {
+    Workspace {
+        packages,
+        root: "/core".to_owned(),
+    }
+}
+
+fn rules(v: &[Violation]) -> Vec<&'static str> {
+    v.iter().map(|x| x.rule).collect()
+}
+
+// ---------------------------------------------------------------------------
+// CD-3
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cd3_fires_on_a_planted_clock_read() {
+    let planted = r"
+        pub fn measure() -> u64 {
+            let start = std::time::Instant::now();
+            start.elapsed().as_micros() as u64
+        }
+    ";
+    let file = ScannedFile::new("crates/twinvpn-path/src/probe.rs", planted);
+    let found = checks::cd3(&file);
+    assert!(!found.is_empty(), "CD-3 did not fire on `Instant::now`");
+    assert_eq!(rules(&found)[0], "CD-3");
+    assert!(found[0].location.contains("probe.rs:3"), "{:?}", found[0]);
+}
+
+#[test]
+fn cd3_fires_on_every_class_in_the_deny_list() {
+    // One planted violation per class ADR-0018 CD-3 enumerates.
+    let cases = [
+        ("let t = SystemTime::now();", "SystemTime::now"),
+        ("let t = Instant::now();", "Instant::now"),
+        ("getrandom::getrandom(&mut b).unwrap();", "getrandom"),
+        ("let mut r = rand::thread_rng();", "thread_rng"),
+        ("tokio::time::sleep(d).await;", "tokio::time"),
+        ("let now = chrono::Utc::now();", "chrono::"),
+        (
+            "unsafe { libc::clock_gettime(0, &mut ts) };",
+            "clock_gettime",
+        ),
+    ];
+    for (line, expected) in cases {
+        let file = ScannedFile::new("crates/twinvpn-session/src/lib.rs", line);
+        let found = checks::cd3(&file);
+        assert!(
+            found.iter().any(|v| v.detail.contains(expected)),
+            "CD-3 did not fire on {line:?}"
+        );
+    }
+}
+
+#[test]
+fn cd3_permits_the_binding_directory_and_nothing_else() {
+    let code = "let now = Instant::now();";
+    // The one exclusion ADR-0018 CD-3 states.
+    let allowed = ScannedFile::new("crates/twinvpn-env/src/binding/system.rs", code);
+    assert!(checks::cd3(&allowed).is_empty());
+    // Elsewhere in the same crate, it still fires: the exclusion is
+    // "twinvpn-env's implementations", not "twinvpn-env".
+    let denied = ScannedFile::new("crates/twinvpn-env/src/clock.rs", code);
+    assert!(!checks::cd3(&denied).is_empty());
+}
+
+#[test]
+fn cd3_does_not_fire_on_its_own_documentation() {
+    // The defect that would make this lint get disabled: firing on the prose
+    // that explains it. twinvpn-env's clock module names every banned API.
+    let documented = r#"
+        //! CD-3's deny-list bans `Instant::now` and `SystemTime::now` outright
+        //! rather than steering them, because `std::time::Instant` is
+        //! suspend-exclusive on Linux and Darwin.
+        /// See also `getrandom` and `tokio::time`.
+        const WHY: &str = "Instant::now is banned";
+        /* A block comment mentioning clock_gettime and Utc::now. */
+        pub fn f() {}
+    "#;
+    let file = ScannedFile::new("crates/twinvpn-env/src/clock.rs", documented);
+    assert!(
+        checks::cd3(&file).is_empty(),
+        "CD-3 fired on documentation: {:?}",
+        checks::cd3(&file)
+    );
+}
+
+#[test]
+fn cd3_is_not_fooled_by_a_raw_string_or_a_lifetime() {
+    let tricky = r####"
+        pub fn f<'a>(s: &'a str) -> &'a str { s }
+        const DOC: &str = r#"Instant::now inside a raw string"#;
+        const CH: char = '"';
+        pub fn g() -> u8 { b'x' }
+    "####;
+    let file = ScannedFile::new("crates/twinvpn-route/src/lib.rs", tricky);
+    assert!(checks::cd3(&file).is_empty(), "{:?}", checks::cd3(&file));
+}
+
+// ---------------------------------------------------------------------------
+// CD-CB3
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cb3_fires_on_a_planted_os_branch() {
+    let planted = r#"
+        #[cfg(target_os = "linux")]
+        fn install() {}
+    "#;
+    let file = ScannedFile::new("crates/twinvpn-enforce/src/lib.rs", planted);
+    let found = checks::cb3(&file, "twinvpn-enforce");
+    assert_eq!(rules(&found), vec!["CD-CB3"]);
+    assert!(found[0].location.contains(":2"), "{:?}", found[0]);
+}
+
+#[test]
+fn cb3_fires_on_the_macro_form_too() {
+    let planted = r#"if cfg!(target_os = "windows") { 1 } else { 2 }"#;
+    let file = ScannedFile::new("crates/twinvpn-dns/src/lib.rs", planted);
+    assert!(!checks::cb3(&file, "twinvpn-dns").is_empty());
+}
+
+#[test]
+fn cb3_exempts_only_the_platform_adapter_crates() {
+    let planted = r#"#[cfg(target_os = "linux")] fn f() {}"#;
+    let file = ScannedFile::new("crates/twinvpn-platform-linux/src/lib.rs", planted);
+    assert!(checks::cb3(&file, "twinvpn-platform-linux").is_empty());
+    // The TRAIT crate is not exempt: CB-3 puts the OS branch below the seam,
+    // and `twinvpn-platform` is the seam itself.
+    let seam = ScannedFile::new("crates/twinvpn-platform/src/lib.rs", planted);
+    assert!(!checks::cb3(&seam, "twinvpn-platform").is_empty());
+    assert!(checks::cb3_crate_is_exempt("twinvpn-platform-windows"));
+    assert!(!checks::cb3_crate_is_exempt("twinvpn-platform"));
+}
+
+#[test]
+fn cb3_does_not_fire_on_prose_about_target_os() {
+    let documented = r#"
+        //! CB-3: `#[cfg(target_os = ...)]` is permitted only in twinvpn-platform-*.
+        pub fn f() {}
+    "#;
+    let file = ScannedFile::new("crates/twinvpn-platform/src/lib.rs", documented);
+    assert!(checks::cb3(&file, "twinvpn-platform").is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// CD-I2
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cd_i2_fires_on_a_planted_crypto_dependency() {
+    let workspace = ws(vec![
+        dp("twinvpn-crypto", &["snow", "x25519-dalek", "twinvpn-types"]),
+        dp("twinvpn-session", &["twinvpn-types", "sha2"]),
+    ]);
+    let found = checks::cd_i2(&workspace);
+    assert_eq!(rules(&found), vec!["CD-I2"]);
+    assert!(found[0].detail.contains("twinvpn-session"));
+    assert!(found[0].detail.contains("sha2"));
+}
+
+#[test]
+fn cd_i2_exempts_only_twinvpn_crypto() {
+    let clean = ws(vec![
+        dp(
+            "twinvpn-crypto",
+            &["snow", "chacha20poly1305", "zeroize", "subtle"],
+        ),
+        dp("twinvpn-session", &["twinvpn-types", "twinvpn-env"]),
+    ]);
+    assert!(checks::cd_i2(&clean).is_empty());
+}
+
+#[test]
+fn cd_i2_covers_the_alternatives_not_only_the_declared_block() {
+    for alternative in [
+        "ring",
+        "rustls",
+        "openssl",
+        "aes-gcm",
+        "blake3",
+        "getrandom",
+    ] {
+        let workspace = ws(vec![dp("twinvpn-trust", &[alternative])]);
+        assert!(
+            !checks::cd_i2(&workspace).is_empty(),
+            "CD-I2 missed `{alternative}`"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CD-I5
+// ---------------------------------------------------------------------------
+
+fn plane_workspace(session_deps: &[&str], cp_deps: &[&str], core_deps: &[&str]) -> Workspace {
+    ws(vec![
+        dp("twinvpn-types", &[]),
+        dp("twinvpn-store", &["twinvpn-types"]),
+        dp("twinvpn-session", session_deps),
+        dp("twinvpn-path", &["twinvpn-store"]),
+        dp("twinvpn-cp-client", cp_deps),
+        dp("twinvpn-core", core_deps),
+    ])
+}
+
+#[test]
+fn cd_i5_fires_on_a_direct_data_plane_to_control_plane_edge() {
+    let workspace = plane_workspace(
+        &["twinvpn-store", "twinvpn-cp-client"],
+        &["twinvpn-store"],
+        &["twinvpn-session", "twinvpn-cp-client"],
+    );
+    let found = checks::cd_i5(&workspace);
+    assert!(!found.is_empty(), "CD-I5 did not fire on a direct edge");
+    assert!(found.iter().all(|v| v.rule == "CD-I5"));
+    assert!(found.iter().any(|v| v.detail.contains("twinvpn-session")));
+}
+
+/// The case a substring grep over manifests cannot see, and the reason CD-I5
+/// says "direct **or transitive**".
+#[test]
+fn cd_i5_fires_on_a_transitive_edge_no_manifest_grep_would_find() {
+    let workspace = ws(vec![
+        dp("twinvpn-types", &[]),
+        dp("twinvpn-store", &["twinvpn-types"]),
+        // An innocuous-looking helper that happens to pull in the CP client.
+        dp("twinvpn-helper", &["twinvpn-cp-client"]),
+        // The data-plane crate names only the helper. Its own manifest is clean.
+        dp("twinvpn-session", &["twinvpn-store", "twinvpn-helper"]),
+        dp("twinvpn-cp-client", &["twinvpn-store"]),
+        dp("twinvpn-core", &["twinvpn-session", "twinvpn-cp-client"]),
+    ]);
+    let found = checks::cd_i5(&workspace);
+    assert!(
+        found
+            .iter()
+            .any(|v| v.detail.contains("twinvpn-session")
+                && v.detail.contains("twinvpn-cp-client")),
+        "CD-I5 missed a transitive edge: {found:?}"
+    );
+}
+
+#[test]
+fn cd_i5_denies_the_reverse_edge_equally() {
+    let workspace = plane_workspace(
+        &["twinvpn-store"],
+        &["twinvpn-store", "twinvpn-path"],
+        &["twinvpn-session", "twinvpn-cp-client"],
+    );
+    let found = checks::cd_i5(&workspace);
+    assert!(
+        found
+            .iter()
+            .any(|v| v.detail.contains("reverse edge is equally denied")),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn cd_i5_permits_the_composition_root_to_name_both() {
+    let workspace = plane_workspace(
+        &["twinvpn-store"],
+        &["twinvpn-store"],
+        &["twinvpn-session", "twinvpn-path", "twinvpn-cp-client"],
+    );
+    assert!(checks::cd_i5(&workspace).is_empty());
+    // And the positive half: the composition root really does wire both.
+    assert!(checks::cd_i5_composition_root_wired(&workspace).is_empty());
+}
+
+#[test]
+fn cd_i5_reports_a_composition_root_that_wires_only_one_plane() {
+    let workspace = plane_workspace(
+        &["twinvpn-store"],
+        &["twinvpn-store"],
+        // Data plane only: the artifact ADR-0002 §11.8 step 3 requires is absent.
+        &["twinvpn-session", "twinvpn-path"],
+    );
+    let found = checks::cd_i5_composition_root_wired(&workspace);
+    assert!(
+        found.iter().any(|v| v.detail.contains("twinvpn-cp-client")),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn cd_i5_does_not_report_an_unwired_skeleton_composition_root() {
+    // Before core-composition lands, twinvpn-core has no intra-workspace deps.
+    // Reporting that would block wave 1 on work that has not started.
+    let workspace = plane_workspace(&["twinvpn-store"], &["twinvpn-store"], &[]);
+    assert!(checks::cd_i5_composition_root_wired(&workspace).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// The real workspace
+// ---------------------------------------------------------------------------
+
+/// The lint, run over the actual `core/` workspace, must be clean.
+///
+/// This is the assertion `make lint` and the merge gate rest on; the tests above
+/// are what make it meaningful.
+#[test]
+fn the_real_core_workspace_is_clean() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("core/xtask has a parent")
+        .join("Cargo.toml");
+    let violations = xtask::run(&manifest).expect("the workspace loads");
+    assert!(
+        violations.is_empty(),
+        "the core workspace has T1 violations:\n{}",
+        violations
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}

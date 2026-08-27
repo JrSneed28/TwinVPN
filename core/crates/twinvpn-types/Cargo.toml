@@ -2,6 +2,11 @@
 #
 # Owner: core-foundation. This manifest is owned by that agent; the WORKSPACE manifest
 # at core/Cargo.toml is owned by the integration lead and must not be edited here.
+#
+# ADR-0018 §11.7 puts this crate at the root of the dependency arrows, so its
+# RUNTIME dependency set is exactly `thiserror`. `serde_json` appears only under
+# [build-dependencies]: build.rs compiles the frozen reason-code registry into a
+# static table, and none of it is linked into the artifact.
 [package]
 name    = "twinvpn-types"
 version.workspace      = true
@@ -13,6 +18,9 @@ description = "domain newtypes, identifiers, address types and the canonical Con
 
 [dependencies]
 thiserror             = { workspace = true }
+
+[build-dependencies]
+serde_json            = { workspace = true }
 
 [dev-dependencies]
 proptest              = { workspace = true }
