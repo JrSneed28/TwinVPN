@@ -169,7 +169,10 @@ impl<'a> Forwarder<'a> {
 
         #[allow(clippy::cast_possible_truncation)]
         let counter_low = egress_counter as u16;
-        let egress_mac_input = frame.mac_input(egress_counter);
+        // Over the EGRESS flow_id, because that is what `reframe` puts on the
+        // wire. Using the ingress one MACs a value the peer never sees, and the
+        // peer then verifies nothing — see `RelayFrame::egress_mac_input`.
+        let egress_mac_input = frame.egress_mac_input(egress_flow.get(), egress_counter);
         let tag = self
             .crypto
             .frame_mac(egress_key, &egress_mac_input)
@@ -280,6 +283,46 @@ mod tests {
             .expect("forwards");
         assert!(out.payload_is_verbatim(&payload));
         assert_eq!(&out.datagram[crate::frame::HEADER_LEN..], &payload[..]);
+    }
+
+    #[test]
+    fn the_egress_mac_covers_the_rewritten_flow_id_not_the_ingress_one() {
+        // A real defect, found by the end-to-end socket test the frame-MAC
+        // binding unlocked. `reframe` rewrites `flow_id` for the egress
+        // half-flow, so the egress MAC must cover THAT value; MACing the ingress
+        // one produces a tag over bytes the peer never sees, and the peer then
+        // verifies nothing.
+        //
+        // It was invisible for as long as `frame_mac` returned `None`: nothing
+        // verified, so nothing could disagree. Pinned here at unit level so it
+        // cannot regress without an obvious failure.
+        let (mut t, a, b) = bound_table();
+        let payload = b"opaque".to_vec();
+        let f = RelayFrame::parse(datagram(a.get(), 1, &payload)).expect("parses");
+        assert_ne!(a, b, "the two half-flows have different handles");
+
+        let ingress_input = f.mac_input(1);
+        let egress_input = f.egress_mac_input(b.get(), 1);
+        assert_ne!(
+            ingress_input, egress_input,
+            "the two inputs differ, so choosing the wrong one is a real error"
+        );
+
+        // What the forwarder actually MACs must be the egress form.
+        let out = Forwarder::new(&MacAlwaysOk)
+            .forward(&f, &mut t, &LegKey::new([1; 32]), &LegKey::new([2; 32]), 0)
+            .expect("forwards");
+        let on_the_wire_flow = u32::from_be_bytes([
+            out.datagram[4],
+            out.datagram[5],
+            out.datagram[6],
+            out.datagram[7],
+        ]);
+        assert_eq!(
+            on_the_wire_flow,
+            out.egress_flow.get(),
+            "the wire carries the egress flow_id, so the MAC must too"
+        );
     }
 
     #[test]

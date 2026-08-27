@@ -30,11 +30,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let dir_cfg = DirectoryConfig::load(&svc::config::SystemEnv)?;
 
+    // The resolved `TWINVPN_INSTANCE_ID`, not the operator group: a group is
+    // shared by every instance in the fleet, so using it as `service.instance.id`
+    // made every relay-directory look like one instance.
     let metrics = svc::metrics::Metrics::new();
-    let obs = svc::obs::init(
-        &cfg.observability_config(&dir_cfg.operator_group_id),
-        metrics.clone(),
-    )?;
+    let obs = svc::obs::init(&cfg.observability(), metrics.clone())?;
+    cfg.log_instance_id_resolution();
 
     // The signing key is read so a missing one fails at startup rather than at
     // the first publish. The SIGNER is still the fail-closed default until a
