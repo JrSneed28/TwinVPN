@@ -20,6 +20,13 @@ twinvpn-platform      = { workspace = true }
 thiserror             = { workspace = true }
 bytes                 = { workspace = true }
 prost                 = { workspace = true }
+tracing               = { workspace = true }
+
+[features]
+# Test scaffolding only. Never enabled in a shipped build.
+test-support = ["twinvpn-env/test-support", "twinvpn-platform/mock"]
 
 [dev-dependencies]
 proptest              = { workspace = true }
+twinvpn-store         = { path = ".", features = ["test-support"] }
+futures-core          = { workspace = true }

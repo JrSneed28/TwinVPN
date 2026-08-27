@@ -1335,6 +1335,7 @@ dependencies = [
  "coset",
  "ed25519-dalek",
  "hkdf",
+ "libc",
  "p256",
  "proptest",
  "rand_core 0.9.5",
@@ -1543,13 +1544,16 @@ name = "twinvpn-store"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures-core",
  "proptest",
  "prost",
  "thiserror",
+ "tracing",
  "twinvpn-crypto",
  "twinvpn-env",
  "twinvpn-platform",
  "twinvpn-schema",
+ "twinvpn-store",
  "twinvpn-types",
 ]
 
@@ -1566,6 +1570,7 @@ dependencies = [
  "twinvpn-platform",
  "twinvpn-schema",
  "twinvpn-store",
+ "twinvpn-trust",
  "twinvpn-types",
 ]
 

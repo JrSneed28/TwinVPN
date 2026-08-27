@@ -22,5 +22,10 @@ thiserror             = { workspace = true }
 bytes                 = { workspace = true }
 prost                 = { workspace = true }
 
+[features]
+# Test scaffolding only. Never enabled in a shipped build.
+test-support = ["twinvpn-crypto/test-support"]
+
 [dev-dependencies]
 proptest              = { workspace = true }
+twinvpn-trust         = { path = ".", features = ["test-support"] }
