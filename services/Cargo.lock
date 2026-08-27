@@ -1548,6 +1548,9 @@ dependencies = [
 name = "twinvpn-relay"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
@@ -1560,6 +1563,10 @@ dependencies = [
 name = "twinvpn-relay-directory"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "bytes",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
@@ -1572,6 +1579,8 @@ dependencies = [
 name = "twinvpn-relay-health"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
