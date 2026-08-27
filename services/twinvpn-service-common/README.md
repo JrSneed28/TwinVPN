@@ -682,7 +682,74 @@ builder drops an undeclared key — so no call can attach the contested subject 
 by mistake. A refusal that echoed it would be an oracle for which subjects are
 bound.
 
-### 11.4 `release` takes the subject — read this before migrating
+### 11.4 Which binding to use — `DerivedPreferred` if the subject is a `device_id`
+
+| Table | Use when |
+|---|---|
+| `binding::DerivedPreferred<S>` | the subject **is** a `device_id`. The rendezvous and presence case |
+| `binding::ChannelPinned<S>` | the subject is anything else — a `relay_sub`, a name with no derivation |
+
+`DerivedPreferred` wraps the same table and adds one rule:
+
+| This claim | Current holder | Outcome |
+|---|---|---|
+| **proven** | none | accepted, proven |
+| **proven** | pinned, another channel | **accepted — the pinned holder is displaced** |
+| pinned | none | accepted, pinned |
+| pinned | pinned, another channel | refused |
+| pinned | **proven**, another channel | refused — a proven holder is never displaced |
+
+A claim is **proven** when the `device_id` derived from the key the peer presented
+on TLS *is* the `device_id` it claims. The peer proved possession of the private
+half in the handshake, so nothing further is needed.
+
+**Why not simply require the derivation?** Because it would lock out every device
+that has ever rotated its identity key. ADR-0007 §11:
+
+> `device_id` pins the **generation-0** public key. IK rotation creates a new
+> `DeviceIdentity` … but **`device_id` does not change** … After a rotation,
+> `device_id` is self-certifying *transitively*: a verifier checks the succession
+> chain from generation 0 to the presented generation.
+
+A rotated device presents a **generation-N** key, which derives to something that
+is not its `device_id` — correctly, because its `device_id` is the hash of a
+generation-0 key it no longer presents. Closing that properly needs the
+`IdentitySuccession` chain, and neither service holds one nor may fetch one per
+connection (**I5**). Derived-only would trade a bounded first-contact window for
+an unbounded lockout of a growing fraction of the fleet. Derived-*preferred* takes
+the whole win for every generation-0 device and costs a rotated device only the
+binding it already had.
+
+**Still open:** first-contact impersonation of a *rotated* device. It cannot prove
+its way past a squatter, and holds only until the TTL lapses.
+
+Two counters make the fallbacks visible: `displacements()` (an impersonation that
+got as far as a binding, or a device taking its name back) and `unprovable_keys()`
+(claims on a key this build cannot derive from — a rotation, or a silent downgrade
+to pinning that should not stay silent).
+
+### 11.4.1 SPKI → COSE_Key lives here, and only here
+
+`binding::spki_to_es256_cose_key` converts the RFC 7250 `SubjectPublicKeyInfo` a
+TLS peer presents into the dCBOR COSE_Key
+`twinvpn_crypto::derive_device_id_checked` is defined over — the map
+`{1: 2, -1: 1, -2: x, -3: y}`, canonically encoded.
+
+That is a **specified encoding**, not a convenience, and finding **RZ-8** is why it
+has one home: two copies that disagree by a byte derive two different names for one
+device, and nothing fails until a device cannot bind. `derive_device_id_checked` is
+used rather than the unchecked form because the octets came off a wire — it proves
+canonicality and ES256 before hashing, so a wrong conversion is rejected rather
+than hashed into some other device's name. It does **not** make a *duplicated*
+conversion safe; only being single-homed does that.
+
+The parse is a byte-exact match on the 26-byte DER prefix rather than a DER walk.
+DER is canonical and there is exactly one valid encoding of a P-256 SPKI with an
+uncompressed point, so the match *is* the specification and there is no parser to
+get wrong on an attacker-reachable input. Strictness is safe here because **a
+conversion failure is not a refusal** — the claim simply falls back to pinning.
+
+### 11.5 `release` takes the subject — read this before migrating
 
 ```rust
 fn release(&mut self, channel: &ChannelIdentity, subject: &S, now: Instant);
@@ -706,7 +773,7 @@ if let Some(s) = held {
 }
 ```
 
-### 11.5 Testing authentication
+### 11.6 Testing authentication
 
 The `test-support` feature exposes `tls::testkit` — `TestKey::generate()`,
 `client_config`, `tls12_only_client_config`, `anonymous_client_config`,
@@ -799,9 +866,19 @@ integration lead.
     demonstrated.
 10. **`ClientKeyPolicy` is a seam, not a sandbox.** A policy that did I/O would
     compile. The trait's docs carry the I5 prohibition; nothing enforces it.
-11. **`BindingCardinality::ManySubjectsPerChannel` has no consumer yet.** It is
-    tested but the relay has not adopted it, so its shape is argued from
-    `relay_sub`/`pair_tag` rather than observed.
+11. **`BindingCardinality::ManySubjectsPerChannel` still has no consumer**, but
+    it now has a consumer *story*: `rendezvous` set `OneSubjectPerChannel`
+    explicitly and not configurable, because the other value would let one key
+    hold every mailbox it could name. The cardinality is a per-service safety
+    decision, not a tuning knob — see the variant's docs. The relay half is still
+    argued from `relay_sub`/`pair_tag` rather than observed.
+14. **First-contact impersonation of a *rotated* device is open.** §11.4. Closing
+    it needs an `IdentitySuccession` chain, which this layer may not fetch (I5).
+15. **The SPKI parse accepts one encoding.** A generation-0 device whose stack
+    emitted a valid-but-different SPKI — a compressed point, say — would be
+    *pinned* rather than *proven*, losing the benefit without being locked out.
+    `unprovable_keys()` is the counter that stops that being silent, but nothing
+    alerts on it yet.
 12. **`aws-lc-rs` is named with a version in this crate's manifest**, because
     `services/Cargo.toml` declares no workspace entry for it and this domain may
     not add one. Both consumers already name `aws-lc-rs = "1.18"` in their own

@@ -65,7 +65,16 @@
 //! derivation-checking implementor is a new type beside it rather than an edit
 //! through it.
 
-use std::collections::{BTreeMap, HashMap};
+mod derived;
+mod pinned;
+mod spki;
+
+pub use derived::{refusal_against_proven_holder, DerivableSubject, DerivedPreferred, Provenance};
+pub use pinned::ChannelPinned;
+pub use spki::{
+    derive_device_id_for, spki_to_es256_cose_key, DerivationError, SpkiError, P256_SPKI_LEN,
+};
+
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
@@ -98,6 +107,13 @@ pub enum Refusal {
     /// different fact: the subject is not contested, the server is. Answering
     /// `SubjectHeldByAnotherChannel` here would tell a caller its subject was
     /// taken when it was not — an oracle, and a wrong one.
+    ///
+    /// The split has a second consequence a service should keep: a capacity
+    /// refusal must **not** be counted as a binding mismatch. `rendezvous`
+    /// excludes it from `binding_mismatches_total` for exactly that reason —
+    /// counting a full table as a security event would make the metric lie
+    /// during a capacity incident, which is when an operator most needs it to be
+    /// telling the truth.
     TableAtCapacity,
 }
 
@@ -171,6 +187,16 @@ pub enum BindingCardinality {
     /// Relaxes only the converse half of the invariant. A subject held by
     /// another channel is still refused, because that is the impersonation half
     /// and it never relaxes.
+    ///
+    /// **This is a per-service safety decision, not a tuning knob.** It belongs
+    /// in a service's source, chosen once and not configurable, because the
+    /// right answer follows from what a subject *is* in that service and not
+    /// from load. `rendezvous` sets [`BindingCardinality::OneSubjectPerChannel`]
+    /// explicitly and refuses to expose it, and its reasoning generalises: there,
+    /// `ManySubjectsPerChannel` would let one key hold **every mailbox it could
+    /// name**. A relay reaches the opposite answer for the same kind of reason —
+    /// one `relay_sub` genuinely carries many flows. Neither is a default worth
+    /// overriding from the environment.
     ManySubjectsPerChannel,
 }
 
@@ -237,183 +263,5 @@ impl Default for BindingLimits {
             max_bindings: 16_384,
             cardinality: BindingCardinality::OneSubjectPerChannel,
         }
-    }
-}
-
-struct Entry {
-    channel: ChannelIdentity,
-    expires_at: Instant,
-    /// Live connections currently holding this binding. A binding with a live
-    /// holder is **never** evicted for capacity: evicting it would hand an
-    /// attacker the very thing the binding exists to protect.
-    holders: u32,
-    arrival: u64,
-}
-
-/// The shipped [`Binding`]: first claim wins, and wins exclusively.
-pub struct ChannelPinned<S: Subject> {
-    limits: BindingLimits,
-    by_subject: HashMap<S, Entry>,
-    /// `arrival → subject`, so the oldest unheld binding is evictable without a
-    /// scan.
-    order: BTreeMap<u64, S>,
-    next_arrival: u64,
-    refusals: u64,
-}
-
-impl<S: Subject> std::fmt::Debug for ChannelPinned<S> {
-    /// Counts only.
-    ///
-    /// A derived `Debug` would render every bound subject, which is exactly the
-    /// per-device identifier O-13 forbids infrastructure from retaining and the
-    /// collector's forbidden-key filter drops whole records for.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ChannelPinned")
-            .field("bound", &self.by_subject.len())
-            .field("refusals", &self.refusals)
-            .field("cardinality", &self.limits.cardinality)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<S: Subject> ChannelPinned<S> {
-    /// A table bounded by `limits`.
-    #[must_use]
-    pub fn new(limits: BindingLimits) -> Self {
-        Self {
-            limits,
-            by_subject: HashMap::new(),
-            order: BTreeMap::new(),
-            next_arrival: 0,
-            refusals: 0,
-        }
-    }
-
-    /// How many claims have been refused since start.
-    #[must_use]
-    pub const fn refusals(&self) -> u64 {
-        self.refusals
-    }
-
-    /// The limits in force.
-    #[must_use]
-    pub const fn limits(&self) -> BindingLimits {
-        self.limits
-    }
-
-    /// Evicts the oldest binding that no live connection holds.
-    fn evict_oldest_unheld(&mut self) -> bool {
-        let victim = self
-            .order
-            .iter()
-            .find(|(_, s)| self.by_subject.get(*s).is_some_and(|e| e.holders == 0))
-            .map(|(seq, s)| (*seq, s.clone()));
-        match victim {
-            Some((seq, subject)) => {
-                self.order.remove(&seq);
-                self.by_subject.remove(&subject);
-                true
-            }
-            None => false,
-        }
-    }
-}
-
-impl<S: Subject> Default for ChannelPinned<S> {
-    fn default() -> Self {
-        Self::new(BindingLimits::default())
-    }
-}
-
-impl<S: Subject> Binding<S> for ChannelPinned<S> {
-    fn claim(&mut self, channel: &ChannelIdentity, subject: S, now: Instant) -> Claim {
-        self.sweep(now);
-
-        // Does this channel already speak for someone else? Checked first,
-        // because it is the cheaper half of the invariant and because a channel
-        // that changes its mind is a stronger signal than a contested subject.
-        if self.limits.cardinality == BindingCardinality::OneSubjectPerChannel {
-            if let Some((held, _)) = self
-                .by_subject
-                .iter()
-                .find(|(_, e)| e.channel == *channel && e.holders > 0)
-            {
-                if *held != subject {
-                    self.refusals += 1;
-                    return Claim::Refused(Refusal::ChannelSpeaksForAnotherSubject);
-                }
-            }
-        }
-
-        match self.by_subject.get_mut(&subject) {
-            Some(entry) if entry.channel == *channel => {
-                entry.expires_at = now + self.limits.ttl;
-                entry.holders = entry.holders.saturating_add(1);
-                Claim::Accepted
-            }
-            Some(_) => {
-                // The impersonation half. Refused under EVERY cardinality.
-                self.refusals += 1;
-                Claim::Refused(Refusal::SubjectHeldByAnotherChannel)
-            }
-            None => {
-                if self.by_subject.len() >= self.limits.max_bindings && !self.evict_oldest_unheld()
-                {
-                    // Every binding is held by a live connection. Refusing is
-                    // the safe direction: admitting would mean forgetting a
-                    // binding that is actively protecting a subject.
-                    self.refusals += 1;
-                    return Claim::Refused(Refusal::TableAtCapacity);
-                }
-                let arrival = self.next_arrival;
-                self.next_arrival += 1;
-                self.order.insert(arrival, subject.clone());
-                self.by_subject.insert(
-                    subject,
-                    Entry {
-                        channel: channel.clone(),
-                        expires_at: now + self.limits.ttl,
-                        holders: 1,
-                        arrival,
-                    },
-                );
-                Claim::Accepted
-            }
-        }
-    }
-
-    fn release(&mut self, channel: &ChannelIdentity, subject: &S, now: Instant) {
-        let Some(entry) = self.by_subject.get_mut(subject) else {
-            return;
-        };
-        if entry.channel != *channel {
-            // Not this connection's binding to release.
-            return;
-        }
-        entry.holders = entry.holders.saturating_sub(1);
-        if entry.holders == 0 {
-            // The binding OUTLIVES the connection. This is the whole point: a
-            // device that drops and reconnects finds its own binding, and an
-            // attacker racing that reconnect finds it taken.
-            entry.expires_at = now + self.limits.ttl;
-        }
-    }
-
-    fn sweep(&mut self, now: Instant) {
-        let gone: Vec<S> = self
-            .by_subject
-            .iter()
-            .filter(|(_, e)| e.holders == 0 && e.expires_at <= now)
-            .map(|(s, _)| s.clone())
-            .collect();
-        for s in gone {
-            if let Some(e) = self.by_subject.remove(&s) {
-                self.order.remove(&e.arrival);
-            }
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.by_subject.len()
     }
 }
