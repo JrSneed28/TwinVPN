@@ -1,0 +1,129 @@
+{
+  "_comment": [
+    "The hand-authored half of the ADR-0019 presentation catalogue, in the SOURCE",
+    "locale (en). ADR-0018 CB-4: the catalogue ships EMBEDDED IN THE ARTIFACT.",
+    "",
+    "Every entry here OVERRIDES the seed the build script derives from the frozen",
+    "registry's `condition` field. The seed exists so LT-3c's completeness rule is",
+    "satisfied by construction for all 201 codes; this file is where a code gets",
+    "user-facing copy that is a real sentence rather than a technical condition.",
+    "",
+    "LT-4: every value is a WHOLE PATTERN. Placeholders are named ICU-style",
+    "`{evidence_key}` and are bound to that code's REGISTRY-DECLARED evidence",
+    "fields. No string is assembled from a reason_code, an i18n key or an enum",
+    "name; the build script rejects a placeholder the registry does not declare.",
+    "",
+    "LT-3b/LT-3c: `next_action` is an object with a MANDATORY `neutral` and",
+    "optional `variants`. An empty platform_ctx resolves to `neutral` and never to",
+    "the host's platform. A variant without a neutral fails the build."
+  ],
+
+  "domain_summary": {
+    "NET": "TwinVPN could not reach the network it needs.",
+    "NAT": "TwinVPN could not open a direct path through this network's address translation.",
+    "RELAY": "TwinVPN could not use a relay for this connection.",
+    "AUTH": "TwinVPN could not confirm this device's or the other device's identity.",
+    "CRYPTO": "TwinVPN could not complete the encrypted handshake with the other device.",
+    "PROTO": "TwinVPN and the other side do not agree on a protocol they can both speak.",
+    "POLICY": "A protection rule stopped this traffic.",
+    "DNS": "TwinVPN could not resolve names the way its policy requires.",
+    "ROUTE": "TwinVPN could not program this device's routing the way it needs to.",
+    "PLATFORM": "The operating system refused something TwinVPN needs.",
+    "RESOURCE": "TwinVPN reached a capacity limit.",
+    "CONTROL": "TwinVPN could not reach or trust the coordination service.",
+    "INTERNAL": "TwinVPN hit a defect in itself.",
+    "MGMT": "The local management interface refused this request.",
+    "STORE": "TwinVPN could not read or write its local encrypted store.",
+    "UPDATE": "TwinVPN could not complete an update step."
+  },
+
+  "domain_next_action": {
+    "NET": "Check this device's network connection, then try again.",
+    "NAT": "Try a different network, or let TwinVPN fall back to a relay.",
+    "RELAY": "Wait and try again; if it keeps happening, report it with a diagnostic bundle.",
+    "AUTH": "Check that this device is still paired and has not been revoked.",
+    "CRYPTO": "Try again; if it keeps happening, re-pair the two devices.",
+    "PROTO": "Update TwinVPN on both devices so they share a supported version.",
+    "POLICY": "Review the protection settings for this device.",
+    "DNS": "Check this device's DNS settings, then try again.",
+    "ROUTE": "Check for other VPN or virtual-network software on this device.",
+    "PLATFORM": "Grant TwinVPN the permission it asked for in this device's system settings.",
+    "RESOURCE": "Reduce the number of connected devices, or free resources on this device.",
+    "CONTROL": "Check this device's internet connection; existing connections keep working.",
+    "INTERNAL": "Report this with a diagnostic bundle.",
+    "MGMT": "Check that you are allowed to run this command on this device.",
+    "STORE": "Restart TwinVPN. If it keeps happening, report it with a diagnostic bundle.",
+    "UPDATE": "Try the update again, or install the latest release manually."
+  },
+
+  "entries": {
+    "reason.internal_core_panic.summary": {
+      "text": "TwinVPN caught a defect in itself and stopped the affected component before it could do harm. Your protection rules are still in place."
+    },
+    "reason.internal_invariant_violated.summary": {
+      "text": "TwinVPN found one of its own internal rules broken ({invariant}) and stopped rather than continuing in an uncertain state."
+    },
+    "reason.internal_unexpected_state.summary": {
+      "text": "TwinVPN was asked to do something that its current state does not allow."
+    },
+    "reason.internal_buffer_overflow.summary": {
+      "text": "TwinVPN's local diagnostic ledger filled up and dropped {dropped} of the oldest entries."
+    },
+    "reason.internal_missing_reason.summary": {
+      "text": "A component reported a problem without saying what it was, which is itself a defect."
+    },
+    "reason.internal_abi_version_mismatch.summary": {
+      "text": "The TwinVPN application and its core were built for different internal interfaces, so they cannot run together."
+    },
+    "reason.internal_abi_version_mismatch.next_action": {
+      "neutral": "Reinstall TwinVPN as a single package so the application and its core match.",
+      "variants": [
+        {
+          "platform": "LINUX",
+          "text": "Install matching versions of the TwinVPN packages; a partial upgrade left the application and its core out of step."
+        },
+        {
+          "platform": "OPENWRT",
+          "text": "Install matching versions of the TwinVPN packages; a partial upgrade left the application and its core out of step."
+        }
+      ]
+    },
+
+    "reason.platform_vpn_permission_denied.summary": {
+      "text": "This device has not given TwinVPN permission to create a VPN connection."
+    },
+    "reason.platform_vpn_permission_denied.next_action": {
+      "neutral": "Grant TwinVPN permission to create a VPN connection in this device's system settings.",
+      "variants": [
+        {
+          "platform": "ANDROID",
+          "text": "Allow the VPN connection request when Android asks. If you dismissed it, open VPN settings and enable TwinVPN."
+        },
+        {
+          "platform": "IOS",
+          "text": "Allow the VPN configuration when iOS asks, and confirm with your passcode. If you removed it, add it again."
+        },
+        {
+          "platform": "IPADOS",
+          "text": "Allow the VPN configuration when iPadOS asks, and confirm with your passcode. If you removed it, add it again."
+        },
+        {
+          "platform": "MACOS",
+          "text": "Open System Settings, then Privacy & Security, and allow the TwinVPN system extension. You may need to restart."
+        },
+        {
+          "platform": "WINDOWS",
+          "text": "TwinVPN's background service is not installed or not running. Choose Repair installation; Windows will ask for administrator approval."
+        },
+        {
+          "platform": "LINUX",
+          "text": "The system refused the request. Grant the TwinVPN polkit action, or add your user to the twinvpn group and sign in again."
+        },
+        {
+          "platform": "OPENWRT",
+          "text": "The system refused the request. Run the TwinVPN command as root, or grant it the uci permissions it needs."
+        }
+      ]
+    }
+  }
+}
