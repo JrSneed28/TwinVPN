@@ -61,6 +61,28 @@ What it enforces, and why each one is here:
      for a reason that has nothing to do with the code under test, which is
      how a v6 lane quietly stops being run.
 
+ 10. EVERY `TWINVPN_*` VARIABLE COMPOSE SETS IS ACTUALLY READ BY THAT SERVICE.
+     This check exists because the mismatch shipped: compose set
+     `TWINVPN_DATABASE_URL` and `TWINVPN_DB_MAX_CONNECTIONS` on `control-plane`
+     while the service reads `TWINVPN_CP_DATABASE_URL` and
+     `TWINVPN_CP_DATABASE_MAX_CONNECTIONS`, so a fully configured stack would
+     still have died at startup on a missing required variable. A variable
+     nobody reads is either a typo or a rename that only landed on one side,
+     and both are invisible until something refuses to boot.
+
+ 11. PRESENCE HAS NO DATABASE.
+     `docs/protocol.md` §6.1 and `contracts/docs/contract-matrix.md` §1
+     category 4 make a DURABLE presence record "a permanent movement and IP
+     history of the Owner" — the privacy defect itself. No database URL, no
+     Postgres dependency.
+
+ 12. RENDEZVOUS AND PRESENCE DO NOT GATE STARTUP ON THE CONTROL PLANE.
+     Both declared `ReadinessPolicy::NoControlPlaneCalls`, because a rendezvous
+     pulled from the load balancer on a control-plane blip stops candidate
+     exchange, which puts the control plane back in every reconnect — I5
+     violated by way of a health check. A `service_healthy` startup gate is the
+     same mistake one step earlier.
+
 Usage:  check-compose.py [--strict]
 """
 
@@ -297,6 +319,40 @@ TWINVPN_SERVICES = {
     "relay-a", "relay-b", "relay-directory", "relay-health",
 }
 
+# Which crate's sources back each compose service. Both relays run one binary.
+SERVICE_SOURCES = {
+    "control-plane": ["services/control-plane/src"],
+    "rendezvous": ["services/rendezvous/src"],
+    "presence": ["services/presence/src"],
+    "relay-a": ["services/relay/src"],
+    "relay-b": ["services/relay/src"],
+    "relay-directory": ["services/relay-directory/src"],
+    "relay-health": ["services/relay-health/src"],
+}
+COMMON_SOURCES = ["services/twinvpn-service-common/src"]
+
+ENV_KEY_IN_RUST = re.compile(r'"(TWINVPN_[A-Z0-9_]+|OTEL_[A-Z0-9_]+)"')
+
+# Variables compose sets that are deliberately NOT read by the Rust config
+# loader. Each needs a reason, because "it is on a list" is how a genuine
+# mismatch gets waved through.
+ENV_CONSUMED_ELSEWHERE = {
+    # Read by the image's HEALTHCHECK command, not by the service.
+    "TWINVPN_HEALTHCHECK_URL",
+    # Read by the OpenTelemetry SDK itself rather than by our config loader.
+    # `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_TRACES_SAMPLER_ARG` ARE read by
+    # twinvpn-service-common and are deliberately absent from this list.
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_RESOURCE_ATTRIBUTES",
+    "OTEL_SERVICE_NAME",
+    "OTEL_TRACES_SAMPLER",
+    # Supplied ahead of its consumer: twinvpn-service-common takes instance_id
+    # as a caller argument and does not yet read this. infra/README.md §10
+    # request 1 tracks it; the variable is set now so the fleet identity is
+    # stable the moment the services adopt it.
+    "TWINVPN_INSTANCE_ID",
+}
+
 
 def check_health_and_readiness(doc: dict) -> None:
     dockerfile = REPO_ROOT / "infra" / "docker" / "Dockerfile.service"
@@ -327,6 +383,150 @@ def check_health_and_readiness(doc: dict) -> None:
         if "TWINVPN_ADMIN_ADDR" not in env:
             fail(f"{name}: no TWINVPN_ADMIN_ADDR, so /healthz, /readyz and /metrics "
                  f"have no listener")
+
+
+def _rust_env_keys(dirs: list[str]) -> set[str]:
+    """Every `"TWINVPN_*"` / `"OTEL_*"` string literal under the given roots."""
+    found: set[str] = set()
+    for d in dirs:
+        root = REPO_ROOT / d
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.rs"):
+            try:
+                found |= set(ENV_KEY_IN_RUST.findall(path.read_text()))
+            except OSError:
+                continue
+    return found
+
+
+def check_env_key_coverage(doc: dict) -> None:
+    """Every TWINVPN_* variable compose sets must be read by that service.
+
+    A variable nobody reads is either a typo or a rename that landed on one
+    side only, and both are invisible until something refuses to boot. This
+    check exists because exactly that shipped: compose set
+    TWINVPN_DATABASE_URL / TWINVPN_DB_MAX_CONNECTIONS on control-plane while
+    the service reads TWINVPN_CP_DATABASE_URL /
+    TWINVPN_CP_DATABASE_MAX_CONNECTIONS.
+
+    Note the direction. This does NOT assert that compose sets every variable a
+    service reads: most have defaults, and requiring compose to restate a
+    default would make the compose file a second source of truth for values the
+    service already owns. It asserts the reverse, which is the direction that
+    fails at startup.
+    """
+    common = _rust_env_keys(COMMON_SOURCES)
+    if not common:
+        warn("no service sources found under services/; env-key coverage NOT "
+             "checked. This is expected only outside a full checkout.")
+        return
+
+    for name, dirs in SERVICE_SOURCES.items():
+        svc = doc.get("services", {}).get(name)
+        if svc is None:
+            continue
+        read = _rust_env_keys(dirs) | common
+        for key in sorted((svc.get("environment", {}) or {}).keys()):
+            if not key.startswith(("TWINVPN_", "OTEL_")):
+                continue
+            if key in ENV_CONSUMED_ELSEWHERE or key in read:
+                continue
+            fail(f"{name}: compose sets {key}, which nothing in "
+                 f"{dirs[0]} or twinvpn-service-common reads. Either the name "
+                 f"is wrong on one side, or the variable is dead. A service "
+                 f"whose real key is unset dies at startup on a fully "
+                 f"configured stack.")
+
+
+def check_presence_has_no_database(doc: dict) -> None:
+    """docs/protocol.md §6.1, contracts/docs/contract-matrix.md §1 category 4.
+
+    A DURABLE presence record is "a permanent movement and IP history of the
+    Owner" — the privacy defect itself, arriving as an infrastructure
+    convenience. presence.proto classifies presence as ephemeral for the same
+    reason. So this is not a tidiness check; it is the one place a database
+    could be reintroduced without anyone noticing.
+    """
+    svc = doc.get("services", {}).get("presence")
+    if svc is None:
+        fail("service presence is missing from the compose topology")
+        return
+
+    for key in (svc.get("environment", {}) or {}):
+        if "DATABASE" in key.upper() or "_DSN" in key.upper():
+            fail(f"presence: compose sets {key}. Presence MUST NOT have a "
+                 f"database: docs/protocol.md §6.1 and contract-matrix.md §1 "
+                 f"category 4 make a durable presence record 'a permanent "
+                 f"movement and IP history of the Owner'. Its state is a "
+                 f"bounded in-memory table with a TTL, and losing it on "
+                 f"restart is correct (architecture.md §2.13).")
+
+    if "postgres" in (svc.get("depends_on") or {}):
+        fail("presence: depends_on postgres. Presence has no database client "
+             "and must not acquire one — see above. The dependency would also "
+             "stop presence starting while Postgres is down, converting a hint "
+             "service into an availability dependency.")
+
+
+def check_owner_anchor(doc: dict) -> None:
+    """ADR-0007 / architecture.md A-04, S-32.
+
+    The control plane verifies Owner-signed statements against a pinned
+    OwnerTrustAnchor set and nothing else. Without a compose mount,
+    Owner-authority commands cannot work anywhere but a unit test — a whole
+    capability silently absent from every local run.
+    """
+    svc = doc.get("services", {}).get("control-plane")
+    if svc is None:
+        return
+
+    env = svc.get("environment", {}) or {}
+    anchor = env.get("TWINVPN_CP_OWNER_ANCHOR_PATH")
+    if not anchor:
+        fail("control-plane: no TWINVPN_CP_OWNER_ANCHOR_PATH. Without the "
+             "pinned OwnerTrustAnchor set (S-32) every Owner-authority "
+             "statement is refused with AUTH.KEY_UNAVAILABLE — a capability "
+             "lost on every local run rather than a startup failure anyone "
+             "would notice.")
+        return
+
+    mounted = False
+    for vol in svc.get("volumes", []) or []:
+        target = vol.get("target") if isinstance(vol, dict) else None
+        if target and str(anchor).startswith(str(target).rstrip("/") + "/"):
+            mounted = True
+            break
+    if not mounted:
+        fail(f"control-plane: TWINVPN_CP_OWNER_ANCHOR_PATH is {anchor}, which "
+             f"no bind mount covers. The file cannot exist in the container, "
+             f"so Owner-authority commands cannot work outside a unit test.")
+
+
+def check_readiness_edges(doc: dict) -> None:
+    """rendezvous and presence declared ReadinessPolicy::NoControlPlaneCalls.
+
+    Their reasoning: a rendezvous that reports NOT READY on a control-plane
+    blip is pulled from the load balancer, which stops candidate exchange,
+    which puts the control plane back in the critical path of every reconnect —
+    I5 violated by way of a health check.
+
+    A `service_healthy` startup gate is the same mistake one step earlier: it
+    makes the service unstartable while the control plane is unhealthy.
+    Ordering is useful; gating is not.
+    """
+    for name in ("rendezvous", "presence"):
+        svc = doc.get("services", {}).get(name)
+        if svc is None:
+            continue
+        dep = (svc.get("depends_on") or {}).get("control-plane")
+        if isinstance(dep, dict) and dep.get("condition") == "service_healthy":
+            fail(f"{name}: depends_on control-plane with condition "
+                 f"service_healthy. This service declared "
+                 f"ReadinessPolicy::NoControlPlaneCalls precisely so that a "
+                 f"control-plane blip cannot take it out; a startup gate "
+                 f"reintroduces that coupling one step earlier. Use "
+                 f"service_started — ordering is useful, gating is not.")
 
 
 def check_relay_independence(doc: dict) -> None:
@@ -435,6 +635,10 @@ def main() -> int:
     check_health_and_readiness(base)
     check_relay_independence(base)
     check_relay_floor(base)
+    check_env_key_coverage(base)
+    check_presence_has_no_database(base)
+    check_owner_anchor(base)
+    check_readiness_edges(base)
 
     for path in OVERRIDES:
         if not path.is_file():

@@ -37,15 +37,16 @@
 # ===========================================================================
 # CURRENT REALITY, STATED PLAINLY
 # ===========================================================================
-# The six service binaries are skeletons: they print a line and exit 1. Their
-# containers will therefore start, exit 1, and — because `restart` is "no" —
-# stay exited rather than crash-looping. Anything with a
-# `condition: service_healthy` edge onto them will not start at all. That is
-# correct and visible, and it is what this file is for: the environment is
-# ready before the behaviour is.
+# All six services are implemented. An earlier revision of this comment said
+# they were skeletons that exit 1; that stopped being true when the four
+# service domains landed.
 #
-# The stores and the observability stack come up fully today:
-#   docker compose up -d postgres otel-collector prometheus tempo loki grafana
+# NOTHING HERE HAS EVER BEEN STARTED. Docker is not installed on the host this
+# file was authored on, so no image has been built and no container has run.
+# Every claim in this file is a claim about the configuration, not an
+# observation. infra/README.md §9 is precise about which is which, and the
+# `topology-up` job in .github/workflows/t2-post-merge.yml exists to close the
+# gap on a runner that has Docker.
 
 name: twinvpn
 
@@ -65,9 +66,11 @@ x-service-defaults: &service-defaults
       BUSYBOX_IMAGE: ${TWINVPN_BUSYBOX_IMAGE:-docker.io/library/busybox:1.37.0-musl}
       SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-1756252800}
       SOURCE_COMMIT: ${TWINVPN_SOURCE_COMMIT:-unknown}
-  # A skeleton that exits 1 must stay exited and visible. A restart policy here
-  # would convert "not implemented" into a crash loop that fills the log with
-  # the same line and hides the next failure.
+  # `restart: "no"` on purpose. A service that fails to start is nearly always
+  # failing on configuration — a missing required variable, an unreadable key,
+  # a malformed trust anchor — and none of those get better on the third
+  # attempt. A restart policy would convert one legible error into a crash loop
+  # that fills the log with the same line and hides the next failure.
   restart: "no"
   init: false
   stop_signal: SIGTERM
@@ -273,6 +276,14 @@ services:
       <<: *service-env
       TWINVPN_SERVICE_NAME: control-plane
       OTEL_SERVICE_NAME: twinvpn-control-plane
+      # The collector allowlists `service.instance.id`; until now nothing
+      # supplied it. twinvpn-service-common takes it as an explicit caller
+      # argument rather than reading a hostname or generating entropy, which is
+      # right - an id invented per process makes every fleet query lie, because
+      # "how many instances served this" becomes "how many times did anything
+      # restart". The container hostname is the stable source, so compose
+      # supplies it and the value matches `hostname:` above.
+      TWINVPN_INSTANCE_ID: control-plane
       # --- the transport ladder, ADR-0002 §11.2 -------------------------
       # Rung 1 QUIC+HTTP/3 on UDP:443; rungs 2-4 TLS on TCP:443. Both bind ::
       # so the one listener serves both families (v4-mapped), which is what
@@ -286,8 +297,27 @@ services:
       TWINVPN_CP_TLS_CERT_PATH: /run/secrets/control-plane/tls.crt
       TWINVPN_CP_TLS_KEY_PATH: /run/secrets/control-plane/tls.key
       # --- durable store and event log, ADR-0002 §11.3 -------------------
-      TWINVPN_DATABASE_URL: ${TWINVPN_CP_DATABASE_URL:?TWINVPN_CP_DATABASE_URL must be set - it carries a credential and has no default}
-      TWINVPN_DB_MAX_CONNECTIONS: ${TWINVPN_DB_MAX_CONNECTIONS:-16}
+      # The KEY NAMES ARE THE SERVICE'S, not this file's. An earlier revision
+      # set TWINVPN_DATABASE_URL and TWINVPN_DB_MAX_CONNECTIONS here while
+      # services/control-plane reads TWINVPN_CP_DATABASE_URL and
+      # TWINVPN_CP_DATABASE_MAX_CONNECTIONS - so the service would have failed
+      # at startup with "missing required variable" on a fully configured
+      # stack. build/verify/check-compose.py now fails the build on any
+      # TWINVPN_* variable no service reads, so this class cannot recur
+      # silently.
+      TWINVPN_CP_DATABASE_URL: ${TWINVPN_CP_DATABASE_URL:?TWINVPN_CP_DATABASE_URL must be set - it carries a credential and has no default}
+      TWINVPN_CP_DATABASE_MAX_CONNECTIONS: ${TWINVPN_CP_DATABASE_MAX_CONNECTIONS:-16}
+      # ADR-0009 §11.2 makes quorum a DEPLOYMENT choice. 0 is single-writer,
+      # correct for one Postgres; a real deployment raises it, and an E-1-class
+      # write is then refused with CONTROL.QUORUM_UNAVAILABLE rather than
+      # committed locally with a promise to reconcile.
+      TWINVPN_CP_QUORUM_REPLICAS: ${TWINVPN_CP_QUORUM_REPLICAS:-0}
+      # S-32, the pinned OwnerTrustAnchor set. ABSENCE IS A CAPABILITY LOST,
+      # NOT A STARTUP FAILURE: with no anchor the service still enrols,
+      # discovers and streams, and refuses every Owner-authority statement with
+      # AUTH.KEY_UNAVAILABLE. A MALFORMED line IS a startup failure - a
+      # half-parsed trust anchor set is worse than none.
+      TWINVPN_CP_OWNER_ANCHOR_PATH: /run/secrets/control-plane/owner-anchors.hex
       TWINVPN_CP_EVENT_BUS: ${TWINVPN_CP_EVENT_BUS:-postgres-notify}
       TWINVPN_CP_WRITE_LEASE_TTL_MS: ${TWINVPN_CP_WRITE_LEASE_TTL_MS:-15000}
       # limits.json control_plane.* — the frozen values, restated as config so
@@ -345,6 +375,14 @@ services:
       <<: *service-env
       TWINVPN_SERVICE_NAME: rendezvous
       OTEL_SERVICE_NAME: twinvpn-rendezvous
+      # The collector allowlists `service.instance.id`; until now nothing
+      # supplied it. twinvpn-service-common takes it as an explicit caller
+      # argument rather than reading a hostname or generating entropy, which is
+      # right - an id invented per process makes every fleet query lie, because
+      # "how many instances served this" becomes "how many times did anything
+      # restart". The container hostname is the stable source, so compose
+      # supplies it and the value matches `hostname:` above.
+      TWINVPN_INSTANCE_ID: rendezvous
       TWINVPN_RZ_LISTEN_QUIC: ${TWINVPN_RZ_LISTEN_QUIC:-[::]:443}
       TWINVPN_RZ_LISTEN_TCP: ${TWINVPN_RZ_LISTEN_TCP:-[::]:443}
       TWINVPN_RZ_TLS_CERT_PATH: /run/secrets/rendezvous/tls.crt
@@ -363,6 +401,35 @@ services:
       TWINVPN_RZ_C4_MAX_DEPTH: "4"
       TWINVPN_RZ_MAX_CANDIDATES_PER_SET: "32"
       TWINVPN_RZ_CANDIDATE_EXPIRY_MS: "30000"
+      # ------------------------------------------------------------------
+      # Ceilings on a PRE-AUTHENTICATION surface (trust-boundaries.md B3:
+      # "reachable by anyone with a UDP socket", "this is where a parser bug
+      # is a remote memory-safety bug"). Every one of these was added by
+      # rendezvous-connectivity, and two of them close bugs its own tests
+      # found. limits.json bounds ONE MESSAGE; nothing in the frozen contracts
+      # bounds how many messages, connections or table entries exist at once,
+      # so these are additions rather than transcriptions.
+      # ------------------------------------------------------------------
+      # A SLOWLORIS HOLD. Without a deadline on a PARTIALLY RECEIVED frame, an
+      # attacker sends one length prefix and one byte and holds a connection
+      # and its buffer open indefinitely - having authenticated nothing.
+      TWINVPN_RZ_FRAME_READ_TIMEOUT_MS: "5000"
+      # DESCRIPTOR EXHAUSTION. A connection ceiling is the difference between
+      # an overloaded rendezvous and a dead host: past it, accept is refused
+      # rather than the process running out of file descriptors and failing
+      # everywhere at once.
+      TWINVPN_RZ_MAX_CONNECTIONS: "16384"
+      TWINVPN_RZ_MAX_ATTACHMENTS: "8192"
+      TWINVPN_RZ_MAX_MAILBOX_TARGETS: "8192"
+      TWINVPN_RZ_MAX_MAILBOX_BYTES: "33554432"
+      TWINVPN_RZ_MAX_BINDINGS: "16384"
+      TWINVPN_RZ_BINDING_TTL_MS: "600000"
+      # A device sends an offer, an answer and a few trickle candidate sets:
+      # single-digit frames per second per peer. 20/s with a burst of 40
+      # leaves a CGNAT full of real devices ample room while making a flood
+      # cost the attacker a bucket entry rather than a mailbox.
+      TWINVPN_RZ_SOURCE_RATE_PER_SEC: "20"
+      TWINVPN_RZ_SOURCE_BURST: "40"
     volumes:
       - type: bind
         source: ./contracts/registry
@@ -379,8 +446,23 @@ services:
       - "[::1]:8444:443/udp"
       - "127.0.0.1:19002:9090/tcp"
     depends_on:
+      # `service_started`, NOT `service_healthy`, and the difference is the
+      # whole of item 1 below expressed as topology.
+      #
+      # rendezvous declared `ReadinessPolicy::NoControlPlaneCalls` and refused
+      # the control-plane readiness probe this file used to ask for. Its
+      # reasoning: a rendezvous that reports NOT READY on a control-plane blip
+      # is pulled from the load balancer, which stops candidate exchange, which
+      # puts the control plane back in the critical path of every reconnect —
+      # I5 violated by way of a health check.
+      #
+      # A `service_healthy` startup gate is the same mistake one step earlier:
+      # it makes rendezvous unstartable while the control plane is unhealthy.
+      # Ordering is useful, GATING is not, so the edge is kept and weakened.
+      # architecture.md §2.9 depends on the control plane for AUTHORIZATION,
+      # which is a per-request concern, not a liveness precondition.
       control-plane:
-        condition: service_healthy
+        condition: service_started
       otel-collector:
         condition: service_started
 
@@ -406,14 +488,45 @@ services:
       <<: *service-env
       TWINVPN_SERVICE_NAME: presence
       OTEL_SERVICE_NAME: twinvpn-presence
+      # The collector allowlists `service.instance.id`; until now nothing
+      # supplied it. twinvpn-service-common takes it as an explicit caller
+      # argument rather than reading a hostname or generating entropy, which is
+      # right - an id invented per process makes every fleet query lie, because
+      # "how many instances served this" becomes "how many times did anything
+      # restart". The container hostname is the stable source, so compose
+      # supplies it and the value matches `hostname:` above.
+      TWINVPN_INSTANCE_ID: presence
       TWINVPN_PRESENCE_LISTEN_QUIC: ${TWINVPN_PRESENCE_LISTEN_QUIC:-[::]:443}
       TWINVPN_PRESENCE_LISTEN_TCP: ${TWINVPN_PRESENCE_LISTEN_TCP:-[::]:443}
       TWINVPN_PRESENCE_TLS_CERT_PATH: /run/secrets/presence/tls.crt
       TWINVPN_PRESENCE_TLS_KEY_PATH: /run/secrets/presence/tls.key
-      TWINVPN_DATABASE_URL: ${TWINVPN_PRESENCE_DATABASE_URL:?TWINVPN_PRESENCE_DATABASE_URL must be set - it carries a credential and has no default}
+      # =================================================================
+      # PRESENCE HAS NO DATABASE, AND MUST NOT HAVE ONE.
+      # =================================================================
+      # An earlier revision of this file required TWINVPN_PRESENCE_DATABASE_URL
+      # and gave presence a Postgres readiness probe and a depends_on edge.
+      # That was wrong, and not merely unnecessary: protocol.md §6.1 and
+      # contract-matrix.md §1 category 4 make a DURABLE presence record "a
+      # permanent movement and IP history of the Owner" - the privacy defect
+      # itself, arriving as an infrastructure convenience. presence.proto
+      # classifies presence as ephemeral for the same reason.
+      #
+      # So the requirement, the probe and the dependency are all gone. State
+      # lives in a bounded in-memory table with a TTL, and a restart losing it
+      # is CORRECT: architecture.md §2.13 makes presence a HINT SERVICE, never
+      # an authority, whose unavailability degrades reconnect LATENCY and not
+      # reconnect CAPABILITY.
       TWINVPN_PRESENCE_CONTROL_PLANE_URL: ${TWINVPN_PRESENCE_CONTROL_PLANE_URL:-https://control-plane:443}
       TWINVPN_PRESENCE_HEARTBEAT_INTERVAL_MS: ${TWINVPN_PRESENCE_HEARTBEAT_INTERVAL_MS:-30000}
       TWINVPN_PRESENCE_RECORD_TTL_MS: ${TWINVPN_PRESENCE_RECORD_TTL_MS:-180000}
+      # The same pre-authentication ceilings rendezvous carries, for the same
+      # reasons: a partial-frame deadline against a slowloris hold, and a
+      # connection ceiling against descriptor exhaustion.
+      TWINVPN_PRESENCE_FRAME_READ_TIMEOUT_MS: "5000"
+      TWINVPN_PRESENCE_MAX_CONNECTIONS: "16384"
+      TWINVPN_PRESENCE_MAX_DEVICES: "65536"
+      TWINVPN_PRESENCE_MAX_BINDINGS: "16384"
+      TWINVPN_PRESENCE_BINDING_TTL_MS: "600000"
     volumes:
       - type: bind
         source: ./contracts/registry
@@ -430,10 +543,17 @@ services:
       - "[::1]:8445:443/udp"
       - "127.0.0.1:19003:9090/tcp"
     depends_on:
-      postgres:
-        condition: service_healthy
+      # NO POSTGRES EDGE. Presence has no database and must not have one — see
+      # the environment block above.
+      #
+      # `service_started` on the control plane for the same reason as
+      # rendezvous: presence declared `ReadinessPolicy::NoControlPlaneCalls`,
+      # and architecture.md §2.13 makes presence a HINT SERVICE whose
+      # unavailability degrades reconnect LATENCY, not reconnect CAPABILITY.
+      # A presence that cannot start while the control plane is unhealthy
+      # converts a latency degradation into an availability one.
       control-plane:
-        condition: service_healthy
+        condition: service_started
       otel-collector:
         condition: service_started
 
@@ -460,6 +580,14 @@ services:
       <<: *service-env
       TWINVPN_SERVICE_NAME: relay
       OTEL_SERVICE_NAME: twinvpn-relay
+      # The collector allowlists `service.instance.id`; until now nothing
+      # supplied it. twinvpn-service-common takes it as an explicit caller
+      # argument rather than reading a hostname or generating entropy, which is
+      # right - an id invented per process makes every fleet query lie, because
+      # "how many instances served this" becomes "how many times did anything
+      # restart". The container hostname is the stable source, so compose
+      # supplies it and the value matches `hostname:` above.
+      TWINVPN_INSTANCE_ID: relay-a
       # RelayMap identity fields, ADR-0006 §11.1. relay_id is 8 bytes
       # (limits.json identifiers.relay_id_bytes) => 16 hex characters.
       TWINVPN_RELAY_ID: "0000000000000a01"
@@ -489,6 +617,15 @@ services:
       TWINVPN_RELAY_PAIR_TAG_ACCEPTED_SKEW: "1"
       # --- resource control, ADR-0005 §11.5 ------------------------------
       TWINVPN_RELAY_MAX_FLOWS_PER_SUBJECT: "64"
+      # ADR-0005 §11.5's whole table is PER relay_sub. That bounds one
+      # attacker; it does not bound how many subjects exist, so the flow table
+      # had no memory bound at all (ownership.md rule 10: bound every
+      # allocation an untrusted input can drive). relay-plane added this
+      # ceiling and it is correct. 65536 is 1024 subjects at their full
+      # per-subject allowance. The subject table and the cookie gate are sized
+      # FROM this value rather than configured separately, so one number moves
+      # all three and they cannot drift apart.
+      TWINVPN_RELAY_MAX_TOTAL_FLOWS: "65536"
       TWINVPN_RELAY_RATE_PER_SUBJECT_MBPS: "20"
       TWINVPN_RELAY_RATE_PER_FLOW_MBPS: "10"
       TWINVPN_RELAY_QUOTA_BYTES_PER_HOUR: "21474836480"
@@ -527,6 +664,7 @@ services:
     hostname: relay-b
     environment:
       <<: *relay-env
+      TWINVPN_INSTANCE_ID: relay-b
       TWINVPN_RELAY_ID: "0000000000000b01"
       # Same region, DIFFERENT failure domain — this is what makes
       # RELAY_STANDBY_READY (ADR-0005 §11.6) reachable locally.
@@ -572,6 +710,14 @@ services:
       <<: *service-env
       TWINVPN_SERVICE_NAME: relay-directory
       OTEL_SERVICE_NAME: twinvpn-relay-directory
+      # The collector allowlists `service.instance.id`; until now nothing
+      # supplied it. twinvpn-service-common takes it as an explicit caller
+      # argument rather than reading a hostname or generating entropy, which is
+      # right - an id invented per process makes every fleet query lie, because
+      # "how many instances served this" becomes "how many times did anything
+      # restart". The container hostname is the stable source, so compose
+      # supplies it and the value matches `hostname:` above.
+      TWINVPN_INSTANCE_ID: relay-directory
       TWINVPN_RELAYDIR_LISTEN_TCP: ${TWINVPN_RELAYDIR_LISTEN_TCP:-[::]:443}
       TWINVPN_RELAYDIR_LISTEN_QUIC: ${TWINVPN_RELAYDIR_LISTEN_QUIC:-[::]:443}
       TWINVPN_RELAYDIR_TLS_CERT_PATH: /run/secrets/relay-directory/tls.crt
@@ -643,6 +789,14 @@ services:
       <<: *service-env
       TWINVPN_SERVICE_NAME: relay-health
       OTEL_SERVICE_NAME: twinvpn-relay-health
+      # The collector allowlists `service.instance.id`; until now nothing
+      # supplied it. twinvpn-service-common takes it as an explicit caller
+      # argument rather than reading a hostname or generating entropy, which is
+      # right - an id invented per process makes every fleet query lie, because
+      # "how many instances served this" becomes "how many times did anything
+      # restart". The container hostname is the stable source, so compose
+      # supplies it and the value matches `hostname:` above.
+      TWINVPN_INSTANCE_ID: relay-health
       TWINVPN_DATABASE_URL: ${TWINVPN_RELAYDIR_DATABASE_URL:?TWINVPN_RELAYDIR_DATABASE_URL must be set - it carries a credential and has no default}
       # Probe targets are the relays' ADMIN listeners, not their data ports: a
       # health prober that opened a relay flow would be indistinguishable from
