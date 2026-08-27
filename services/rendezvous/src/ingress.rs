@@ -151,6 +151,19 @@ pub fn admission_deferred(retry_after_ms: u64) -> ServiceError {
         .build()
 }
 
+/// `CONTROL.CHANNEL_BINDING_MISMATCH` — the claimed `device_id` is not
+/// answerable to the authenticated channel identity.
+///
+/// FATAL, CRITICAL, and `trust-boundaries.md` §4's words for this code are
+/// "**a security event, never a parse error**". The registry declares no
+/// evidence fields for it, and none is attached: naming the contested
+/// `device_id` in an answer would turn the refusal into an oracle for which
+/// devices are attached.
+#[must_use]
+pub fn channel_binding_mismatch() -> ServiceError {
+    ServiceError::new(codes::CONTROL_CHANNEL_BINDING_MISMATCH, crate::COMPONENT).build()
+}
+
 /// `CONTROL.SUPERSEDED_BY_NEW_ATTACH` (ADR-0002 N-1).
 #[must_use]
 pub fn superseded() -> ServiceError {

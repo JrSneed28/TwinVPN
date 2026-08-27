@@ -42,6 +42,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    mistake unrepresentable: `readiness()` refuses any probe declaring
     //    `ProbeKind::ControlPlane`. The divergence is reported to the
     //    integration lead (README.md §8).
+    // TLS before anything else that could serve: a key that cannot be loaded
+    // must stop the process, not degrade it to a plaintext listener.
+    let tls_config = rz::tls::server_config(&rz_cfg.tls_key_path)?;
+    let server_spki = rz::tls::server_public_key(&rz_cfg.tls_key_path)?;
+
     let shared = Arc::new(rz::server::Shared {
         router: tokio::sync::Mutex::new(rz::ingress::Router {
             attachments: rz::attach::AttachRegistry::new(rz_cfg.attach),
@@ -49,6 +54,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             labels: rz::label::Labeller::default(),
         }),
         limiter: tokio::sync::Mutex::new(rz::admission::SourceLimiter::new(rz_cfg.admission)),
+        bindings: tokio::sync::Mutex::new(Box::new(rz::binding::ChannelPinned::new(
+            rz_cfg.binding,
+        ))),
+        tls: tokio_rustls::TlsAcceptor::from(tls_config),
         connections: Arc::new(tokio::sync::Semaphore::new(rz_cfg.max_connections)),
         config: rz_cfg.clone(),
         metrics: metrics.clone(),
@@ -115,7 +124,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The bound port is operational, not personal. No client address, no
         // device identifier, ever appears in a log line from this service.
         port = bound_addr.port(),
-        "rendezvous serving C4 ingress"
+        // The server's own public key length, so an operator can see that RFC
+        // 7250 mode came up. The key itself is printed by `--print-server-key`
+        // rather than into every startup log line.
+        server_key_bytes = server_spki.len(),
+        "rendezvous serving C4 ingress over TLS 1.3 with mutual raw public keys"
     );
 
     // 6. Serve.

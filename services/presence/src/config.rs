@@ -31,9 +31,13 @@ pub struct PresenceConfig {
     pub listen_tcp: SocketAddr,
     /// `TWINVPN_PRESENCE_LISTEN_QUIC`. Parsed, not yet bound — `README.md` §9.
     pub listen_quic: SocketAddr,
-    /// `TWINVPN_PRESENCE_TLS_CERT_PATH`.
+    /// `TWINVPN_PRESENCE_TLS_CERT_PATH`. Required to exist because
+    /// `docker-compose.yml` mounts it; **not used** — in RFC 7250 mode the
+    /// server's identity is its key.
     pub tls_cert_path: PathBuf,
-    /// `TWINVPN_PRESENCE_TLS_KEY_PATH`.
+    /// `TWINVPN_PRESENCE_TLS_KEY_PATH`. **The server's whole identity.** A key
+    /// that cannot be read or parsed is a startup failure, never a plaintext
+    /// listener.
     pub tls_key_path: PathBuf,
     /// `TWINVPN_PRESENCE_CONTROL_PLANE_URL`. Never called on the publish path.
     pub control_plane_url: String,
@@ -52,6 +56,8 @@ pub struct PresenceConfig {
     pub max_connections: usize,
     /// How often the TTL sweep runs.
     pub sweep_interval: Duration,
+    /// `device_id` ↔ channel-identity binding ceilings.
+    pub binding: crate::binding::BindingLimits,
 }
 
 /// Env keys.
@@ -78,6 +84,10 @@ pub mod keys {
     pub const FRAME_READ_TIMEOUT_MS: &str = "TWINVPN_PRESENCE_FRAME_READ_TIMEOUT_MS";
     /// **(new)** concurrently served connection ceiling.
     pub const MAX_CONNECTIONS: &str = "TWINVPN_PRESENCE_MAX_CONNECTIONS";
+    /// **(new)** how long a `device_id`↔channel binding outlives its connection.
+    pub const BINDING_TTL_MS: &str = "TWINVPN_PRESENCE_BINDING_TTL_MS";
+    /// **(new)** concurrently held binding ceiling.
+    pub const MAX_BINDINGS: &str = "TWINVPN_PRESENCE_MAX_BINDINGS";
 }
 
 /// Milliseconds of a `Duration`, saturating rather than truncating.
@@ -112,7 +122,16 @@ impl PresenceConfig {
 
         let ttl = l.duration_ms(keys::RECORD_TTL_MS, defaults.record_ttl)?;
 
+        let binding_defaults = crate::binding::BindingLimits::default();
+
         Ok(Self {
+            binding: crate::binding::BindingLimits {
+                ttl: l.duration_ms(keys::BINDING_TTL_MS, binding_defaults.ttl)?,
+                max_bindings: usize::try_from(
+                    l.u64(keys::MAX_BINDINGS, binding_defaults.max_bindings as u64)?,
+                )
+                .unwrap_or(binding_defaults.max_bindings),
+            },
             listen_tcp: l.socket_addr(keys::LISTEN_TCP, "[::]:443")?,
             listen_quic: l.socket_addr(keys::LISTEN_QUIC, "[::]:443")?,
             tls_cert_path: l.readable_file(keys::TLS_CERT, "/run/secrets/presence/tls.crt")?,

@@ -6,9 +6,12 @@
 
 #![allow(dead_code)]
 
+pub mod keys;
+
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+pub use keys::TestKey;
 use twinvpn_rendezvous as rz;
 use twinvpn_service_common as svc;
 
@@ -18,6 +21,8 @@ pub struct Harness {
     pub addr: SocketAddr,
     /// The shared state, so a test can assert on the tables directly.
     pub shared: Arc<rz::server::Shared>,
+    /// The server's raw public key, for a client to pin.
+    pub server_spki: Vec<u8>,
     shutdown: Arc<svc::shutdown::Shutdown>,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
 }
@@ -40,10 +45,21 @@ pub async fn start_with(
     host: IpAddr,
     f: impl FnOnce(rz::config::RendezvousConfig) -> rz::config::RendezvousConfig,
 ) -> Harness {
+    // A fresh server identity per harness, so two concurrently running tests
+    // cannot share a key and a test can never depend on one that is checked in.
+    let server_key = TestKey::generate();
+    let key_path = server_key.write_pem(&format!(
+        "rz-server-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
     let env = svc::config::MapEnv::new()
         .with(rz::config::keys::TLS_CERT, "Cargo.toml")
-        .with(rz::config::keys::TLS_KEY, "Cargo.toml");
+        .with(rz::config::keys::TLS_KEY, key_path.to_str().expect("utf-8"));
     let cfg = f(rz::config::RendezvousConfig::load(&env).expect("test config"));
+    let tls = tokio_rustls::TlsAcceptor::from(
+        rz::tls::server_config(&cfg.tls_key_path).expect("a usable server key"),
+    );
 
     let metrics = svc::metrics::Metrics::new();
     let shared = Arc::new(rz::server::Shared {
@@ -53,6 +69,8 @@ pub async fn start_with(
             labels: rz::label::Labeller::default(),
         }),
         limiter: tokio::sync::Mutex::new(rz::admission::SourceLimiter::new(cfg.admission)),
+        bindings: tokio::sync::Mutex::new(Box::new(rz::binding::ChannelPinned::new(cfg.binding))),
+        tls,
         connections: Arc::new(tokio::sync::Semaphore::new(cfg.max_connections)),
         config: cfg,
         metrics: metrics.clone(),
@@ -79,6 +97,7 @@ pub async fn start_with(
     Harness {
         addr,
         shared,
+        server_spki: server_key.spki.clone(),
         shutdown,
         task,
     }
@@ -93,17 +112,45 @@ impl Harness {
     }
 }
 
-/// A framed client connection.
+/// A framed client connection over an authenticated TLS 1.3 channel.
 pub struct Client {
-    stream: tokio::net::TcpStream,
+    stream: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+}
+
+impl Harness {
+    /// Connects with a fresh device identity.
+    pub async fn client(&self) -> Client {
+        Client::connect_as(self.addr, &TestKey::generate(), &self.server_spki).await
+    }
+
+    /// Connects with a specific device identity, so a test can reuse or
+    /// deliberately vary the authenticated key.
+    pub async fn client_as(&self, key: &TestKey) -> Client {
+        Client::connect_as(self.addr, key, &self.server_spki).await
+    }
+
+    /// Attempts a handshake presenting **no** client key.
+    pub async fn anonymous_handshake(&self) -> Result<(), std::io::Error> {
+        let tcp = tokio::net::TcpStream::connect(self.addr).await?;
+        let connector =
+            tokio_rustls::TlsConnector::from(TestKey::anonymous_client_config(&self.server_spki));
+        connector
+            .connect(keys::server_name(), tcp)
+            .await
+            .map(|_| ())
+    }
 }
 
 impl Client {
-    /// Connects to `addr`.
-    pub async fn connect(addr: SocketAddr) -> Self {
-        Self {
-            stream: tokio::net::TcpStream::connect(addr).await.expect("connect"),
-        }
+    /// Connects, completing the mutual raw-public-key handshake.
+    pub async fn connect_as(addr: SocketAddr, key: &TestKey, server_spki: &[u8]) -> Self {
+        let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let connector = tokio_rustls::TlsConnector::from(key.client_config(server_spki));
+        let stream = connector
+            .connect(keys::server_name(), tcp)
+            .await
+            .expect("the mutual raw-public-key handshake completes");
+        Self { stream }
     }
 
     /// Writes raw bytes, whatever they are.

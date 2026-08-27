@@ -53,6 +53,8 @@
 
 pub mod admission;
 pub mod attach;
+pub mod binding;
+pub mod codec;
 pub mod config;
 pub mod frame;
 pub mod ingress;
@@ -60,6 +62,7 @@ pub mod label;
 pub mod mailbox;
 pub mod server;
 pub mod testkit;
+pub mod tls;
 
 /// The `errors.proto` component this service reports itself as.
 ///

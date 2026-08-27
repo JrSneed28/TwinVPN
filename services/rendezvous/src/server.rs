@@ -2,17 +2,21 @@
 //!
 //! # What is bound, and what is not
 //!
-//! This wave binds **`TWINVPN_RZ_LISTEN_TCP`** and speaks the [`crate::frame`]
-//! framing directly on it. `TWINVPN_RZ_LISTEN_QUIC` is parsed and validated but
-//! **not bound**, and TLS is **not terminated**: `rustls` is a workspace
-//! dependency but `tokio-rustls` is not, and adding one is the integration
-//! lead's call, not this domain's. `README.md` §9 states this as a limitation
-//! rather than letting a reader infer a mutually authenticated channel that does
-//! not exist.
+//! This wave binds **`TWINVPN_RZ_LISTEN_TCP`** and terminates **TLS 1.3 with
+//! mutual RFC 7250 raw-public-key authentication** on it ([`crate::tls`]).
+//! `TWINVPN_RZ_LISTEN_QUIC` is parsed and validated but **not bound**:
+//! ADR-0001's L-CONTROL is QUIC + TLS 1.3 and this is the TCP shape of the same
+//! authentication, which ADR-0002 §11.2's rung 2 already contemplates. That gap
+//! is `README.md` §9's, not a silent substitution.
 //!
-//! What that costs is stated precisely there too. It does **not** change the
-//! parser, the caps, the ladder, the ceilings or the forwarding rule, which are
-//! the parts a transport cannot make safe.
+//! # The handshake happens before the framing
+//!
+//! A connection that presents no raw public key, or one it cannot prove
+//! possession of, **never reaches the parser**: `client_auth_mandatory` is true
+//! and rustls fails the handshake. So the B3 caps and the framing are now behind
+//! an authenticated channel rather than in front of one — which does not make
+//! them less load-bearing, because a device that authenticates is still a device
+//! this service does not trust.
 //!
 //! # The one rule the read loop must not get wrong
 //!
@@ -24,14 +28,16 @@
 //! it.
 
 use std::net::{IpAddr, SocketAddr};
+
+use crate::codec::{encode_endpoint, encode_error};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-use twinvpn_schema::{v1, Channel, Reject};
+use twinvpn_schema::{Channel, Reject};
 use twinvpn_service_common::transport::Admission;
 use twinvpn_service_common::{Metrics, ServiceError, ShutdownHandle};
 
@@ -39,19 +45,25 @@ use tokio::sync::Semaphore;
 
 use crate::admission::SourceLimiter;
 use crate::attach::{Attached, Egress};
+use crate::binding::{Binding, Claim};
 use crate::config::RendezvousConfig;
 use crate::frame::{self, Frame, Opcode, HEADER_LEN};
 use crate::ingress::{self, Disposition, Router};
+use crate::tls::ChannelIdentity;
 
 /// Everything a connection needs. `Router` is behind one mutex because the whole
-/// service state is three small tables and the work under the lock is a hash
+/// service state is four small tables and the work under the lock is a hash
 /// lookup — a lock-free design here would buy nothing and cost reviewability.
-#[derive(Debug)]
 pub struct Shared {
     /// The routing tables.
     pub router: Mutex<Router>,
     /// Per-source admission.
     pub limiter: Mutex<SourceLimiter>,
+    /// `device_id` ↔ authenticated channel identity.
+    pub bindings: Mutex<Box<dyn Binding>>,
+    /// The TLS acceptor. Constructed at startup; a key that cannot be loaded is
+    /// a startup failure, never a plaintext listener.
+    pub tls: tokio_rustls::TlsAcceptor,
     /// Configuration.
     pub config: RendezvousConfig,
     /// Counters.
@@ -60,6 +72,17 @@ pub struct Shared {
     /// with no connection bound is a file-descriptor exhaustion primitive; the
     /// semaphore makes the bound a resource rather than a hope.
     pub connections: Arc<Semaphore>,
+}
+
+impl std::fmt::Debug for Shared {
+    /// Names the parts and renders none of them. A `Shared` holds every
+    /// `device_id`, every channel identity and every queued `CALL` this process
+    /// knows; a derived `Debug` would be a rendering path for all three.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shared")
+            .field("service", &"rendezvous")
+            .finish_non_exhaustive()
+    }
 }
 
 /// How many egress frames may be queued for one attached device before this
@@ -86,6 +109,11 @@ pub mod counters {
     pub const MAILBOX_BYTES: &str = "twinvpn_rendezvous_mailbox_bytes";
     /// Currently attached devices.
     pub const ATTACHED: &str = "twinvpn_rendezvous_attached_devices";
+    /// TLS handshakes that did not complete — no client key, an unprovable key,
+    /// or a peer speaking something other than TLS 1.3.
+    pub const HANDSHAKES_REFUSED: &str = "twinvpn_rendezvous_tls_handshakes_refused_total";
+    /// `ATTACH`es refused because the claimed device does not match the channel.
+    pub const BINDING_MISMATCHES: &str = "twinvpn_rendezvous_binding_mismatches_total";
 }
 
 /// Accepts connections until `handle` drains.
@@ -126,19 +154,62 @@ pub async fn serve(
         tokio::spawn(async move {
             let _guard = guard;
             let _slot = slot;
-            let _ = connection(stream, peer, shared).await;
+            let _ = accept_one(stream, peer, shared).await;
         });
     }
 }
 
-/// Serves one connection.
-async fn connection(
+/// Completes the TLS handshake, then serves the connection behind it.
+///
+/// The handshake is bounded by the same deadline a partial frame gets: a peer
+/// that opens a socket and then stalls mid-handshake is the slowloris case one
+/// layer down, and rustls will wait as long as the peer makes it.
+async fn accept_one(
     stream: TcpStream,
     peer: SocketAddr,
     shared: Arc<Shared>,
 ) -> std::io::Result<()> {
     let _ = stream.set_nodelay(true);
-    let (mut rd, mut wr) = stream.into_split();
+    let handshake =
+        tokio::time::timeout(shared.config.frame_read_timeout, shared.tls.accept(stream)).await;
+    // No client key, an unprovable key, a TLS 1.2 hello, or plaintext. The peer
+    // learns only that the handshake failed; nothing is answered and no state
+    // exists to change.
+    let Ok(Ok(tls)) = handshake else {
+        count(
+            &shared,
+            counters::HANDSHAKES_REFUSED,
+            "TLS handshakes that did not complete",
+        );
+        return Ok(());
+    };
+
+    // `client_auth_mandatory` means a completed handshake always presented a
+    // key. If that ever stops being true, refuse rather than serve an
+    // unidentified peer.
+    let Some(channel) = crate::tls::peer_identity(tls.get_ref().1) else {
+        count(
+            &shared,
+            counters::HANDSHAKES_REFUSED,
+            "TLS handshakes that did not complete",
+        );
+        return Ok(());
+    };
+
+    connection(tls, channel, peer, shared).await
+}
+
+/// Serves one authenticated connection.
+async fn connection<S>(
+    stream: S,
+    channel: ChannelIdentity,
+    peer: SocketAddr,
+    shared: Arc<Shared>,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (mut rd, mut wr) = tokio::io::split(stream);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Egress>(EGRESS_QUEUE);
 
     // The egress task. Nothing here renders a payload: `Verbatim`'s `Debug`
@@ -170,7 +241,7 @@ async fn connection(
     let _ = tx.try_send(Egress::Reflexive(encode_endpoint(peer)));
 
     let mut bound: Option<(frame::DeviceId, u64)> = None;
-    let outcome = read_loop(&mut rd, peer.ip(), &shared, &tx, &mut bound).await;
+    let outcome = read_loop(&mut rd, peer.ip(), &channel, &shared, &tx, &mut bound).await;
 
     if let Some((device_id, epoch)) = bound {
         shared
@@ -185,13 +256,17 @@ async fn connection(
     outcome
 }
 
-async fn read_loop(
-    rd: &mut tokio::net::tcp::OwnedReadHalf,
+async fn read_loop<R>(
+    rd: &mut R,
     source: IpAddr,
+    channel: &ChannelIdentity,
     shared: &Arc<Shared>,
     tx: &tokio::sync::mpsc::Sender<Egress>,
     bound: &mut Option<(frame::DeviceId, u64)>,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
     loop {
         let mut header = [0u8; HEADER_LEN];
         // An idle connection is legitimate: an attached peer waits here for a
@@ -253,7 +328,7 @@ async fn read_loop(
         let now = Instant::now();
         match parsed {
             Frame::Attach { device_id } => {
-                if !handle_attach(shared, tx, bound, device_id, now).await {
+                if !handle_attach(shared, tx, channel, bound, device_id, now).await {
                     return Ok(());
                 }
             }
@@ -301,10 +376,27 @@ async fn read_loop(
 async fn handle_attach(
     shared: &Arc<Shared>,
     tx: &tokio::sync::mpsc::Sender<Egress>,
+    channel: &ChannelIdentity,
     bound: &mut Option<(frame::DeviceId, u64)>,
     device_id: frame::DeviceId,
     now: Instant,
 ) -> bool {
+    // The claim is checked against the AUTHENTICATED channel identity before
+    // anything is bound, delivered or drained. `CONTROL.CHANNEL_BINDING_MISMATCH`
+    // is FATAL/CRITICAL: `trust-boundaries.md` §4 calls a binding mismatch
+    // "a security event, never a parse error", and this is the same event one
+    // layer out — a device_id being claimed on a channel not entitled to it.
+    if let Claim::Refused(_) = shared.bindings.lock().await.claim(channel, device_id, now) {
+        let e = ingress::channel_binding_mismatch();
+        e.emit(&shared.metrics, "binding_mismatch");
+        count(
+            shared,
+            counters::BINDING_MISMATCHES,
+            "ATTACHes refused for a channel-binding mismatch",
+        );
+        ack(tx, &e);
+        return false;
+    }
     let (result, superseded, queued) = {
         let mut router = shared.router.lock().await;
         let (result, superseded) = router.attachments.attach(device_id, tx.clone(), now);
@@ -362,53 +454,6 @@ fn count(shared: &Arc<Shared>, name: &'static str, help: &'static str) {
 
 fn ack(tx: &tokio::sync::mpsc::Sender<Egress>, e: &ServiceError) {
     let _ = tx.try_send(Egress::Ack(Bytes::from(encode_error(e))));
-}
-
-/// Encodes a `ServiceError` as `twinvpn.v1.ErrorEnvelope`.
-///
-/// `ServiceError` has no message field and its envelope carries only the
-/// registered code plus **this build's** registry attributes, so there is no
-/// path by which an internal error string reaches the wire.
-fn encode_error(e: &ServiceError) -> Vec<u8> {
-    use prost::Message as _;
-    let env: v1::ErrorEnvelope = e.envelope();
-    let mut buf = Vec::with_capacity(env.encoded_len());
-    env.encode(&mut buf).expect("a Vec never fails to grow");
-    buf
-}
-
-/// Encodes an observed source address as `twinvpn.v1.Endpoint`.
-///
-/// Both families are first-class here: `Endpoint`'s `IPAddress` is a `oneof`, so
-/// "we have a v4 story and a v6 story" is not sayable — ADR-0010 R1 expressed in
-/// the schema rather than in a runtime branch.
-///
-/// # Panics
-///
-/// Never: the only fallible step is encoding into a `Vec`, which cannot fail.
-#[must_use]
-pub fn encode_endpoint(peer: SocketAddr) -> Bytes {
-    use prost::Message as _;
-    let address = match peer.ip() {
-        IpAddr::V4(v4) => v1::ip_address::Address::V4(v1::IPv4Address {
-            octets: v4.octets().to_vec(),
-        }),
-        IpAddr::V6(v6) => v1::ip_address::Address::V6(v1::IPv6Address {
-            octets: v6.octets().to_vec(),
-            // A rendezvous connection never arrives on a link-local source, and
-            // an invented zone index would be a lie a peer might act on.
-            zone_index: 0,
-        }),
-    };
-    let ep = v1::Endpoint {
-        address: Some(v1::IpAddress {
-            address: Some(address),
-        }),
-        port: u32::from(peer.port()),
-    };
-    let mut buf = Vec::with_capacity(ep.encoded_len());
-    ep.encode(&mut buf).expect("a Vec never fails to grow");
-    Bytes::from(buf)
 }
 
 /// Runs the TTL sweep until shutdown, so expired bytes are reclaimed on a timer

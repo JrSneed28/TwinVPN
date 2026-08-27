@@ -77,7 +77,7 @@ fn hostile_cases() -> Vec<(&'static str, Vec<u8>)> {
 
 async fn refused_without_state_change(h: &common::Harness, bytes: &[u8], case: &str) {
     let before = h.shared.store.lock().await.len();
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     c.write(bytes).await;
     let answered = common::within(async {
         let mut seen = Vec::new();
@@ -107,7 +107,7 @@ async fn every_hostile_input_is_refused_without_a_state_change() {
         }
         // The service is still serving afterwards.
         let device = [0x01u8; 32];
-        let mut c = common::Client::connect(h.addr).await;
+        let mut c = h.client().await;
         c.bind(device).await;
         c.write(&testkit::publish_frame(&testkit::heartbeat(
             device,
@@ -127,7 +127,7 @@ async fn every_hostile_input_is_refused_without_a_state_change() {
 async fn a_declared_four_gigabytes_does_not_allocate_four_gigabytes() {
     let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
     for _ in 0..500 {
-        let mut c = common::Client::connect(h.addr).await;
+        let mut c = h.client().await;
         c.write(&testkit::declared_length_frame(
             Opcode::Publish,
             u32::MAX,

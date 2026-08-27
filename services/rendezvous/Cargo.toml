@@ -30,8 +30,25 @@ tokio = { workspace = true }
 bytes = { workspace = true }
 prost = { workspace = true }
 
+# TLS termination. The integration lead added these to the workspace manifest
+# after this domain reported the unauthenticated-ATTACH hole; ADR-0018 CD-I2
+# scopes the crypto-dependency rule to the /core crate set, and these are
+# separate server artifacts that do not link the core (§11.2 rows 2.8/2.11).
+rustls           = { workspace = true }
+tokio-rustls     = { workspace = true }
+rustls-pemfile   = { workspace = true }
+rustls-pki-types = { workspace = true }
+
 [dev-dependencies]
 # The B3 parser is the most hostile surface in the system; `ownership.md` §6
 # rules 9/10 make "never panics, never allocates unboundedly" a property rather
 # than a set of examples, and a property needs a property test.
 proptest = "1.11"
+
+# Test-only key generation. `rustls` already links `aws-lc-rs` at RUNTIME as its
+# default provider, so this adds no crate to the lockfile and no runtime
+# cryptographic dependency to the service -- it is named here only so a test can
+# mint an ephemeral P-256 keypair. The alternative was committing a private key
+# to the repository or depending on `openssl` being on the host, and both are
+# worse. Flagged to the integration lead in README.md section 8.
+aws-lc-rs = "1.18"

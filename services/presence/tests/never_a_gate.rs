@@ -105,7 +105,7 @@ async fn with_presence_entirely_down_there_is_no_answer_to_gate_on() {
 async fn a_presence_record_carries_no_address() {
     let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
     let device = [0x88u8; 32];
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     c.bind(device).await;
     c.write(&pr::testkit::publish_frame(&pr::testkit::heartbeat(
         device,
