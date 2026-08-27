@@ -147,6 +147,7 @@ running with a known password. `infra/README.md` §4.1 rule 1 and the compose
 |---|---|---|---|---|
 | `TWINVPN_SERVICE_NAME` | string | the caller's `default_service_name` | no | the per-service default baked into the image |
 | `TWINVPN_ENVIRONMENT` | string | `local` | no | `local` |
+| `TWINVPN_INSTANCE_ID` | string | the container hostname | no | `HOSTNAME`, else `/etc/hostname`, else `{service_name}-{pid}` — see §3.5. Compose sets it per service |
 | `TWINVPN_LOG_LEVEL` | `off\|critical\|error\|warn\|info\|debug\|trace` | `info` | no | `info`. A value the loader does not recognise is a **startup failure**, not a fallback |
 | `TWINVPN_LOG_FORMAT` | `json\|text` | `json` | no | `json` |
 | `TWINVPN_LOG_LEVEL_EXPIRY_MS` | u64 ms | `3600000` | no | 1 h. The bound on how long `DEBUG`/`TRACE` may stay on (ADR-0015 §11.5). Raising it is a real privacy decision |
@@ -186,7 +187,33 @@ service validating against different bounds from the ones it was built with woul
 pass its own tests and reject real traffic. Pass `RegistryCheck::Skip` in a unit
 test or on a host with no `contracts/registry` mount.
 
-### 3.4 Per-service variables
+### 3.4 `service.instance.id`, and why it is not derived
+
+`ServiceConfig::load` resolves it, in this order, and records which one it used:
+
+| Source | `InstanceIdSource` | Survives a restart |
+|---|---|---|
+| `TWINVPN_INSTANCE_ID` | `Configured` | yes — and it is the operator's choice |
+| `HOSTNAME`, else `/etc/hostname` | `Hostname` | yes |
+| `{service_name}-{pid}` | `ProcessFallback` | **no** |
+
+Call `cfg.observability()` — **not** `observability_config(&derived)` — and then
+`cfg.log_instance_id_resolution()` once the subscriber is installed.
+
+The last row is a degraded mode and says so at `WARN`. An id that changes on
+every restart makes every fleet aggregate grouped by `service.instance.id` mean
+something other than what it says: *"how many instances served this"* silently
+becomes *"how many times did anything restart"*. The collector allowlists the
+attribute; before this, nothing supplied it correctly.
+
+Reading the hostname here is a deliberate narrowing of the earlier decision to
+take the id as a caller argument. The thing to avoid is an id **invented** per
+process; a hostname is neither invented nor per-process. The resolution rides
+`twinvpn.outcome` (an ADR-0015 §9 label) rather than a new attribute, because a
+key meaning "where an id came from" is not on the collector allowlist and would
+simply be deleted.
+
+### 3.5 Per-service variables
 
 `TWINVPN_CP_*`, `TWINVPN_RZ_*`, `TWINVPN_PRESENCE_*`, `TWINVPN_RELAY_*`,
 `TWINVPN_RELAYDIR_*` and `TWINVPN_RELAYHEALTH_*` belong to their own domains and
@@ -232,17 +259,31 @@ and the container `HEALTHCHECK` do not each open a database connection. A state
 change invalidates the cache immediately, so a drain is red on the very next
 probe rather than up to one TTL later.
 
-### I5 — the relay's readiness may never call the control plane
+### I5 — when readiness may not depend on the control plane
 
-ADR-0005 §11.3 and architecture.md A-12: relay admission verifies an Owner-rooted
+`ReadinessPolicy::NoControlPlaneCalls` exists for **two different reasons**, and a
+reader who knows only one will wrongly conclude the rule does not apply to them.
+
+**The data plane: a relay must not need coordination to start.** ADR-0005 §11.3
+and architecture.md A-12: relay admission verifies an Owner-rooted
 `RelayCapabilityToken` **offline**, so a relay must come up and stay up with the
-whole control plane down. `infra/README.md` §2.3 records that the compose
-topology has no `depends_on` edge from a relay onto the control plane and that
-"that absence is load-bearing".
+whole control plane down. `infra/README.md` §2.3 records that the compose topology
+has no `depends_on` edge from a relay onto the control plane and that "that
+absence is load-bearing".
 
-The same absence holds inside the process. Build the relay's registry with
-`ReadinessPolicy::NoControlPlaneCalls` and `readiness()` **refuses** any probe
-declaring `ProbeKind::ControlPlane`:
+**The signalling path: a readiness check is itself a dependency.** A rendezvous or
+presence instance that reports NOT READY on a control-plane blip is pulled from
+the load balancer; that stops candidate exchange; and that puts the control plane
+back in the critical path of every reconnect. **I5 is violated by way of a health
+check, with no line of code anywhere calling the control plane.**
+`rendezvous-connectivity` reached this independently and deliberately diverged
+from `infra/README.md` §5 to get it.
+
+So the question when wiring a service is not *"do I call the control plane?"* but
+*"does my readiness **answer** depend on it?"*. If it does, this is the policy.
+
+Either way the absence holds inside the process: `readiness()` **refuses** any
+probe declaring `ProbeKind::ControlPlane`, at wiring time.
 
 ```rust
 HealthRegistry::builder(ReadinessPolicy::NoControlPlaneCalls)
@@ -256,8 +297,8 @@ The four services' readiness sets, from `infra/README.md` §5, are:
 | Service | policy | `/readyz` checks |
 |---|---|---|
 | `control-plane` | `AnyDependency` | Postgres reachable; the per-`TwinNet` write lease obtainable or knowingly held elsewhere |
-| `rendezvous` | `AnyDependency` | the control-plane authorization endpoint reachable |
-| `presence` | `AnyDependency` | Postgres reachable |
+| `rendezvous` | **`NoControlPlaneCalls`** | local state only. `infra/README.md` §5 lists `AnyDependency` with "the control-plane authorization endpoint reachable"; that is the divergence above, and the divergence is correct |
+| `presence` | **`NoControlPlaneCalls`** | Postgres reachable — but never the control plane |
 | `relay-a`/`relay-b` | **`NoControlPlaneCalls`** | issuer key set loaded and parsable; all configured carriages bound |
 | `relay-directory` | `AnyDependency` | Postgres; signing key loaded; the map satisfies ≥2 alternates / ≥2 failure domains |
 | `relay-health` | `AnyDependency` | Postgres reachable |

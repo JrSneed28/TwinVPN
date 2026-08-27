@@ -70,15 +70,22 @@ async fn run() -> std::process::ExitCode {
     };
 
     // 2. Metrics, then observability.
+    //
+    //    `observability()` uses the instance id `ServiceConfig` resolved from
+    //    TWINVPN_INSTANCE_ID (which compose supplies per service), not one
+    //    derived here. A `{name}-{pid}` id changes on every restart, so every
+    //    fleet aggregate grouped by `service.instance.id` silently counts
+    //    restarts instead of instances.
     let metrics = svc::Metrics::new();
-    let instance_id = format!("{}-{}", cp::SERVICE_NAME, std::process::id());
-    let obs = match svc::obs::init(&cfg.observability_config(&instance_id), metrics.clone()) {
+    let obs = match svc::obs::init(&cfg.observability(), metrics.clone()) {
         Ok(obs) => Arc::new(obs),
         Err(e) => {
             eprintln!("control-plane: observability refused: {e}");
             return std::process::ExitCode::FAILURE;
         }
     };
+    // Which of the three sources was used, visible rather than inferred.
+    cfg.log_instance_id_resolution();
 
     // 2b. The signature verifier. Real: COSE_Sign1 through `twinvpn-crypto`,
     //     the same audited provider the client verifies with.

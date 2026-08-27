@@ -134,7 +134,7 @@ pub mod tls;
 pub mod transport;
 
 pub use binding::{Binding, BindingCardinality, BindingLimits, ChannelPinned, Claim, Refusal};
-pub use config::{ConfigError, ServiceConfig};
+pub use config::{ConfigError, InstanceIdSource, ServiceConfig};
 pub use correlation::Correlation;
 pub use errors::ServiceError;
 pub use forward::{Forwarded, Framing, Verbatim};
