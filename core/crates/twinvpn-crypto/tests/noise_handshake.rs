@@ -79,8 +79,11 @@ fn prologue(trust_epoch: u64, psk_epoch: u64, selection: &[u8]) -> Prologue {
     )
 }
 
-fn psk(epoch: u64, seed: &[u8]) -> TwinNetPsk {
-    TwinNetPsk::derive(b"pair-secret", seed, epoch, &[0x01; 32], &[0x02; 32]).expect("psk")
+/// `TwinNetPSK(A,B,e)` per ADR-0007 §7.7. `seed` is `EpochSeed(e)`, which is
+/// 32 bytes; the peer identities are not inputs (the pairwise binding is
+/// already in `PairSecret`).
+fn psk(epoch: u64, seed: &[u8; 32]) -> TwinNetPsk {
+    TwinNetPsk::derive(b"pair-secret", seed, "tn-1", epoch).expect("psk")
 }
 
 /// Runs a full handshake and returns both transport sessions, or the first
@@ -209,8 +212,8 @@ fn two_peers_that_agree_complete_the_handshake_and_carry_data() {
     let (mut a, mut b) = run_handshake(
         &p,
         &p,
-        &psk(1, b"seed"),
-        &psk(1, b"seed"),
+        &psk(1, &[0x5d; 32]),
+        &psk(1, &[0x5d; 32]),
         &init_static,
         &resp_static,
         &resp_pub,
@@ -243,8 +246,8 @@ fn a_peer_at_a_stale_psk_epoch_cannot_complete_the_handshake() {
         &p,
         // The revoked device is not a recipient of EpochSeed(2), so it can only
         // present the epoch-1 PSK.
-        &psk(1, b"seed-1"),
-        &psk(2, b"seed-2"),
+        &psk(1, &[0x01; 32]),
+        &psk(2, &[0x02; 32]),
         &init_static,
         &resp_static,
         &resp_pub,
@@ -266,8 +269,8 @@ fn a_divergent_trust_epoch_in_the_prologue_fails_the_handshake() {
     let err = run_handshake(
         &prologue(1, 1, b"\xa0"),
         &prologue(2, 1, b"\xa0"),
-        &psk(1, b"seed"),
-        &psk(1, b"seed"),
+        &psk(1, &[0x5d; 32]),
+        &psk(1, &[0x5d; 32]),
         &init_static,
         &resp_static,
         &resp_pub,
@@ -287,8 +290,8 @@ fn a_tampered_negotiation_selection_fails_the_handshake() {
     let err = run_handshake(
         &prologue(1, 1, b"\xa0"),
         &prologue(1, 1, b"\xa1\x01\x02"),
-        &psk(1, b"seed"),
-        &psk(1, b"seed"),
+        &psk(1, &[0x5d; 32]),
+        &psk(1, &[0x5d; 32]),
         &init_static,
         &resp_static,
         &resp_pub,
@@ -309,8 +312,8 @@ fn a_replayed_transport_frame_is_refused() {
     let (mut a, mut b) = run_handshake(
         &p,
         &p,
-        &psk(1, b"seed"),
-        &psk(1, b"seed"),
+        &psk(1, &[0x5d; 32]),
+        &psk(1, &[0x5d; 32]),
         &init_static,
         &resp_static,
         &resp_pub,
@@ -340,8 +343,8 @@ fn a_forged_frame_does_not_advance_the_replay_window() {
     let (mut a, mut b) = run_handshake(
         &p,
         &p,
-        &psk(1, b"seed"),
-        &psk(1, b"seed"),
+        &psk(1, &[0x5d; 32]),
+        &psk(1, &[0x5d; 32]),
         &init_static,
         &resp_static,
         &resp_pub,
@@ -394,7 +397,7 @@ fn an_initiator_without_a_verified_peer_static_is_refused() {
     let env = test_env(1);
     let s = static_key(0x11);
     let p = prologue(1, 1, b"\xa0");
-    let k = psk(1, b"seed");
+    let k = psk(1, &[0x5d; 32]);
     let err = Handshake::new(
         &env,
         Role::Initiator,

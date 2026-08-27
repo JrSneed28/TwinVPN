@@ -17,7 +17,7 @@ means.
 | Module | Contents |
 |---|---|
 | `noise` | `Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s` over `snow`, the §7.2 rekey constants, the stateless transport |
-| `psk` | `TwinNetPSK(A,B,epoch)` — the one TwinVPN-designed derivation (§7.5, ADR-0007 §7.7) |
+| `psk` | `TwinNetPSK(A,B,epoch)` — the one TwinVPN-designed derivation. **ADR-0007 §7.7 lines 654-657 is the operative text**; ADR-0001 §7.5 writes it with an ellipsis and is overruled by ADR-0007 §10. Pinned with a golden vector |
 | `prologue` | the 83-byte §7.3.1 prologue and its two contributed digests |
 | `binding` | `TunnelKeyBinding` verification; `VerifiedTunnelKey` has **no public constructor** |
 | `cose` | COSE_Sign1 verification **over the received octets**; `VerifiedStatement` has **no public constructor** |
@@ -44,7 +44,7 @@ It is a library; there is nothing to start. To exercise it:
 ```bash
 source build/toolchain/env.sh
 cd core
-cargo test -p twinvpn-crypto                       # 87 unit tests
+cargo test -p twinvpn-crypto                       # 95 unit tests
 cargo test -p twinvpn-crypto --test signed_statements  # 29 attack tests
 cargo test -p twinvpn-crypto --test noise_handshake    # 8 end-to-end tests
 ```
@@ -71,6 +71,22 @@ content, so a `Debug` of one is safe to log.
   different device. A skipped check here is a full authentication bypass.
 - `CRYPTO.HANDSHAKE_REJECTED` — deliberately indistinguishable between causes
   (§7.3.1 P-3, and A1's silence on unauthenticated input).
+
+## The `twinnet_id` has two encodings
+
+Deliberately, because the two sites impose opposite constraints:
+
+- **`prologue`** contracts it to `SHA-256(twinnet_id)[0..16]`, because §7.3.1's
+  `identity_binding_hash` is a preimage of concatenated **fixed-width** fields
+  and declares `twinnet_id(16)`, while `contracts/` declares the identifier a
+  `tstr .size (1..64)`.
+- **`psk`** uses the **raw UTF-8 bytes**, because ADR-0007 §7.7's
+  `salt = twinnet_id || e (u64 BE)` feeds HKDF, whose salt is variable-length by
+  construction (RFC 5869 §2.2).
+
+`the_twinnet_contraction_is_for_the_prologue_and_not_for_the_psk_salt` pins the
+distinction. Applying one answer at the other site breaks interoperability in
+one direction and field alignment in the other.
 
 ## `unsafe`
 
