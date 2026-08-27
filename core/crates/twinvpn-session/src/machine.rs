@@ -178,6 +178,16 @@ impl SessionMachine {
     /// one [`Outcome::Ignored`] when none does.
     pub fn apply(&mut self, trigger: Trigger, guards: Guards, ctx: Context) -> Outcome {
         let Some(resolution) = table::resolve(self.state, trigger, guards, ctx) else {
+            // Not a silent drop: an ignored trigger is recorded at DEBUG with
+            // the state that ignored it, so "nothing happened" is still
+            // observable (§10.4's honest-ambiguity rule).
+            tracing::debug!(
+                target: "twinvpn::session",
+                session_id = %session_fingerprint(self.session_id),
+                state = ?self.state,
+                trigger = trigger.name(),
+                "trigger ignored in this state"
+            );
             return Outcome::Ignored {
                 state: self.state,
                 trigger,
@@ -235,6 +245,26 @@ impl SessionMachine {
             }
         }
 
+        // ADR-0015 O-05: the transition stream is emitted here, at the single
+        // choke point, for the same reason the record is — so no code path can
+        // move the machine without the event appearing.
+        //
+        // Nothing here is a key, a payload or a pairing secret: the fields are a
+        // fingerprint, two state names, a row label and a registered code.
+        // `SessionId`'s own `Debug` is redacted, so the fingerprint is taken
+        // explicitly rather than reached by a derive (`ownership.md` §6 rule 11).
+        tracing::info!(
+            target: "twinvpn::session",
+            session_id = %session_fingerprint(record.session_id),
+            from = ?record.from,
+            to = ?record.to,
+            trigger = record.trigger.name(),
+            row = record.row.label(),
+            reason_code = record.reason_code.map(twinvpn_types::ReasonCode::as_str),
+            occurred_at_micros = record.occurred_at_micros,
+            "connection state transition"
+        );
+
         self.state = to;
         self.reason = record.reason_code.filter(|_| to.requires_reason_code());
         self.history.push(record.clone());
@@ -272,6 +302,19 @@ fn default_resume_reason(state: SessionState) -> ReasonCode {
         // the same honest answer for any state that carries no code at all.
         _ => codes::PLATFORM_PROCESS_RESTARTED,
     }
+}
+
+/// A short, stable prefix of a `SessionId`, for a local log line.
+///
+/// `SessionId` is `SENSITIVE` and its `Debug` is redacted, so reaching the bytes
+/// is deliberately explicit and greppable (`twinvpn-types`' `to_hex` doc).
+/// §10.2 E6 permits it here — "`session_id` is **local**", and the event "carries
+/// no peer-pair correlation off-device" — and a prefix is enough to join two log
+/// lines without writing the whole identifier into a file.
+fn session_fingerprint(id: SessionId) -> String {
+    let mut hex = twinvpn_types::Identifier::to_hex(&id);
+    hex.truncate(8);
+    hex
 }
 
 /// §11.1: `EV_BACKGROUND` / `EV_FOREGROUND` switch the timer profile, and a park
