@@ -8,17 +8,26 @@
 # drift one.
 #
 # ===========================================================================
-# THERE IS NO CRYPTOGRAPHIC DEPENDENCY HERE, AND THAT IS DELIBERATE.
+# THE CRYPTOGRAPHY IS `twinvpn-crypto`'S, NOT THIS CRATE'S.
 # ===========================================================================
 # ADR-0018 CD-I2 makes `twinvpn-crypto` the only crate permitted a cryptographic
-# dependency. The relay needs three primitives it may not implement itself
-# (ADR-0005 C1, ownership.md §6 "do not invent cryptographic primitives"):
-# COSE_Sign1/Ed25519 verification for the RelayCapabilityToken and the
-# RelayEpochFloor, a truncated BLAKE2s frame MAC under K_leg, and a one-way
-# 16-byte digest for the daily relay_sub re-hash.
+# dependency, and ownership.md §6 forbids inventing primitives. The relay needs
+# three it may not implement itself (ADR-0005 C1): COSE_Sign1/Ed25519
+# verification for the RelayCapabilityToken and the RelayEpochFloor, a truncated
+# BLAKE2s frame MAC under K_leg, and a one-way digest for the daily relay_sub
+# re-hash.
 #
-# They are therefore taken as an INJECTED SEAM (`crate::crypto::RelayCrypto`)
-# whose default provider REFUSES EVERYTHING. See src/crypto.rs and README.md §8.
+# The workspace now declares `twinvpn-crypto` as a permitted edge for the relay
+# plane, chosen over four primitive crates because of DP-8: at most two crypto
+# providers fleet-wide, both passing the identical golden-vector corpus. Four
+# primitive crates here would be a SECOND provider whose agreement with the
+# core's is untested. Depending on `twinvpn-crypto` is not itself a cryptographic
+# dependency -- it is the crate that encapsulates them.
+#
+# The injected seam (`crate::crypto::RelayCrypto`) is KEPT: it is what let the
+# admission policy be tested with no provider at all, and `crypto::FailClosed`
+# remains the default when none is configured. `crate::provider` binds the real
+# one behind it.
 [package]
 name    = "twinvpn-relay"
 version.workspace      = true
@@ -39,6 +48,7 @@ path = "src/main.rs"
 
 [dependencies]
 twinvpn-schema = { workspace = true }
+twinvpn-crypto = { workspace = true }
 twinvpn-types  = { workspace = true }
 thiserror      = { workspace = true }
 tracing        = { workspace = true }

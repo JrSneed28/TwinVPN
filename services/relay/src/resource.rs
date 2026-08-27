@@ -30,9 +30,9 @@ use std::time::Instant;
 
 use twinvpn_service_common::transport::{Admission, TokenBucket};
 
+use crate::claims::Quota;
 use crate::condition::Condition;
 use crate::subject::RelaySub;
-use crate::token::Quota;
 
 /// The configured ceilings a token's quota may not exceed.
 #[derive(Debug, Clone, Copy)]

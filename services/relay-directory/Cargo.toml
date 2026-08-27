@@ -32,6 +32,7 @@ path = "src/main.rs"
 
 [dependencies]
 twinvpn-schema = { workspace = true }
+twinvpn-crypto = { workspace = true }
 twinvpn-types  = { workspace = true }
 thiserror      = { workspace = true }
 tracing        = { workspace = true }

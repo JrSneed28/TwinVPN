@@ -15,114 +15,120 @@
 //!
 //! # The payload is never a value this crate can read
 //!
-//! [`RelayFrame::payload`] returns [`Opaque`], whose whole surface is
-//! `as_bytes`, `to_bytes`, `len` and `is_empty` — there is no decode, no parse,
-//! no `Display`, and a `Debug` that prints a length, never octets. That is one
-//! half of the I1 structural argument; the other half is
-//! [`crate::crypto::RelayCrypto`] having no decrypt operation at all.
+//! [`RelayFrame::payload`] returns [`twinvpn_service_common::Verbatim`] built
+//! through **[`Verbatim::from_opaque`]** — `Framing::Opaque`, size cap only. Its
+//! whole surface is `as_bytes`, `to_bytes`, `into_bytes`, `len`, `is_empty`:
+//! there is no decode, no parse, no `Display`, and a `Debug` that prints a
+//! length, a channel and the framing token, never octets. That is one half of the
+//! I1 structural argument; the other half is [`crate::crypto::RelayCrypto`]
+//! having no decrypt operation at all.
 //!
-//! # Why not `twinvpn_service_common::Verbatim` — a finding, not a preference
+//! # Why `from_opaque` and not `from_received`
 //!
-//! W-4 directs every forwarder at `Forwarded`/`Verbatim`, and the *rule* it
-//! encodes — forward the received octets verbatim, never decode-then-re-encode —
-//! is honoured here in its strongest possible form: the relay never decodes at
-//! all. But `Verbatim::from_received` cannot carry a relay `DATA` payload,
-//! because it calls `twinvpn_schema::depth::check`, a **protobuf** record scan
-//! that returns `Reject::Unparseable` when "the bytes are not a well-formed
-//! record sequence at the top level".
+//! `from_received` is `Framing::ProtobufRecords`: it runs
+//! `twinvpn_schema::depth::check`, a protobuf record scan that returns
+//! `Reject::Unparseable` for bytes that are not a well-formed record sequence. A
+//! relay `DATA` payload is an unmodified WireGuard L-DATA datagram (ADR-0001
+//! §11, ADR-0005 C2) — AEAD ciphertext, not protobuf — so `from_received`
+//! refuses essentially all real relay traffic.
 //!
-//! A relay `DATA` payload is an unmodified WireGuard L-DATA datagram (ADR-0001
-//! §11, ADR-0005 C2) — AEAD ciphertext, not protobuf. Wrapping it in `Verbatim`
-//! rejects essentially all real traffic. Measured, not assumed:
-//! `the_service_common_verbatim_primitive_cannot_carry_l_data` below.
+//! The deeper reason `from_opaque` exists is ADR-0003 **R7**: "B4 MUST have
+//! **zero** serialization framework in the packet path", and
+//! `contracts/README.md`'s note that B4's schema artifact is *absent by design*
+//! so "the highest-rate path is immune to serialization bugs by construction".
+//! A parser on this path removes that immunity. The pair is asserted below by
+//! `the_two_framings_disagree_which_is_the_whole_finding`: protobuf mode refuses
+//! an L-DATA datagram, opaque mode carries it.
 //!
-//! `Verbatim` is right for the rendezvous' opaque `CALL` *envelope*, which is
-//! protobuf; it is wrong for a ciphertext leg. That is a `twinvpn-service-common`
-//! gap for this consumer and is reported to the integration lead rather than
-//! worked around silently. [`Opaque`] keeps every property `Verbatim` provides —
-//! the size bound, the absent decoder, the non-rendering `Debug` — and drops only
-//! the protobuf structural assumption.
+//! # Bounds before allocation — and where the bound comes from
 //!
-//! # Bounds before allocation
-//!
-//! `parse` refuses anything shorter than the header before it indexes, and
-//! bounds the payload through `twinvpn_service_common::transport::check_declared_length`
-//! against `Channel::PeerDatagram`'s cap — `ownership.md` §6 rules 9 and 10, on a
+//! See [`MAX_DATA_PAYLOAD_BYTES`]. `parse` refuses anything shorter than the
+//! header before it indexes, and bounds the payload against that derived B4
+//! ceiling *before* retaining it — `ownership.md` §6 rules 9 and 10, on a
 //! directly attacker-reachable surface.
 
 use bytes::Bytes;
 use twinvpn_schema::{Channel, Reject};
-use twinvpn_service_common::transport::check_declared_length;
-
-/// A payload this process is not entitled to interpret.
-///
-/// Modelled on `twinvpn_service_common::Verbatim` and deliberately no larger:
-/// bytes out, a length, and a `Debug` that says only how many. There is no
-/// `decode`, no `Display`, no `Serialize` and no `AsRef<[u8]>` — an implicit
-/// conversion is exactly what a reviewer does not see.
-#[derive(Clone)]
-pub struct Opaque(Bytes);
-
-impl Opaque {
-    /// Bounds and retains `bytes` against `channel`'s byte cap.
-    ///
-    /// The **only** check applied is the size cap. No structural scan runs,
-    /// because there is no structure: the relay is forwarding ciphertext it must
-    /// not interpret, and a parser that "understands" it would be the I1
-    /// violation.
-    ///
-    /// # Errors
-    ///
-    /// [`Reject::SizeExceeded`], carrying the `limits.json` bound it violated.
-    /// Never a truncation, never a pad.
-    pub fn from_received(bytes: Bytes, channel: Channel) -> Result<Self, Reject> {
-        let limit = channel.max_bytes();
-        if bytes.len() > limit {
-            return Err(Reject::SizeExceeded {
-                parser_id: channel.parser_id(),
-                observed: bytes.len(),
-                limit,
-            });
-        }
-        Ok(Self(bytes))
-    }
-
-    /// The octets, unchanged.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-
-    /// The octets, cheaply cloned for the next hop.
-    #[must_use]
-    pub fn to_bytes(&self) -> Bytes {
-        self.0.clone()
-    }
-
-    /// How many octets.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Whether the payload is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-impl std::fmt::Debug for Opaque {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Opaque({} bytes)", self.0.len())
-    }
-}
+use twinvpn_service_common::Verbatim;
 
 /// The wire header length. ADR-0005 §9.1.
 pub const HEADER_LEN: usize = 16;
 
 /// The protocol version this build speaks, in the `ver` nibble.
 pub const VERSION: u8 = 1;
+
+/// The largest `DATA` payload a relay leg can legitimately carry: **1456 bytes**.
+///
+/// # This is derived, not borrowed — and the number it replaced was wrong
+///
+/// The first version of this crate bounded the payload against
+/// `Channel::PeerDatagram` (1200 B, `limits.json`'s `envelope.c4_max_bytes`).
+/// That is the **C4 rendezvous datagram** cap: a pre-authentication,
+/// attacker-reachable *signalling* channel, deliberately given "the smallest safe
+/// parser". A relay leg is B4, and it is bounded by **path MTU**, not by C4.
+///
+/// It was not merely the nearest available number, it was **too small to be
+/// legal**. `docs/networking.md` §6.2 and ADR-0005 C7 fix an overlay MTU floor of
+/// **1280**, and ADR-0005 §9.2 adds 32 B of L-DATA overhead beneath it, so the
+/// smallest payload a conforming relay must be able to carry is
+/// `1280 + 32 = 1312` — above 1200. A 1200-byte cap would have made the 1280
+/// floor unachievable on every carriage, which is exactly the condition §9.2
+/// requires `RELAY.MTU_FLOOR_VIOLATED` for.
+///
+/// # The derivation
+///
+/// `limits.json` has **no B4 entry to look this up in**, and that absence is
+/// consistent rather than accidental: `contracts/README.md` records that B4's
+/// schema artifact is *absent by design*. So the bound has to be argued from
+/// ADR-0005 §9.2's overhead table.
+///
+/// A relay receives a datagram and forwards it byte for byte; it never fragments
+/// and never reassembles (§11.1(5)). The payload it carries is therefore one
+/// L-DATA datagram, and the largest one any carriage can deliver on the underlay
+/// §9.2 analyses is the row with the **least framing beneath `RelayFrame`** —
+/// `R-UDP` over IPv4:
+///
+/// ```text
+///   1500   Ethernet underlay MTU (§9.2's stated basis)
+///   -  20  IPv4 header
+///   -   8  UDP header
+///   -  16  RelayFrame (§9.1)
+///   ------
+///   = 1456 bytes of L-DATA datagram
+/// ```
+///
+/// Which is §9.2's own arithmetic read the other way: that row gives an overlay
+/// MTU of 1424, and `1424 + 32` (L-DATA overhead) `= 1456`. Every other row —
+/// `R-UDP` v6 (1436), `R-QUIC` (1408 / 1388), `R-TLS` (1400 / 1380) — is
+/// **smaller**, because each adds framing beneath `RelayFrame`. So the v4 `R-UDP`
+/// row is the binding maximum across all four carriages and both families.
+///
+/// # Why this is the right conservative choice at the top end too
+///
+/// A link with an MTU above 1500 could in principle deliver more. Nothing in
+/// Phase 1 contemplates one: §9.2 states 1500 as its basis and lists only
+/// *lower* underlays (464XLAT 1480, PPPoE 1492) as variations, `docs/networking.md`
+/// §6.2 sets a floor and no ceiling above 1500, and DPLPMTUD searches downward
+/// from the interface MTU. Admitting jumbo frames here would widen an
+/// attacker-driven allocation on the highest-rate path in the system for traffic
+/// no ADR describes, so the ceiling stays where the ADR's own table puts it.
+///
+/// The margin is comfortable in the direction that matters: 1456 clears the 1312
+/// the 1280 floor requires by **144 bytes**, and
+/// `the_bound_clears_the_1280_overlay_floor` pins that.
+///
+/// # What a violation is
+///
+/// A silent drop, not a reply. ADR-0005 §11.5: the relay emits **zero bytes** in
+/// response to any unauthenticated or unbound frame, so an oversized datagram
+/// costs an attacker a packet and earns nothing — amplification stays at 1.0.
+pub const MAX_DATA_PAYLOAD_BYTES: usize = 1_456;
+
+/// The L-DATA per-datagram overhead ADR-0005 §9.2 accounts for.
+pub const L_DATA_OVERHEAD_BYTES: usize = 32;
+
+/// The overlay MTU floor `docs/networking.md` §6.2 and ADR-0005 C7 fix.
+pub const OVERLAY_MTU_FLOOR: usize = 1_280;
 
 /// ADR-0005 §9.1 frame types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,7 +196,7 @@ pub struct RelayFrame {
     counter_low: u16,
     flow_id: u32,
     auth_tag: [u8; 8],
-    payload: Opaque,
+    payload: Verbatim,
 }
 
 /// Why a frame was not parsed. Distinguished from [`Reject`] because a relay
@@ -242,10 +248,27 @@ impl RelayFrame {
         let mut auth_tag = [0_u8; 8];
         auth_tag.copy_from_slice(&datagram[8..16]);
 
-        // The bound check happens BEFORE the payload is retained.
+        // The bound check happens BEFORE the payload is retained, and it is the
+        // DERIVED B4 ceiling of `MAX_DATA_PAYLOAD_BYTES`, not a borrowed C4 cap.
         let payload_len = datagram.len() - HEADER_LEN;
-        check_declared_length(payload_len, Channel::PeerDatagram)?;
-        let payload = Opaque::from_received(datagram.slice(HEADER_LEN..), Channel::PeerDatagram)?;
+        if payload_len > MAX_DATA_PAYLOAD_BYTES {
+            return Err(FrameError::Bounds(Reject::CapViolated {
+                cap_violated: "relay.data_payload_max_bytes",
+                observed: payload_len as u64,
+                limit: MAX_DATA_PAYLOAD_BYTES as u64,
+            }));
+        }
+        // `Framing::Opaque` -- size cap only, no record scan (ADR-0003 R7).
+        //
+        // The `Channel` argument is service-common's OUTER backstop cap family,
+        // not the operative bound: `limits.json` has no B4 entry, so `Channel`
+        // cannot express 1456 and the two variants available are 1200 (C4, too
+        // small to be legal here -- see MAX_DATA_PAYLOAD_BYTES) and 64 KiB. The
+        // larger is passed deliberately, because the real bound was already
+        // enforced two lines up and a backstop must never be tighter than the
+        // rule it backs. Reported as a limits.json gap.
+        let payload =
+            Verbatim::from_opaque(datagram.slice(HEADER_LEN..), Channel::ControlAndTelemetry)?;
 
         Ok(Self {
             kind,
@@ -298,7 +321,7 @@ impl RelayFrame {
     ///
     /// **There is no method on the returned type that yields a decoded value.**
     #[must_use]
-    pub const fn payload(&self) -> &Opaque {
+    pub const fn payload(&self) -> &Verbatim {
         &self.payload
     }
 
@@ -447,43 +470,109 @@ mod tests {
         Bytes::from(v)
     }
 
-    #[test]
-    fn the_service_common_verbatim_primitive_cannot_carry_l_data() {
-        // The evidence for the finding in this module's docs, measured rather
-        // than argued. A WireGuard L-DATA datagram begins with a 4-byte type
-        // field, a 4-byte receiver index, an 8-byte counter and then AEAD
-        // ciphertext (ADR-0001 §11). None of that is a protobuf record sequence,
-        // and `Verbatim::from_received` runs `twinvpn_schema::depth::check`.
-        let mut l_data = vec![4_u8, 0, 0, 0]; // WireGuard message type 4 = DATA
-        l_data.extend_from_slice(&0x1234_5678_u32.to_le_bytes()); // receiver index
-        l_data.extend_from_slice(&7_u64.to_le_bytes()); // counter
-        l_data.extend_from_slice(&[0xC3; 64]); // ciphertext + tag
-
-        let via_verbatim = twinvpn_service_common::Verbatim::from_received(
-            Bytes::from(l_data.clone()),
-            Channel::PeerDatagram,
-        );
-        assert!(
-            via_verbatim.is_err(),
-            "if this ever passes, service-common's Verbatim gained a non-protobuf \
-             mode and the relay should go back to using it"
-        );
-
-        // `Opaque` carries the same bytes, with the same size bound and the same
-        // absence of a decoder.
-        let via_opaque = Opaque::from_received(Bytes::from(l_data.clone()), Channel::PeerDatagram)
-            .expect("ciphertext is carriable");
-        assert_eq!(via_opaque.as_bytes(), &l_data[..]);
+    /// A WireGuard L-DATA datagram: 4-byte type, 4-byte receiver index, 8-byte
+    /// counter, then AEAD ciphertext and tag (ADR-0001 §11).
+    fn l_data_datagram(cipher_len: usize) -> Vec<u8> {
+        let mut v = vec![4_u8, 0, 0, 0]; // WireGuard message type 4 = DATA
+        v.extend_from_slice(&0x1234_5678_u32.to_le_bytes()); // receiver index
+        v.extend_from_slice(&7_u64.to_le_bytes()); // counter
+        v.extend_from_slice(&vec![0xC3; cipher_len]); // ciphertext + tag
+        v
     }
 
     #[test]
-    fn an_oversized_payload_is_refused_against_the_frozen_cap() {
-        let cap = Channel::PeerDatagram.max_bytes();
-        let e = Opaque::from_received(Bytes::from(vec![0_u8; cap + 1]), Channel::PeerDatagram)
-            .unwrap_err();
-        assert!(matches!(e, Reject::SizeExceeded { limit, .. } if limit == cap));
-        // And exactly at the cap it is accepted — never a truncation, never a pad.
-        assert!(Opaque::from_received(Bytes::from(vec![0_u8; cap]), Channel::PeerDatagram).is_ok());
+    fn the_two_framings_disagree_which_is_the_whole_finding() {
+        // The pair, asserted together, because the pair IS the finding: protobuf
+        // framing refuses a ciphertext leg, opaque framing carries it. Keeping
+        // both halves in one test means neither can drift out from under the
+        // other, and it records WHY `from_opaque` had to exist.
+        let l_data = l_data_datagram(64);
+
+        // ProtobufRecords: `depth::check` is a record scan, and ciphertext is not
+        // a record sequence. Correct behaviour, wrong framing for this consumer.
+        let as_protobuf =
+            Verbatim::from_received(Bytes::from(l_data.clone()), Channel::PeerDatagram);
+        assert!(
+            as_protobuf.is_err(),
+            "if protobuf framing ever accepts ciphertext, a parser is on the B4 \
+             packet path and ADR-0003 R7 is being violated silently"
+        );
+
+        // Opaque: size cap only. No record scan, no depth check, no framework.
+        let as_opaque = Verbatim::from_opaque(Bytes::from(l_data.clone()), Channel::PeerDatagram)
+            .expect("ciphertext is carriable under Framing::Opaque");
+        assert_eq!(as_opaque.as_bytes(), &l_data[..]);
+        assert_eq!(
+            as_opaque.framing(),
+            twinvpn_service_common::forward::Framing::Opaque
+        );
+        assert!(!as_opaque.framing().checks_depth());
+    }
+
+    #[test]
+    fn the_payload_bound_is_derived_from_adr_0005_9_2_not_borrowed_from_c4() {
+        // 1500 (Ethernet) - 20 (IPv4) - 8 (UDP) - 16 (RelayFrame) = 1456, which
+        // is §9.2's R-UDP/v4 row read the other way: 1424 overlay MTU + 32 L-DATA.
+        assert_eq!(MAX_DATA_PAYLOAD_BYTES, 1500 - 20 - 8 - HEADER_LEN);
+        assert_eq!(MAX_DATA_PAYLOAD_BYTES, 1424 + L_DATA_OVERHEAD_BYTES);
+
+        // Every other §9.2 row is smaller, so the v4 R-UDP row binds. Overlay
+        // MTUs from §9.2's table, plus the 32 B L-DATA overhead.
+        for (carriage, overlay_mtu) in [
+            ("R-UDP v6", 1404_usize),
+            ("R-QUIC v4", 1396),
+            ("R-QUIC v6", 1376),
+            ("R-TLS v4", 1388),
+            ("R-TLS v6", 1368),
+        ] {
+            assert!(
+                overlay_mtu + L_DATA_OVERHEAD_BYTES <= MAX_DATA_PAYLOAD_BYTES,
+                "{carriage} needs more than the derived ceiling"
+            );
+        }
+
+        // And the number it replaced was not merely loose, it was ILLEGAL.
+        assert!(
+            Channel::PeerDatagram.max_bytes() < OVERLAY_MTU_FLOOR + L_DATA_OVERHEAD_BYTES,
+            "C4's 1200 B cap cannot carry the 1280 overlay floor ADR-0005 C7 fixes"
+        );
+    }
+
+    #[test]
+    fn the_bound_clears_the_1280_overlay_floor() {
+        // ADR-0005 C7 / networking §6.2: the 1280 floor always holds. The
+        // smallest payload a conforming relay must carry is 1280 + 32 = 1312.
+        let required = OVERLAY_MTU_FLOOR + L_DATA_OVERHEAD_BYTES;
+        assert_eq!(required, 1_312);
+        assert!(MAX_DATA_PAYLOAD_BYTES >= required);
+        assert_eq!(MAX_DATA_PAYLOAD_BYTES - required, 144, "margin, in bytes");
+
+        // Behaviourally: a datagram carrying a floor-sized overlay packet parses.
+        let f = RelayFrame::parse(datagram(0x01, 0x10, 1, 42, &l_data_datagram(required - 16)))
+            .expect("a 1280-byte overlay packet must traverse the relay");
+        assert_eq!(f.payload().len(), required);
+    }
+
+    #[test]
+    fn an_oversized_payload_is_refused_against_the_derived_bound() {
+        let over = vec![0_u8; MAX_DATA_PAYLOAD_BYTES + 1];
+        let e = RelayFrame::parse(datagram(0x01, 0x10, 1, 42, &over)).unwrap_err();
+        match e {
+            FrameError::Bounds(Reject::CapViolated {
+                cap_violated,
+                observed,
+                limit,
+            }) => {
+                assert_eq!(cap_violated, "relay.data_payload_max_bytes");
+                assert_eq!(observed as usize, MAX_DATA_PAYLOAD_BYTES + 1);
+                assert_eq!(limit as usize, MAX_DATA_PAYLOAD_BYTES);
+            }
+            other => panic!("expected a typed cap violation, got {other:?}"),
+        }
+
+        // Exactly at the bound it is accepted -- never a truncation, never a pad.
+        let at = vec![0_u8; MAX_DATA_PAYLOAD_BYTES];
+        assert!(RelayFrame::parse(datagram(0x01, 0x10, 1, 42, &at)).is_ok());
     }
 
     #[test]

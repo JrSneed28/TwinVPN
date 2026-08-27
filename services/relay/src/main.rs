@@ -20,10 +20,22 @@
 use std::sync::Arc;
 
 use twinvpn_relay::config::RelayConfig;
+use twinvpn_relay::drr::TwoTierDrr;
 use twinvpn_relay::issuer::IssuerKeySet;
+use twinvpn_relay::loop_udp::{serve_udp, RelayRuntime};
 use twinvpn_relay::net::CarriageSet;
+use twinvpn_relay::provider::CryptoProvider;
+use twinvpn_relay::pump::LegRegistry;
 use twinvpn_relay::RelayEngine;
 use twinvpn_service_common as svc;
+
+/// The leg-registry ceiling.
+///
+/// A leg is created by an unauthenticated source completing a handshake, so an
+/// unbounded map keyed by source address is a remote memory-exhaustion primitive
+/// (`ownership.md` §6 rule 10). 65 536 legs is the same order as the relay-wide
+/// half-flow ceiling and is stated as an addition, like that one.
+const MAX_LEGS: usize = 65_536;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -55,7 +67,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // 4. Carriages. A carriage this build cannot serve is recorded, not faked.
+    // 4. The cryptographic provider. `twinvpn-crypto` (ADR-0018 CD-I2, DP-8):
+    //    COSE_Sign1 verification over the received octets, and the daily
+    //    relay_sub digest. The frame MAC is not bound in this build and says so,
+    //    once, rather than presenting as a flood of dropped frames.
+    let crypto = CryptoProvider::new();
+    if !crypto.frame_mac_available() {
+        tracing::error!(
+            outcome = "partial_provider",
+            "the keyed BLAKE2s frame MAC (ADR-0005 §9.1) is not available from \
+             twinvpn-crypto in this build: admission and the epoch floor are live, \
+             but NO DATA FRAME WILL BE FORWARDED. See services/relay/README.md §8."
+        );
+    }
+
+    // 5. Carriages. A carriage this build cannot serve is recorded, not faked.
     let carriages = CarriageSet::bind(&relay_cfg).await?;
     for (carriage, why) in &carriages.unavailable {
         tracing::error!(
@@ -66,19 +92,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let engine = Arc::new(std::sync::Mutex::new(RelayEngine::new(
-        relay_cfg.clone(),
-        issuers,
-        0,
-    )));
+    // 6. The runtime the receive loop drives. `legs` starts EMPTY and stays
+    //    empty: establishing one needs the Noise_IK handshake (R-UDP) or an RFC
+    //    8446 exporter (R-QUIC/R-TLS), neither of which exists in this build. A
+    //    relay therefore forwards nothing, which is the fail-closed direction and
+    //    is stated once here rather than inferred from silence.
+    let runtime = Arc::new(std::sync::Mutex::new(RelayRuntime {
+        engine: RelayEngine::new(relay_cfg.clone(), issuers, 0),
+        legs: LegRegistry::new(MAX_LEGS),
+        scheduler: TwoTierDrr::with_default_quantum(),
+    }));
+    tracing::warn!(
+        outcome = "no_legs",
+        "no leg handshake is implemented in this build, so no device can \
+         establish K_leg and every received frame is dropped with zero bytes in \
+         reply. See services/relay/README.md §11."
+    );
 
-    // 5. Health. NoControlPlaneCalls REFUSES a ProbeKind::ControlPlane probe,
+    // 7. Health. NoControlPlaneCalls REFUSES a ProbeKind::ControlPlane probe,
     //    which is what makes I5 structural rather than remembered.
     let issuer_probe = {
-        let engine = Arc::clone(&engine);
+        let runtime = Arc::clone(&runtime);
         svc::health::FnProbe::new("issuer_keys", svc::health::ProbeKind::Local, move || {
             // Loaded and parsable — NOT non-empty. infra/README.md §5.
-            let ok = engine.lock().is_ok();
+            let ok = runtime.lock().is_ok();
             async move {
                 if ok {
                     svc::health::ProbeOutcome::Ready
@@ -110,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .liveness(svc::health::FnLiveness::new("forwarder", || true))
             .build();
 
-    // 6. Shutdown, wired to health so the drain turns /readyz red immediately.
+    // 8. Shutdown, wired to health so the drain turns /readyz red immediately.
     let shutdown = Arc::new(
         svc::shutdown::Shutdown::new(cfg.shutdown_config(), metrics.clone())
             .with_health(health.clone()),
@@ -119,12 +156,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The relay's drain is ADR-0005 §8's, not a generic one: it announces one
     // deadline to every bound flow and then keeps carrying until that deadline.
     {
-        let engine = Arc::clone(&engine);
+        let runtime = Arc::clone(&runtime);
         let deadline = shutdown.drain_deadline_ms();
         shutdown.register_teardown(20, "relay_drain", move || {
-            let engine = Arc::clone(&engine);
+            let runtime = Arc::clone(&runtime);
             svc::shutdown::futures_step::boxed(async move {
-                if let Ok(mut e) = engine.lock() {
+                if let Ok(mut rt) = runtime.lock() {
+                    let e = &mut rt.engine;
                     let (plan, flows) = e.begin_drain(0, deadline);
                     tracing::info!(
                         outcome = "draining",
@@ -148,6 +186,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ));
 
+    // 9. The receive loops, one per bound socket. Each reads a datagram, calls
+    //    the synchronous pump, and writes AT MOST ONE datagram — the shape of
+    //    ADR-0005 §11.5's amplification factor of exactly 1.0.
+    let provider: Arc<dyn twinvpn_relay::RelayCrypto> = Arc::new(crypto);
+    let listening = carriages.bound.len();
+    let mut pumps = Vec::new();
+    for bound in carriages.bound {
+        let runtime = Arc::clone(&runtime);
+        let provider = Arc::clone(&provider);
+        let h = handle.clone();
+        let addr = bound.local_addr;
+        let family = bound.families.as_label();
+        pumps.push(tokio::spawn(async move {
+            tracing::info!(
+                outcome = "listening",
+                address_family = family,
+                "R-UDP receive loop on {addr}"
+            );
+            serve_udp(
+                Arc::new(bound.socket),
+                runtime,
+                provider,
+                // The packet path's own clock. `WallClock` is evidence only
+                // (ADR-0018 CD-1), so this is a monotonic offset, not a timestamp.
+                {
+                    let started = std::time::Instant::now();
+                    move || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+                },
+                async move { h.draining().await },
+            )
+            .await;
+        }));
+    }
+
     health.set_state(svc::health::ServiceState::Serving);
     tracing::info!(
         outcome = "serving",
@@ -155,12 +227,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         relay_cfg.relay_id_hex,
         relay_cfg.region_id,
         relay_cfg.failure_domain,
-        carriages.bound.len()
+        listening
     );
 
     svc::shutdown::Shutdown::wait_for_signal().await;
     let report = shutdown.shutdown().await;
     let _ = admin.await;
+    for p in pumps {
+        let _ = p.await;
+    }
     obs.shutdown();
     if !report.drained {
         tracing::warn!(

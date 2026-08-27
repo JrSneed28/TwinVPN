@@ -52,6 +52,10 @@ pub struct RelayEngine {
     cookies: CookieGate,
     replay: ReplayCache,
     drain: Option<DrainPlan>,
+    /// The monotonic base the millisecond-valued packet path is measured from.
+    /// Set once, on first use, so a rate decision is a pure function of the
+    /// caller's `now_ms` thereafter.
+    bucket_epoch: Option<Instant>,
 }
 
 impl std::fmt::Debug for RelayEngine {
@@ -99,6 +103,7 @@ impl RelayEngine {
             floor: EpochFloor::starting_at(starting_epoch),
             issuers,
             drain: None,
+            bucket_epoch: None,
             config,
         }
     }
@@ -214,10 +219,36 @@ impl RelayEngine {
         // Quota is charged after a successful forward. A refused frame costs the
         // subject nothing, so an off-path injector cannot exhaust a victim's
         // hourly budget with frames that never arrive.
-        let _ = self
+        //
+        // A spent hourly budget is NOT a silent drop: §11.5 requires a
+        // RELAY_STATUS on the affected flow, so it is surfaced as a distinct
+        // refusal for `pump` to answer rather than swallowed here.
+        if self
             .limiter
-            .charge_bytes(out.egress_subject, out.payload_len as u64, now_ms);
+            .charge_bytes(out.egress_subject, out.payload_len as u64, now_ms)
+            .is_err()
+        {
+            return Err(ForwardRefusal::QuotaExceeded);
+        }
         Ok(out)
+    }
+
+    /// Whether `subject` may send now, or must be throttled.
+    ///
+    /// ADR-0005 §11.5 says **throttle, not drop**, so a `Deferred` result is a
+    /// queueing instruction plus a `RELAY_STATUS`, never a discard. `pump` acts
+    /// on both halves.
+    pub fn admit_bytes(
+        &mut self,
+        subject: crate::subject::RelaySub,
+        now_ms: u64,
+    ) -> twinvpn_service_common::transport::Admission {
+        // The token bucket takes an `Instant`; the pump has milliseconds. A
+        // monotonic base plus the offset keeps the decision reproducible from its
+        // inputs (architecture §5.2 R-DET-1) without reading a clock here.
+        let base = *self.bucket_epoch.get_or_insert_with(Instant::now);
+        self.limiter
+            .admit_bytes(subject, base + std::time::Duration::from_millis(now_ms))
     }
 
     /// Expires pending slots and idle flows. Returns `(unmatched, idle)`.
@@ -263,24 +294,29 @@ impl RelayEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{FailClosed, IssuerPublicKey};
-    use crate::token::Quota;
+    use crate::claims::TokenClaims;
+    use crate::crypto::FailClosed;
+    use crate::token::testkit::{claims, good_envelope, Doubles};
     use twinvpn_service_common::config::MapEnv;
 
-    struct AlwaysOk;
-    impl RelayCrypto for AlwaysOk {
-        fn verify_signature(&self, _: &IssuerPublicKey, _: &[u8], _: &[u8]) -> bool {
-            true
-        }
-        fn verify_frame_mac(&self, _: &LegKey, _: &[u8], _: [u8; 8]) -> bool {
-            true
-        }
-        fn frame_mac(&self, _: &LegKey, _: &[u8]) -> Option<[u8; 8]> {
-            Some([0; 8])
-        }
-        fn digest16(&self, _: &[u8], _: &[u8]) -> Option<[u8; 16]> {
-            Some([0; 16])
-        }
+    /// The engine's tests exercise binding, drain and metering, not signature
+    /// arithmetic, so they share `token::testkit`'s double. `provider.rs` tests
+    /// the real `twinvpn-crypto` binding separately.
+    fn always_ok() -> Doubles {
+        let mut c = claims();
+        c.epoch = 3;
+        c.not_before_ms = 0;
+        c.not_after_ms = 86_400_000;
+        Doubles::new(c)
+    }
+
+    fn always_ok_with(edit: impl FnOnce(&mut TokenClaims)) -> Doubles {
+        let mut c = claims();
+        c.epoch = 3;
+        c.not_before_ms = 0;
+        c.not_after_ms = 86_400_000;
+        edit(&mut c);
+        Doubles::new(c)
     }
 
     fn config() -> RelayConfig {
@@ -304,7 +340,7 @@ mod tests {
 
     fn issuers(populated: bool) -> IssuerKeySet {
         let raw = if populated {
-            r#"{"operator_group_id":"local-operator","issuers":[{"key_id":"k1","alg":"Ed25519","public_key_hex":"0102"}]}"#
+            r#"{"operator_group_id":"local-operator","issuers":[{"key_id":"k1","alg":"Ed25519","cose_key_hex":"0102"}]}"#
         } else {
             r#"{"operator_group_id":"local-operator","issuers":[]}"#
         };
@@ -312,20 +348,11 @@ mod tests {
     }
 
     fn token() -> PresentedToken {
-        PresentedToken {
-            issuer_key_id: "k1".into(),
-            signed_bytes: b"payload".to_vec(),
-            signature: b"sig".to_vec(),
-            audience_operator_group_id: "local-operator".into(),
-            subject: [9; 16],
-            confirmation_key: b"RLK".to_vec(),
-            not_before_ms: 0,
-            not_after_ms: 86_400_000,
-            epoch: 3,
-            quota: Quota::default(),
-            jti: [1; 16],
-        }
+        PresentedToken::new("k1".into(), good_envelope())
     }
+
+    /// The leg key `token::testkit::claims()` binds `cnf` to.
+    const LEG: &[u8] = b"RLK-cose-key";
 
     fn engine(populated: bool) -> RelayEngine {
         RelayEngine::new(config(), issuers(populated), 3)
@@ -343,7 +370,7 @@ mod tests {
     fn an_empty_issuer_set_admits_no_one() {
         let mut e = engine(false);
         assert_eq!(
-            e.admit(&token(), b"RLK", &AlwaysOk, 1_000).unwrap_err(),
+            e.admit(&token(), LEG, &always_ok(), 1_000).unwrap_err(),
             Condition::IssuerUnknown
         );
     }
@@ -352,7 +379,7 @@ mod tests {
     fn the_fail_closed_crypto_provider_admits_no_one() {
         let mut e = engine(true);
         assert_eq!(
-            e.admit(&token(), b"RLK", &FailClosed, 1_000).unwrap_err(),
+            e.admit(&token(), LEG, &FailClosed, 1_000).unwrap_err(),
             Condition::TokenInvalid
         );
     }
@@ -362,16 +389,17 @@ mod tests {
         let mut e = engine(true);
         let now = Instant::now();
         let v1 = e
-            .admit(&token(), b"RLK", &AlwaysOk, 1_000)
+            .admit(&token(), LEG, &always_ok(), 1_000)
             .expect("admitted");
         assert!(matches!(
             e.bind(tag(1), addr(1), &v1, now, 1_000),
             BindResult::Pending(_)
         ));
-        let mut t2 = token();
-        t2.jti = [2; 16];
-        t2.subject = [8; 16];
-        let v2 = e.admit(&t2, b"RLK", &AlwaysOk, 1_000).expect("admitted");
+        let second = always_ok_with(|c| {
+            c.jti = [2; 16];
+            c.subject = [8; 16];
+        });
+        let v2 = e.admit(&token(), LEG, &second, 1_000).expect("admitted");
         assert!(matches!(
             e.bind(tag(1), addr(2), &v2, now, 1_000),
             BindResult::Bound { .. }
@@ -383,7 +411,7 @@ mod tests {
         let mut e = engine(true);
         let now = Instant::now();
         let v = e
-            .admit(&token(), b"RLK", &AlwaysOk, 1_000)
+            .admit(&token(), LEG, &always_ok(), 1_000)
             .expect("admitted");
         let _ = e.bind(tag(1), addr(1), &v, now, 1_000);
 
@@ -391,9 +419,8 @@ mod tests {
         assert_eq!(plan.deadline_ms(), 120_000);
         assert!(flows.is_empty(), "only BOUND flows are announced to");
 
-        let mut t2 = token();
-        t2.jti = [2; 16];
-        let v2 = e.admit(&t2, b"RLK", &AlwaysOk, 1_000).expect("admitted");
+        let second = always_ok_with(|c| c.jti = [2; 16]);
+        let v2 = e.admit(&token(), LEG, &second, 1_000).expect("admitted");
         assert_eq!(
             e.bind(tag(2), addr(2), &v2, now, 1_000),
             BindResult::Refused(Condition::Draining)
@@ -410,13 +437,14 @@ mod tests {
         let mut e = engine(true);
         let now = Instant::now();
         let v = e
-            .admit(&token(), b"RLK", &AlwaysOk, 1_000)
+            .admit(&token(), LEG, &always_ok(), 1_000)
             .expect("admitted");
         let _ = e.bind(tag(1), addr(1), &v, now, 1_000);
-        let mut t2 = token();
-        t2.jti = [2; 16];
-        t2.subject = [8; 16];
-        let v2 = e.admit(&t2, b"RLK", &AlwaysOk, 1_000).expect("admitted");
+        let second = always_ok_with(|c| {
+            c.jti = [2; 16];
+            c.subject = [8; 16];
+        });
+        let v2 = e.admit(&token(), LEG, &second, 1_000).expect("admitted");
         let _ = e.bind(tag(1), addr(2), &v2, now, 1_000);
 
         let (_, first) = e.begin_drain(1_000, 120_000);
@@ -430,7 +458,7 @@ mod tests {
         let mut e = engine(true);
         let now = Instant::now();
         let v = e
-            .admit(&token(), b"RLK", &AlwaysOk, 1_000)
+            .admit(&token(), LEG, &always_ok(), 1_000)
             .expect("admitted");
         let _ = e.bind(tag(1), addr(1), &v, now, 1_000);
         assert_eq!(e.simulate_restart(), 1);
@@ -442,7 +470,7 @@ mod tests {
         let mut e = engine(true);
         let now = Instant::now();
         let v = e
-            .admit(&token(), b"RLK", &AlwaysOk, 1_000)
+            .admit(&token(), LEG, &always_ok(), 1_000)
             .expect("admitted");
         let _ = e.bind(tag(1), addr(1), &v, now, 1_000);
         assert_eq!(e.collect(1_000 + 30_000), (1, 0));

@@ -71,8 +71,14 @@ struct RawIssuer {
     key_id: String,
     #[serde(default = "default_alg")]
     alg: String,
-    /// Lowercase hex. Public material only.
-    public_key_hex: String,
+    /// The **COSE_Key**, deterministic CBOR, as lowercase hex.
+    ///
+    /// Public material only. A COSE_Key rather than a raw point because the
+    /// algorithm and curve travel inside it, so a key cannot be reinterpreted
+    /// under an algorithm it was not published for — `twinvpn_crypto`'s
+    /// `PublicVerifyingKey::from_cose_key` additionally refuses a key carrying a
+    /// private half.
+    cose_key_hex: String,
 }
 
 fn default_alg() -> String {
@@ -125,12 +131,19 @@ impl IssuerKeySet {
 
         let mut keys = Vec::with_capacity(parsed.issuers.len());
         for (index, issuer) in parsed.issuers.into_iter().enumerate() {
-            let bytes =
-                decode_hex(&issuer.public_key_hex).ok_or(IssuerKeySetError::UnusableKey {
-                    path: display.to_owned(),
-                    index,
-                })?;
-            if issuer.key_id.is_empty() || bytes.is_empty() || issuer.alg.is_empty() {
+            let bytes = decode_hex(&issuer.cose_key_hex).ok_or(IssuerKeySetError::UnusableKey {
+                path: display.to_owned(),
+                index,
+            })?;
+            // ADR-0005 §11.3 fixes Ed25519 for the relay-credential issuer, and
+            // CDDL `key-id = tstr .size (1..64)`. Catching both here means a
+            // misconfigured fleet fails visibly at boot rather than silently
+            // refusing every token afterwards.
+            if issuer.key_id.is_empty()
+                || issuer.key_id.len() > 64
+                || bytes.is_empty()
+                || issuer.alg != "Ed25519"
+            {
                 return Err(IssuerKeySetError::UnusableKey {
                     path: display.to_owned(),
                     index,
@@ -233,9 +246,40 @@ mod tests {
     }
 
     #[test]
+    fn a_key_whose_algorithm_is_not_ed25519_is_refused_at_startup() {
+        // ADR-0005 §11.3 fixes Ed25519 for the relay-credential issuer.
+        for alg in ["RS256", "ES256", "none", ""] {
+            let raw = format!(
+                r#"{{"operator_group_id":"g","issuers":[
+                {{"key_id":"k1","alg":"{alg}","cose_key_hex":"00ff10"}}]}}"#
+            );
+            assert!(
+                matches!(
+                    IssuerKeySet::parse(&raw, "g", "x").unwrap_err(),
+                    IssuerKeySetError::UnusableKey { index: 0, .. }
+                ),
+                "alg {alg} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn an_over_long_key_id_is_refused_against_the_cddl_bound() {
+        let raw = format!(
+            r#"{{"operator_group_id":"g","issuers":[
+            {{"key_id":"{}","alg":"Ed25519","cose_key_hex":"00"}}]}}"#,
+            "k".repeat(65)
+        );
+        assert!(matches!(
+            IssuerKeySet::parse(&raw, "g", "x").unwrap_err(),
+            IssuerKeySetError::UnusableKey { index: 0, .. }
+        ));
+    }
+
+    #[test]
     fn a_populated_set_finds_its_key() {
         let raw = r#"{"operator_group_id":"g","issuers":[
-            {"key_id":"k1","alg":"Ed25519","public_key_hex":"00ff10"}]}"#;
+            {"key_id":"k1","alg":"Ed25519","cose_key_hex":"00ff10"}]}"#;
         let set = IssuerKeySet::parse(raw, "g", "x").expect("parses");
         assert_eq!(set.len(), 1);
         let k = set.find("k1").expect("held");
@@ -246,7 +290,7 @@ mod tests {
     #[test]
     fn a_malformed_key_is_a_startup_failure_not_a_skipped_entry() {
         let raw = r#"{"operator_group_id":"g","issuers":[
-            {"key_id":"k1","alg":"Ed25519","public_key_hex":"zz"}]}"#;
+            {"key_id":"k1","alg":"Ed25519","cose_key_hex":"zz"}]}"#;
         assert!(matches!(
             IssuerKeySet::parse(raw, "g", "x").unwrap_err(),
             IssuerKeySetError::UnusableKey { index: 0, .. }

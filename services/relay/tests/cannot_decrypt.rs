@@ -29,7 +29,8 @@
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
-use twinvpn_relay::crypto::{IssuerPublicKey, LegKey, RelayCrypto};
+use twinvpn_relay::claims::VerifiedClaims;
+use twinvpn_relay::crypto::{IssuerPublicKey, LegKey, RelayCrypto, Statement};
 use twinvpn_relay::flow::{BindOutcome, PairTable, PairTag};
 use twinvpn_relay::forward::Forwarder;
 use twinvpn_relay::frame::{RelayFrame, HEADER_LEN};
@@ -63,10 +64,18 @@ fn all_sources() -> Vec<(String, String)> {
     out
 }
 
-/// Strips `//!` and `///` doc lines and `//` comments, so a *description* of a
-/// forbidden thing is not mistaken for the thing.
+/// The production code only: comment lines blanked, and everything from
+/// `#[cfg(test)]` onward dropped.
+///
+/// Both exclusions matter, and for the same reason. A *description* of a
+/// forbidden thing is not the thing, and neither is a test that proves it is
+/// refused — `frame.rs`'s `the_two_framings_disagree_which_is_the_whole_finding`
+/// calls `Verbatim::from_received` deliberately, to assert that protobuf framing
+/// rejects ciphertext. Scanning the test module would make writing that assertion
+/// break this one.
 fn code_only(source: &str) -> String {
-    source
+    let end = source.find("#[cfg(test)]").unwrap_or(source.len());
+    source[..end]
         .lines()
         .map(|l| {
             let t = l.trim_start();
@@ -157,7 +166,7 @@ fn no_decrypt_operation_exists_anywhere() {
     }
     // The four permitted operations, named so a fifth is a visible edit.
     for method in [
-        "fn verify_signature",
+        "fn verify_statement",
         "fn verify_frame_mac",
         "fn frame_mac",
         "fn digest16",
@@ -197,26 +206,37 @@ fn no_decrypt_operation_exists_anywhere() {
 #[test]
 fn the_payload_type_has_no_reader() {
     let frame = code_only(&src("frame.rs"));
-    // `Opaque` is the payload carrier. Its surface is closed.
+    // The payload carrier is service-common's `Verbatim` under `Framing::Opaque`.
+    // Nothing here may widen its surface or re-derive a local one.
     for forbidden in [
-        "impl std::fmt::Display for Opaque",
-        "impl Serialize for Opaque",
-        "impl AsRef<[u8]> for Opaque",
-        "impl Deref for Opaque",
+        "struct Opaque",
+        "impl std::fmt::Display",
+        "impl Serialize",
+        "impl AsRef<[u8]>",
+        "impl Deref",
         "fn decode(",
         "fn parse_payload",
+        "Framing::ProtobufRecords",
+        "from_received(",
+        "depth::check",
     ] {
         assert!(
             !frame.contains(forbidden),
-            "frame.rs provides `{forbidden}` on the payload carrier"
+            "frame.rs provides `{forbidden}` on the payload carrier. The DATA \
+             payload is B4: ADR-0003 R7 puts ZERO serialization framework on the \
+             packet path, and a decoder here would be the I1 violation."
         );
     }
+    // The opaque constructor is the one used, and it is named at the call site.
+    assert!(frame.contains("Verbatim::from_opaque("));
 
-    // And its Debug prints a length, never octets — checked behaviourally.
+    // Its Debug prints a length, a channel and the framing token, never octets.
     let f = RelayFrame::parse(datagram(1, 1, b"SENTINEL-PLAINTEXT-MARKER")).expect("parses");
     let rendered = format!("{:?}", f.payload());
     assert!(!rendered.contains("SENTINEL"));
-    assert!(rendered.contains("25 bytes"));
+    assert!(rendered.contains("25 B"), "got {rendered}");
+    assert!(rendered.contains("opaque"), "got {rendered}");
+    assert!(rendered.contains("<not rendered>"), "got {rendered}");
 
     // The whole frame's Debug too: a `#[derive(Debug)]` on an enclosing type is
     // exactly how a payload reaches a log.
@@ -308,8 +328,13 @@ fn forwarding_never_needed_a_key_that_could_decrypt() {
 
 struct MacOk;
 impl RelayCrypto for MacOk {
-    fn verify_signature(&self, _: &IssuerPublicKey, _: &[u8], _: &[u8]) -> bool {
-        false
+    fn verify_statement(
+        &self,
+        _: &IssuerPublicKey,
+        _: Statement,
+        _: &[u8],
+    ) -> Option<VerifiedClaims> {
+        None
     }
     fn verify_frame_mac(&self, _: &LegKey, _: &[u8], _: [u8; 8]) -> bool {
         true

@@ -209,16 +209,60 @@ pub fn advice_for(record: &RelayRecord, health: Health, rank_age_ms: u64) -> Ser
 // HRW — deterministic, coordination-free redistribution (§11.5, §11.7)
 // ===========================================================================
 
-/// The 64-bit hash HRW needs.
+/// §11.5's `k`: both devices `BIND` all three highest-weight relays in parallel.
+///
+/// The same constant `twinvpn-relay-client`'s `hrw::K` declares. Not
+/// coincidentally the same — see [`hrw_weight`].
+pub const HRW_K: usize = 3;
+
+/// The 32-byte digest HRW needs.
 ///
 /// ADR-0006 §11.5 specifies `BLAKE2s(relay_id ‖ pair_id)`. BLAKE2s is a
 /// cryptographic primitive and CD-I2 keeps those in `twinvpn-crypto`, so it is
-/// injected here for the same reason as `relay::crypto::RelayCrypto` — see
-/// `README.md` §7. Injection also satisfies testing-strategy A-14, which requires
-/// the HRW hash to be **seedable** for a deterministic region-failure test.
+/// injected — the same shape `core-dataplane`'s `twinvpn-relay-client::hrw::HrwHash`
+/// takes, and for the same reason. Injection also satisfies testing-strategy
+/// A-14, which requires the HRW hash to be **seedable** for a deterministic
+/// region-failure test.
+///
+/// **This is currently unbindable in production.** `twinvpn-crypto` declares
+/// `blake2` as a dependency but exposes no BLAKE2s function, so neither this
+/// service nor `twinvpn-relay-client` can supply one — the client's `hrw.rs`
+/// carries the identical open integration item in its own words. See
+/// `README.md` §7.
 pub trait Hrw64: Send + Sync {
-    /// `BLAKE2s(relay_id ‖ pair_id)` interpreted as a `u64`.
-    fn weight(&self, relay_id: &[u8], pair_id: &[u8]) -> u64;
+    /// `BLAKE2s(relay_id ‖ pair_id)`, 32 bytes.
+    ///
+    /// The **digest**, not a `u64`: [`hrw_weight`] does the reduction, so the two
+    /// implementations of HRW in this system cannot disagree about which bytes
+    /// become the number or in which endianness.
+    fn weight_digest(&self, relay_id: &[u8], pair_id: &[u8]) -> [u8; 32];
+}
+
+/// One relay's HRW weight — **byte-identical to `twinvpn-relay-client`'s**.
+///
+/// The cold-start convergence in ADR-0006 §11.5 works only if the device and this
+/// service compute the *same* function: "both devices compute this from their own
+/// cached maps, with no message exchanged", and a directory that ranked
+/// redistribution differently from the clients would model a spread that never
+/// happens.
+///
+/// So this is `twinvpn-relay-client::hrw::weight` transcribed exactly:
+///
+/// 1. the **leading eight bytes** of the digest,
+/// 2. as a **little-endian** `u64`,
+/// 3. shifted right by 16, then multiplied by `capacity_weight`.
+///
+/// The shift is the client's, and its comment explains it: it scales into the top
+/// bits "so `capacity_weight` dominates the ordering while the hash still decides
+/// between equal-capacity relays". A `capacity_weight` of zero means "take no new
+/// pairs", and a zero weight expresses that exactly — so, unlike an earlier
+/// revision here, it is **not** clamped up to one.
+#[must_use]
+pub fn hrw_weight(digest: [u8; 32], capacity_weight: u32) -> u64 {
+    let raw = u64::from_le_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ]);
+    (raw >> 16).saturating_mul(u64::from(capacity_weight))
 }
 
 /// The k highest-weighted relays for a pair, weighted by `capacity_weight`.
@@ -233,15 +277,12 @@ pub fn hrw_top_k<'a>(
     k: usize,
     hash: &dyn Hrw64,
 ) -> Vec<&'a RelayRecord> {
-    let mut scored: Vec<(u128, &RelayRecord)> = candidates
+    let mut scored: Vec<(u64, &RelayRecord)> = candidates
         .iter()
         .filter(|r| r.admin_state == AdminState::Active)
         .map(|r| {
-            let w = u128::from(hash.weight(&r.relay_id, pair_id));
-            // Scaling by capacity_weight is what makes the spread proportional to
-            // published capacity, which is how an operator rebalances a fleet
-            // "by publishing weights, not by touching clients" (§10).
-            (w * u128::from(r.capacity_weight.max(1)), r)
+            let digest = hash.weight_digest(&r.relay_id, pair_id);
+            (hrw_weight(digest, r.capacity_weight), r)
         })
         .collect();
     // Ties break on relay_id so two devices with the same map agree exactly —
@@ -264,18 +305,24 @@ mod tests {
     /// pick the same relay and would make this test pass for the wrong reason.
     struct Mixed;
     impl Hrw64 for Mixed {
-        fn weight(&self, relay_id: &[u8], pair_id: &[u8]) -> u64 {
+        fn weight_digest(&self, relay_id: &[u8], pair_id: &[u8]) -> [u8; 32] {
             let mut h = 0xcbf2_9ce4_8422_2325_u64;
             for b in relay_id.iter().chain(pair_id.iter()) {
                 h ^= u64::from(*b);
                 h = h.wrapping_mul(0x0000_0100_0000_01B3);
             }
-            // splitmix64 finalizer.
-            h ^= h >> 30;
-            h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            h ^= h >> 27;
-            h = h.wrapping_mul(0x94d0_49bb_1331_11eb);
-            h ^ (h >> 31)
+            // splitmix64: advance, then finalize, four times. Gives 32 mixed
+            // bytes from one state, which is the shape a real BLAKE2s supplies.
+            let mut out = [0_u8; 32];
+            for chunk in 0..4_usize {
+                h = h.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let mut z = h;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^= z >> 31;
+                out[chunk * 8..chunk * 8 + 8].copy_from_slice(&z.to_le_bytes());
+            }
+            out
         }
     }
 
@@ -539,6 +586,59 @@ mod tests {
                 "relay {id} received {n} of 600 pairs: the spread is not proportional"
             );
         }
+    }
+
+    #[test]
+    fn the_weight_reduction_matches_twinvpn_relay_client_byte_for_byte() {
+        // ADR-0006 §11.5's cold-start convergence works only if the device and
+        // this service compute the SAME function. `twinvpn-relay-client::hrw`
+        // reads the leading eight bytes little-endian, shifts right 16, then
+        // multiplies by capacity_weight. Transcribed here as an assertion, so a
+        // change on either side shows up as a failing test rather than as a fleet
+        // whose two halves never meet at the same relay.
+        let mut digest = [0_u8; 32];
+        let raw = 0x0102_0304_0506_0708_u64;
+        digest[..8].copy_from_slice(&raw.to_le_bytes());
+        assert_eq!(hrw_weight(digest, 1), raw >> 16);
+        assert_eq!(hrw_weight(digest, 7), (raw >> 16) * 7);
+
+        // Only the LEADING eight bytes matter; the rest is unread, as on the client.
+        let mut tail_changed = digest;
+        tail_changed[8] = 0xFF;
+        tail_changed[31] = 0xFF;
+        assert_eq!(hrw_weight(tail_changed, 3), hrw_weight(digest, 3));
+
+        // Little-endian, not big: reversing the first eight bytes must change it.
+        let mut reversed = digest;
+        reversed[..8].reverse();
+        assert_ne!(hrw_weight(reversed, 1), hrw_weight(digest, 1));
+    }
+
+    #[test]
+    fn a_capacity_weight_of_zero_means_take_no_new_pairs() {
+        // The client says exactly that, and expresses it as a zero weight. An
+        // earlier revision here clamped capacity up to at least 1, which would
+        // have let a relay an operator had drained to zero keep taking pairs.
+        let mut digest = [0xFF_u8; 32];
+        digest[..8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(hrw_weight(digest, 0), 0);
+        assert!(hrw_weight(digest, 1) > 0);
+
+        let mut fleet: Vec<RelayRecord> =
+            (1..=3_u8).map(|n| sample(n, "eu-west", "fd-a")).collect();
+        fleet[0].capacity_weight = 0;
+        for pair in 0..200_u32 {
+            assert_ne!(
+                hrw_top_k(&fleet, &pair.to_be_bytes(), 1, &Mixed)[0].relay_id[0],
+                1,
+                "a zero-capacity relay was still taking pairs"
+            );
+        }
+    }
+
+    #[test]
+    fn k_is_three_on_both_sides() {
+        assert_eq!(HRW_K, 3, "twinvpn-relay-client::hrw::K is 3");
     }
 
     #[test]
