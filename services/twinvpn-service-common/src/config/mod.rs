@@ -37,6 +37,57 @@ use tracing::level_filters::LevelFilter;
 
 use crate::obs::layer::LogFormat;
 
+/// Where `service.instance.id` came from.
+///
+/// Recorded and logged, because the three answers are not equally good and a
+/// silent fall-through to the worst one is exactly how a fleet query starts
+/// lying without anyone noticing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceIdSource {
+    /// `TWINVPN_INSTANCE_ID`. What `docker-compose.yml` supplies for all six
+    /// services, and the only source that is stable across a restart *and*
+    /// chosen by the operator.
+    Configured,
+    /// The container hostname (`HOSTNAME`, else `/etc/hostname`). Stable across
+    /// a restart, so fleet queries still hold; not chosen by anyone.
+    Hostname,
+    /// `{service_name}-{pid}`. **A degraded mode.** A new value on every
+    /// restart, so "how many instances served this" silently becomes "how many
+    /// times did anything restart". Present so a bare `cargo run` has an id at
+    /// all, and logged at `WARN` so it is never the quiet answer.
+    ProcessFallback,
+}
+
+impl InstanceIdSource {
+    /// A coarse, allowlisted token for the `twinvpn.outcome` attribute.
+    ///
+    /// There is no allowlisted attribute that means "where an id came from", and
+    /// inventing one would be a field the collector deletes
+    /// (`infra/otel/collector-config.yaml`). `twinvpn.outcome` is on the ADR-0015
+    /// §9 label list and is exactly a coarse outcome, so the resolution is
+    /// greppable and alertable without a new key.
+    #[must_use]
+    pub const fn as_outcome(self) -> &'static str {
+        match self {
+            InstanceIdSource::Configured => "instance_id_configured",
+            InstanceIdSource::Hostname => "instance_id_hostname",
+            InstanceIdSource::ProcessFallback => "instance_id_process_fallback",
+        }
+    }
+
+    /// Whether this source survives a restart.
+    ///
+    /// The property that actually matters: an id that does not is a correlation
+    /// handle for one process lifetime and a lie for anything longer.
+    #[must_use]
+    pub const fn is_stable_across_restarts(self) -> bool {
+        matches!(
+            self,
+            InstanceIdSource::Configured | InstanceIdSource::Hostname
+        )
+    }
+}
+
 /// Which address families this deployment uses (ADR-0010 R1).
 ///
 /// `ipv4` exists because `infra/README.md` §3 keeps a v4-only override as **the
@@ -91,6 +142,10 @@ pub struct ServiceConfig {
     pub service_version: String,
     /// `twinvpn.component` — one of `errors.proto`'s `Component` names.
     pub component: String,
+    /// `TWINVPN_INSTANCE_ID`, resolved. The OTel `service.instance.id`.
+    pub instance_id: String,
+    /// Which of the three sources [`ServiceConfig::instance_id`] came from.
+    pub instance_id_source: InstanceIdSource,
     /// `TWINVPN_ENVIRONMENT`, default `local`.
     pub environment: String,
     /// `TWINVPN_LOG_LEVEL`, default `info`.
@@ -127,6 +182,8 @@ pub mod keys {
     pub const SERVICE_NAME: &str = "TWINVPN_SERVICE_NAME";
     /// `TWINVPN_ENVIRONMENT`.
     pub const ENVIRONMENT: &str = "TWINVPN_ENVIRONMENT";
+    /// `TWINVPN_INSTANCE_ID`.
+    pub const INSTANCE_ID: &str = "TWINVPN_INSTANCE_ID";
     /// `TWINVPN_LOG_LEVEL`.
     pub const LOG_LEVEL: &str = "TWINVPN_LOG_LEVEL";
     /// `TWINVPN_LOG_FORMAT`.
@@ -223,10 +280,15 @@ impl ServiceConfig {
             }
         };
 
+        let service_name = l.string(keys::SERVICE_NAME, default_service_name);
+        let (instance_id, instance_id_source) = resolve_instance_id(env, &service_name);
+
         Ok(Self {
-            service_name: l.string(keys::SERVICE_NAME, default_service_name),
+            service_name,
             service_version: service_version.to_owned(),
             component: component.to_owned(),
+            instance_id,
+            instance_id_source,
             environment: l.string(keys::ENVIRONMENT, "local"),
             log_level,
             log_format,
@@ -263,9 +325,44 @@ impl ServiceConfig {
         }
     }
 
-    /// The observability configuration, with `instance_id` supplied by the
-    /// caller (a hostname, a container id, a random value from the platform
-    /// CSPRNG — this crate reads no clock and no entropy source).
+    /// The observability configuration, using the **resolved**
+    /// [`ServiceConfig::instance_id`].
+    ///
+    /// This is the one to call. `TWINVPN_INSTANCE_ID` is what
+    /// `docker-compose.yml` supplies per service, and a service that derives its
+    /// own id ignores it — which is how `service.instance.id` came to change on
+    /// every restart and every fleet query grouping by it came to be wrong.
+    ///
+    /// Log [`ServiceConfig::log_instance_id_resolution`] right after installing
+    /// the subscriber, so which source was used is visible rather than inferred.
+    #[must_use]
+    pub fn observability(&self) -> crate::obs::ObservabilityConfig {
+        self.observability_config(&self.instance_id)
+    }
+
+    /// Emits how `service.instance.id` was resolved.
+    ///
+    /// `WARN` for [`InstanceIdSource::ProcessFallback`], because that id does not
+    /// survive a restart and every aggregate keyed on it is then wrong; `INFO`
+    /// otherwise. Call it after the subscriber is installed.
+    pub fn log_instance_id_resolution(&self) {
+        let outcome = self.instance_id_source.as_outcome();
+        if self.instance_id_source.is_stable_across_restarts() {
+            tracing::info!(twinvpn.outcome = outcome, "service.instance.id resolved");
+        } else {
+            tracing::warn!(
+                twinvpn.outcome = outcome,
+                "service.instance.id is a per-process value; set TWINVPN_INSTANCE_ID, \
+                 or every fleet aggregate grouped by instance counts restarts"
+            );
+        }
+    }
+
+    /// The observability configuration with an explicitly supplied
+    /// `instance_id`, overriding the resolved one.
+    ///
+    /// Kept for a caller that genuinely mints its own id. Prefer
+    /// [`ServiceConfig::observability`], which honours `TWINVPN_INSTANCE_ID`.
     #[must_use]
     pub fn observability_config(&self, instance_id: &str) -> crate::obs::ObservabilityConfig {
         crate::obs::ObservabilityConfig {
@@ -285,6 +382,33 @@ impl ServiceConfig {
             },
         }
     }
+}
+
+/// Resolves `service.instance.id`: the variable, then the hostname, then the pid.
+///
+/// `infra/README.md` §4.2 names `TWINVPN_INSTANCE_ID` and its default (the
+/// container hostname). Reading the hostname here rather than making the caller
+/// pass one is a deliberate narrowing of an earlier decision: an id *invented*
+/// per process is the thing to avoid, and a hostname is neither invented nor
+/// per-process. The pid form remains only so a bare `cargo run` has an id, and
+/// it announces itself at `WARN`.
+fn resolve_instance_id(env: &dyn EnvSource, service_name: &str) -> (String, InstanceIdSource) {
+    if let Some(v) = env.get(keys::INSTANCE_ID) {
+        return (v, InstanceIdSource::Configured);
+    }
+    if let Some(h) = env.get("HOSTNAME") {
+        return (h, InstanceIdSource::Hostname);
+    }
+    if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
+        let h = h.trim();
+        if !h.is_empty() {
+            return (h.to_owned(), InstanceIdSource::Hostname);
+        }
+    }
+    (
+        format!("{service_name}-{}", std::process::id()),
+        InstanceIdSource::ProcessFallback,
+    )
 }
 
 fn parse_level(key: &'static str, s: &str) -> Result<LevelFilter, ConfigError> {

@@ -17,17 +17,31 @@
 //!
 //! # I5, made structural rather than remembered
 //!
-//! ADR-0005 §11.3: relay admission verifies an Owner-rooted
-//! `RelayCapabilityToken` **offline**, so a relay must come up and stay up with
-//! the whole control plane down. `infra/README.md` §2.3 records that the compose
-//! topology has no `depends_on` edge from a relay onto the control plane and
-//! that "that absence is load-bearing".
+//! [`ReadinessPolicy::NoControlPlaneCalls`] exists for **two different reasons**,
+//! and a reader who knows only the first will wrongly conclude the rule does not
+//! apply to them.
 //!
-//! The same absence has to hold inside the process. Every probe declares a
+//! **The data plane: a relay must not need coordination to start.** ADR-0005
+//! §11.3: relay admission verifies an Owner-rooted `RelayCapabilityToken`
+//! **offline**, so a relay must come up and stay up with the whole control plane
+//! down. `infra/README.md` §2.3 records that the compose topology has no
+//! `depends_on` edge from a relay onto the control plane and that "that absence
+//! is load-bearing".
+//!
+//! **The signalling path: a readiness check is itself a dependency.** A
+//! rendezvous or presence instance that reports NOT READY on a control-plane
+//! blip is pulled from the load balancer; that stops candidate exchange; and that
+//! puts the control plane back in the critical path of every reconnect. **I5 is
+//! violated by way of a health check, with no line of code anywhere calling the
+//! control plane.** `rendezvous-connectivity` reached this independently and
+//! diverged from `infra/README.md` §5 to get it, which is the right call.
+//!
+//! Either way the absence has to hold inside the process. Every probe declares a
 //! [`ProbeKind`]; a registry built with [`ReadinessPolicy::NoControlPlaneCalls`]
-//! **refuses to register** a `ControlPlane` probe. A relay cannot acquire the
-//! dependency by accident, and the refusal is a compile-adjacent error at wiring
-//! time rather than an outage discovered when the control plane is down.
+//! **refuses to register** a `ControlPlane` probe. The dependency cannot be
+//! acquired by accident, and the refusal is a wiring-time error rather than an
+//! outage discovered when the control plane is down — the mistake is
+//! unrepresentable, not merely discouraged.
 
 mod probes;
 
@@ -44,11 +58,25 @@ use twinvpn_types::{codes, ReasonCode};
 /// Whether the registry admits a control-plane probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadinessPolicy {
-    /// The control plane, rendezvous, presence and relay-directory: any probe.
+    /// Any probe, including a control-plane one.
+    ///
+    /// Correct for the control plane itself and for `relay-directory` and
+    /// `relay-health`, whose readiness is a datastore.
     AnyDependency,
-    /// **The relays.** A control-plane probe is refused, because a relay that
-    /// cannot become ready without coordination puts the control plane in the
-    /// data path and makes I5 untrue.
+    /// **A control-plane probe is refused.** Chosen by the relays *and* by the
+    /// rendezvous and presence, for two different and equally load-bearing
+    /// reasons — see the module docs:
+    ///
+    /// * a **relay** that cannot become ready without coordination puts the
+    ///   control plane in the data path (ADR-0005 §11.3);
+    /// * a **rendezvous or presence** instance that goes NOT READY on a
+    ///   control-plane blip is pulled from the load balancer, which stops
+    ///   candidate exchange, which puts the control plane back in the reconnect
+    ///   path — I5 violated by way of a health check.
+    ///
+    /// If you are wiring a service that talks to the control plane at all, the
+    /// question is not "do I call it?" but "does my readiness *answer* depend on
+    /// it?". If it does, this is the policy you want.
     NoControlPlaneCalls,
 }
 
@@ -58,7 +86,10 @@ pub enum HealthError {
     /// A `ControlPlane` probe on a `NoControlPlaneCalls` registry.
     #[error(
         "probe {probe} declares ProbeKind::ControlPlane, which this service forbids: \
-         a relay's readiness must never make a control-plane call (ADR-0005 §11.3, I5)"
+         readiness must not depend on the control plane, either because the service \
+         must start without coordination (ADR-0005 §11.3) or because going NOT READY \
+         on a control-plane blip would pull it from the load balancer and put the \
+         control plane back in the reconnect path (I5)"
     )]
     ControlPlaneProbeForbidden {
         /// The probe's static name.

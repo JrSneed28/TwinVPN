@@ -8,8 +8,8 @@
 use std::time::Duration;
 
 use twinvpn_service_common::config::{
-    keys, AddressFamilies, ConfigError, EnvSource, Loader, MapEnv, RegistryCheck, ServiceConfig,
-    SystemEnv,
+    keys, AddressFamilies, ConfigError, EnvSource, InstanceIdSource, Loader, MapEnv, RegistryCheck,
+    ServiceConfig, SystemEnv,
 };
 
 fn empty() -> MapEnv {
@@ -300,4 +300,102 @@ fn the_derived_sub_configs_carry_the_loaded_values() {
     assert!(!obs.otel.enabled);
     assert_eq!(obs.log_level_expiry, Duration::from_millis(60_000));
     assert_eq!(obs.component, "COMPONENT_COORDINATION_SERVICE");
+}
+
+// ---------------------------------------------------------------------------
+// service.instance.id
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_configured_instance_id_wins_over_every_fallback() {
+    // `docker-compose.yml` sets TWINVPN_INSTANCE_ID per service. A service that
+    // derived its own would ignore it, and `service.instance.id` would change on
+    // every restart — which makes "how many instances served this" silently mean
+    // "how many times did anything restart".
+    let cfg = load(
+        &empty()
+            .with(keys::INSTANCE_ID, "control-plane")
+            .with("HOSTNAME", "some-container-abc123"),
+    )
+    .expect("loads");
+    assert_eq!(cfg.instance_id, "control-plane");
+    assert_eq!(cfg.instance_id_source, InstanceIdSource::Configured);
+    assert!(cfg.instance_id_source.is_stable_across_restarts());
+}
+
+#[test]
+fn the_hostname_is_the_documented_fallback() {
+    let cfg = load(&empty().with("HOSTNAME", "some-container-abc123")).expect("loads");
+    assert_eq!(cfg.instance_id, "some-container-abc123");
+    assert_eq!(cfg.instance_id_source, InstanceIdSource::Hostname);
+    // Still stable across a restart, which is the property that matters.
+    assert!(cfg.instance_id_source.is_stable_across_restarts());
+}
+
+#[test]
+fn an_empty_instance_id_falls_through_rather_than_naming_an_instance_empty() {
+    // `TWINVPN_INSTANCE_ID=` in a compose file is an easy way to think you set
+    // one. An empty `service.instance.id` would collapse the whole fleet into a
+    // single series.
+    let cfg = load(
+        &empty()
+            .with(keys::INSTANCE_ID, "   ")
+            .with("HOSTNAME", "h1"),
+    )
+    .expect("loads");
+    assert_eq!(cfg.instance_id, "h1");
+    assert_eq!(cfg.instance_id_source, InstanceIdSource::Hostname);
+}
+
+#[test]
+fn the_process_fallback_is_marked_as_the_degraded_mode_it_is() {
+    // No variable, no HOSTNAME. `MapEnv` supplies neither, so the resolver falls
+    // to the pid form — unless this host has an /etc/hostname, which a container
+    // does. Assert the property rather than the value.
+    let cfg = load(&empty()).expect("loads");
+    match cfg.instance_id_source {
+        InstanceIdSource::ProcessFallback => {
+            assert!(cfg.instance_id.starts_with("control-plane-"));
+            assert!(
+                !cfg.instance_id_source.is_stable_across_restarts(),
+                "the pid form must not claim to survive a restart"
+            );
+        }
+        InstanceIdSource::Hostname => {
+            assert!(cfg.instance_id_source.is_stable_across_restarts());
+        }
+        InstanceIdSource::Configured => panic!("nothing configured it"),
+    }
+    assert!(!cfg.instance_id.is_empty(), "an id is always produced");
+}
+
+#[test]
+fn each_source_has_a_distinct_allowlisted_outcome_token() {
+    use twinvpn_service_common::obs::attrs;
+    let mut seen = std::collections::BTreeSet::new();
+    for src in [
+        InstanceIdSource::Configured,
+        InstanceIdSource::Hostname,
+        InstanceIdSource::ProcessFallback,
+    ] {
+        assert!(seen.insert(src.as_outcome()), "duplicate outcome token");
+    }
+    // The token rides `twinvpn.outcome`, which IS on the collector allowlist.
+    // There is no allowlisted key meaning "where an id came from", and inventing
+    // one would be a field the collector silently deletes.
+    assert_eq!(
+        attrs::verdict("twinvpn.outcome"),
+        attrs::KeyVerdict::Allowed
+    );
+}
+
+#[test]
+fn the_resolved_id_is_what_reaches_observability() {
+    let cfg = load(&empty().with(keys::INSTANCE_ID, "relay-a")).expect("loads");
+    assert_eq!(cfg.observability().instance_id, "relay-a");
+    // ...and the explicit override still overrides, for a caller that mints one.
+    assert_eq!(
+        cfg.observability_config("minted-elsewhere").instance_id,
+        "minted-elsewhere"
+    );
 }
