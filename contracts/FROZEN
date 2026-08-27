@@ -1,0 +1,27 @@
+2f5323cf3351a757b5ca31585b46ffebc7bad22d4b75cbc1e89e3ff5f5b344a3
+
+TwinVPN Phase 2 contract freeze — declared 2026-08-27.
+
+Declared by the Phase 3 integration lead after `make gate` reported 31/31
+conditions satisfied against this exact schema digest, and after every conflict
+in docs/phase1-conflicts.md was confirmed dispositioned (CF-1 … CF-10 resolved
+or closed; OQ-1 and OQ-2 open questions that Phase 1 states do not block).
+
+Evidence at declaration:
+  20 .proto files compile and lint clean
+  649 generated files across rust, swift, kotlin, csharp
+  all four bindings COMPILE against their pinned runtimes
+  35801 contract checks, 0 failures
+  201 reason codes across 16 domains; 28 capabilities; 12 canonical states
+
+What this file authorizes: production implementation under ADR-0018 §11.12's
+repository layout may begin.
+
+What it does NOT authorize: any change to contracts/. The freeze procedure in
+the Phase 3 objective still applies — a contract may change only on a
+demonstrated defect, documented, reviewed by the integration lead, checked for
+Phase 1 and compatibility implications, explicitly approved, with contract tests
+updated and this decision amended. Implementation inconvenience is not a reason.
+
+If the schema changes, scripts/check_freeze_scope.py fails until this file is
+re-declared deliberately.
