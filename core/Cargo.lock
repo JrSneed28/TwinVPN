@@ -1282,7 +1282,9 @@ dependencies = [
 name = "twinvpn-core"
 version = "0.1.0"
 dependencies = [
+ "futures-core",
  "proptest",
+ "prost",
  "thiserror",
  "tracing",
  "twinvpn-cp-client",
@@ -1354,15 +1356,12 @@ dependencies = [
 name = "twinvpn-diag"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "proptest",
  "prost",
- "serde",
  "serde_json",
  "thiserror",
  "twinvpn-env",
  "twinvpn-schema",
- "twinvpn-store",
  "twinvpn-types",
 ]
 
@@ -1409,10 +1408,14 @@ dependencies = [
 name = "twinvpn-ffi"
 version = "0.1.0"
 dependencies = [
- "libc",
+ "futures-core",
+ "prost",
  "twinvpn-core",
  "twinvpn-diag",
  "twinvpn-env",
+ "twinvpn-mgmt",
+ "twinvpn-platform",
+ "twinvpn-schema",
  "twinvpn-types",
 ]
 
