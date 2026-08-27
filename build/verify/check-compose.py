@@ -15,8 +15,18 @@ What it enforces, and why each one is here:
      secrets, credentials, or .env files"; the corollary is that a default IS
      a committed credential.
 
-  2. NO `.env` IS COMMITTED, AND NO KEY MATERIAL SITS IN infra/secrets/.
-     A generated development key is still a key.
+  2. NO `.env` IS COMMITTED, AND NO KEY UNDER infra/secrets/ IS REACHABLE BY
+     GIT. A generated development key is still a key.
+
+     This check ASKS GIT rather than printing advice. For every file under
+     infra/secrets/ it consults `git check-ignore` and `git ls-files`: ignored
+     and untracked is a PASS, said quietly; tracked, or not ignored, is a
+     FAIL that stops the build. An earlier revision warned instead, which made
+     `--strict` fail on exactly the files `infra/scripts/bootstrap-local.sh`
+     is supposed to create - and a check whose normal-path outcome is "5
+     warnings, exit 1" trains people to run it with `--strict` off, which is
+     how the real finding gets missed later. A check that can verify its own
+     claim must verify it.
 
   3. EVERY BIND MOUNT SOURCE EXISTS.
      Docker silently creates a missing bind source as a ROOT-OWNED directory,
@@ -58,6 +68,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -92,6 +103,26 @@ def fail(msg: str) -> None:
 
 def warn(msg: str) -> None:
     warnings.append(msg)
+
+
+def git(*args: str) -> int:
+    """Run a git command in the repository and return its exit status.
+
+    Returns 127 when git cannot be run at all, which the caller distinguishes
+    from a real non-zero verdict: "git says no" and "git could not be asked"
+    are different facts and must not collapse into one.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 127
+    return proc.returncode
 
 
 def walk_strings(node, path="") -> list[tuple[str, str]]:
@@ -140,15 +171,70 @@ def check_no_committed_secrets() -> None:
         if "*" not in body:
             fail("infra/secrets/.gitignore does not ignore everything ('*').")
 
-    for path in secrets_dir.rglob("*"):
-        if path.is_file() and path.name != ".gitignore":
-            try:
-                head = path.read_bytes()[:200]
-            except OSError:
-                continue
-            if KEYLIKE.search(head):
-                warn(f"{path.relative_to(REPO_ROOT)} contains PEM private key material. "
-                     f"It is gitignored; confirm it is not staged.")
+    # ------------------------------------------------------------------
+    # Every file under infra/secrets/ is key material by construction - that
+    # is what the directory is for - so every file is checked, not only the
+    # PEM-bearing ones. The relays' 32-byte raw Noise static keys carry no
+    # header to match on and are exactly as sensitive as the PEM files.
+    #
+    # THE CHECK ASKS GIT. `infra/scripts/bootstrap-local.sh` is SUPPOSED to
+    # create these files, so their existence is the normal path and must not
+    # be a finding. What matters is whether git can reach them, and git can
+    # answer that:
+    #
+    #     git check-ignore -q <p>        exit 0 => ignored
+    #     git ls-files --error-unmatch   exit 0 => TRACKED
+    #
+    # ignored AND untracked  -> PASS, silently.
+    # tracked, or unignored  -> FAIL. A private key git can see is precisely
+    #                           the thing this check exists to catch, and it
+    #                           should stop the build rather than print advice.
+    #
+    # An earlier revision warned in the ignored-and-untracked case, which made
+    # `--strict` exit 1 on a correctly bootstrapped tree. A check whose normal
+    # outcome is a wall of warnings teaches people to drop `--strict`, and the
+    # real finding is then missed later.
+    # ------------------------------------------------------------------
+    candidates = sorted(
+        p for p in secrets_dir.rglob("*")
+        if p.is_file() and not p.is_symlink() and p.name != ".gitignore"
+    )
+    if not candidates:
+        return
+
+    if git("rev-parse", "--git-dir") != 0:
+        for path in candidates:
+            warn(f"{path.relative_to(REPO_ROOT)} holds key material and could NOT be "
+                 f"verified: git is unavailable or this is not a work tree, so "
+                 f"neither `git check-ignore` nor `git ls-files` can be consulted. "
+                 f"Confirm by hand that it is ignored and untracked.")
+        return
+
+    for path in candidates:
+        rel = path.relative_to(REPO_ROOT).as_posix()
+
+        try:
+            pem = bool(KEYLIKE.search(path.read_bytes()[:512]))
+        except OSError:
+            pem = False
+        what = "PEM private key material" if pem else "key material"
+
+        # Tracked is the worse of the two failures and is reported first: an
+        # ignore rule cannot save a file git already has.
+        if git("ls-files", "--error-unmatch", "--", rel) == 0:
+            fail(f"{rel} contains {what} and is TRACKED BY GIT. An ignore rule does "
+                 f"not untrack an already-tracked file. Remove it from the index "
+                 f"(`git rm --cached -- {rel}`), rotate the key, and check whether "
+                 f"it reached a published commit.")
+            continue
+
+        if git("check-ignore", "-q", "--", rel) != 0:
+            fail(f"{rel} contains {what} and is NOT IGNORED by git. One `git add -A` "
+                 f"commits it. infra/secrets/.gitignore is supposed to cover "
+                 f"everything under this directory; find out why it does not.")
+            continue
+
+        # ignored and untracked: the intended state. Say nothing.
 
 
 def check_bind_sources(doc: dict) -> None:

@@ -131,7 +131,7 @@ fi
 
 echo
 echo "==> done. Next:"
-echo "    1. cp infra/.env.example .env      (then EDIT it - nothing there is a usable secret)"
+echo "    1. cp infra/env.example .env       (then EDIT it - nothing there is a usable secret)"
 echo "    2. docker compose config           (validate)"
 echo "    3. docker compose up -d postgres otel-collector prometheus tempo loki grafana"
 echo

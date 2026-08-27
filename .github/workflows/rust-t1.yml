@@ -162,9 +162,10 @@ jobs:
   # =========================================================================
   # ADR-0018 T1 ARCHITECTURAL LINTS.
   #
-  # THIS JOB IS EXPECTED TO BE RED UNTIL core-foundation LANDS core/xtask, AND
-  # THAT IS THE POINT. It is a real, named, blocking job rather than a
-  # conditional skip, because:
+  # STATUS: GREEN. core-foundation has landed core/xtask and all four checks
+  # pass. This job was written to be RED before that happened, deliberately -
+  # a real, named, blocking job rather than a conditional skip - and it stays
+  # written that way, because:
   #
   #   - ADR-0018 CD-3 says the deny-list "IS THE ACTUAL MECHANISM" for the
   #     three-clock rule. A mechanism that is skipped is not a mechanism.
