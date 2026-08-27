@@ -1,0 +1,154 @@
+{
+  "uid": "twinvpn-reason-codes",
+  "title": "TwinVPN — Reason codes by domain",
+  "tags": ["twinvpn", "adr-0015", "r-22"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": { "from": "now-24h", "to": "now" },
+  "description": "Every panel here keys on the CODE, never on the text. ADR-0015 §11.2 rule 4: 'the code is the contract; the human text is not' - summary and next-action strings may be reworded or re-translated at any time, so automation, tests and support tooling MUST key on the code. docs/testing-strategy.md V9 makes that a review rule. The 16 domains are a CLOSED SET (contracts/registry/reason_codes.json closed_domain_set); a code from outside it is a contract-test failure, not a dashboard gap.",
+  "templating": {
+    "list": [
+      {
+        "name": "domain",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+        "query": "label_values(twinvpn_reason_code_total, twinvpn_reason_domain)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "description": "NET NAT RELAY AUTH CRYPTO PROTO POLICY DNS ROUTE PLATFORM RESOURCE CONTROL INTERNAL MGMT STORE UPDATE"
+      },
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+        "query": "label_values(twinvpn_reason_code_total, twinvpn_service)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "barchart",
+      "title": "Reason-code frequency by DOMAIN",
+      "description": "Domain is the only segment with registry meaning: forward compatibility is by DOMAIN prefix (ADR-0015 §11.2 rule 5), so a receiver meeting an unknown code degrades on its first segment. Grouping here by domain therefore matches how an older peer would actually understand the traffic.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (twinvpn_reason_domain) (increase(twinvpn_reason_code_total{twinvpn_reason_domain=~\"$domain\",twinvpn_service=~\"$service\"}[$__range]))",
+          "legendFormat": "{{twinvpn_reason_domain}}",
+          "instant": true
+        }
+      ],
+      "options": { "orientation": "horizontal", "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "INTERNAL-domain share (ADR-0015 §14 revisit condition 5)",
+      "description": "REVISIT TRIGGER, not a vanity metric. 'More than 5% of support cases resolve with a reason_code in the INTERNAL domain, or with no reason_code at all' falsifies the completeness of the taxonomy and requires the registry to be expanded and the unenterable-without-a-reason enforcement to be audited. Every INTERNAL occurrence is by definition a defect (§11.2.1).",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 9, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(twinvpn_reason_code_total{twinvpn_reason_domain=\"INTERNAL\"}[$__range])) / clamp_min(sum(increase(twinvpn_reason_code_total[$__range])), 1)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Emissions carrying NO reason_code",
+      "description": "This must be ZERO. ADR-0015 O-05 makes emission a property of the TRANSITION ITSELF, not of a call site, and §11.6 mechanism 3 makes DEGRADED, BLOCKED, RECONNECTING and FAILED UNENTERABLE without a reason_code - a transition without one is INTERNAL.INVARIANT_VIOLATED. A non-zero value here means the choke point has been bypassed.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 9, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(twinvpn_transition_total{twinvpn_reason_code=\"\"}[$__range]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Reason-code rate by code, per domain",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(20, sum by (twinvpn_reason_code, twinvpn_reason_domain) (rate(twinvpn_reason_code_total{twinvpn_reason_domain=~\"$domain\",twinvpn_service=~\"$service\"}[$__rate_interval])))",
+          "legendFormat": "{{twinvpn_reason_code}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Codes by registry attributes (class / severity / terminal / user-actionable)",
+      "description": "ADR-0015 §11.2 rule 5 requires every carrier of a Diagnostic to transmit the registry attributes FOR UNRECOGNISED CODES AS WELL AS KNOWN ONES, because 'a receiver cannot choose a correct affordance from a bare string, and could not tell a POLICY-class condition that must not be dismissible from an INFO one that should be transient'. A row here with an empty class or severity means a carrier dropped them, which is a contract defect.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 19 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (twinvpn_reason_code, twinvpn_reason_domain, twinvpn_reason_class, twinvpn_severity, twinvpn_terminal, twinvpn_user_actionable, twinvpn_remediation_class, twinvpn_scope) (increase(twinvpn_reason_code_total{twinvpn_reason_domain=~\"$domain\"}[$__range]))",
+          "format": "table",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "RELAY and CONTROL domains, split by address family",
+      "description": "Address family is an EVIDENCE FIELD, never a namespace (ADR-0015 §11.2, rejecting TVPN-IPV4/TVPN-IPV6). So a v4 failure and a v6 failure are the SAME condition with different evidence, and this panel splits by the evidence rather than by a per-family code - which is why neither family can acquire a diagnostic vocabulary the other lacks.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (twinvpn_reason_code, twinvpn_address_family) (rate(twinvpn_reason_code_total{twinvpn_reason_domain=~\"RELAY|CONTROL\"}[$__rate_interval]))",
+          "legendFormat": "{{twinvpn_reason_code}} — {{twinvpn_address_family}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    }
+  ]
+}

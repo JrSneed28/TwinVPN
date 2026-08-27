@@ -1,0 +1,63 @@
+# Local trace backend for TwinVPN INFRASTRUCTURE traces.
+#
+# ADR-0015 §11.7: "Client traces are LOCAL spans over one connection attempt,
+# retained in the ledger. NO TRACE CONTEXT CROSSES TO INFRASTRUCTURE." Nothing
+# stored here originates on a device. Infrastructure traces "TERMINATE AT THE
+# COMPONENT BOUNDARY" (§11.1), and the collector severs any relay span's parent
+# link so a relay cannot stitch two peers into one trace even by accident.
+#
+# Retention is deliberately short. A trace store is a metadata store, and
+# ADR-0015 §1 is explicit that observability data about a VPN is exactly the
+# metadata the VPN exists to protect. Keeping less is a privacy control, not a
+# disk-space measure.
+
+stream_over_http_enabled: true
+
+server:
+  http_listen_address: "::"
+  http_listen_port: 3200
+  grpc_listen_address: "::"
+  grpc_listen_port: 9095
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "[::]:4317"
+        http:
+          endpoint: "[::]:4318"
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    # 24 hours. Long enough to answer "what happened during last night's run",
+    # short enough that this is not a longitudinal record of anything.
+    block_retention: 24h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+usage_report:
+  reporting_enabled: false
+
+overrides:
+  defaults:
+    metrics_generator:
+      # The span-metrics and service-graph generators are OFF.
+      #
+      # A service graph derived from spans across control-plane, rendezvous,
+      # presence and relay is precisely the cross-component correlation
+      # ADR-0015 §6 called FATAL ON PRIVACY when it rejected Alternative A. It
+      # is off here not because it is expensive but because turning it on would
+      # reconstruct, from permitted per-component traces, the thing the
+      # architecture refused to collect.
+      processors: []

@@ -1,0 +1,66 @@
+# yamllint configuration for the TwinVPN infrastructure and CI YAML.
+#
+# The point of a linter here is to catch the errors that a human misses and a
+# parser accepts: a duplicated key that silently wins, inconsistent indentation
+# that changes nesting, a trailing space that changes a value. It is not to
+# enforce a house style over files whose main content is the reasoning behind
+# each setting.
+#
+# Where a rule is relaxed, the reason is stated. A relaxed rule with no reason
+# is indistinguishable from a rule someone turned off to make a build go green.
+
+extends: default
+
+rules:
+
+  # A duplicated key is a value silently overwritten. This is the single most
+  # valuable rule in the file and it is an error.
+  key-duplicates: enable
+
+  # Comments in this repository carry the ADR citations that make a setting
+  # reviewable, and they are long because the clauses they quote are.
+  line-length:
+    max: 200
+    level: warning
+    allow-non-breakable-words: true
+
+  # `on:` in a GitHub Actions workflow is a key, not the boolean `on`. YAML 1.1
+  # says otherwise; GitHub does not. Checking keys here would flag every
+  # workflow in the repository for something that is correct.
+  truthy:
+    check-keys: false
+    allowed-values: ["true", "false"]
+
+  # Compose and collector configs both use two-space nesting with lists
+  # indented under their key. Consistency matters; the specific choice does not.
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+    check-multi-line-strings: false
+
+  comments:
+    min-spaces-from-content: 1
+    require-starting-space: true
+
+  comments-indentation: disable
+
+  document-start: disable
+
+  # `x-*` extension fields and long environment blocks make some mappings long.
+  empty-lines:
+    max: 2
+
+  braces:
+    max-spaces-inside: 1
+
+  brackets:
+    max-spaces-inside: 1
+
+  # A trailing space at the end of a scalar changes the value.
+  trailing-spaces: enable
+
+  new-line-at-end-of-file: enable
+
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: false

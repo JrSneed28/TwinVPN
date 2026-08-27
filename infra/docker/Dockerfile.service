@@ -1,0 +1,142 @@
+# TwinVPN server-side artifact image — ONE Dockerfile for all six services.
+#
+# Six near-identical Dockerfiles is exactly the R-31 divergence class ADR-0018
+# CB-2 exists to prevent, and it is the same argument that produced
+# `twinvpn-service-common`: one decision, one implementation. The per-service
+# difference is a crate name and a set of listeners, both of which are build
+# arguments, so there is nothing left to diverge.
+#
+# ADR-0018 §11.10 (BM-6) reproducibility inputs honoured here:
+#   --remap-path-prefix ....... every source root remapped
+#   SOURCE_DATE_EPOCH ......... passed through as a build arg
+#   pinned toolchain digest ... base images pinned by tag AND (once resolved)
+#                               by digest, see infra/docker/base-images.lock
+#   committed lockfile ........ services/Cargo.lock is copied, `--locked` is used
+#
+# ADR-0018 §11.11 (DP-1/DP-2) supply chain: `cargo build --locked` refuses to
+# move the lockfile, so an image build cannot silently acquire a new dependency
+# version. There is no `cargo install` and no network fetch outside the fetch
+# stage.
+
+# ---------------------------------------------------------------------------
+# Base images.
+#
+# Defaults are exact immutable version tags. `infra/docker/base-images.lock`
+# carries the sha256 digests; `build/verify/pin-base-images.sh` resolves and
+# writes them on a host with registry access, and docker-compose.yml passes the
+# resolved values in as these build args. A tag is mutable and a digest is not,
+# so the digest is the real pin and the tag is the readable label.
+#
+# We do NOT commit a digest we have not resolved: a fabricated digest is worse
+# than an honest tag, because it looks like a pin and is not one.
+# ---------------------------------------------------------------------------
+ARG RUST_IMAGE=docker.io/library/rust:1.90.0-bookworm
+ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot
+ARG BUSYBOX_IMAGE=docker.io/library/busybox:1.37.0-musl
+
+# ---------------------------------------------------------------------------
+# Stage 1 — the healthcheck shim.
+#
+# The runtime layer is distroless: no shell, no curl, no wget, no package
+# manager. That is the point. But a TCP probe is not a health check — it proves
+# a socket is listening, not that the service considers itself healthy — and
+# the objective requires the check to hit the service's own health endpoint.
+#
+# One statically linked busybox (~1 MB) supplies `sh` and `wget` for exactly
+# that, and nothing else in the image can be used to fetch, resolve or execute
+# anything the service did not.
+# ---------------------------------------------------------------------------
+FROM ${BUSYBOX_IMAGE} AS busybox
+
+# ---------------------------------------------------------------------------
+# Stage 2 — dependency fetch, cached separately from the source build.
+# ---------------------------------------------------------------------------
+FROM ${RUST_IMAGE} AS fetch
+WORKDIR /src
+# The services workspace has exactly one permitted edge into /core
+# (twinvpn-schema, twinvpn-types — ADR-0018 §11.2 rows 2.8/2.11), so both trees
+# are needed to resolve. contracts/ is needed because the schema crate builds
+# from it.
+COPY rust-toolchain.toml ./
+COPY core ./core
+COPY services ./services
+COPY contracts ./contracts
+WORKDIR /src/services
+RUN cargo fetch --locked
+
+# ---------------------------------------------------------------------------
+# Stage 3 — build one service binary.
+# ---------------------------------------------------------------------------
+FROM fetch AS build
+
+# The cargo package to build. Every service crate is named twinvpn-<service>
+# and its [[bin]] carries the same name, so one argument identifies both.
+ARG SERVICE
+ARG CARGO_PROFILE=release
+# ADR-0018 BM-6. Defaults to the TwinVPN epoch commit date rather than "now",
+# so an unparameterised build is still deterministic.
+ARG SOURCE_DATE_EPOCH=1756252800
+ARG SOURCE_COMMIT=unknown
+
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+# BM-6: remap every source root so the build path does not enter the artifact.
+ENV RUSTFLAGS="--remap-path-prefix=/src=/twinvpn --remap-path-prefix=/usr/local/cargo=/cargo"
+ENV CARGO_NET_OFFLINE=true
+
+WORKDIR /src/services
+RUN test -n "${SERVICE}" || { echo "SERVICE build arg is required"; exit 1; }
+RUN cargo build --locked --offline --profile "${CARGO_PROFILE}" -p "twinvpn-${SERVICE}" \
+ && install -D "target/${CARGO_PROFILE}/twinvpn-${SERVICE}" /out/twinvpn-service \
+ && strip /out/twinvpn-service || true
+
+# ---------------------------------------------------------------------------
+# Stage 4 — runtime.
+#
+# distroless `:nonroot` runs as uid/gid 65532 and contains no shell, no package
+# manager and no setuid binary. There is no USER downgrade to forget, because
+# there is no root user to start from.
+# ---------------------------------------------------------------------------
+FROM ${RUNTIME_IMAGE} AS runtime
+
+ARG SERVICE
+ARG SOURCE_COMMIT=unknown
+
+LABEL org.opencontainers.image.title="twinvpn-${SERVICE}"
+LABEL org.opencontainers.image.source="https://github.com/twinvpn/twinvpn"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.revision="${SOURCE_COMMIT}"
+LABEL io.twinvpn.service="${SERVICE}"
+LABEL io.twinvpn.plane="control"
+
+COPY --from=busybox /bin/busybox /busybox
+COPY --from=build /out/twinvpn-service /usr/local/bin/twinvpn-service
+
+# The admin listener. ONE listener serving three paths, so a service has one
+# port to open, one port to firewall and one port to forget to publish:
+#   /healthz  liveness  — "this process is running and its own invariants hold"
+#   /readyz   readiness — "this process can serve, INCLUDING its dependencies"
+#   /metrics  Prometheus, label allowlist per ADR-0015 §9
+#
+# Health and readiness are different questions and are answered separately:
+# a control plane whose database is unreachable is LIVE (do not restart it,
+# restarting will not help) and NOT READY (do not send it traffic).
+#
+# The admin listener is operator-facing. It is NOT the device-facing surface
+# and MUST NOT be published to an untrusted network.
+ENV TWINVPN_ADMIN_ADDR="[::]:9090"
+ENV TWINVPN_HEALTHCHECK_URL="http://127.0.0.1:9090/readyz"
+ENV TWINVPN_SERVICE_NAME="${SERVICE}"
+ENV OTEL_SERVICE_NAME="twinvpn-${SERVICE}"
+
+EXPOSE 9090/tcp
+
+# Readiness is what dependency ordering needs, so it is what the container
+# health check asks. `restart:` is deliberately "no" in docker-compose.yml, so
+# an unready container stays unready and visible rather than crash-looping.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+  CMD ["/busybox", "sh", "-c", "/busybox wget -q -T 3 -O /dev/null \"$TWINVPN_HEALTHCHECK_URL\""]
+
+# PID 1 is the service itself, so SIGTERM reaches it directly and the graceful
+# shutdown sequence in twinvpn-service-common is actually exercised. No shell,
+# no init wrapper, no signal to swallow.
+ENTRYPOINT ["/usr/local/bin/twinvpn-service"]

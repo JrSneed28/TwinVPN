@@ -1,0 +1,328 @@
+name: T2 — post-merge
+
+# ===========================================================================
+# TIER MAPPING — docs/testing-strategy.md §6.1.
+# ===========================================================================
+# T2: "Every merge into `main` (post-merge), and on demand. <= 60 min. Blocks
+# `main` health; A RED `main` BLOCKS ALL MERGES UNTIL GREEN OR REVERTED. Runs
+# on a shared TwinLab instance (namespaces only)."
+#
+# ===========================================================================
+# WHAT THIS WORKFLOW HONESTLY IS
+# ===========================================================================
+# §6.2's T2 contents are: everything in T1, PLUS levels 5 (interop, (N,N-1)
+# pairs), 6 (integration), 9 (networking), 10-subset (NAT traversal), 11
+# (relay), 12-regression, 18-N-1 (upgrade), and a proof-test smoke set
+# (P01, P02, P03, P05, P07, P09-A, P12).
+#
+# EVERY ONE OF THOSE NEEDS TwinLab, AND TwinLab DOES NOT EXIST YET. It is
+# `test-engineering`'s (docs/implementation/ownership.md §2, `lab/`), and this
+# domain does not write into another's paths.
+#
+# So this workflow runs the part of T2 that is real today - the full local
+# gate, both address-family topologies brought up for real, and the artifact
+# budget check - and NAMES the missing levels in a step that PRINTS them rather
+# than omitting them. A tier whose missing contents are invisible looks
+# complete, and "looked done" is the failure mode the wave-1 objective names in
+# its last line.
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t2-post-merge-${{ github.ref }}
+  cancel-in-progress: false     # a post-merge verdict on main is not disposable
+
+jobs:
+
+  gate:
+    name: full local gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60          # docs/testing-strategy.md §6.1 T2 budget
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: cache language toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+            ~/.local/jdk
+            ~/.local/kotlinc
+            ~/.local/swift
+            ~/.local/sysroot
+            ~/.dotnet
+          # Same discipline as rust-t1.yml: the key binds the toolchain pins
+          # AND the installer scripts, and there is no restore-keys fallback,
+          # because a cache that can serve a different toolchain produces a
+          # green build of the wrong thing.
+          key: >-
+            twinvpn-toolchains-${{ runner.os }}-${{ runner.arch }}-${{
+            hashFiles('build/toolchain/*.sh') }}-${{
+            hashFiles('rust-toolchain.toml') }}
+
+      - name: bootstrap
+        run: make bootstrap
+
+      - name: toolchains
+        run: make toolchains
+
+      # ownership.md §7's integration gate, in the order it states it.
+      - name: contracts
+        run: make contracts
+
+      - name: test-contracts
+        run: make test-contracts
+
+      - name: build
+        run: make build
+
+      - name: lint
+        run: make lint
+
+      - name: test
+        run: make test
+
+  topology-up:
+    name: bring the stack up — dual stack and IPv6-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: python3 -m pip install --quiet 'pyyaml==6.0.2'
+
+      # ------------------------------------------------------------------
+      # IPv6 IN THE DOCKER DAEMON.
+      #
+      # `enable_ipv6: true` on a compose network is not sufficient on every
+      # daemon version: ip6tables and IPv6 forwarding must be on, and the
+      # default GitHub runner daemon has neither. Without this the v6 topology
+      # comes up "successfully" with unreachable addresses, which is worse than
+      # failing - it is a green IPv6 lane that never carried a v6 packet.
+      # ------------------------------------------------------------------
+      - name: enable IPv6 in the docker daemon
+        run: |
+          sudo mkdir -p /etc/docker
+          echo '{"ipv6": true, "ip6tables": true, "experimental": true, "fixed-cidr-v6": "fd00:7717:d0c::/64"}' \
+            | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          sudo sysctl -w net.ipv6.conf.all.forwarding=1
+          docker info --format '{{json .}}' | python3 -c "import json,sys; d=json.load(sys.stdin); print('daemon ipv6:', d.get('Driver'), d.get('ServerVersion'))"
+
+      - name: bootstrap local secrets
+        run: bash infra/scripts/bootstrap-local.sh
+
+      - name: structural invariants
+        run: python3 build/verify/check-compose.py --strict
+
+      # ------------------------------------------------------------------
+      # Only the stores and the observability stack are brought up.
+      #
+      # The six service binaries are SKELETONS: they print a line and exit 1.
+      # Starting them here would produce a red lane that says nothing about
+      # this change. When a domain lands its service, ADD IT TO THIS LIST -
+      # that is the moment the topology becomes real, and it should be a
+      # visible one-line diff rather than an implicit consequence.
+      # ------------------------------------------------------------------
+      - name: dual-stack — up
+        env:
+          TWINVPN_PG_PASSWORD: ci-not-a-credential
+          TWINVPN_CP_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_control?sslmode=disable
+          TWINVPN_PRESENCE_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_presence?sslmode=disable
+          TWINVPN_RELAYDIR_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_relay_directory?sslmode=disable
+        run: |
+          set -euo pipefail
+          docker compose up -d --wait --wait-timeout 180 \
+            postgres otel-collector prometheus tempo loki grafana
+          docker compose ps
+
+      - name: dual-stack — every service has BOTH families
+        run: |
+          set -euo pipefail
+          fail=0
+          for svc in postgres otel-collector prometheus tempo loki grafana; do
+            cid="$(docker compose ps -q "$svc")"
+            v4="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$cid")"
+            v6="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.GlobalIPv6Address}}{{end}}' "$cid")"
+            echo "$svc  v4=${v4:-NONE}  v6=${v6:-NONE}"
+            # ADR-0010 R1 is ONE story covering both families. A dual-stack
+            # topology in which a container has no v6 address is a v4-only
+            # topology wearing a label, and every v6 defect stays invisible.
+            [ -n "$v4" ] || { echo "::error::$svc has no IPv4 address in the dual-stack topology"; fail=1; }
+            [ -n "$v6" ] || { echo "::error::$svc has no IPv6 address in the dual-stack topology - ADR-0010 R1"; fail=1; }
+          done
+          exit "$fail"
+
+      - name: dual-stack — the observability stack actually answers
+        run: |
+          set -euo pipefail
+          curl -fsS "http://127.0.0.1:19090/-/ready" >/dev/null && echo "prometheus ready"
+          curl -fsS "http://127.0.0.1:13100/ready"   >/dev/null && echo "loki ready"
+          curl -fsS "http://127.0.0.1:13200/ready"   >/dev/null && echo "tempo ready"
+          curl -fsS "http://127.0.0.1:13000/api/health" >/dev/null && echo "grafana healthy"
+          # The collector's health_check extension, not a TCP probe.
+          docker compose exec -T prometheus wget -q -O - "http://otel-collector:13133" >/dev/null \
+            && echo "otel-collector health_check extension answers"
+
+      - name: dual-stack — the redaction pipeline is loaded, not just present
+        run: |
+          set -euo pipefail
+          # otelcol_processor_* series only exist once the processors are built
+          # into a running pipeline. Their presence proves the config parsed and
+          # the filter/redaction chain is live, which a config-file lint cannot.
+          docker compose exec -T prometheus wget -q -O - "http://otel-collector:8888/metrics" \
+            | grep -E '^otelcol_(process_uptime|processor)' | head -20
+          echo "collector pipelines are live"
+
+      - name: dual-stack — down
+        if: always()
+        run: docker compose down -v --remove-orphans
+
+      # ------------------------------------------------------------------
+      # IPv6-ONLY. Not a wave-2 item, not optional, and NOT the same test as
+      # dual stack: a service that quietly needs a v4 address passes dual stack
+      # and fails here, which is the entire point.
+      # ------------------------------------------------------------------
+      - name: IPv6-only — up
+        env:
+          TWINVPN_PG_PASSWORD: ci-not-a-credential
+          TWINVPN_CP_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_control?sslmode=disable
+          TWINVPN_PRESENCE_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_presence?sslmode=disable
+          TWINVPN_RELAYDIR_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_relay_directory?sslmode=disable
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml -f infra/compose/ipv6-only.yml \
+            up -d --wait --wait-timeout 180 \
+            postgres otel-collector prometheus tempo loki grafana
+          docker compose -f docker-compose.yml -f infra/compose/ipv6-only.yml ps
+
+      - name: IPv6-only — prove there is genuinely no IPv4
+        run: |
+          set -euo pipefail
+          fail=0
+          for svc in postgres otel-collector prometheus tempo loki grafana; do
+            cid="$(docker compose -f docker-compose.yml -f infra/compose/ipv6-only.yml ps -q "$svc")"
+            v4="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$cid")"
+            v6="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.GlobalIPv6Address}}{{end}}' "$cid")"
+            echo "$svc  v4=${v4:-NONE}  v6=${v6:-NONE}"
+            [ -n "$v6" ] || { echo "::error::$svc has no IPv6 address in the IPv6-ONLY topology"; fail=1; }
+            # docs/testing-strategy.md V4: "absence of a signal is not evidence
+            # unless the signal was provably possible". A v6-only lane in which
+            # containers still hold a v4 address proves nothing at all.
+            [ -z "$v4" ] || { echo "::error::$svc HAS an IPv4 address in the IPv6-only topology - this lane is not testing what it claims"; fail=1; }
+          done
+          exit "$fail"
+
+      - name: IPv6-only — services answer over v6
+        run: |
+          set -euo pipefail
+          curl -fsS "http://[::1]:19090/-/ready" >/dev/null && echo "prometheus ready over v6"
+          curl -fsS "http://[::1]:13100/ready"   >/dev/null && echo "loki ready over v6"
+          curl -fsS "http://[::1]:13200/ready"   >/dev/null && echo "tempo ready over v6"
+          curl -fsS "http://[::1]:13000/api/health" >/dev/null && echo "grafana healthy over v6"
+
+      - name: IPv6-only — down
+        if: always()
+        run: docker compose -f docker-compose.yml -f infra/compose/ipv6-only.yml down -v --remove-orphans
+
+  budgets:
+    name: ADR-0018 §11.9 artifact budgets
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            shells/linux/target
+          key: >-
+            twinvpn-cargo-${{ runner.os }}-${{ runner.arch }}-budgets-${{
+            hashFiles('rust-toolchain.toml') }}-${{
+            hashFiles('shells/linux/Cargo.lock') }}-${{
+            hashFiles('.github/workflows/t2-post-merge.yml') }}
+
+      - name: build the Linux rows in release
+        run: |
+          set -euo pipefail
+          # ADR-0018 §11.9 rows 6 and 7 are the only rows a Linux runner can
+          # produce. BM-3: Windows needs the MSVC ABI, macOS/iOS need Xcode.
+          # Rows 8 and 9 need the OpenWrt SDK (and row 9 a second pinned
+          # nightly, BM-2a); neither is provisioned here.
+          cd shells/linux
+          cargo build --locked --release --workspace
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/x86_64-unknown-linux-gnu"
+          find target/release -maxdepth 1 -type f -perm -u+x ! -name '*.d' \
+            -exec cp {} "$GITHUB_WORKSPACE/artifacts/x86_64-unknown-linux-gnu/" \;
+          ls -l "$GITHUB_WORKSPACE/artifacts/x86_64-unknown-linux-gnu/"
+
+      - name: check row 6 against its budget
+        run: |
+          # --allow-unmeasured because the aarch64 triple of row 6 is not built
+          # on this runner. ADR-0018 BM-5 forbids a SUPPORTED target shipping
+          # without a gated budget, and the checker reports it as UNMEASURED
+          # rather than as a pass, which is what keeps BM-5 answerable.
+          python3 build/verify/check-budgets.py \
+            --artifacts artifacts --row 6 --allow-unmeasured
+
+      - name: what T2 is NOT covering, named
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ### T2 coverage gaps — named, not omitted
+
+          docs/testing-strategy.md §6.2 defines T2 as everything in T1 plus:
+
+          | Level | Status |
+          |---|---|
+          | 5 — interoperability, (N, N-1) pairs | **absent** — needs multi-version binaries |
+          | 6 — integration | **absent** — needs TwinLab (`lab/`, owner `test-engineering`) |
+          | 9 — networking (namespaces, dual-stack) | **partial** — the compose IPv6-only lane above is the closest thing that exists |
+          | 10-subset — NAT traversal | **absent** — needs the TwinLab NAT emulators |
+          | 11 — relay | **absent** — needs relay binaries with behaviour |
+          | 12-regression — security regression corpus | **absent** — no corpus yet |
+          | 18-N-1 — upgrade | **absent** |
+          | Proof-test smoke set P01, P02, P03, P05, P07, P09-A, P12 | **absent** — §4's proof tests are `test-engineering`'s |
+
+          ADR-0018 §11.9 rows not built here: 1, 2, 3, 4, 5 (BM-3 — need native
+          Windows and macOS runners), 8, 9 (need the OpenWrt SDK; row 9 also
+          needs the BM-2a second pinned nightly).
+
+          These are listed so the tier's incompleteness is visible on every run.
+          A tier whose missing contents are invisible looks complete.
+          SUMMARY

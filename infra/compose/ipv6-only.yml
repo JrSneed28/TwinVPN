@@ -1,0 +1,163 @@
+# IPv6-ONLY topology override.
+#
+#   docker compose -f docker-compose.yml -f infra/compose/ipv6-only.yml up
+#
+# ===========================================================================
+# WHY THIS EXISTS, AND WHY IT IS NOT A WAVE-2 ITEM
+# ===========================================================================
+# ADR-0010 R1 is ONE story covering both address families, and ADR-0015 §11.2
+# rejected `TVPN-IPV4-*` / `TVPN-IPV6-*` as reason-code domains precisely
+# because a per-family namespace makes "we have a v4 story and a v6 story"
+# sayable. A compose file that only ever runs dual stack makes the same
+# asymmetry true in practice while leaving the claim standing: every v6-only
+# defect stays invisible until production, because nothing ever ran without a
+# v4 address to fall back to.
+#
+# This override removes IPv4 from the network entirely. A service that quietly
+# depends on a v4 address — a hard-coded 0.0.0.0 bind, a v4-first resolver
+# assumption, a v4 literal in a health probe — fails here and passes in the
+# default topology, which is exactly the discrimination the file is for.
+#
+# ===========================================================================
+# WHAT CHANGES, AND WHY EACH CHANGE IS NECESSARY
+# ===========================================================================
+# 1. The network's IPAM carries a v6 prefix ONLY. Compose replaces sequences
+#    rather than merging them, so `ipam.config` here replaces the dual-stack
+#    pair in docker-compose.yml wholesale.
+# 2. Every host port publication is re-declared on [::1]. A v4 publication
+#    would ask docker-proxy to forward to a container v4 address that does not
+#    exist; leaving them in place would fail the run for a reason that has
+#    nothing to do with the service under test.
+# 3. TWINVPN_ADDRESS_FAMILIES=ipv6 tells each service which families it may
+#    consider, so "no v4 candidate was gathered" is a configured fact rather
+#    than an inferred one.
+#
+# ===========================================================================
+# WHAT THIS DOES *NOT* GIVE YOU
+# ===========================================================================
+# A v6-only *underlay* with no NAT64/DNS64. ADR-0010 requires NAT64 handling
+# where the network provides it, and that needs a NAT64/DNS64 appliance in the
+# path. That belongs to TwinLab (docs/testing-strategy.md §3, owner
+# `test-engineering`), not to a developer compose file, and this override does
+# not pretend otherwise.
+
+networks:
+  twinvpn:
+    name: twinvpn
+    driver: bridge
+    enable_ipv6: true
+    driver_opts:
+      com.docker.network.bridge.name: br-twinvpn6
+    ipam:
+      driver: default
+      config:
+        # A distinct prefix from the dual-stack network so the two topologies
+        # can never be confused for one another in a packet capture. Still
+        # deliberately outside the product ULA fd7c:9e5d:2a10::/48 (ADR-0010
+        # §11 AP-1), which is OVERLAY space and must not appear as underlay.
+        - subnet: fd00:7717:6::/64
+          gateway: fd00:7717:6::1
+
+services:
+
+  postgres:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv6
+    ports:
+      - "[::1]:15432:5432"
+
+  control-plane:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv6
+      TWINVPN_CP_LISTEN_QUIC: "[::]:443"
+      TWINVPN_CP_LISTEN_TCP: "[::]:443"
+      TWINVPN_HEALTHCHECK_URL: "http://[::1]:9090/readyz"
+    ports:
+      - "[::1]:8443:443/tcp"
+      - "[::1]:8443:443/udp"
+      - "[::1]:19001:9090/tcp"
+
+  rendezvous:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv6
+      TWINVPN_RZ_LISTEN_QUIC: "[::]:443"
+      TWINVPN_RZ_LISTEN_TCP: "[::]:443"
+      TWINVPN_HEALTHCHECK_URL: "http://[::1]:9090/readyz"
+    ports:
+      - "[::1]:8444:443/tcp"
+      - "[::1]:8444:443/udp"
+      - "[::1]:19002:9090/tcp"
+
+  presence:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv6
+      TWINVPN_PRESENCE_LISTEN_QUIC: "[::]:443"
+      TWINVPN_PRESENCE_LISTEN_TCP: "[::]:443"
+      TWINVPN_HEALTHCHECK_URL: "http://[::1]:9090/readyz"
+    ports:
+      - "[::1]:8445:443/tcp"
+      - "[::1]:8445:443/udp"
+      - "[::1]:19003:9090/tcp"
+
+  relay-a:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv6
+      TWINVPN_HEALTHCHECK_URL: "http://[::1]:9090/readyz"
+    ports:
+      - "[::1]:41641:41641/udp"
+      - "[::1]:8446:443/udp"
+      - "[::1]:8446:443/tcp"
+      - "[::1]:19004:9090/tcp"
+
+  relay-b:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv6
+      TWINVPN_HEALTHCHECK_URL: "http://[::1]:9090/readyz"
+    ports:
+      - "[::1]:41642:41641/udp"
+      - "[::1]:8447:443/udp"
+      - "[::1]:8447:443/tcp"
+      - "[::1]:19005:9090/tcp"
+
+  relay-directory:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv6
+      TWINVPN_HEALTHCHECK_URL: "http://[::1]:9090/readyz"
+      # ADR-0006 §11.1 rule 2 still holds: every region publishes relays
+      # reachable over BOTH families. In a v6-only underlay the v4 endpoint
+      # list is legitimately empty, so the invariant is relaxed HERE ONLY and
+      # the relaxation is visible in configuration rather than silent.
+      TWINVPN_RELAYDIR_REQUIRE_BOTH_FAMILIES: "false"
+    ports:
+      - "[::1]:8448:443/tcp"
+      - "[::1]:8448:443/udp"
+      - "[::1]:19006:9090/tcp"
+
+  relay-health:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv6
+      TWINVPN_HEALTHCHECK_URL: "http://[::1]:9090/readyz"
+    ports:
+      - "[::1]:19007:9090/tcp"
+
+  otel-collector:
+    ports:
+      - "[::1]:14317:4317/tcp"
+      - "[::1]:14318:4318/tcp"
+      - "[::1]:18888:8888/tcp"
+
+  prometheus:
+    ports:
+      - "[::1]:19090:9090/tcp"
+
+  tempo:
+    ports:
+      - "[::1]:13200:3200/tcp"
+
+  loki:
+    ports:
+      - "[::1]:13100:3100/tcp"
+
+  grafana:
+    ports:
+      - "[::1]:13000:3000/tcp"

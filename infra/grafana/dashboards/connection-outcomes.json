@@ -1,0 +1,147 @@
+{
+  "uid": "twinvpn-connection-outcomes",
+  "title": "TwinVPN — Connection outcomes",
+  "tags": ["twinvpn", "adr-0015"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": { "from": "now-24h", "to": "now" },
+  "description": "The four questions ADR-0015 says matter: connection outcome by NAT class pair, relay incidence, time-to-first-byte, and both address families side by side. NOTE THE DATA SOURCE: the outcome and NAT panels read Tier-2 AGGREGATE counters (ADR-0015 §11.1), which are OFF BY DEFAULT and OPT-IN. §13 records that this makes them a BIASED SAMPLE - privacy-motivated users decline - so they are for regression DETECTION, never for absolute rates. A decision must never be gated on them alone.",
+  "templating": {
+    "list": [
+      {
+        "name": "address_family",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+        "query": "label_values(twinvpn_aggregate_connection_outcome_total, twinvpn_address_family)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "description": "ADR-0010 R1: one story covering both families. A panel filtered to v4 alone is an incomplete answer (ADR-0015 O-09), which is why All is the default."
+      },
+      {
+        "name": "relay_region",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+        "query": "label_values(twinvpn_relay_flows_bound_total, twinvpn_relay_region)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Outcome by NAT class pair (Tier-2 aggregate — biased sample)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "barchart",
+      "title": "Connection outcome by NAT class pair",
+      "description": "docs/testing-strategy.md §3.6 classifies pairs as DIRECT_EXPECTED or RELAY_EXPECTED, and release blocker B-6 fires when a DIRECT_EXPECTED pair falls back to RELAYED or a RELAY_EXPECTED pair claims WAN_DIRECT. This panel is where that shows up in the field rather than in the lab.\n\nARCHITECTURE CONFLICT, reported not resolved: ADR-0015 §11.1's Tier-2 tuple lists a single `nat_class`, but a PAIR needs two. This panel queries twinvpn_nat_class_local and twinvpn_nat_class_remote; if the disposition is that Tier 2 carries only one, this panel loses its x-axis and the question moves to the lab.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (twinvpn_nat_class_local, twinvpn_nat_class_remote, twinvpn_outcome) (increase(twinvpn_aggregate_connection_outcome_total{twinvpn_address_family=~\"$address_family\"}[$__range]))",
+          "legendFormat": "{{twinvpn_nat_class_local}} x {{twinvpn_nat_class_remote}} -> {{twinvpn_outcome}}",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "options": { "orientation": "horizontal", "stacking": "percent", "legend": { "displayMode": "table", "placement": "right" } }
+    },
+    {
+      "id": 3,
+      "type": "row",
+      "title": "Relay incidence",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 10 }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Relay incidence — share of sessions that are RELAYED",
+      "description": "R-01 wants a direct path whenever the network permits one; R-02 makes relay fallback automatic and CONCURRENT rather than a post-timeout retry, so a relayed session is not a failure. A RISING share is the signal - it means direct paths that used to work stopped working. ADR-0006 §11.10 makes RELAYED -> WAN_DIRECT upgrade opportunistic, so persistent relay share is the number to watch, not instantaneous.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 11 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (twinvpn_address_family) (increase(twinvpn_aggregate_connection_outcome_total{twinvpn_outcome=\"RELAYED\",twinvpn_address_family=~\"$address_family\"}[$__rate_interval]))\n/\nsum by (twinvpn_address_family) (increase(twinvpn_aggregate_connection_outcome_total{twinvpn_address_family=~\"$address_family\"}[$__rate_interval]))",
+          "legendFormat": "relayed share — {{twinvpn_address_family}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Relay flows bound, per region and failure domain",
+      "description": "Infrastructure-side counter, NOT Tier-2. ADR-0015 §9 restricts relay labels to the five-dimension allowlist; there is deliberately no per-session or peer-pair label here, which is O-13 working as intended and is why this panel can show load but can never show a user.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 11 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (twinvpn_relay_region, failure_domain, twinvpn_carriage) (rate(twinvpn_relay_flows_bound_total{twinvpn_relay_region=~\"$relay_region\"}[$__rate_interval]))",
+          "legendFormat": "{{twinvpn_relay_region}}/{{failure_domain}} — {{twinvpn_carriage}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "Time to first byte",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Time to first byte — p50 / p90 / p99, by address family",
+      "description": "Both families, always (docs/testing-strategy.md V5). ADR-0005 §11.4 races carriages with a staggered start (R-UDP at 0 ms, R-QUIC at +250 ms, R-TLS at +750 ms) and cancels the losers at 2 s, and ADR-0002 §11.2 gives the control ladder 3 s at rung 1. A p99 above ~2 s means the relay carriage ladder ran to exhaustion; a p50 that diverges BETWEEN FAMILIES is the asymmetry ADR-0010 R1 forbids.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 21 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le, twinvpn_address_family) (rate(twinvpn_aggregate_time_to_first_byte_seconds_bucket{twinvpn_address_family=~\"$address_family\"}[$__rate_interval])))",
+          "legendFormat": "p50 — {{twinvpn_address_family}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.90, sum by (le, twinvpn_address_family) (rate(twinvpn_aggregate_time_to_first_byte_seconds_bucket{twinvpn_address_family=~\"$address_family\"}[$__rate_interval])))",
+          "legendFormat": "p90 — {{twinvpn_address_family}}"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le, twinvpn_address_family) (rate(twinvpn_aggregate_time_to_first_byte_seconds_bucket{twinvpn_address_family=~\"$address_family\"}[$__rate_interval])))",
+          "legendFormat": "p99 — {{twinvpn_address_family}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Control-plane transport rung in use (ADR-0002 §11.2)",
+      "description": "Rung 1 is QUIC+HTTP/3 on UDP:443. Falling to any rung below 1 MUST be surfaced, and each fall emits its own code: CONTROL.TRANSPORT_DEGRADED_TCP, CONTROL.TRANSPORT_DEGRADED_POLL, CONTROL.TRANSPORT_VIA_PROXY. ADR-0002 §14 condition 1 makes rung-1 attach success below 90% a trigger to revisit the ADR, so this panel is the one that decides that.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 30 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (twinvpn_transport_rung, twinvpn_address_family) (rate(twinvpn_control_attach_total{twinvpn_address_family=~\"$address_family\"}[$__rate_interval]))",
+          "legendFormat": "rung {{twinvpn_transport_rung}} — {{twinvpn_address_family}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    }
+  ]
+}

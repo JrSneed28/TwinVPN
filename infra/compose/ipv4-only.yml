@@ -1,0 +1,143 @@
+# IPv4-ONLY topology override — THE CONTROL RUN, NOT A SUPPORTED MODE.
+#
+#   docker compose -f docker-compose.yml -f infra/compose/ipv4-only.yml up
+#
+# ===========================================================================
+# READ THIS BEFORE USING IT
+# ===========================================================================
+# This file exists for exactly one reason: docs/testing-strategy.md V4 says
+# "absence of a signal is not evidence unless the signal was provably
+# possible". When an IPv6-only run shows a failure, the question is always
+# "would the same procedure have failed on v4?" — and answering it needs a
+# same-rig, same-command v4 run. That is what this override is.
+#
+# It is NOT a deployment mode, it is NOT a fallback, and a service that only
+# works here is broken. ADR-0010 R1 and docs/implementation/ownership.md
+# ("IPv4 and IPv6 are equally required — there is no 'v6 later'") both make a
+# v4-only product a defect, and ADR-0015 §11.2 refused per-family reason-code
+# domains so that "we have a v4 story and a v6 story" would not be sayable.
+# Treating this file as the normal way to run the stack would reintroduce that
+# asymmetry through the back door.
+#
+# If you find yourself reaching for this override to make something work
+# rather than to explain why something did not, that is the finding.
+
+networks:
+  twinvpn:
+    name: twinvpn
+    driver: bridge
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.name: br-twinvpn4
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.31.241.0/24
+          gateway: 172.31.241.1
+
+services:
+
+  postgres:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv4
+    ports:
+      - "127.0.0.1:15432:5432"
+
+  control-plane:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv4
+      TWINVPN_CP_LISTEN_QUIC: "0.0.0.0:443"
+      TWINVPN_CP_LISTEN_TCP: "0.0.0.0:443"
+      TWINVPN_ADMIN_ADDR: "0.0.0.0:9090"
+      TWINVPN_HEALTHCHECK_URL: "http://127.0.0.1:9090/readyz"
+    ports:
+      - "127.0.0.1:8443:443/tcp"
+      - "127.0.0.1:8443:443/udp"
+      - "127.0.0.1:19001:9090/tcp"
+
+  rendezvous:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv4
+      TWINVPN_RZ_LISTEN_QUIC: "0.0.0.0:443"
+      TWINVPN_RZ_LISTEN_TCP: "0.0.0.0:443"
+      TWINVPN_ADMIN_ADDR: "0.0.0.0:9090"
+    ports:
+      - "127.0.0.1:8444:443/tcp"
+      - "127.0.0.1:8444:443/udp"
+      - "127.0.0.1:19002:9090/tcp"
+
+  presence:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv4
+      TWINVPN_PRESENCE_LISTEN_QUIC: "0.0.0.0:443"
+      TWINVPN_PRESENCE_LISTEN_TCP: "0.0.0.0:443"
+      TWINVPN_ADMIN_ADDR: "0.0.0.0:9090"
+    ports:
+      - "127.0.0.1:8445:443/tcp"
+      - "127.0.0.1:8445:443/udp"
+      - "127.0.0.1:19003:9090/tcp"
+
+  relay-a:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv4
+      TWINVPN_RELAY_LISTEN_UDP: "0.0.0.0:41641"
+      TWINVPN_RELAY_LISTEN_UDP_443: "0.0.0.0:443"
+      TWINVPN_RELAY_LISTEN_QUIC: "0.0.0.0:443"
+      TWINVPN_RELAY_LISTEN_TLS: "0.0.0.0:443"
+      TWINVPN_ADMIN_ADDR: "0.0.0.0:9090"
+    ports:
+      - "127.0.0.1:41641:41641/udp"
+      - "127.0.0.1:8446:443/udp"
+      - "127.0.0.1:8446:443/tcp"
+      - "127.0.0.1:19004:9090/tcp"
+
+  relay-b:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv4
+      TWINVPN_RELAY_LISTEN_UDP: "0.0.0.0:41641"
+      TWINVPN_RELAY_LISTEN_UDP_443: "0.0.0.0:443"
+      TWINVPN_RELAY_LISTEN_QUIC: "0.0.0.0:443"
+      TWINVPN_RELAY_LISTEN_TLS: "0.0.0.0:443"
+      TWINVPN_ADMIN_ADDR: "0.0.0.0:9090"
+    ports:
+      - "127.0.0.1:41642:41641/udp"
+      - "127.0.0.1:8447:443/udp"
+      - "127.0.0.1:8447:443/tcp"
+      - "127.0.0.1:19005:9090/tcp"
+
+  relay-directory:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv4
+      TWINVPN_ADMIN_ADDR: "0.0.0.0:9090"
+      TWINVPN_RELAYDIR_REQUIRE_BOTH_FAMILIES: "false"
+    ports:
+      - "127.0.0.1:8448:443/tcp"
+      - "127.0.0.1:8448:443/udp"
+      - "127.0.0.1:19006:9090/tcp"
+
+  relay-health:
+    environment:
+      TWINVPN_ADDRESS_FAMILIES: ipv4
+      TWINVPN_ADMIN_ADDR: "0.0.0.0:9090"
+    ports:
+      - "127.0.0.1:19007:9090/tcp"
+
+  prometheus:
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=72h
+      - --web.enable-lifecycle
+      - --web.listen-address=0.0.0.0:9090
+
+  grafana:
+    environment:
+      GF_SERVER_HTTP_ADDR: "0.0.0.0"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"

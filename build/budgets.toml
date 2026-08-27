@@ -1,0 +1,259 @@
+# TwinVPN artifact size and memory budgets.
+#
+# Named by ADR-0018 §11.12 ("/build/  toolchain pins, target definitions,
+# budgets.toml") and gated by §11.9. Every number here is TRANSCRIBED from
+# ADR-0018 §11.9's table and its BM-* notes. None is invented, none is rounded,
+# and where §11.9 gives no number for a row the field is ABSENT rather than
+# guessed — an absent budget is an honest gap; a made-up one is a gate that
+# blocks the wrong thing and passes the right one.
+#
+# ===========================================================================
+# BM-4 — BUDGETS ARE GATES.
+# ===========================================================================
+# "A size or RSS breach at T4 is a failure, not a re-run." And BM-5: a target
+# that cannot be built or budgeted is WITHDRAWN EXPLICITLY from the supported
+# matrix in the same release, named there, and reported at runtime by an
+# out-of-range build as PLATFORM.OS_UNSUPPORTED. There is no third option where
+# a target ships without a gate.
+#
+# ===========================================================================
+# BM-1 — A BUDGET QUOTED WITHOUT ITS HARDWARE CLASS IS VOID.
+# ===========================================================================
+# Three label axes exist and do NOT substitute for one another:
+#   HC-1/HC-2/HC-3   process topology        (ADR-0016)
+#   H-*  e.g. H-EMB  deployment profile      (ADR-0023)
+#   GC-0/GC-0U/G1-a  silicon / gateway class (ADR-0023 §11.13 EM-54)
+# "An ordinal in the HC-n series MUST NOT be used to mean a hardware envelope"
+# and "a performance or size budget MUST cite a GC-* class". BM-1.4 records
+# what happened last time this was got wrong: a chimera reference device whose
+# throughput gate was 2-3x above what its named silicon could reach.
+#
+# ===========================================================================
+# BM-2b — BUILD-DERIVED vs SILICON-DERIVED.
+# ===========================================================================
+# BUILD-derived (RSS, stripped size, installed size, .ipk, persistent-state
+# footprint, flash write rate) is a property of the compiled artifact, portable
+# across envelope members, and IS A RELEASE GATE.
+#
+# SILICON-derived (throughput, cold start) is a property of the CPU, NOT
+# portable, and is a NIGHTLY FLOOR ON THE CANONICAL MEMBER — not a release
+# gate. Every silicon-derived entry below therefore carries
+# `gate = "nightly"` and names its measuring member (BM-2c).
+
+schema_version = 1
+source = "docs/adr/ADR-0018-shared-core-and-build-architecture.md §11.9"
+
+# ---------------------------------------------------------------------------
+# Silicon classes, adopted from ADR-0023 §11.13 rather than restated.
+# The GC-0 / GC-0U boundary is SIMD PRESENCE (ADR-0023 EM-54e), not core count.
+# ---------------------------------------------------------------------------
+[silicon_class.GC-0]
+description  = "envelope, not one SoC: single core ~580-700 MHz, no crypto extensions, 128 MB RAM (~24 MB realistically free), 16 MB flash"
+canonical_member = "MIPS 24Kc @ 580 MHz, ath79"
+binding_constraint = "CPU"
+
+[silicon_class.GC-0U]
+description  = "Cortex-A53-class with SIMD present (mt7622, ipq40xx). 128 MB RAM, 16 MB flash — SAME as GC-0; more CPU only. ~24 MB free."
+note = "mt7621 (1004Kc x2, no SIMD) is GC-0, NOT GC-0U — ADR-0023 EM-54e."
+binding_constraint = "crypto throughput"
+
+[silicon_class.G1-a]
+description = "4x Cortex-A72 @ 1.5 GHz, 2 GB, writable rootfs"
+note = "ADR-0018 derives NOTHING from this class. ADR-0013 §9's figure is valid only there."
+
+# ===========================================================================
+# §11.9 rows 1-10.
+# `artifact_max_bytes` is STRIPPED artifact size. `rss_max_bytes` is
+# steady-state RSS. Both gate at T4 (§6.4).
+# ===========================================================================
+
+[[target]]
+row = 1
+name = "ios"
+triples = ["aarch64-apple-ios"]
+core_artifact = "staticlib"
+linkage = "static; system libs dynamic"
+minimum_os = "iOS 15"
+artifact_max_bytes = 12_582_912            # 12 MB staticlib on disk
+rss_max_bytes = 9_437_184                  # core RSS <= 9 MB
+rss_note = "inside ADR-0022's 12 MB provider budget (PB-6)"
+gate = "release"
+budget_kind = "build-derived"
+wave = 2                                    # ownership.md §5: needs a macOS builder
+
+[[target]]
+row = 2
+name = "ipados"
+triples = ["aarch64-apple-ios"]
+same_as_row = 1
+note = "as row 1; distinct device-farm entry (§11.5)"
+gate = "release"
+budget_kind = "build-derived"
+wave = 2
+
+[[target]]
+row = 3
+name = "android"
+triples = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "i686-linux-android"]
+core_artifact = "cdylib"
+linkage = "dynamic vs bionic"
+minimum_os = "API 26 min / 29 target"
+artifact_max_bytes = 6_291_456              # <= 6 MB PER ABI
+artifact_scope = "per-abi"
+load_alignment_min = 0x4000                 # C-12
+# §11.9 row 3 states no RSS figure. Absent on purpose — see the header.
+gate = "release"
+budget_kind = "build-derived"
+wave = 2
+
+[[target]]
+row = 4
+name = "windows"
+triples = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+core_artifact = "staticlib"
+linkage = "static core; dynamic UCRT"
+minimum_os = "Windows 10 21H2 / Server 2019"
+artifact_max_bytes = 8_388_608              # <= 8 MB
+gate = "release"
+budget_kind = "build-derived"
+wave = 2                                    # BM-3: MSVC ABI needs a native runner
+
+[[target]]
+row = 5
+name = "macos"
+triples = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+core_artifact = "staticlib"
+linkage = "static"
+minimum_os = "macOS 11"
+artifact_max_bytes = 10_485_760             # <= 10 MB PER ARCH
+artifact_scope = "per-arch"
+gate = "release"
+budget_kind = "build-derived"
+wave = 2
+
+[[target]]
+row = 6
+name = "linux-glibc"
+triples = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+core_artifact = "staticlib into twinvpnd"
+linkage = "static core, dynamic glibc"
+minimum_os = "kernel 5.6 (5.4 with userspace datapath)"
+artifact_max_bytes = 12_582_912             # <= 12 MB
+gate = "release"
+budget_kind = "build-derived"
+wave = 1
+
+[[target]]
+row = 7
+name = "linux-musl"
+triples = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+core_artifact = "fully static twinvpnd"
+linkage = "fully static"
+minimum_os = "as row 6"
+artifact_max_bytes = 12_582_912             # <= 12 MB
+gate = "release"
+budget_kind = "build-derived"
+wave = 1
+
+[[target]]
+row = 8
+name = "openwrt-gc0u"
+silicon_class = "GC-0U"
+triples = ["aarch64-unknown-linux-musl", "armv7-unknown-linux-musleabihf"]
+toolchain = "OpenWrt SDK 21.02 + pinned stable Rust"
+core_artifact = "fully static twinvpnd"
+linkage = 'fully static, opt-level="z"'
+artifact_max_bytes = 4_194_304              # <= 4 MB STRIPPED (BM-1.1 governs both classes)
+rss_max_bytes = 13_631_488                  # <= 13 MB RSS at 16 peers
+rss_at_peers = 16
+gate = "release"
+budget_kind = "build-derived"
+wave = 2
+
+[[target]]
+row = 9
+name = "openwrt-gc0-mips"
+silicon_class = "GC-0"
+triples = ["mipsel-unknown-linux-musl", "mips-unknown-linux-musl"]
+toolchain = "OpenWrt SDK 21.02 + a SECOND, separately pinned, exactly-dated nightly (BM-2a)"
+core_artifact = "fully static twinvpnd"
+linkage = 'fully static, opt-level="z"'
+artifact_max_bytes = 4_194_304              # <= 4 MB stripped
+rss_max_bytes = 10_485_760                  # <= 10 MB RSS at 16 peers (PB-6)
+rss_at_peers = 16
+gate = "release"
+budget_kind = "build-derived"
+build_std = true
+note = """
+BM-2b: the GC-0 RELEASE GATE is its BUILD-DERIVED budgets, and those may run on
+the single-core ARM envelope member when the MIPS build is broken. The MIPS
+build itself is a NIGHTLY PORTABILITY BUILD whose breakage is a filed toolchain
+defect, not a silicon-class withdrawal. No release gate depends on build-std.
+"""
+wave = 2
+
+[[target]]
+row = 10
+name = "headless-gateway-cli"
+same_as_host_row = true
+note = "as rows 6-8 by host; budget is the host row's"
+gate = "release"
+budget_kind = "build-derived"
+wave = 1
+
+# ===========================================================================
+# SILICON-DERIVED FLOORS — nightly, on the canonical member. NOT release gates.
+# BM-2b: "24Kc MIPS has no SIMD; a Cortex-A7 at a similar clock differs
+# materially." BM-2c: a silicon-derived budget names its MEASURING MEMBER.
+# ===========================================================================
+
+[[throughput_floor]]
+silicon_class = "GC-0"
+measuring_member = "MIPS 24Kc @ 580 MHz, ath79"
+kernel_mbits_min = 20
+kernel_mbits_max = 35
+userspace_mbits_min = 8
+userspace_mbits_max = 15
+userspace_extra_rss_bytes_min = 3_145_728
+userspace_extra_rss_bytes_max = 6_291_456
+gate = "nightly"
+discipline = "ADR-0023 §14 condition 1a"
+
+[[throughput_floor]]
+silicon_class = "GC-0U"
+measuring_member = "Cortex-A53-class with SIMD (mt7622)"
+kernel_mbits_min = 80
+userspace_mbits_min = 40
+gate = "nightly"
+
+# ===========================================================================
+# OBSERVABILITY SUBSYSTEM BUDGET — ADR-0015 §9 and §14 revisit condition 6.
+#
+# Separate from the artifact budgets because it bounds a SUBSYSTEM inside the
+# artifact, not the artifact. §14 condition 6: exceeding it in a release
+# benchmark means "RE-SCOPE TIER 0 RATHER THAN ACCEPT DATAPATH IMPACT".
+# ===========================================================================
+
+[observability_budget.reference_desktop]
+cpu_percent_max = 1
+rss_max_bytes = 8_388_608                   # < 8 MB resident
+source = "ADR-0015 §9, §14 condition 6"
+gate = "release"
+
+[observability_budget.router_class]
+rss_max_bytes = 524_288                     # < 512 KB resident
+source = "ADR-0015 §9 (C-6, O-19), §14 condition 6"
+gate = "release"
+note = "ADR-0015 §9 says 'the router-class target' without naming a GC-* class. Under BM-1 that is an unqualified budget; it is transcribed as written and flagged rather than silently attributed to GC-0 or GC-0U."
+
+# ===========================================================================
+# WHAT IS DELIBERATELY NOT HERE
+# ===========================================================================
+# - Server-side artifact budgets. ADR-0018 §11.9's matrix is the CLIENT/core
+#   build matrix; it states no budget for the six /services artifacts, and
+#   inventing one would be exactly the fabrication this file's header refuses.
+#   If server budgets are wanted they are a new ADR decision, not a checker
+#   default.
+# - Installed-size and .ipk budgets. BM-2b names them as build-derived and
+#   gate-able, but §11.9 gives no number for either.
+# - Cold-start budgets. Named as silicon-derived in BM-2b; no figure given.

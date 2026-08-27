@@ -1,0 +1,179 @@
+name: T1 — infrastructure
+
+# ===========================================================================
+# TIER MAPPING.
+# ===========================================================================
+# docs/testing-strategy.md §6.1 defines T1 by when it runs and what it blocks:
+# every PR push and every commit on main, <= 15 min to first verdict, blocking
+# MERGE, on ephemeral runners with no lab and no real hardware.
+#
+# §6.2's T1 contents list does not name an infrastructure lane, because when it
+# was written there was no infra/ to lint. This workflow does not invent a new
+# tier for it: a compose file and a set of Dockerfiles are configuration whose
+# breakage blocks a merge and which needs no lab, so T1 is where §6.1's own
+# definition puts them. Rule C-1 is respected - work is placed by the tier's
+# definition, never by convenience.
+#
+# ===========================================================================
+# WHY `docker compose config` IS NOT THE WHOLE JOB
+# ===========================================================================
+# It validates the SCHEMA. It does not know that a secret must not have a
+# default, that a relay must not depend on the control plane (ADR-0005 §11.3 /
+# architecture.md A-12), or that a region needs two failure domains (ADR-0006
+# §11.1 rule 3). build/verify/check-compose.py checks those, needs only PyYAML,
+# and therefore also runs on a developer machine with no Docker.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t1-infra-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  topology:
+    name: compose topology and invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install PyYAML
+        run: python3 -m pip install --quiet 'pyyaml==6.0.2'
+
+      # ------------------------------------------------------------------
+      # The bind-mount sources must exist before `docker compose config`
+      # touches them, or Docker creates them ROOT-OWNED and the next failure
+      # is a permission error three layers from its cause.
+      # ------------------------------------------------------------------
+      - name: bootstrap local secret directories
+        run: bash infra/scripts/bootstrap-local.sh
+
+      - name: structural invariants
+        run: python3 build/verify/check-compose.py --strict
+
+      # ------------------------------------------------------------------
+      # Schema validation of all three topologies. A dummy secret is supplied
+      # so the `${VAR:?}` guards resolve; it is a literal in the workflow, it
+      # is not a credential, and nothing it configures is ever started here.
+      # ------------------------------------------------------------------
+      - name: docker compose config — dual stack (default)
+        env:
+          TWINVPN_PG_PASSWORD: ci-not-a-credential
+          TWINVPN_CP_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_control?sslmode=disable
+          TWINVPN_PRESENCE_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_presence?sslmode=disable
+          TWINVPN_RELAYDIR_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_relay_directory?sslmode=disable
+        run: docker compose -f docker-compose.yml config --quiet
+
+      - name: docker compose config — IPv6-only
+        env:
+          TWINVPN_PG_PASSWORD: ci-not-a-credential
+          TWINVPN_CP_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_control?sslmode=disable
+          TWINVPN_PRESENCE_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_presence?sslmode=disable
+          TWINVPN_RELAYDIR_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_relay_directory?sslmode=disable
+        run: docker compose -f docker-compose.yml -f infra/compose/ipv6-only.yml config --quiet
+
+      - name: docker compose config — IPv4-only (control run)
+        env:
+          TWINVPN_PG_PASSWORD: ci-not-a-credential
+          TWINVPN_CP_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_control?sslmode=disable
+          TWINVPN_PRESENCE_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_presence?sslmode=disable
+          TWINVPN_RELAYDIR_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_relay_directory?sslmode=disable
+        run: docker compose -f docker-compose.yml -f infra/compose/ipv4-only.yml config --quiet
+
+      # ------------------------------------------------------------------
+      # A secret with a default is a committed credential. This asserts the
+      # `${VAR:?}` guards actually bite, rather than trusting that they do.
+      # ------------------------------------------------------------------
+      - name: unset secrets must FAIL the config, not default
+        run: |
+          if docker compose -f docker-compose.yml config --quiet 2>/dev/null; then
+            echo "::error title=A secret has a default::docker compose config succeeded with every secret unset. A default for a secret is a committed credential. Use \${VAR:?message}."
+            exit 1
+          fi
+          echo "confirmed: an unset secret fails the config rather than defaulting"
+
+  lint-config:
+    name: YAML, Dockerfile and shell lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install linters
+        run: python3 -m pip install --quiet 'yamllint==1.35.1' 'pyyaml==6.0.2'
+
+      - name: yamllint
+        run: yamllint -c infra/yamllint.yml docker-compose.yml infra .github/workflows
+
+      - name: hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: infra/docker/Dockerfile.service
+          # DL3007 (do not use :latest) does not apply - every base image here
+          # is an exact version tag, and the DIGEST pin it really wants is
+          # tracked separately by the DP-2 lane in supply-chain-t1.yml, which
+          # reports the gap rather than hiding it behind a suppressed rule.
+          failure-threshold: warning
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -x \
+            infra/scripts/bootstrap-local.sh \
+            infra/postgres/initdb/10-databases.sh \
+            build/verify/pin-base-images.sh \
+            build/verify/verify-bindings.sh \
+            build/toolchain/*.sh
+
+      - name: grafana dashboards are valid JSON
+        run: |
+          set -euo pipefail
+          for f in infra/grafana/dashboards/*.json; do
+            python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d.get('uid'), 'missing uid'; assert d.get('title'), 'missing title'; assert d.get('panels'), 'no panels'; print(sys.argv[1], 'OK', len(d['panels']), 'panels')" "$f"
+          done
+
+  observability-redaction:
+    name: collector redaction is an ALLOWLIST, not a denylist
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install PyYAML
+        run: python3 -m pip install --quiet 'pyyaml==6.0.2'
+
+      # ------------------------------------------------------------------
+      # docs/testing-strategy.md §6.2 lists "the redaction lint feeding PB-7"
+      # among T1's contents. This is the INFRASTRUCTURE half of it: the
+      # emitter-side half belongs to the services and to the schema.
+      #
+      # ADR-0015 O-14 requires redaction at EMIT time by schema-level field
+      # classification and explicitly rejects export-time pattern matching over
+      # rendered text, which "FAILS OPEN". The collector's job is therefore a
+      # positive allowlist - anything not named is deleted - and this lane
+      # asserts that it stays one. A future edit that flips
+      # `allow_all_keys` to true would turn a structural control into a
+      # decorative one, silently, in a config file nobody diffs closely.
+      # ------------------------------------------------------------------
+      - name: assert the structural properties
+        run: python3 build/verify/check-otel-redaction.py

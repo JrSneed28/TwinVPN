@@ -1,0 +1,100 @@
+# TwinVPN infrastructure metrics.
+#
+# ADR-0015 §11.7: "Infrastructure metrics are Prometheus-style with the label
+# allowlist of §9." §9 fixes that allowlist to exactly five dimensions:
+#
+#     relay_region, protocol_version, reason_code, outcome, address_family
+#
+# Per-Session, per-Device, per-peer and per-endpoint labels are FORBIDDEN —
+# "for privacy first (O-13) and for cost second". The `metric_relabel_configs`
+# below enforce that at ingestion, so a service that starts emitting a
+# forbidden label loses the label rather than poisoning the TSDB, and the
+# collector's `filter/forbidden` has already dropped the record loudly one hop
+# earlier. Two independent enforcement points, on purpose: one of them is
+# always the one that was misconfigured.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+  external_labels:
+    deployment_environment: local
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+
+  # -----------------------------------------------------------------------
+  # The collector's own pipeline health, and everything it re-exports.
+  # -----------------------------------------------------------------------
+  - job_name: otel-collector-pipeline
+    static_configs:
+      - targets: ["otel-collector:8889"]
+        labels:
+          twinvpn_source: collector
+
+  - job_name: otel-collector-self
+    static_configs:
+      - targets: ["otel-collector:8888"]
+        labels:
+          twinvpn_source: collector-self
+
+  - job_name: otel-collector-health
+    metrics_path: /
+    static_configs:
+      - targets: ["otel-collector:13133"]
+
+  # -----------------------------------------------------------------------
+  # The six server-side artifacts, scraped on their admin listener.
+  #
+  # ONE listener per service serving /healthz, /readyz and /metrics. The
+  # relays are enumerated individually rather than discovered, because
+  # ADR-0006 §11.1 rule 3 makes ">=2 ACTIVE relays in >=2 failure_domains"
+  # a floor: a discovery mechanism that silently returned one would hide
+  # exactly the condition the floor exists to catch.
+  # -----------------------------------------------------------------------
+  - job_name: twinvpn-services
+    static_configs:
+      - targets: ["control-plane:9090"]
+        labels: { twinvpn_service: control-plane, twinvpn_plane: control }
+      - targets: ["rendezvous:9090"]
+        labels: { twinvpn_service: rendezvous, twinvpn_plane: control }
+      - targets: ["presence:9090"]
+        labels: { twinvpn_service: presence, twinvpn_plane: control }
+      - targets: ["relay-directory:9090"]
+        labels: { twinvpn_service: relay-directory, twinvpn_plane: control }
+      - targets: ["relay-health:9090"]
+        labels: { twinvpn_service: relay-health, twinvpn_plane: management }
+      - targets: ["relay-a:9090"]
+        labels: { twinvpn_service: relay, twinvpn_plane: data, relay_region: local-1, failure_domain: fd-a }
+      - targets: ["relay-b:9090"]
+        labels: { twinvpn_service: relay, twinvpn_plane: data, relay_region: local-1, failure_domain: fd-b }
+
+    metric_relabel_configs:
+      # ------------------------------------------------------------------
+      # O-13 / §9. Drop any label outside the allowlist before it is stored.
+      #
+      # This is a labeldrop over a regex of FORBIDDEN names rather than a
+      # keep-list, because Prometheus relabelling has no positive label
+      # allowlist primitive. The positive allowlist lives one hop upstream in
+      # the collector, where it is expressible; this is the backstop for
+      # anything scraped directly rather than routed through the collector.
+      # ------------------------------------------------------------------
+      - regex: "(session_id|path_id|pair_tag|flow_id|device_id|identity_id|peer_id|peer_device_id|owner_id|pairing_id|twinnet_id|endpoint|remote_addr|client_addr|ssid|interface|iface|dns_query|destination|url)"
+        action: labeldrop
+
+      # A relay must never carry a per-session or peer-pair label, and the
+      # cheapest way to be sure is to refuse the whole series if it does. This
+      # is the metric-level twin of ADR-0015 §7's "relay-side observability is
+      # the sharpest risk".
+      - source_labels: [twinvpn_service, session_id]
+        regex: "relay;.+"
+        action: drop
+
+  # -----------------------------------------------------------------------
+  # The backing store.
+  # -----------------------------------------------------------------------
+  - job_name: prometheus-self
+    static_configs:
+      - targets: ["[::1]:9090"]

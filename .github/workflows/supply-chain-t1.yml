@@ -1,0 +1,178 @@
+name: T1 — supply chain
+
+# ===========================================================================
+# WHY THIS IS T1 AND NOT NIGHTLY.
+# ===========================================================================
+# ADR-0018 §11.11 DP-6 is explicit: "Advisory, licence and duplicate-version
+# checks run at T1." That is a decision, not a preference, and DP-9 gives the
+# reason: "A malicious dependency or compromised pipeline defeats EVERY
+# INVARIANT SIMULTANEOUSLY." A check that catches a hostile dependency the
+# night after it merged has caught it in the wrong place.
+#
+# DP-9 also records that "the threat model currently has NO ADVERSARY OR THREAT
+# ROW to bind [these mechanisms] to", and §11.16 (j) asks for one. That gap is
+# still open; this workflow implements the mechanism DP-1..DP-8 specify and
+# does not pretend the threat-model row exists.
+#
+# ===========================================================================
+# WHAT DP-6 ASKS FOR, AND WHAT IS NOT AUTOMATABLE HERE
+# ===========================================================================
+# DP-6's dependency LEDGER records, per direct dependency: why it is present,
+# who reviewed the last bump, whether it reaches a shipped artifact or only dev
+# tooling, whether it contains `unsafe`, and whether it has a published audit.
+# Four of those five are human judgements and no tool produces them. This
+# workflow therefore runs the three MECHANICAL checks DP-6 names - advisory,
+# licence, duplicate-version - and the DP-4 `unsafe` count, and leaves the
+# ledger to review rather than faking it with a generated file.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t1-supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+
+  advisories:
+    name: cargo-deny (advisories, licences, duplicate versions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: [core, services, shells/linux, lab]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # Pinned. An unpinned auditing tool is an auditing tool whose behaviour
+      # can change without a diff - the same argument DP-2 makes about
+      # source-vendoring, applied to the auditor itself.
+      - name: cache cargo-deny
+        id: cache-deny
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-0.16.4-${{ runner.os }}-${{ runner.arch }}
+
+      - name: install cargo-deny
+        if: steps.cache-deny.outputs.cache-hit != 'true'
+        run: cargo install cargo-deny --locked --version 0.16.4
+
+      - name: check
+        working-directory: ${{ matrix.workspace }}
+        run: cargo deny --config "$GITHUB_WORKSPACE/build/deny.toml" check advisories licenses bans sources
+
+  unsafe-count:
+    name: DP-4 unsafe-block census
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ------------------------------------------------------------------
+      # DP-4: `#![forbid(unsafe_code)]` everywhere except an enumerated
+      # allowlist - twinvpn-ffi (the boundary), twinvpn-platform-* (syscalls),
+      # and twinvpn-crypto's locked-memory allocator (mlock/VirtualLock,
+      # MADV_DONTDUMP, core dumps disabled, required by ADR-0001 L-STORE).
+      # Every block carries a `// SAFETY:` justification.
+      #
+      # "CI COUNTS BLOCKS; A NET INCREASE REQUIRES A SECURITY-OWNER REVIEWER."
+      # This job produces the count and the diff. It does not - and must not -
+      # decide whether the increase is acceptable: that is a named human's job
+      # under ADR-0018 DP-4, and a bot that approved it would be the review.
+      # ------------------------------------------------------------------
+      - name: census
+        run: |
+          set -euo pipefail
+          count_unsafe() {
+            grep -rn --include='*.rs' -E '(^|[^A-Za-z_])unsafe([^A-Za-z_]|$)' \
+              core services shells lab 2>/dev/null | grep -v 'forbid(unsafe_code)' | wc -l
+          }
+          head_count="$(count_unsafe)"
+          echo "unsafe occurrences on HEAD: ${head_count}"
+
+          echo "### DP-4 unsafe census" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`unsafe\` occurrences on HEAD: **${head_count}**" >> "$GITHUB_STEP_SUMMARY"
+
+          # Every occurrence must carry a SAFETY justification on a nearby line.
+          missing=0
+          while IFS= read -r hit; do
+            file="${hit%%:*}"
+            rest="${hit#*:}"
+            line="${rest%%:*}"
+            start=$(( line > 5 ? line - 5 : 1 ))
+            if ! sed -n "${start},${line}p" "$file" | grep -q 'SAFETY:'; then
+              echo "::error file=${file},line=${line}::unsafe block without a // SAFETY: justification (ADR-0018 DP-4)"
+              missing=$(( missing + 1 ))
+            fi
+          done < <(grep -rn --include='*.rs' -E '(^|[^A-Za-z_])unsafe([^A-Za-z_]|$)' \
+                     core services shells lab 2>/dev/null | grep -v 'forbid(unsafe_code)' || true)
+
+          if [ "${missing}" -gt 0 ]; then
+            echo "${missing} unsafe block(s) lack a // SAFETY: justification"
+            exit 1
+          fi
+
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}"
+            # `git grep` against the ref directly - no worktree, no checkout,
+            # nothing to leave behind and nothing to get wrong.
+            base_count="$(git grep -h -E '(^|[^A-Za-z_])unsafe([^A-Za-z_]|$)' \
+                            "origin/${GITHUB_BASE_REF}" -- \
+                            'core/**/*.rs' 'services/**/*.rs' 'shells/**/*.rs' 'lab/**/*.rs' \
+                          2>/dev/null | grep -vc 'forbid(unsafe_code)' || echo 0)"
+            echo "unsafe occurrences on ${GITHUB_BASE_REF}: ${base_count}"
+            if [ "${head_count}" -gt "${base_count}" ]; then
+              echo "::warning title=DP-4 net increase in unsafe::${base_count} -> ${head_count}. ADR-0018 DP-4 requires a SECURITY-owner reviewer for a net increase. This job reports; it does not approve."
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "> **NET INCREASE** ${base_count} → ${head_count}. ADR-0018 DP-4 requires a SECURITY-owner reviewer." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+  base-image-pins:
+    name: DP-2 base images pinned by digest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ------------------------------------------------------------------
+      # DP-2 pins dependencies BY DIGEST, "not copied into the tree", because
+      # source-vendoring "makes a dependency bump invisible in the diff, which
+      # is exactly the review a supply-chain policy exists to force". A
+      # container TAG has the same defect: `rust:1.90.0` is a mutable pointer.
+      #
+      # This step reports the gap rather than hiding it. It is a WARNING while
+      # infra/docker/base-images.lock still carries tag-only entries; set
+      # TWINVPN_REQUIRE_IMAGE_DIGESTS=1 to make it a failure once
+      # build/verify/pin-base-images.sh has been run.
+      # ------------------------------------------------------------------
+      - name: check pins
+        run: |
+          set +e
+          python3 build/verify/check-budgets.py --check-image-pins
+          rc=$?
+          set -e
+          if [ "$rc" = "1" ]; then exit 1; fi
+          if [ "$rc" = "2" ]; then
+            echo "::warning title=DP-2 base images are tag-pinned only::Run build/verify/pin-base-images.sh on a host with registry access, then set TWINVPN_REQUIRE_IMAGE_DIGESTS=1 to gate."
+          fi

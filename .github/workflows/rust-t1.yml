@@ -1,0 +1,235 @@
+name: T1 — rust
+
+# ===========================================================================
+# TIER MAPPING — docs/testing-strategy.md §6.1 and §6.2.
+# ===========================================================================
+# This workflow is TIER 1 and nothing else. T1 is defined by WHEN IT RUNS and
+# WHAT IT BLOCKS: every push to a pull request and every commit on main, budget
+# <= 15 MIN TO FIRST VERDICT with a HARD FAIL AT 25 MIN, blocking MERGE, on
+# ephemeral runners with no lab and no real hardware.
+#
+# §6.2 lists T1's contents: levels 1 (unit), 2 (component), 3 (protocol/golden
+# vectors), 4 (contract), 14-short (property), plus the domain-separation
+# tripwire, the §3.5 L-3 lint, the redaction lint, and the ADR-0002 §11.8
+# step-3 dependency-graph assertion. Levels 1, 2 and 14-short arrive here as
+# `cargo test`; levels 3 and 4 are the contract gate in contracts.yml; the
+# lints are the `arch-lint` job below.
+#
+# RULE C-1 IS BINDING: "when a tier exceeds its budget, the response is to move
+# work down a tier or to parallelize it - NEVER to raise the budget silently.
+# Raising a budget is a reviewed change to this table." The 25-minute
+# `timeout-minutes` here is that hard fail, not a target.
+#
+# ===========================================================================
+# WHAT IS NOT HERE, AND WHERE IT LIVES
+# ===========================================================================
+# ADR-0018 BM-3: Windows cannot be cross-built from Linux (the MSVC ABI is
+# required for WFP, IP Helper and Authenticode) and macOS/iOS cannot be
+# cross-built at all (Xcode licensing). BM-3 says T1 "fans the matrix across a
+# Linux, a Windows and a macOS runner in parallel to stay inside the <= 15 min
+# budget". Those two runners do not exist for this wave -
+# docs/implementation/ownership.md §5 defers those shells to wave 2 with the
+# reason stated - so this workflow covers the LINUX rows only and says so
+# rather than implying the matrix is complete.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t1-rust-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+
+  # =========================================================================
+  # Formatting. Cheapest possible verdict, so it runs alone and first.
+  # =========================================================================
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pinned toolchain
+        run: |
+          # rust-toolchain.toml pins the exact version (ADR-0018 §11.3: "one
+          # exact toolchain version ... advanced only by a reviewed commit that
+          # re-runs the full §11.9 matrix"). `rustup show` materialises it.
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo fmt --version
+
+      - name: fmt
+        run: |
+          for w in core services shells/linux lab; do
+            echo "::group::fmt $w"
+            (cd "$w" && cargo fmt --all -- --check)
+            echo "::endgroup::"
+          done
+
+  # =========================================================================
+  # Build, clippy and test — one job per workspace, in parallel.
+  #
+  # ADR-0018 §11.12 / ownership.md §1: four SEPARATE cargo workspaces, on
+  # purpose, "so that no domain silently acquires another's dependency graph".
+  # Splitting the CI matrix the same way means a failure names its workspace,
+  # and a workspace's build time is its own domain's problem rather than
+  # everyone's.
+  # =========================================================================
+  workspace:
+    name: ${{ matrix.workspace }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25          # docs/testing-strategy.md §6.1: hard fail at 25
+    strategy:
+      fail-fast: false           # V7-adjacent: see every failing workspace at once
+      matrix:
+        workspace: [core, services, shells/linux, lab]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo clippy --version
+
+      # ------------------------------------------------------------------
+      # CACHING, AND WHY THE KEY LOOKS LIKE THIS.
+      #
+      # "A cache key that can serve a stale toolchain is worse than no cache."
+      # A stale cache does not fail loudly; it produces a GREEN BUILD OF THE
+      # WRONG THING, which is the single worst outcome a CI cache can have.
+      #
+      # The key therefore binds every input that can change what the cache
+      # contains:
+      #
+      #   runner.os / runner.arch  - artifacts are not portable across either
+      #   rust-toolchain.toml      - ADR-0018 §11.3's exact pin. A toolchain
+      #                              bump MUST invalidate every artifact, and
+      #                              this is the file that records it
+      #   <workspace>/Cargo.lock   - DP-1's committed lockfile. A dependency
+      #                              change must not reuse the old build
+      #   <workspace>/Cargo.toml   - feature and profile changes
+      #   this workflow file       - a flag change (RUSTFLAGS, profile) alters
+      #                              the artifacts and nothing else would catch
+      #                              it
+      #
+      # THERE IS DELIBERATELY NO `restore-keys` PREFIX FALLBACK. A prefix
+      # fallback is exactly the mechanism that serves a cache built with a
+      # different toolchain or lockfile: it is what makes a cache "merely
+      # fast" instead of correct. A miss here costs a cold build; a wrong hit
+      # costs a false green.
+      # ------------------------------------------------------------------
+      - name: cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ${{ matrix.workspace }}/target
+          key: >-
+            twinvpn-cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.workspace }}-${{
+            hashFiles('rust-toolchain.toml') }}-${{
+            hashFiles(format('{0}/Cargo.lock', matrix.workspace)) }}-${{
+            hashFiles(format('{0}/Cargo.toml', matrix.workspace)) }}-${{
+            hashFiles('.github/workflows/rust-t1.yml') }}
+
+      # `--locked` refuses to move the lockfile. ADR-0018 DP-1 commits one
+      # lockfile per workspace and forbids unbounded version ranges; a CI run
+      # that silently updated it would make the lockfile decorative.
+      - name: build
+        run: cd "${{ matrix.workspace }}" && cargo build --locked --workspace --all-targets
+
+      - name: clippy
+        run: cd "${{ matrix.workspace }}" && cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cd "${{ matrix.workspace }}" && cargo test --locked --workspace
+
+  # =========================================================================
+  # ADR-0018 T1 ARCHITECTURAL LINTS.
+  #
+  # THIS JOB IS EXPECTED TO BE RED UNTIL core-foundation LANDS core/xtask, AND
+  # THAT IS THE POINT. It is a real, named, blocking job rather than a
+  # conditional skip, because:
+  #
+  #   - ADR-0018 CD-3 says the deny-list "IS THE ACTUAL MECHANISM" for the
+  #     three-clock rule. A mechanism that is skipped is not a mechanism.
+  #   - docs/testing-strategy.md B-19 BLOCKS A RELEASE when "the ADR-0002
+  #     §11.8 dependency-graph assertion [is] absent OR DISABLED", and adds
+  #     that "P15 passing at T3 does not substitute" - so I5 is undischarged
+  #     with only one of the two.
+  #   - ownership.md §6 rule 14 says report an unresolved conflict rather than
+  #     resolving it locally. A `continue-on-error: true` here would resolve it
+  #     locally, by pretending.
+  #
+  # A skipped check reads as green on the PR page. A red one that names its
+  # owner and its ADR gets fixed.
+  # =========================================================================
+  arch-lint:
+    name: arch-lint (ADR-0018 CD-3 / CD-I2 / CD-I5 / CB-3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            core/target
+          key: >-
+            twinvpn-cargo-${{ runner.os }}-${{ runner.arch }}-archlint-${{
+            hashFiles('rust-toolchain.toml') }}-${{
+            hashFiles('core/Cargo.lock') }}-${{
+            hashFiles('core/Cargo.toml') }}-${{
+            hashFiles('.github/workflows/rust-t1.yml') }}
+
+      - name: run the architectural lints
+        id: lints
+        working-directory: core
+        run: cargo run --locked -q -p xtask -- lint
+
+      # A failure here must say WHOSE it is and WHICH ADR clause it discharges,
+      # or it becomes a red square people learn to ignore.
+      - name: explain the failure
+        if: failure() && steps.lints.outcome == 'failure'
+        run: |
+          echo "::error title=ADR-0018 T1 architectural lints::core/xtask lint failed or is not implemented. Owner: core-foundation."
+          echo "The four checks core/xtask owes (ADR-0018 §11.7, §11.8):"
+          echo ""
+          echo "  CD-3   deny SystemTime::now, Instant::now, getrandom, thread-local RNG"
+          echo "         constructors, the runtime's time module and chrono now-constructors"
+          echo "         EVERYWHERE outside twinvpn-env. CD-1 defines three NON-INTERCHANGEABLE"
+          echo "         clock types and CD-3 says this deny-list 'is the actual mechanism'."
+          echo "  CD-I2  only twinvpn-crypto may declare a cryptographic dependency."
+          echo "  CD-I5  no data-plane crate may reach twinvpn-cp-client, directly or"
+          echo "         transitively, and the reverse edge is equally denied. Only"
+          echo "         twinvpn-core may name both. This is the artifact ADR-0002 §11.8"
+          echo "         step 3 requires and docs/testing-strategy.md B-19 blocks a release"
+          echo "         without - 'P15 passing at T3 does not substitute'."
+          echo "  CB-3   #[cfg(target_os = ...)] outside twinvpn-platform-*."
+          echo ""
+          echo "This job is deliberately NOT skipped and NOT continue-on-error. A skipped"
+          echo "check reads as green on the PR page; B-19 says I5 is undischarged while"
+          echo "this check is 'absent OR DISABLED'."
+          exit 1

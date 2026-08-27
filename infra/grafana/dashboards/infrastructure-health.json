@@ -1,0 +1,234 @@
+{
+  "uid": "twinvpn-infrastructure-health",
+  "title": "TwinVPN — Infrastructure health and observability integrity",
+  "tags": ["twinvpn", "adr-0015", "adr-0002", "adr-0006"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "description": "Operator view. ADR-0015 O-20: infrastructure MUST expose health and metrics sufficient to operate an SLO, SUBJECT TO O-13 - so everything here is an aggregate and nothing here can identify a Device, an Owner, a peer pair or a Session. The first row is the one that matters most: it watches the observability system for leaks of its own.",
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Observability integrity — does the pipeline itself hold?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Records dropped for carrying a FORBIDDEN attribute",
+      "description": "MUST BE ZERO. ADR-0015 O-12 makes tunnel plaintext, packet payloads, private key material, pairing secrets and pre-shared material unwritable to ANY log, metric, trace, crash artifact or diagnostic bundle, at any log level, IN ANY BUILD INCLUDING DEBUG BUILDS - and §7 says SECRET-classified fields have NO RENDERING PATH AT ALL, 'the code that would print them does not exist'. A non-zero value means one does. That is a security defect in the emitting service, not a collector tuning problem.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(otelcol_processor_filter_spans_filtered_total{processor=\"filter/forbidden\"}[$__range]))\n+ sum(increase(otelcol_processor_filter_logs_filtered_total{processor=\"filter/forbidden\"}[$__range]))\n+ sum(increase(otelcol_processor_filter_datapoints_filtered_total{processor=\"filter/forbidden\"}[$__range]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Tier-0 events dropped (ring full)",
+      "description": "ADR-0015 §8: emission is non-blocking into a fixed-size ring with an explicit drop policy and a dropped_events counter SO THAT LOSS IS ITSELF OBSERVABLE. §13 records the cost honestly: an incident whose cause scrolled out is undiagnosable from the bundle, mitigated by the long-retention significant-events ring alongside the short verbose one.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (twinvpn_service, twinvpn_ring) (rate(twinvpn_observability_dropped_events_total[$__rate_interval]))",
+          "legendFormat": "{{twinvpn_service}} / {{twinvpn_ring}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Collector export failures",
+      "description": "A stalled export must never block, delay or fail a packet-path or state-machine operation (ADR-0015 §8). It is shown separately from service health on purpose: §8 warns that a telemetry outage looking like a network outage creates a feedback loop, so the reliability layer must not consume this.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (exporter) (rate(otelcol_exporter_send_failed_spans_total[$__rate_interval])) + sum by (exporter) (rate(otelcol_exporter_send_failed_log_records_total[$__rate_interval])) + sum by (exporter) (rate(otelcol_exporter_send_failed_metric_points_total[$__rate_interval]))",
+          "legendFormat": "{{exporter}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "Service liveness and readiness",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Scrape success per service (liveness proxy)",
+      "description": "Read this with architecture.md §2.8 in hand: a control-plane OUTAGE IS A SUPPORTED OPERATING MODE. Established Sessions continue (I5); only new pairings, policy changes, revocations and first contact with a never-seen peer degrade. Neither relay being down is a Session teardown either - ADR-0006 §11.5 makes failover a MIGRATING transition (R-10).",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"twinvpn-services\"}",
+          "legendFormat": "{{twinvpn_service}} ({{twinvpn_plane}})"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Readiness vs liveness — the two are different questions",
+      "description": "A control plane whose database is unreachable is LIVE (restarting will not help) and NOT READY (do not send it traffic). A readiness probe that returns 200 unconditionally is not a readiness probe. twinvpn_ready reflects DEPENDENCY availability; twinvpn_live reflects only that the process's own invariants hold.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "twinvpn_live{job=\"twinvpn-services\"}",
+          "legendFormat": "live — {{twinvpn_service}}"
+        },
+        {
+          "refId": "B",
+          "expr": "twinvpn_ready{job=\"twinvpn-services\"}",
+          "legendFormat": "ready — {{twinvpn_service}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Relay fleet — ADR-0005 / ADR-0006",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Live relays per region",
+      "description": "ADR-0006 §11.1 rule 3 refuses a RelayMap that drops a region with live sessions below 2 ACTIVE relays in >=2 failure_domains, and architecture.md §2.12 calls a cached set of size 1 A DESIGN ERROR. Below 2 here, failover is not possible in that region.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 18 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count by (relay_region) (up{twinvpn_service=\"relay\"} == 1)",
+          "legendFormat": "{{relay_region}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 2 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Relay throughput, by carriage and address family",
+      "description": "ADR-0005 §11.4's three carriages: R-UDP (41641 and 443), R-QUIC (UDP/443, QUIC DATAGRAM), R-TLS (TCP/443, TLS 1.3). They are RACED with a staggered start, never tried in sequence after a timeout. A sustained shift toward R-TLS means UDP is being blocked somewhere and NAT.UDP_BLOCKED should be rising in step.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 7, "w": 9, "x": 6, "y": 18 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (twinvpn_carriage, twinvpn_address_family) (rate(twinvpn_relay_bytes_forwarded_total[$__rate_interval]))",
+          "legendFormat": "{{twinvpn_carriage}} — {{twinvpn_address_family}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Relay shedding, throttling and draining",
+      "description": "ADR-0005 §11.5: OVERLOAD IS NEVER SILENT (I6). Whenever the relay throttles, sheds or drains it MUST emit RELAY_STATUS{reason_code, retry_after_ms, suggested_alternatives[]} on the affected flow; a relay that drops without a status frame is a defect. Note that this is NOT a DEGRADED entry - docs/reliability.md R6 reserves DEGRADED for measured quality violations.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 7, "w": 9, "x": 15, "y": 18 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (twinvpn_reason_code, twinvpn_relay_region) (rate(twinvpn_relay_status_emitted_total[$__rate_interval]))",
+          "legendFormat": "{{twinvpn_reason_code}} — {{twinvpn_relay_region}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Control plane — ADR-0002",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Durable event write rate against the per-TwinNet budget",
+      "description": "limits.json control_plane.durable_events_per_second_sustained = 1, burst 20 (ADR-0002 §11.6). Over budget the write is REFUSED with CONTROL.EVENT_RATE_EXCEEDED, which bounds log-flooding denial-of-freshness. Aggregate only: there is no per-TwinNet label, because that would be a per-entity index.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 26 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (twinvpn_outcome) (rate(twinvpn_control_durable_events_total[$__rate_interval]))",
+          "legendFormat": "{{twinvpn_outcome}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "C2 stream compaction and admission deferral",
+      "description": "ADR-0002 N-8: a compaction MUST be announced in band and in order as StreamCompacted{up_to_net_seq}; SILENT OMISSION IS PROHIBITED. §11.7 rule 3: an over-limit attach receives CONTROL.ADMISSION_DEFERRED{retry_after_ms} and a TCP reset or silent drop IS PROHIBITED HERE. Both are visible failures by design, which is what makes them chartable at all.",
+      "datasource": { "type": "prometheus", "uid": "twinvpn-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 26 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(twinvpn_reason_code_total{twinvpn_reason_code=\"CONTROL.STREAM_COMPACTED\"}[$__rate_interval]))",
+          "legendFormat": "CONTROL.STREAM_COMPACTED"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(twinvpn_reason_code_total{twinvpn_reason_code=\"CONTROL.ADMISSION_DEFERRED\"}[$__rate_interval]))",
+          "legendFormat": "CONTROL.ADMISSION_DEFERRED"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(twinvpn_reason_code_total{twinvpn_reason_code=\"CONTROL.EVENT_RATE_EXCEEDED\"}[$__rate_interval]))",
+          "legendFormat": "CONTROL.EVENT_RATE_EXCEEDED"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    }
+  ]
+}
