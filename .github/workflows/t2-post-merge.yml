@@ -142,11 +142,17 @@ jobs:
       # ------------------------------------------------------------------
       # Only the stores and the observability stack are brought up.
       #
-      # The six service binaries are SKELETONS: they print a line and exit 1.
-      # Starting them here would produce a red lane that says nothing about
-      # this change. When a domain lands its service, ADD IT TO THIS LIST -
-      # that is the moment the topology becomes real, and it should be a
-      # visible one-line diff rather than an implicit consequence.
+      # The six services are now implemented, but they have never been built
+      # into an image or started in a container — see infra/README.md §9. The
+      # first run of this job that includes them is therefore the first real
+      # exercise of the Dockerfile, the busybox healthcheck shim and the
+      # distroless runtime, and it should be a deliberate, visible diff rather
+      # than a silent widening of an existing list.
+      #
+      # Adding them needs, at minimum: the database URLs and the Postgres
+      # service for control-plane and relay-directory, and the bootstrapped
+      # secret directories (already done by the step above). Presence needs
+      # NO database — infra/README.md §2.2.
       # ------------------------------------------------------------------
       - name: dual-stack — up
         env:
