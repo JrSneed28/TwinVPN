@@ -1259,8 +1259,10 @@ name = "twinvpn-cp-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures-core",
  "prost",
  "thiserror",
+ "tracing",
  "twinvpn-env",
  "twinvpn-platform",
  "twinvpn-schema",
@@ -1280,6 +1282,7 @@ dependencies = [
  "coset",
  "ed25519-dalek",
  "hkdf",
+ "libc",
  "p256",
  "rand_core 0.9.5",
  "sha2 0.11.0",
@@ -1435,6 +1438,7 @@ name = "twinvpn-session"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+ "tracing",
  "twinvpn-env",
  "twinvpn-path",
  "twinvpn-platform",
@@ -1452,6 +1456,7 @@ dependencies = [
  "bytes",
  "prost",
  "thiserror",
+ "tracing",
  "twinvpn-crypto",
  "twinvpn-env",
  "twinvpn-platform",
