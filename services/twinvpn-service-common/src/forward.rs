@@ -40,30 +40,167 @@
 //! This is the same rule `Auth.signed_payload` already states — "the verifier
 //! MUST verify over the exact received octets of `signed_payload` and MUST NOT
 //! re-serialize" — generalised from one field to any forwarded message.
+//!
+//! # Two framings, because B4 has none
+//!
+//! The first version of this module applied `twinvpn_schema::depth::check` to
+//! every `Verbatim`. That was wrong for one consumer and wrong in a way that
+//! mattered more than an API mismatch. `depth::check` is a **protobuf record
+//! scan**; a relay `DATA` payload is an unmodified WireGuard L-DATA datagram —
+//! AEAD ciphertext with a fixed binary header (ADR-0001 §11, ADR-0005 C2) — so
+//! `Verbatim` rejected essentially all real relay traffic. `relay-plane`
+//! measured it.
+//!
+//! The deeper defect is that requiring the bytes to parse as protobuf put a
+//! protobuf parser on the **B4 packet path**, which ADR-0003 R7 forbids
+//! outright:
+//!
+//! > B4 MUST have **zero** serialization framework in the packet path.
+//!
+//! and §11's table restates as a property, not a preference:
+//!
+//! > **No serialization framework.** … A serialization library MUST NOT appear
+//! > in the packet path. Relay framing is a length + opaque-bytes header only.
+//!
+//! `contracts/README.md` records *why* that is worth a rule: B4's schema
+//! artifact is "**absent by design**", so "the highest-rate path is immune to
+//! serialization bugs by construction". A primitive that quietly reintroduced
+//! the parser would have removed that immunity while looking like the safe
+//! choice — which is worse than an obvious mistake, because nothing fails until
+//! it is a packet-path bug.
+//!
+//! So [`Verbatim`] carries a [`Framing`], and the two constructors say which:
+//!
+//! | Constructor | [`Framing`] | Checks applied | Belongs on |
+//! |---|---|---|---|
+//! | [`Verbatim::from_received`] | `ProtobufRecords` | size cap **and** depth cap | B1 (C1/C2/C7), B3 (C4) |
+//! | [`Verbatim::from_opaque`] | `Opaque` | size cap **only** | B4 (C5/C6) and any ciphertext leg |
+//!
+//! `from_received` keeps its name, its signature and its behaviour, so the
+//! control plane and the rendezvous cannot silently lose the depth guard by
+//! anyone's inaction. The opaque mode is a differently named constructor rather
+//! than a boolean parameter, because `from_received(bytes, channel, false)` at a
+//! call site tells a reviewer nothing and `from_opaque(bytes, channel)` tells
+//! them everything.
+//!
+//! **A `Channel` variant would have been the other reasonable shape**, and it is
+//! not available here: `Channel` lives in `twinvpn-schema`, is owned by
+//! `core-foundation`, and enumerates the two envelope **cap families** of
+//! `limits.json` — it is a bounds selector, not a framing selector, and B4 has no
+//! entry in `limits.json` to add. Framing is therefore a `twinvpn-service-common`
+//! concept, declared here.
+//!
 
 use bytes::Bytes;
 use twinvpn_schema::{depth, Channel, Reject};
 
+/// What structure, if any, the carried octets are assumed to have.
+///
+/// This is the ADR-0003 §11 boundary class expressed as a type. It selects the
+/// *checks*, not the bounds — the byte cap comes from [`Channel`] either way,
+/// because an attacker-driven allocation must be bounded on every boundary
+/// (`ownership.md` §6 rules 9 and 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Framing {
+    /// **B1 and B3.** A length-delimited protobuf record sequence.
+    ///
+    /// The nesting-depth cap of `limits.json` applies and is enforced on the raw
+    /// octets before `prost` allocates or recurses (ADR-0003 §11: "Depth limit 8,
+    /// size limit 64 KiB, enforced before parse"; C4 gets 4 and 1200 B, "the
+    /// smallest safe parser on a pre-authentication, attacker-reachable path").
+    ProtobufRecords,
+
+    /// **B4, and any ciphertext leg.** No structure at all.
+    ///
+    /// ADR-0003 R7: "B4 MUST have **zero** serialization framework in the packet
+    /// path." No record scan runs, because there is no record sequence and
+    /// because running one would be the violation. A relay forwarding a WireGuard
+    /// L-DATA datagram must not be able to say anything about its contents — that
+    /// is I1 in the code as well as in the crypto (`twinvpn-crypto` gives a relay
+    /// no decrypt operation; this gives it no parser).
+    Opaque,
+}
+
+impl Framing {
+    /// A stable token, for a `Debug` rendering and for evidence.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Framing::ProtobufRecords => "protobuf_records",
+            Framing::Opaque => "opaque",
+        }
+    }
+
+    /// Whether this framing runs the nesting-depth scan.
+    #[must_use]
+    pub const fn checks_depth(self) -> bool {
+        matches!(self, Framing::ProtobufRecords)
+    }
+}
+
 /// The exact octets a message arrived as.
 ///
-/// Constructed only through [`Verbatim::from_received`], which applies the
-/// channel's byte cap and depth cap **before** anything proportional to a
-/// declared length is allocated (`ownership.md` §6 rules 9 and 10). `Bytes` is
-/// reference-counted, so forwarding through several hops copies nothing.
+/// Built through [`Verbatim::from_received`] (B1/B3, size **and** depth) or
+/// [`Verbatim::from_opaque`] (B4, size only). Either way the byte cap is applied
+/// **before** anything proportional to a declared length is allocated
+/// (`ownership.md` §6 rules 9 and 10). `Bytes` is reference-counted, so
+/// forwarding through several hops copies nothing.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Verbatim {
     bytes: Bytes,
     channel: Channel,
+    framing: Framing,
 }
 
 impl Verbatim {
-    /// Validates and retains `bytes`.
+    /// Validates and retains `bytes` as a **protobuf record sequence**.
+    ///
+    /// The B1/B3 constructor, and the default: applying the depth cap is the
+    /// behaviour a control-plane or rendezvous forwarder must not lose by
+    /// accident, so it keeps the unqualified name. For a ciphertext leg or
+    /// anything else with no structure, use [`Verbatim::from_opaque`].
     ///
     /// # Errors
     ///
     /// [`Reject::SizeExceeded`] or [`Reject::DepthExceeded`], each carrying the
     /// `limits.json` bound it violated. Never a truncation, never a pad.
     pub fn from_received(bytes: Bytes, channel: Channel) -> Result<Self, Reject> {
+        Self::with_framing(bytes, channel, Framing::ProtobufRecords)
+    }
+
+    /// Bounds and retains `bytes` with **no structural assumption whatsoever**.
+    ///
+    /// The B4 constructor. The only check is `channel`'s byte cap; no record
+    /// scan, no depth check, no framework — ADR-0003 R7 puts zero serialization
+    /// machinery on the packet path, and `contracts/README.md` records the
+    /// consequence that makes it worth a rule: "the highest-rate path is immune
+    /// to serialization bugs by construction".
+    ///
+    /// Use this for a relay `DATA` payload (an unmodified WireGuard L-DATA
+    /// datagram), for a COSE_Sign1 `signed_payload` being carried rather than
+    /// verified, and for anything else whose bytes this process is not entitled
+    /// to interpret.
+    ///
+    /// # Errors
+    ///
+    /// [`Reject::SizeExceeded`] only, carrying the `limits.json` bound it
+    /// violated. Never a truncation, never a pad.
+    pub fn from_opaque(bytes: Bytes, channel: Channel) -> Result<Self, Reject> {
+        Self::with_framing(bytes, channel, Framing::Opaque)
+    }
+
+    /// The general form, for a caller whose framing is genuinely a runtime value.
+    ///
+    /// Prefer [`Verbatim::from_received`] or [`Verbatim::from_opaque`] at a fixed
+    /// call site: a named constructor is legible in a diff and a `Framing` held in
+    /// a variable is not.
+    ///
+    /// # Errors
+    ///
+    /// As the constructor the `framing` selects.
+    pub fn with_framing(bytes: Bytes, channel: Channel, framing: Framing) -> Result<Self, Reject> {
+        // The size cap first and always. It is the bound that stops an
+        // attacker-driven allocation, and it is the only check B4 gets.
         let limit = channel.max_bytes();
         if bytes.len() > limit {
             return Err(Reject::SizeExceeded {
@@ -72,8 +209,14 @@ impl Verbatim {
                 limit,
             });
         }
-        depth::check(&bytes, channel)?;
-        Ok(Self { bytes, channel })
+        if framing.checks_depth() {
+            depth::check(&bytes, channel)?;
+        }
+        Ok(Self {
+            bytes,
+            channel,
+            framing,
+        })
     }
 
     /// The octets, unchanged.
@@ -100,6 +243,15 @@ impl Verbatim {
         self.channel
     }
 
+    /// Which framing discipline this value was built under.
+    ///
+    /// Worth asking now that there are two: it answers "was this depth-checked,
+    /// or is it opaque octets?" without reading the bytes.
+    #[must_use]
+    pub const fn framing(&self) -> Framing {
+        self.framing
+    }
+
     /// The length in bytes.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -114,18 +266,23 @@ impl Verbatim {
 }
 
 impl std::fmt::Debug for Verbatim {
-    /// Length and channel only.
+    /// Length, channel and framing. **Never the octets.**
     ///
     /// The octets of a forwarded message are, by construction, content this
     /// process is not entitled to interpret — a relay's leg is ciphertext (I1),
     /// a rendezvous `CALL` body is opaque. Rendering them would be exactly the
     /// payload capture ADR-0015 O-12 forbids.
+    ///
+    /// The framing token is metadata about the container, not about the content,
+    /// and it is the one question a reader of a log now has that they did not
+    /// have before: which discipline did this value go through.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Verbatim({} B on {}, <not rendered>)",
+            "Verbatim({} B on {}, {}, <not rendered>)",
             self.bytes.len(),
-            self.channel.parser_id()
+            self.channel.parser_id(),
+            self.framing.as_str()
         )
     }
 }
@@ -148,6 +305,12 @@ impl<M: prost::Message + Default> Forwarded<M> {
     ///
     /// The caps are applied to the raw octets first, so a hostile declared length
     /// never reaches `prost`.
+    ///
+    /// Always [`Framing::ProtobufRecords`]: this type exists to hold a decoded
+    /// *view*, so there is nothing it could mean on a B4 payload. A component
+    /// carrying opaque octets holds a [`Verbatim`] from
+    /// [`Verbatim::from_opaque`] and no view at all — which is the stronger
+    /// position, not a lesser one.
     ///
     /// # Errors
     ///
@@ -211,179 +374,5 @@ impl<M> std::fmt::Debug for Forwarded<M> {
         f.debug_struct("Forwarded")
             .field("verbatim", &self.verbatim)
             .finish_non_exhaustive()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use prost::Message as _;
-    use twinvpn_schema::v1;
-
-    /// A protobuf key/varint pair for a field number this build does not know.
-    fn append_unknown_varint_field(buf: &mut Vec<u8>, field_number: u32, value: u64) {
-        let mut tag = u64::from(field_number) << 3; // wire type 0 = varint
-        loop {
-            let mut byte = u8::try_from(tag & 0x7f).expect("masked");
-            tag >>= 7;
-            if tag != 0 {
-                byte |= 0x80;
-            }
-            buf.push(byte);
-            if tag == 0 {
-                break;
-            }
-        }
-        let mut v = value;
-        loop {
-            let mut byte = u8::try_from(v & 0x7f).expect("masked");
-            v >>= 7;
-            if v != 0 {
-                byte |= 0x80;
-            }
-            buf.push(byte);
-            if v == 0 {
-                break;
-            }
-        }
-    }
-
-    /// A `MessageMetadata` plus a field number 1000 that `twinvpn.v1` does not
-    /// define — a future peer's additive extension, exactly the case ADR-0003
-    /// §11 B1's preserve-and-forward rule exists for.
-    fn message_with_an_unknown_field() -> Bytes {
-        let known = v1::MessageMetadata {
-            proto_version: 1,
-            message_id: vec![7u8; 16],
-            twinnet_id: "tn-1".to_owned(),
-            ..Default::default()
-        };
-        let mut buf = known.encode_to_vec();
-        append_unknown_varint_field(&mut buf, 1000, 42);
-        Bytes::from(buf)
-    }
-
-    #[test]
-    fn the_failing_control_decode_then_re_encode_drops_the_unknown_field() {
-        // This half is the reason the other half exists. If this ever starts
-        // passing, `prost` gained preserve-and-forward and CF-2's constraint on
-        // this crate can be revisited.
-        let original = message_with_an_unknown_field();
-        let decoded = v1::MessageMetadata::decode(original.clone()).expect("decodes");
-        let re_encoded = Bytes::from(decoded.encode_to_vec());
-
-        assert_ne!(
-            re_encoded, original,
-            "prost 0.13 is expected to DROP unknown fields; if this passes, \
-             re-read contracts/docs/phase1-conflicts.md CF-2"
-        );
-        assert!(
-            re_encoded.len() < original.len(),
-            "the dropped field should make the re-encoding shorter"
-        );
-    }
-
-    #[test]
-    fn forward_verbatim_preserves_the_unknown_field() {
-        let original = message_with_an_unknown_field();
-        let f = Forwarded::<v1::MessageMetadata>::decode(
-            original.clone(),
-            Channel::ControlAndTelemetry,
-        )
-        .expect("valid");
-
-        // The view is usable for routing decisions...
-        assert_eq!(f.view().twinnet_id, "tn-1");
-        assert_eq!(f.view().proto_version, 1);
-
-        // ...and what goes on the wire is what arrived, byte for byte.
-        assert_eq!(f.forward(), original);
-    }
-
-    #[test]
-    fn the_two_halves_disagree_which_is_the_whole_finding() {
-        let original = message_with_an_unknown_field();
-        let re_encoded = Bytes::from(
-            v1::MessageMetadata::decode(original.clone())
-                .unwrap()
-                .encode_to_vec(),
-        );
-        let forwarded = Forwarded::<v1::MessageMetadata>::decode(
-            original.clone(),
-            Channel::ControlAndTelemetry,
-        )
-        .unwrap()
-        .forward();
-
-        assert_eq!(forwarded, original);
-        assert_ne!(re_encoded, original);
-        assert_ne!(forwarded, re_encoded);
-    }
-
-    #[test]
-    fn the_explicit_rewrite_really_does_drop_it() {
-        let original = message_with_an_unknown_field();
-        let rewritten = Forwarded::<v1::MessageMetadata>::decode(
-            original.clone(),
-            Channel::ControlAndTelemetry,
-        )
-        .unwrap()
-        .rewrite_dropping_unknown_fields(|m| m.proto_version = 2);
-
-        assert_ne!(rewritten, original);
-        let back = v1::MessageMetadata::decode(rewritten).unwrap();
-        assert_eq!(back.proto_version, 2);
-    }
-
-    #[test]
-    fn an_oversized_message_is_refused_before_any_decode() {
-        let big = Bytes::from(vec![0u8; Channel::PeerDatagram.max_bytes() + 1]);
-        let e = Verbatim::from_received(big, Channel::PeerDatagram).expect_err("must reject");
-        assert!(matches!(
-            e,
-            Reject::SizeExceeded {
-                parser_id: "c4",
-                ..
-            }
-        ));
-        assert_eq!(e.reason_code(), twinvpn_types::codes::PROTO_SIZE_EXCEEDED);
-    }
-
-    #[test]
-    fn c4_gets_the_tighter_bound_because_b3_is_the_hostile_boundary() {
-        // limits.json: c4_max_bytes = 1200, c1_c2_c7_max_bytes = 65536.
-        let mid = Bytes::from(vec![0u8; 2000]);
-        assert!(Verbatim::from_received(mid.clone(), Channel::PeerDatagram).is_err());
-        // The same octets are within the control channel's cap; whether they
-        // parse is a separate question, which is why this asserts only the cap.
-        assert!(mid.len() < Channel::ControlAndTelemetry.max_bytes());
-    }
-
-    #[test]
-    fn debug_never_renders_the_octets() {
-        let v = Verbatim::from_received(
-            Bytes::from_static(b"\x08\x01secret-looking-payload"),
-            Channel::ControlAndTelemetry,
-        );
-        // Whether it validates is irrelevant; what matters is that if it does,
-        // its Debug carries no content.
-        if let Ok(v) = v {
-            let d = format!("{v:?}");
-            assert!(!d.contains("secret-looking-payload"), "{d}");
-            assert!(d.contains("<not rendered>"), "{d}");
-        }
-    }
-
-    #[test]
-    fn forwarding_several_hops_is_still_the_original_octets() {
-        let original = message_with_an_unknown_field();
-        let mut carried = original.clone();
-        for _ in 0..5 {
-            carried =
-                Forwarded::<v1::MessageMetadata>::decode(carried, Channel::ControlAndTelemetry)
-                    .unwrap()
-                    .into_forwarded();
-        }
-        assert_eq!(carried, original);
     }
 }

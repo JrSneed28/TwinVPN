@@ -45,6 +45,10 @@
 //!    the timer is the bound ([`shutdown::Shutdown`]).
 //! 5. **A forwarded message keeps its unknown fields.** `prost` 0.13 drops them,
 //!    so nothing decodes-then-re-encodes ([`forward::Forwarded`]).
+//! 6. **No serialization framework reaches the B4 packet path.**
+//!    [`forward::Verbatim::from_opaque`] carries ciphertext with a size bound and
+//!    no structural assumption at all; [`forward::Verbatim::from_received`] keeps
+//!    the protobuf depth guard for B1/B3 (ADR-0003 R7).
 //!
 //! # What this crate deliberately does not do
 //!
@@ -125,7 +129,7 @@ pub mod transport;
 pub use config::{ConfigError, ServiceConfig};
 pub use correlation::Correlation;
 pub use errors::ServiceError;
-pub use forward::{Forwarded, Verbatim};
+pub use forward::{Forwarded, Framing, Verbatim};
 pub use health::{
     DependencyProbe, HealthRegistry, LivenessCheck, ProbeKind, ProbeOutcome, ReadinessPolicy,
     ReadinessStatus, ServiceState,
