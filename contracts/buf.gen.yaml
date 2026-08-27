@@ -1,0 +1,73 @@
+# TwinVPN contract code generation.
+#
+# Authority: ADR-0018 §11.12 — /contracts is the SINGLE SOURCE, and
+# /contracts/gen/{rust,swift,kotlin,csharp} is COMMITTED and CI-REGENERATED AND
+# DIFFED, "so a schema change that a language binding cannot express fails at
+# MERGE rather than at INTEGRATION".
+#
+# ===========================================================================
+# THE BINDING SET IS DECIDED BY PHASE 1, NOT BY THIS FILE.
+# ===========================================================================
+# ADR-0018 §11.12 fixes exactly four targets. They are not arbitrary:
+#   rust    — the shared core (ADR-0018 alternative A), the Linux/Windows/
+#             OpenWrt shells, and the relay server
+#   swift   — the iOS, iPadOS and macOS shells
+#   kotlin  — the Android shell, with java, whose classes the generated Kotlin
+#             DSL extends
+#   csharp  — the Windows WinUI application shell
+#
+# TypeScript is NOT generated. See contracts/docs/phase1-conflicts.md CF-2:
+# ADR-0003 R8 lists TypeScript (and Go, and C) in a REQUIREMENTS table, but
+# ADR-0018 §11.12 — the later and more specific decision — assigns no Phase 1
+# component to any of them. Generating an unassigned binding would create a
+# permanent maintenance and CI obligation for a consumer that does not exist.
+# ===========================================================================
+#
+# EVERY PLUGIN VERSION IS PINNED. An unpinned version makes generation
+# non-reproducible, which would defeat the CI staleness check this whole
+# arrangement exists to enable.
+version: v2
+
+managed:
+  enabled: true
+  override:
+    - file_option: csharp_namespace
+      value: TwinVpn.V1
+    - file_option: java_package
+      value: net.twinvpn.contracts.v1
+    - file_option: java_multiple_files
+      value: true
+  disable:
+    # Never let managed mode write a go_package option: no Go binding is
+    # generated, and a stray option would imply one exists.
+    - file_option: go_package
+
+plugins:
+  # -- Rust: the shared core (ADR-0018 §11.3, alternative A) ----------------
+  - remote: buf.build/community/neoeinstein-prost:v0.4.0
+    out: gen/rust/src
+    opt:
+      - compile_well_known_types
+  - remote: buf.build/community/neoeinstein-prost-crate:v0.4.1
+    out: gen/rust
+    opt:
+      - no_features
+
+  # -- Swift: iOS / iPadOS / macOS shells -----------------------------------
+  - remote: buf.build/apple/swift:v1.28.2
+    out: gen/swift
+    opt:
+      - Visibility=Public
+      - FileNaming=PathToUnderscores
+
+  # -- Java + Kotlin: the Android shell -------------------------------------
+  # The Kotlin plugin emits DSL builders that EXTEND the Java classes; emitting
+  # kotlin without java yields code that does not compile.
+  - remote: buf.build/protocolbuffers/java:v33.1
+    out: gen/kotlin/java
+  - remote: buf.build/protocolbuffers/kotlin:v33.1
+    out: gen/kotlin/kotlin
+
+  # -- C#: the Windows WinUI application shell ------------------------------
+  - remote: buf.build/protocolbuffers/csharp:v33.1
+    out: gen/csharp

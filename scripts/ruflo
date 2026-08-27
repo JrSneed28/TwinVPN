@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+VERSION_FILE="$ROOT/.ruflo-version"
+
+if [[ ! -f "$VERSION_FILE" ]]; then
+  echo "Missing $VERSION_FILE" >&2
+  exit 1
+fi
+
+VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+
+exec npx -y "ruflo@$VERSION" "$@"

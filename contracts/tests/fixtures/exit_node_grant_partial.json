@@ -1,0 +1,20 @@
+{
+  "type": "twinvpn.v1.ExitNodeGrant",
+  "value": {
+    "sessionId": "AZGb8ABxc2SLnZ2en5+gpQ==",
+    "exitNodeDeviceId": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "grantedDefaultV4": true,
+    "grantedDefaultV6": false,
+    "dnsServersV4": [
+      {
+        "octets": "CgABAQ=="
+      }
+    ],
+    "mtu": 1380,
+    "ttlMs": "3600000",
+    "error": {
+      "reasonCode": "POLICY.NO_V6_EGRESS",
+      "domain": "POLICY"
+    }
+  }
+}

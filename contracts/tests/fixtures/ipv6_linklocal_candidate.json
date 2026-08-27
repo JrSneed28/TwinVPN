@@ -1,0 +1,20 @@
+{
+  "type": "twinvpn.v1.ConnectionCandidate",
+  "value": {
+    "candidateId": "AAAAAAAAAAE=",
+    "family": "ADDRESS_FAMILY_V6",
+    "kind": "CANDIDATE_KIND_HOST",
+    "endpoint": {
+      "address": {
+        "v6": {
+          "octets": "/oAAAAAAAAAAAAAAAAAAAQ==",
+          "zoneIndex": 7
+        }
+      },
+      "port": 51820
+    },
+    "priority": 120,
+    "mtuHint": 1280,
+    "expiresAtMs": "1756300030000"
+  }
+}

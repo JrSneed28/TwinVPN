@@ -1,0 +1,293 @@
+// TwinVPN shared contracts — the canonical connection state vocabulary,
+// Session, Path, and connection health.
+//
+// Authority: docs/reliability.md §4 (THE AUTHORITATIVE STATE MACHINE),
+// docs/architecture.md §3.3 and §3.4, S-12/S-14/S-15, docs/protocol.md §10-§12.
+//
+// ===========================================================================
+// ONE STATE MACHINE. THERE IS NO SECOND ONE.
+// ===========================================================================
+// docs/reliability.md §4 owns ConnectionState and its transitions. This file
+// FREEZES THE VOCABULARY and defines nothing about transitions.
+//
+// Application-facing presentation states MAY map onto these values but MUST NOT
+// replace them, and no surface may define a competing enum. ADR-0019 hosts its
+// presentation resolver INSIDE the shared core (ADR-0018 CB-4) precisely so
+// that six shells cannot each invent six mappings — R-31's defect class.
+//
+// The twelve names below are exactly those in docs/architecture.md §3.3 and
+// docs/reliability.md §4.2. Adding a thirteenth is a change to
+// docs/reliability.md, not to this file.
+// ===========================================================================
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/common.proto";
+import "twinvpn/v1/errors.proto";
+
+// The canonical connection state. INSTANTIATED PER Session — that is, once per
+// TrustedPeer relationship the local Device is maintaining. A Device in a
+// TwinNet with six peers runs six instances. The TwinNet-scope state the UI
+// calls "the connection" is DERIVED by docs/reliability.md §4.7's aggregation
+// rules from these per-Session values; it is not a separate vocabulary.
+enum ConnectionState {
+  CONNECTION_STATE_UNSPECIFIED = 0;
+
+  // Resting. No Session keys held, no relay allocation held, no Route installed
+  // for this peer. Enforcement rules for the protected scope REMAIN INSTALLED
+  // if FAIL_CLOSED — disconnected is not unprotected.
+  CONNECTION_STATE_DISCONNECTED = 1;
+
+  // Gathering candidates for v4 and v6 CONCURRENTLY. No packet is sent to the
+  // peer over any path yet; no user traffic may be emitted on an unvalidated
+  // path.
+  CONNECTION_STATE_DISCOVERING = 2;
+
+  // Version and capability agreement plus candidate exchange. Nothing is
+  // committed until agreement. No user traffic.
+  CONNECTION_STATE_NEGOTIATING = 3;
+
+  // Racing candidate pairs concurrently across v4 and v6 AND across direct and
+  // relay. No user traffic until a path is both cryptographically established
+  // and validated.
+  CONNECTION_STATE_CONNECTING = 4;
+
+  // Steady. A validated direct path over the same L2 segment carries traffic.
+  CONNECTION_STATE_LOCAL_DIRECT = 5;
+
+  // Steady. As LOCAL_DIRECT, plus a NAT binding keepalive at the currently
+  // estimated safe interval and at least one alternate path warm or
+  // re-establishable within T_FAILOVER_TARGET.
+  CONNECTION_STATE_WAN_DIRECT = 6;
+
+  // Steady. The relay forwards OPAQUE CIPHERTEXT ONLY and holds no key capable
+  // of decrypting the payload (I1). A direct-upgrade prober is running, and a
+  // standby relay in a DIFFERENT FAILURE DOMAIN is selected.
+  CONNECTION_STATE_RELAYED = 7;
+
+  // Transient, make-before-break. The Session, its keys, and its inner v4 and
+  // v6 addresses are UNCHANGED. The new path is not committed until it passes
+  // authenticated path validation, and the old path is not released until the
+  // new one is committed whenever the old path is still alive.
+  CONNECTION_STATE_MIGRATING = 8;
+
+  // Steady but time-bounded. TRAFFIC CONTINUES TO FLOW.
+  //
+  // docs/reliability.md R6: the violation is a QUALITY violation, NEVER a
+  // policy or security violation. A policy violation must not let traffic
+  // continue, so it goes to BLOCKED instead. This distinction is why
+  // ADR-0014 N-17(6) sends a policy-required-capability shortfall to BLOCKED
+  // and not to DEGRADED.
+  CONNECTION_STATE_DEGRADED = 9;
+
+  // Transient. Session context — identity, negotiated capabilities, inner
+  // addresses, cached peer endpoints — is RETAINED. Enforcement rules stay
+  // installed. No user traffic is emitted on any path.
+  CONNECTION_STATE_RECONNECTING = 10;
+
+  // Holding, recoverable. Traffic is DROPPED FAIL-CLOSED, always, without
+  // exception. Entered BY POLICY, not by fault. A re-establishment loop runs
+  // INSIDE this state, and the reason code and its remediation are displayed
+  // persistently (I3).
+  CONNECTION_STATE_BLOCKED = 11;
+
+  // Terminal for the attempt. Entered only on a non-retryable condition or on
+  // retry-budget exhaustion. Carries the terminal reason code AND ITS
+  // PRECONDITION FOR RETRY. No timers burn CPU or battery here.
+  CONNECTION_STATE_FAILED = 12;
+}
+
+// The class of path currently carrying traffic. A SUBSET of ConnectionState,
+// not a parallel vocabulary: these are exactly the three states in which a
+// validated path exists. Used as the `carrier` parameter of DEGRADED{carrier}
+// and the endpoints of MIGRATING{from -> to}.
+enum PathClass {
+  PATH_CLASS_UNSPECIFIED = 0;
+  PATH_CLASS_LOCAL_DIRECT = 1;
+  PATH_CLASS_WAN_DIRECT = 2;
+  PATH_CLASS_RELAYED = 3;
+}
+
+// What actually happens to user packets right now. docs/reliability.md §4.1
+// tracks this ORTHOGONALLY to ConnectionState and deliberately does not encode
+// it as extra states — "connected" and "traffic is flowing" are two facts, and
+// conflating them is how a UI renders DEGRADED as connected.
+enum TrafficDisposition {
+  TRAFFIC_DISPOSITION_UNSPECIFIED = 0;
+  TRAFFIC_DISPOSITION_TUNNELED_LOCAL_DIRECT = 1;
+  TRAFFIC_DISPOSITION_TUNNELED_WAN_DIRECT = 2;
+  TRAFFIC_DISPOSITION_TUNNELED_RELAY = 3;
+  // Both paths alive during a make-before-break window.
+  TRAFFIC_DISPOSITION_TUNNELED_DUAL = 4;
+  TRAFFIC_DISPOSITION_QUEUED_BOUNDED = 5;
+  TRAFFIC_DISPOSITION_DROPPED_FAIL_CLOSED = 6;
+  TRAFFIC_DISPOSITION_DROPPED_NO_ROUTE = 7;
+  // Exists ONLY when enforcement mode is PERMISSIVE_ANNOUNCED — the user has
+  // explicitly disabled the kill switch. Even then it is announced with a
+  // persistent POLICY.KILLSWITCH.UNPROTECTED_FALLBACK indication. There is no
+  // configuration in which protected traffic silently leaves the device
+  // untunneled (I3).
+  TRAFFIC_DISPOSITION_UNPROTECTED_ANNOUNCED = 8;
+}
+
+// Is the kill switch armed. docs/reliability.md §4.1; owned by ADR-0012.
+enum EnforcementMode {
+  ENFORCEMENT_MODE_UNSPECIFIED = 0;
+  ENFORCEMENT_MODE_FAIL_CLOSED = 1;
+  ENFORCEMENT_MODE_PERMISSIVE_ANNOUNCED = 2;
+}
+
+// The derived, eventually-consistent OPINION held about a Relay or a Device.
+//
+// docs/reliability.md §4.1: HealthState is NOT a ConnectionState, shares only
+// the name DEGRADED with one, and — decisively — MUST NOT GATE A CONNECTION
+// ATTEMPT. It contributes a score delta to relay selection and nothing more
+// (S-10, ADR-0006 §11.3 rule 1). A device's own probe result always outranks
+// any reported HealthState.
+enum HealthState {
+  HEALTH_STATE_UNSPECIFIED = 0;
+  HEALTH_STATE_HEALTHY = 1;
+  HEALTH_STATE_DEGRADED = 2;
+  HEALTH_STATE_UNHEALTHY = 3;
+  // The value before any observation exists, and after an observation goes
+  // stale. NEVER RENDERED AS HEALTHY.
+  HEALTH_STATE_UNKNOWN = 4;
+}
+
+// One network path. docs/architecture.md §3.3 `Path`.
+//
+// DISPOSABLE BY DESIGN. A new Endpoint pair IS a new Path. A Path failure MUST
+// NOT destroy the Tunnel while an alternate is available or obtainable; it
+// triggers MIGRATING, not DISCONNECTED (§3.4 normative consequence 1).
+message NetworkPath {
+  // EPHEMERAL, process-local, 8 bytes. Not persisted, not globally unique, and
+  // meaningful only within the emitting device's current process — it names a
+  // row in the in-memory path set (S-14). Nullable in a transition event,
+  // because DISCONNECTED, DISCOVERING and NEGOTIATING have no Path.
+  bytes path_id = 1;
+
+  Endpoint local_endpoint = 2;
+  Endpoint remote_endpoint = 3;
+  AddressFamily family = 4;
+  PathClass path_class = 5;
+
+  // Set iff path_class is RELAYED.
+  bytes relay_id = 6;
+
+  // Monotone per Path lineage within a Session. Orders PathOffer/PathAck; a
+  // LOWER path_epoch MUST BE IGNORED (docs/protocol.md §11.2, §12.2). This is
+  // what makes an unordered datagram exchange safe for migration.
+  uint64 path_epoch = 7;
+
+  // Whether the path has passed authenticated path validation. AN UNVALIDATED
+  // PATH MUST NOT CARRY TRAFFIC — this is also the anti-migration-hijack
+  // control.
+  bool validated = 8;
+
+  uint32 mtu = 9;
+}
+
+// The cryptographic transport instance. docs/architecture.md §3.3 `Tunnel`.
+// Full state vocabulary is in tunnel.proto; this is the descriptor a Session
+// carries.
+message TunnelRef {
+  bytes tunnel_id = 1;
+}
+
+// The user-visible relationship with a TrustedPeer.
+// docs/architecture.md §3.3 `Session`, §3.4.
+//
+// STATE OWNERSHIP: S-12, class LOCAL. THE DEVICE THAT OWNS THE Session IS THE
+// SOLE AUTHORITY. docs/protocol.md §7 makes this load-bearing: if the
+// coordination service were authoritative for Session state, a control-plane
+// outage would put every session into an indeterminate state and any
+// reconciliation logic would eventually tear tunnels down. Because the device
+// owns it, the coordination service losing the whole event log changes NOTHING
+// about a running Tunnel. This is the mechanism that makes I5 true.
+message ConnectionSession {
+  // ASSIGNED BY THE INITIATING DEVICE, globally unique, ENDPOINT-INDEPENDENT.
+  // 16 bytes, UUIDv7.
+  //
+  // DURABLE (S-12) and survives process restart, which is what lets an outage
+  // be reconstructed across a crash and what makes `session_id` non-nullable on
+  // every transition event while `path_id` is nullable.
+  //
+  // It survives every Tunnel and Path change. It is NOT reassigned on relay
+  // failover, on roam, on rekey, or on re-handshake — ADR-0014 §8 depends on
+  // this: a rolling upgrade restarts the process, creates a NEW Tunnel with a
+  // freshly negotiated (V, C), and the Session persists.
+  bytes session_id = 1;
+
+  bytes peer_device_id = 2;
+
+  ConnectionState state = 3;
+
+  // Set iff state is DEGRADED or MIGRATING (the two parameterised states).
+  // For DEGRADED it is the carrier actually carrying traffic; for MIGRATING it
+  // is the outgoing class.
+  PathClass carrier = 4;
+
+  // Set iff state is MIGRATING: the incoming class.
+  PathClass migrating_to = 5;
+
+  TrafficDisposition disposition = 6;
+
+  // The active Tunnel. One per Session; historical Tunnels are not carried.
+  TunnelRef active_tunnel = 7;
+
+  // Active plus warm-standby paths. >= 1 while a Tunnel exists.
+  repeated NetworkPath paths = 8;
+
+  // REQUIRED whenever `state` is DEGRADED, BLOCKED, RECONNECTING or FAILED.
+  //
+  // docs/reliability.md §4.5 rule 3 and ADR-0015 §11.6 rule 3: a transition
+  // into one of those four states WITHOUT a reason_code is itself the defect
+  // INTERNAL.INVARIANT_VIOLATED. Enforced at the state-machine boundary, so no
+  // code path can enter a bad state quietly.
+  ErrorEnvelope diagnostic = 9;
+
+  // The policy_version in force when this Session was established.
+  uint64 policy_snapshot_version = 10;
+
+  uint64 established_at_ms = 11;
+}
+
+// Measured quality of a live path. Feeds DEGRADED entry/exit, whose THRESHOLDS
+// are owned by docs/reliability.md §5.4 — this contract only guarantees the
+// observations are carried.
+message ConnectionHealth {
+  bytes session_id = 1;
+  bytes path_id = 2;
+
+  PathClass path_class = 3;
+  AddressFamily family = 4;
+
+  // Measured on the MONOTONIC clock.
+  uint64 rtt_p50_us = 5;
+  uint64 rtt_p95_us = 6;
+
+  // Parts per million, so a 0.05% loss rate is 500 rather than a float. Integer
+  // because ADR-0003 §11 rule 2 requires explicitly sized integers on the wire
+  // and float comparison across languages is a determinism hazard.
+  uint32 loss_ppm = 7;
+
+  uint64 goodput_bps = 8;
+  uint32 mtu = 9;
+
+  // Whether Path MTU Discovery detected a black hole — a top cause of
+  // "connects but nothing loads".
+  bool pmtud_blackhole_detected = 10;
+
+  HealthState health = 11;
+
+  // ADR-0015 §11.6 rule 3 / docs/protocol.md §14: a health report of DEGRADED
+  // or FAILED with an EMPTY reason_codes list is a MALFORMED MESSAGE and MUST
+  // be rejected with INTERNAL.MISSING_REASON. This is the protocol-level teeth
+  // behind I6.
+  repeated string reason_codes = 12;
+
+  // Local monotonic sample instant. Not comparable across devices.
+  MonotonicMicros observed_at = 13;
+}

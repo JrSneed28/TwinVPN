@@ -1,0 +1,213 @@
+// TwinVPN shared contracts — NAT candidates and local interfaces.
+//
+// Authority: docs/protocol.md §10.4 and §10.5, ADR-0004 (§11 ladder, §11.6
+// reason codes), docs/architecture.md §3.3 `ConnectionCandidate` / `Endpoint`,
+// S-14.
+//
+// ===========================================================================
+// CLASSIFICATION: EPHEMERAL SIGNALING (B3). The canonical ephemeral case.
+// ===========================================================================
+// docs/protocol.md §10.4: candidates are re-derived every time (E1), NAT
+// mappings expire in tens of seconds (E2), losing one costs a fallback to
+// RELAYED and not correctness (E3), and replay is merely wasteful (E4).
+//
+// PERSISTING CANDIDATES IS AN ANTI-PATTERN (docs/protocol.md §6.1). On
+// reconnect a device would replay a candidate set minted hours ago, probing NAT
+// mappings that expired and IP addresses now belonging to someone else —
+// producing connection storms, misleading diagnostics, and probe traffic to an
+// uninvolved third party. RELIABLE DELIVERY MAKES THIS WORSE, because the stale
+// data is then guaranteed to arrive.
+//
+// ADR-0002 N-9: candidate-exchange payloads MUST NOT be written to the durable
+// log, MUST NOT be replayed from a cursor, and MUST NOT survive their TTL.
+//
+// TRUST BOUNDARY: this is the WORST-CASE boundary in the system —
+// pre-authentication, forwarded by an untrusted rendezvous, reachable by anyone
+// who can send a UDP datagram (ADR-0003 §7). Envelope <= 1200 B, parser depth
+// limit 4, caps enforced BEFORE parse.
+// ===========================================================================
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/common.proto";
+
+// How a candidate address was learned. Determines its priority and what its
+// failure means diagnostically.
+enum CandidateKind {
+  CANDIDATE_KIND_UNSPECIFIED = 0;
+
+  // An address configured on a local interface.
+  CANDIDATE_KIND_HOST = 1;
+
+  // The mapped address a reflexive service observed for us.
+  CANDIDATE_KIND_SERVER_REFLEXIVE = 2;
+
+  // A mapping believed to be port-restricted, requiring synchronized punching.
+  CANDIDATE_KIND_PORT_RESTRICTED = 3;
+
+  // An address obtained from a Relay.
+  CANDIDATE_KIND_RELAYED = 4;
+
+  // A mapping explicitly created via PCP / NAT-PMP / UPnP-IGD
+  // (capability `portmap/1`).
+  CANDIDATE_KIND_PORT_MAPPED = 5;
+
+  // A mapping predicted from an observed allocation pattern. Lowest confidence;
+  // ADR-0004 tracks it separately so "prediction worked" is measurable rather
+  // than assumed.
+  CANDIDATE_KIND_PREDICTED = 6;
+}
+
+// A local network interface, as observed by the Platform Network Adapter.
+//
+// SCOPE: DIAGNOSTIC AND LOCAL-DECISION ONLY. This message MUST NOT be
+// transmitted to a peer, to the rendezvous, or to the coordination service.
+//
+// ADR-0015 §11.4 classifies interface names as SENSITIVE, pseudonymized to
+// `iface-1` in a Tier-1 bundle and NEVER present in Tier 2. Sending an
+// interface inventory to infrastructure would hand a semi-trusted party a
+// stable device fingerprint and a topology map of the user's home network, for
+// no protocol benefit — candidates already carry every address that matters,
+// and they carry it signed.
+message NetworkInterface {
+  // Platform interface name. SENSITIVE.
+  string name = 1;
+
+  // Addresses currently configured. SENSITIVE.
+  repeated IPPrefix addresses = 2;
+
+  // Whether a default route for each family points out of this interface.
+  // Both fields are always meaningful; ADR-0015 §11.8 item 2 requires v4 and v6
+  // to be reported SIDE BY SIDE AND ALWAYS BOTH.
+  bool has_default_route_v4 = 3;
+  bool has_default_route_v6 = 4;
+
+  // Whether this is the TwinVPN overlay interface. ADR-0010 §11.5: the
+  // fail-closed rule is scoped BY INTERFACE, not by destination prefix, so
+  // knowing which interface is the overlay is the whole of the enforcement
+  // predicate.
+  bool is_overlay = 5;
+
+  bool is_up = 6;
+
+  // Link MTU as reported by the OS.
+  uint32 mtu = 7;
+}
+
+// One proposed path endpoint. docs/architecture.md §3.3 `ConnectionCandidate`.
+message ConnectionCandidate {
+  // Locally unique within one establishment attempt. EPHEMERAL: it names a row
+  // in the attempt ledger (S-14), lives only as long as the attempt, and is
+  // never persisted or transmitted as a stable reference. 8 bytes.
+  bytes candidate_id = 1;
+
+  AddressFamily family = 2;
+  CandidateKind kind = 3;
+
+  // The proposed endpoint. For an IPv6 link-local host candidate the zone index
+  // inside IPv6Address is REQUIRED and non-zero (docs/protocol.md §10.4).
+  Endpoint endpoint = 4;
+
+  // Higher is preferred. ADR-0004's ladder ordering is: native IPv6 candidates
+  // first, then LAN candidates, then the rest. Priority is ADVISORY — the
+  // actual winner is whichever pair validates first, because a measured
+  // validation always outranks a predicted preference.
+  uint32 priority = 5;
+
+  // Largest payload believed to fit this path without fragmentation. A HINT.
+  // docs/protocol.md §12.2: MTU MUST be RE-PROBED on migration, because v6
+  // paths commonly have a smaller effective MTU and a stale MTU is a top cause
+  // of "throughput degradation" and "connects but nothing loads".
+  uint32 mtu_hint = 6;
+
+  // Absolute expiry, wall clock. Default 30 s (docs/protocol.md §10.4).
+  uint64 expires_at_ms = 7;
+}
+
+// The exchanged candidate set. docs/protocol.md §10.4 `CandidateSet`.
+//
+// AUTHORIZATION: Rule B — DeviceKey-signed. An UNSIGNED candidate MUST BE
+// DROPPED. Without the signature the rendezvous, or anyone who can inject a
+// datagram, could steer probing traffic at a chosen victim, TURNING TwinVPN
+// INTO A REFLECTION AMPLIFIER. The matching control is in PunchSync: probe
+// targets MUST be restricted to addresses that appeared in a SIGNED CandidateSet
+// from the peer.
+message CandidateSet {
+  // Correlates the exchange. 16 bytes. Chosen by the initiator; the glare loser
+  // adopts the winner's nonce (docs/protocol.md §10.1).
+  bytes session_nonce = 1;
+
+  // Monotone trickle counter. A receiver DISCARDS a lower generation. This is
+  // how an unordered, at-most-once channel gets ordering where ordering
+  // matters, without making the channel reliable.
+  uint32 generation = 2;
+
+  // BOTH FAMILIES MUST BE GATHERED AND EXCHANGED IN THE SAME CandidateSet
+  // (docs/protocol.md §4.1, §10.4).
+  //
+  // A set containing only one family MUST be flagged
+  // NAT.SINGLE_FAMILY_CANDIDATES in diagnostics — it is the leading cause of
+  // "works at home, fails on cellular".
+  //
+  // CAP: at most 32 candidates; the whole C4 envelope is <= 1200 B, chosen for
+  // the worst-case IPv6 path MTU minus headers rather than the IPv4 576 B
+  // floor, because C4 is never fragmented and IPv6 forbids in-network
+  // fragmentation.
+  repeated ConnectionCandidate candidates = 3;
+}
+
+// Synchronized hole-punching instruction. docs/protocol.md §10.5.
+//
+// TIGHTLY TIME-COUPLED: a punch instruction is worthless a second late.
+// Reliable or ordered delivery would ACTIVELY HARM it by delivering stale
+// synchronization instructions.
+message PunchSync {
+  bytes session_nonce = 1;
+  uint32 generation = 2;
+
+  // When to punch, RELATIVE to receipt, in milliseconds. Relative because the
+  // two peers' wall clocks are advisory and may differ by minutes; a relative
+  // offset needs only that both sides measure duration, which the monotonic
+  // clock does correctly.
+  uint32 punch_at_ms_relative = 3;
+
+  // Index pairs into the two peers' signed candidate sets. INDICES, NOT
+  // ADDRESSES: an index cannot name an address that did not appear in a signed
+  // set, which is the anti-amplification control expressed structurally rather
+  // than by a runtime check.
+  repeated CandidatePair pairs = 4;
+
+  // Ports to try for birthday-paradox prediction against symmetric NAT.
+  // At most 64 entries.
+  repeated uint32 birthday_port_hints = 5;
+}
+
+message CandidatePair {
+  uint32 local_candidate_index = 1;
+  uint32 remote_candidate_index = 2;
+}
+
+message PunchProbe {
+  bytes session_nonce = 1;
+  bytes probe_id = 2;
+  AddressFamily family = 3;
+}
+
+message PunchResult {
+  bytes session_nonce = 1;
+  bytes probe_id = 2;
+
+  // Measured on the MONOTONIC clock. A wall-clock RTT would be nonsense across
+  // an NTP step.
+  uint64 rtt_us = 3;
+
+  bool succeeded = 4;
+
+  // On failure, the specific NAT domain code observed — e.g.
+  // NAT.SYMMETRIC_BOTH_ENDS, NAT.CGNAT_V4_NO_V6, NAT.UDP_BLOCKED.
+  // docs/protocol.md §10.5 requires naming the ACTUAL CAUSE per family;
+  // "connection failed" is not acceptable.
+  string reason_code = 5;
+}

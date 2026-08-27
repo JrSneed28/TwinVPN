@@ -1,0 +1,10 @@
+{
+  "type": "twinvpn.v1.RelayBinding",
+  "value": {
+    "relayId": "AAAAAAAAAAI=",
+    "pairTag": "8PDw8PDw8PDw8PDw8PDw8A==",
+    "flowId": "AQID",
+    "carriage": "RELAY_CARRIAGE_QUIC",
+    "family": "ADDRESS_FAMILY_V6"
+  }
+}

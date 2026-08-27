@@ -1,0 +1,303 @@
+// TwinVPN shared contracts — the canonical error envelope.
+//
+// Authority:
+//   ADR-0015 §11.2  (reason_code taxonomy, registry attributes, stability rules)
+//   ADR-0015 §11.3  (the Diagnostic record)
+//   ADR-0015 §11.4  (field classification and redaction)
+//   ADR-0018 F-4    (errors carry a name, never an errno; the `resolved` block)
+//   docs/protocol.md §17 (protocol-level diagnostic obligations)
+//
+// TRUST BOUNDARY: an ErrorEnvelope may be produced locally or received from a
+// semi-trusted control plane or an untrusted peer. A RECEIVED envelope's
+// `resolved` attributes are a claim, not a fact: a receiver MUST prefer its own
+// registry entry when it recognizes `reason_code`, and MUST fall back to the
+// carried attributes only for a code it does not know (ADR-0015 §11.2 rule 5).
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/common.proto";
+
+// ---------------------------------------------------------------------------
+// Registry attributes
+// ---------------------------------------------------------------------------
+
+// ADR-0015 §11.2 `class`. Describes how a condition behaves over time, which is
+// what decides whether a caller may retry.
+enum ErrorClass {
+  ERROR_CLASS_UNSPECIFIED = 0;
+  // Expected to clear on its own; retry under the reliability.md backoff regime.
+  ERROR_CLASS_TRANSIENT = 1;
+  // Will not clear without a change in the world; retry is futile until then.
+  ERROR_CLASS_PERSISTENT = 2;
+  // A deliberate refusal by policy. Retrying without changing the policy is
+  // not merely futile, it is wrong.
+  ERROR_CLASS_POLICY = 3;
+  // A security event or an invariant violation. Never retried automatically.
+  ERROR_CLASS_FATAL = 4;
+}
+
+// ADR-0015 §11.2 `severity`.
+enum ErrorSeverity {
+  ERROR_SEVERITY_UNSPECIFIED = 0;
+  ERROR_SEVERITY_INFO = 1;
+  ERROR_SEVERITY_WARN = 2;
+  ERROR_SEVERITY_ERROR = 3;
+  ERROR_SEVERITY_CRITICAL = 4;
+}
+
+// The component that OBSERVED the condition. ADR-0015 §11.3 `component`.
+// This is the observer, not the blamed party: a relay failure observed by the
+// tunnel engine carries COMPONENT_TUNNEL_ENGINE and a RELAY.* reason_code.
+enum Component {
+  COMPONENT_UNSPECIFIED = 0;
+  COMPONENT_TUNNEL_ENGINE = 1;
+  COMPONENT_ROUTING_ENGINE = 2;
+  COMPONENT_PLATFORM_ADAPTER = 3;
+  COMPONENT_DEVICE_IDENTITY = 4;
+  COMPONENT_PAIRING = 5;
+  COMPONENT_CONTROL_PLANE_CLIENT = 6;
+  COMPONENT_RENDEZVOUS_CLIENT = 7;
+  COMPONENT_NAT_TRAVERSAL = 8;
+  COMPONENT_RELAY_CLIENT = 9;
+  COMPONENT_RELAY_SELECTION = 10;
+  COMPONENT_PRESENCE = 11;
+  COMPONENT_POLICY_ENGINE = 12;
+  COMPONENT_DNS = 13;
+  COMPONENT_KILL_SWITCH = 14;
+  COMPONENT_LAN_DISCOVERY = 15;
+  COMPONENT_EXIT_NODE = 16;
+  COMPONENT_DIAGNOSTICS = 17;
+  COMPONENT_STORE = 18;
+  COMPONENT_UPDATE = 19;
+  COMPONENT_MANAGEMENT_INTERFACE = 20;
+  COMPONENT_COORDINATION_SERVICE = 21;
+  COMPONENT_RELAY_SERVER = 22;
+}
+
+// The scope a condition applies to. Decides what a surface may render it
+// against — a device-scope condition must not be drawn on one Session's row.
+enum DiagnosticScope {
+  DIAGNOSTIC_SCOPE_UNSPECIFIED = 0;
+  DIAGNOSTIC_SCOPE_SESSION = 1;
+  DIAGNOSTIC_SCOPE_TWINNET = 2;
+  DIAGNOSTIC_SCOPE_DEVICE = 3;
+  DIAGNOSTIC_SCOPE_PATH = 4;
+  DIAGNOSTIC_SCOPE_RELAY = 5;
+}
+
+// The shape of the remediation, independent of the specific wording. Lets a
+// surface pick an affordance (a button, a link, a passive banner) for a code it
+// has never seen. ADR-0018 F-4 `remediation_class`.
+enum RemediationClass {
+  REMEDIATION_CLASS_UNSPECIFIED = 0;
+  // Nothing to do; it will clear or it is informational.
+  REMEDIATION_CLASS_NONE = 1;
+  // Wait; the system is already retrying.
+  REMEDIATION_CLASS_WAIT = 2;
+  // The Owner must act on THIS device.
+  REMEDIATION_CLASS_LOCAL_ACTION = 3;
+  // The Owner must act on the PEER device named in the evidence.
+  REMEDIATION_CLASS_PEER_ACTION = 4;
+  // The Owner must change a policy or a permission.
+  REMEDIATION_CLASS_POLICY_CHANGE = 5;
+  // Software on this device or on the peer must be updated.
+  REMEDIATION_CLASS_UPDATE_REQUIRED = 6;
+  // The network or its operator is the obstacle.
+  REMEDIATION_CLASS_NETWORK_CHANGE = 7;
+  // An OS permission or entitlement must be granted.
+  REMEDIATION_CLASS_PERMISSION_GRANT = 8;
+  // Report it. Every occurrence is a defect (the INTERNAL domain).
+  REMEDIATION_CLASS_REPORT_DEFECT = 9;
+}
+
+// ---------------------------------------------------------------------------
+// Evidence
+// ---------------------------------------------------------------------------
+
+// ADR-0015 §11.4 field classification. This is carried on the wire because
+// redaction is applied BY THE EMITTER from the schema classification — there is
+// no "scrub the log with regexes before sending" step, because that approach
+// fails open (ADR-0015 O-14).
+enum FieldClassification {
+  FIELD_CLASSIFICATION_UNSPECIFIED = 0;
+  // Carries no user-identifying information.
+  FIELD_CLASSIFICATION_PUBLIC = 1;
+  // Timing, states, counters, coarse categories.
+  FIELD_CLASSIFICATION_OPERATIONAL = 2;
+  // Endpoints, addresses, interface names, DeviceIdentity, peer identifiers,
+  // hostnames, SSIDs. Pseudonymized in a Tier-1 bundle; NEVER in Tier 2.
+  FIELD_CLASSIFICATION_SENSITIVE = 3;
+  // FIELD_CLASSIFICATION_SECRET is deliberately ABSENT from this enum.
+  //
+  // ADR-0015 §11.4: SECRET material is "never stored, never rendered, no code
+  // path exists". Giving it an enum value would create the code path. A field
+  // that would have to be classified SECRET must not be constructed at all.
+}
+
+// One typed, registry-declared piece of evidence.
+//
+// ADR-0015 §11.3: evidence is "attached to a code, never in place of one". A
+// bare errno with no reason_code is exactly the failure this product exists to
+// fix, and ADR-0018 F-4 forbids returning one.
+//
+// The registry declares, per reason_code, the exact set of `key`s that code may
+// attach and each key's classification (`evidence_fields`). An evidence entry
+// whose key is not declared for its code MUST be dropped by the receiver — an
+// undeclared key is an unclassified key, and an unclassified key cannot be
+// redacted correctly.
+message Evidence {
+  // Registry-declared key, e.g. "peer_min", "capability", "observed_mtu".
+  // lower_snake_case, <= 48 bytes.
+  string key = 1;
+
+  // The emitter's classification of `value`, taken from the registry. A
+  // receiver MUST honour the STRICTER of this and its own registry entry.
+  FieldClassification classification = 2;
+
+  // Typed value. The oneof exists so that a consumer never has to parse a
+  // number back out of a string, which is where unit and precision bugs live.
+  oneof value {
+    string string_value = 3;
+    int64 int_value = 4;
+    uint64 uint_value = 5;
+    bool bool_value = 6;
+    // A network address as evidence — always SENSITIVE.
+    IPAddress address_value = 7;
+    // A prefix as evidence — e.g. the colliding prefix in
+    // POLICY.PREFIX_COLLIDES_LOCAL, which docs/protocol.md §13.2 requires to be
+    // named precisely rather than described.
+    IPPrefix prefix_value = 8;
+    AddressFamily family_value = 9;
+    // Duration in milliseconds. Named, so it cannot be confused with a
+    // timestamp.
+    uint64 duration_ms_value = 10;
+  }
+}
+
+// The registry attributes for a reason_code, resolved by the emitter at
+// emission time. ADR-0018 F-4.
+//
+// This block is present for EVERY code, INCLUDING one the receiving consumer
+// does not recognize. That is its whole purpose: an unknown code still arrives
+// with its severity, terminality and actionability intact, so a consumer can
+// behave correctly on a code shipped after it was built. ADR-0015 §11.2 rule 5
+// strengthens prefix degradation into attribute degradation precisely here — a
+// receiver cannot choose a correct affordance from a bare string, and could not
+// otherwise tell a POLICY-class condition that must not be dismissible from an
+// INFO one that should be transient.
+//
+// NORMATIVE: every field here is machine-readable metadata — an enum, a
+// boolean, or a stable anchor. NO FIELD IS LOCALIZED AND NONE IS A SENTENCE.
+// Adding a `summary`, `message`, or `title` field to this message is
+// prohibited: it would place a second text authority outside the registry
+// (ADR-0015 §11.2 rule 4), breach ADR-0018 CB-4 (the core owns no user-visible
+// string), and breach ADR-0017 MI-15 (no rendered human text on the wire).
+message ResolvedAttributes {
+  ErrorClass class = 1;
+  ErrorSeverity severity = 2;
+
+  // Whether this condition ends the current attempt. Note ADR-0015 §11.2.1:
+  // INTERNAL.CORE_PANIC is terminal for the core INSTANCE and not for the
+  // Session, so a consumer must read `scope` alongside this flag rather than
+  // assuming Session scope.
+  bool terminal = 3;
+
+  // Whether an Owner can do anything about it. When true, `next_action_key`
+  // is required.
+  bool user_actionable = 4;
+
+  RemediationClass remediation_class = 5;
+  DiagnosticScope scope = 6;
+
+  // Stable documentation anchor, e.g. "adr-0011#dn-11".
+  string doc_anchor = 7;
+
+  // i18n LOOKUP KEYS, not text. The catalogue that resolves them ships
+  // embedded in the artifact (ADR-0018 CB-4) and is versioned by
+  // SchemaDescriptor.reason_registry_version.
+  //
+  // ADR-0015 §11.2 rule 4: the CODE is the contract; the human text is not.
+  // Summary and next-action strings may be reworded or re-translated at any
+  // time. Automation, tests and support tooling MUST key on `reason_code` and
+  // MUST NOT match on rendered text.
+  string summary_key = 8;
+  string next_action_key = 9;
+}
+
+// ---------------------------------------------------------------------------
+// The error envelope
+// ---------------------------------------------------------------------------
+
+// The single canonical failure carrier for TwinVPN.
+//
+// One envelope, used for: a non-success C1 response, a diagnostic attached to a
+// DEGRADED/BLOCKED/FAILED state entry, an ABI failure return (ADR-0018 F-4),
+// and a diagnostic-bundle entry. There is deliberately no second error shape.
+//
+// docs/protocol.md §17 obligations this message exists to make mechanical:
+//   1. Every non-success response carries at least one reason code.
+//   2. Every transition into DEGRADED, BLOCKED, FAILED, or a fallback path
+//      carries at least one reason code.
+//   3. Reason codes are stable identifiers, never renumbered.
+//   4. A receiver encountering an unknown code degrades to its DOMAIN prefix,
+//      MUST NOT swallow it, and MUST NOT display the raw code as the primary
+//      user-facing signal.
+message ErrorEnvelope {
+  // The taxonomy code: DOMAIN.CONDITION or DOMAIN.SUBDOMAIN.CONDITION.
+  // Uppercase, dot-separated, ASCII, <= 64 bytes, two or three segments
+  // (ADR-0015 §11.2 rule 7 — four or more is malformed).
+  //
+  // CARRIED AS A STRING, NEVER AS AN ENUM. This is normative in ADR-0015 §11.2
+  // and it is not a stylistic choice: prefix degradation and unknown-code
+  // passthrough both require the receiver to hold the unrecognised code's TEXT,
+  // and a protobuf enum preserves an unknown value only as an integer, which
+  // discards the DOMAIN and destroys forward compatibility.
+  string reason_code = 1;
+
+  // The first segment of `reason_code`, carried redundantly so a receiver can
+  // degrade without string-splitting attacker-supplied input. A receiver MUST
+  // verify it matches the prefix of `reason_code` and MUST reject the envelope
+  // on disagreement — a mismatched pair is an attempt to make a condition
+  // render under the wrong domain.
+  string domain = 2;
+
+  // Registry attributes resolved by the emitter. Present for every code.
+  ResolvedAttributes resolved = 3;
+
+  // Which component observed the condition.
+  Component component = 4;
+
+  // Typed, classified, registry-declared evidence. Bounded: at most 32 entries
+  // and 4 KiB total; an envelope exceeding either is truncated by the emitter
+  // (never by the receiver) with a final entry {key:"evidence_truncated"}.
+  repeated Evidence evidence = 5;
+
+  // When the condition was observed, on the emitter's wall clock. OPERATIONAL
+  // classification. Advisory — see WallClockMillis.
+  uint64 occurred_at_ms = 6;
+
+  // The `message_id` of the message that produced this failure, when there is
+  // one. Lets a failure be joined to its request across a device boundary.
+  //
+  // NOTE the deliberate difference from ADR-0015 §11.3's local `correlation_id`
+  // field, which is classified SENSITIVE and "never transmitted off-device".
+  // That field is the LOCAL LEDGER's incident-correlation id and is a different
+  // fact from the envelope-level `message_id` linkage carried here. This field
+  // carries only the protocol correlation, which is already on the wire in
+  // MessageMetadata and therefore leaks nothing new.
+  bytes correlation_id = 7;
+
+  // ConnectionState transition context, when the condition accompanied one.
+  // Encoded as the ConnectionState enum's numeric value; see connection.proto.
+  // Zero means "not a transition".
+  uint32 state_from = 8;
+  uint32 state_to = 9;
+
+  // Additional codes observed in the same failure, most-specific first.
+  // docs/reliability.md T12 requires the MOST SPECIFIC transport code observed,
+  // never a generic one; this field exists so the specific code can be primary
+  // while its contributing observations remain attached rather than discarded.
+  repeated string contributing_reason_codes = 10;
+}

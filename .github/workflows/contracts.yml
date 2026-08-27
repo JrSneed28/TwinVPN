@@ -1,0 +1,132 @@
+name: contract gate
+
+# The Phase 2 CI contract gate.
+#
+# Parallel implementation MUST NOT merge if:
+#   - schemas do not compile
+#   - generated bindings are stale
+#   - contract tests fail
+#   - schema lint fails
+#   - a prohibited breaking change is detected
+#   - contract fixtures disagree across languages
+#
+# The contract package is an UPSTREAM DEPENDENCY of every implementation agent,
+# so this workflow runs on every change to the repository, not only on changes
+# under contracts/: a change elsewhere that assumes a contract shape must still
+# be checked against the frozen contract.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contract-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The breaking-change check needs the merge base, not just the tip.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # --- 1. pinned toolchains ------------------------------------------------
+      - name: bootstrap
+        run: make bootstrap
+
+      # The four language toolchains needed to COMPILE the generated bindings.
+      # Cached because they are large and pinned - a cache hit is exactly the
+      # same toolchain, by construction.
+      - name: cache language toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+            ~/.local/jdk
+            ~/.local/kotlinc
+            ~/.local/swift
+            ~/.local/sysroot
+            ~/.dotnet
+          key: twinvpn-toolchains-${{ runner.os }}-${{ hashFiles('build/toolchain/*.sh') }}
+
+      - name: install language toolchains
+        run: make toolchains
+
+      # --- 2. schemas compile and lint ---------------------------------------
+      - name: lint
+        run: make lint
+
+      # --- 3. deterministic generation, and staleness --------------------------
+      # `make contracts` regenerates in place. The freshness check then fails if
+      # `git status` is dirty under contracts/gen, which means the committed
+      # bindings did not match a fresh generation.
+      - name: contracts
+        run: make contracts
+
+      - name: generated bindings are not stale
+        run: |
+          if [ -n "$(git status --porcelain -- contracts/gen)" ]; then
+            echo "::error::Generated bindings are STALE. Run 'make contracts' and commit contracts/gen."
+            git --no-pager diff --stat -- contracts/gen
+            exit 1
+          fi
+          echo "generated bindings are current"
+
+      # --- 4. breaking-change detection ---------------------------------------
+      # Against the frozen baseline if one exists, and additionally against the
+      # target branch on a pull request, so a break is caught even before the
+      # first freeze.
+      - name: breaking-change check (frozen baseline)
+        run: make contracts-breaking
+
+      - name: breaking-change check (against target branch)
+        if: github.event_name == 'pull_request'
+        run: |
+          ./node_modules/.bin/buf breaking contracts \
+            --against ".git#branch=origin/${{ github.base_ref }},subdir=contracts"
+
+      # --- 5. registries are append-only --------------------------------------
+      # A code or capability may be added or deprecated; it may never be renamed,
+      # removed, or have its semantics changed once ACTIVE.
+      - name: registries are append-only
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/check_registry_append_only.py "origin/${{ github.base_ref }}"
+
+      # --- 6. the generated bindings COMPILE ----------------------------------
+      # A byte-diff proves the bindings are current; only a compile proves they
+      # are usable. ADR-0018 §11.12's "a schema change that a language binding
+      # cannot express fails at merge" is a compile claim, not a diff claim.
+      # CI=true makes a missing toolchain a FAILURE rather than a skip.
+      - name: generated bindings compile
+        env:
+          CI: 'true'
+        run: make verify-bindings
+
+      # --- 7. contract tests, including cross-language fixture agreement ------
+      - name: contract tests
+        run: make test-contracts
+
+      # --- 8. the freeze gate -------------------------------------------------
+      - name: freeze gate
+        run: python3 scripts/freeze_gate.py
+
+      # --- 9. no production implementation has landed prematurely --------------
+      - name: contract freeze is still in force
+        run: python3 scripts/check_freeze_scope.py

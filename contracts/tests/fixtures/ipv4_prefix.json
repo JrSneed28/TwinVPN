@@ -1,0 +1,11 @@
+{
+  "type": "twinvpn.v1.IPPrefix",
+  "value": {
+    "address": {
+      "v4": {
+        "octets": "CmQAAA=="
+      }
+    },
+    "prefixLen": 16
+  }
+}

@@ -1,0 +1,276 @@
+// TwinVPN shared contracts — ephemeral peer signaling (C4) and peer-direct
+// negotiation (C5).
+//
+// Authority: docs/protocol.md §10 (connection establishment), §12 (session
+// lifecycle), ADR-0014 §11.2 (N-5 the wire exchange, N-6 transcript
+// construction, N-10 pre-authentication caps), ADR-0004.
+//
+// ===========================================================================
+// THIS IS THE HOSTILE BOUNDARY (ADR-0003 B3).
+// ===========================================================================
+// Pre-authentication. Forwarded by an UNTRUSTED RENDEZVOUS that MUST NOT parse
+// the payload. Reachable by anyone who can send a UDP datagram.
+//
+// Hard limits, enforced BEFORE any allocation proportional to a declared
+// length (ADR-0003 §7, ADR-0014 N-10):
+//   - C4 envelope <= 1200 B. Chosen for the worst-case IPv6 path MTU minus
+//     headers, NOT the IPv4 576 B floor, because C4 is never fragmented and
+//     IPv6 forbids in-network fragmentation.
+//   - Parser depth limit 4.
+//   - <= 32 capability tokens, <= 512 B of capabilities, token name <= 24 B,
+//     <= 8 parameters per token, <= 256 B of parameters.
+//   - v_min <= v_max <= current_epoch + 64, so an absurd maximum cannot be used
+//     as a probe oracle or an allocation lever.
+// Violation => DROP, emit PROTO.MALFORMED_MESSAGE, NO STATE CHANGE, NO ANSWER.
+//
+// ADR-0014 N-9 / ADR-0001 D6: NO Session state, NO negotiation floor and NO
+// cached advertisement may be written from an offer or answer BEFORE the
+// handshake completes AND NegotiationConfirm matches.
+// ===========================================================================
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/candidate.proto";
+import "twinvpn/v1/capability.proto";
+import "twinvpn/v1/common.proto";
+import "twinvpn/v1/connection.proto";
+
+// The initiator's half-advertisement plus candidates. docs/protocol.md §10.1.
+//
+// AUTHORIZATION: Rule B — DeviceKey-signed. The rendezvous forwards and MUST
+// NOT be able to substitute a key, a version, or a capability set. An offer
+// from a revoked key MUST be dropped WITHOUT AN ANSWER and logged as
+// AUTH.DEVICE_REVOKED — answering would confirm the peer exists.
+message ConnectOffer {
+  // 16 bytes, chosen by the initiator. Correlates the whole exchange and is the
+  // idempotency key for it: A REPEATED OFFER WITH THE SAME NONCE MUST NOT
+  // CREATE A SECOND Session. This is PEER-LOCAL idempotency, not server-side.
+  //
+  // GLARE (simultaneous mutual offers) resolves deterministically: LOWER
+  // key_id WINS, and the loser adopts the winner's session_nonce
+  // (docs/protocol.md §10.1). Note this affects SESSION IDENTITY ONLY — it does
+  // NOT affect version selection, which depends solely on the two
+  // advertisements and has a unique maximum by construction.
+  bytes session_nonce = 1;
+
+  // The initiator's DeviceKey fingerprint.
+  string initiator_key_id = 2;
+
+  // The initiator's FULL supported range — both bounds.
+  ProtocolVersion protocol_version = 3;
+
+  // The initiator's FULL advertised set, canonically sorted.
+  CapabilitySet capabilities = 4;
+
+  CandidateSet candidates = 5;
+
+  // Relay regions the initiator can reach, so the responder can pre-warm.
+  // ADVISORY.
+  repeated string relay_fallback_hint = 6;
+
+  // H_initiator = SHA-256("TWINVPN-NEG-HALF-v1" || dCBOR(HalfAdvertisement)).
+  // Exactly 32 bytes. ADR-0014 N-6.
+  //
+  // HalfAdvertisement := {session_nonce, key_id, role, v_min, v_max,
+  //                       capabilities (canonically sorted)}
+  bytes transcript_commitment = 7;
+}
+
+// The responder's half-advertisement plus its selection.
+// docs/protocol.md §10.1, as CORRECTED by ADR-0014 §11.10 required-edit 3.
+//
+// ===================================================================
+// max_supported AND THE FULL capabilities SET ARE REQUIRED HERE.
+// ===================================================================
+// ADR-0014 §11.10 records that docs/protocol.md §10.1's original
+// ConnectAnswer carried only `min_supported` and `selected_*`. That is
+// INSUFFICIENT: without the responder's OWN MAXIMUM and OWN FULL SET, the
+// initiator cannot verify that the responder selected the highest mutually
+// supported epoch, AND THE T2/T3 DOWNGRADE DEFENCE DOES NOT EXIST.
+//
+// The attack the extra fields defeat (ADR-0014 §7.1 T2/T3): an attacker
+// rewrites BOTH peers' advertised maxima consistently — lowering A's in transit
+// to B and B's in transit to A. Under selection-binding alone, both peers
+// compute the SAME lowered value, both bind it, and the handshake SUCCEEDS AT
+// THE DOWNGRADED EPOCH, UNDETECTED. Binding each peer's own advertisement AS
+// SENT alongside the peer's AS RECEIVED cannot be defeated that way, because a
+// peer cannot be made to forget what it sent.
+message ConnectAnswer {
+  bytes session_nonce = 1;
+  string responder_key_id = 2;
+
+  // The responder's FULL range — BOTH bounds. Required by the above.
+  ProtocolVersion protocol_version = 3;
+
+  // The responder's FULL advertised set, not only the intersection. Required by
+  // the above.
+  CapabilitySet capabilities = 4;
+
+  // The responder's computed result. Both peers compute SELECT independently
+  // and MUST agree; disagreement surfaces at NegotiationConfirm.
+  NegotiatedProtocolVersion selected_protocol_version = 5;
+  CapabilitySet selected_capabilities = 6;
+
+  CandidateSet candidates = 7;
+
+  // H_responder. Exactly 32 bytes.
+  bytes transcript_commitment = 8;
+}
+
+// The first in-session message each peer sends. docs/protocol.md §16 row 35,
+// ADR-0014 N-8.
+//
+// ===================================================================
+// THE THIRD DETECTION LAYER, and the only one that catches implementation
+// divergence in the selection function itself.
+// ===================================================================
+// ADR-0014 §7.2's layers:
+//   1. Rule-B signature over the offer/answer — catches rendezvous and network
+//      tampering BEFORE the handshake, with a precise pre-authentication cause:
+//      PROTO.NEGOTIATION_TAMPERED.
+//   2. Noise prologue binding — catches everything the signature layer misses,
+//      INCLUDING A FUTURE UNSIGNED PATH. Failure mode is a handshake that does
+//      not complete, i.e. FAIL CLOSED (I3).
+//   3. This message — catches two conforming, honest peers computing DIFFERENT
+//      selections from the same inputs, which no cryptographic layer can see.
+//
+// A mismatch MUST TEAR DOWN THE Tunnel and emit PROTO.TRANSCRIPT_MISMATCH,
+// classified FATAL/CRITICAL — A SECURITY EVENT, NOT A NETWORK ERROR.
+message NegotiationConfirm {
+  // SHA-256("TWINVPN-NEG-v1" || H_initiator || H_responder || dCBOR(Selection))
+  bytes negotiation_hash = 1;
+
+  NegotiatedProtocolVersion selected_protocol_version = 2;
+  CapabilitySet selected_capabilities = 3;
+}
+
+// Peer-direct assertion of the current trust epoch. docs/protocol.md §16 row 36.
+//
+// Carries (twinnet_id, trust_epoch, anchor_version, delegation_set_digest). The
+// OBSERVABLE carrier for ADR-0009 G-1/G-2 and ADR-0007 §7.5. Bound into the
+// ADR-0001 transcript, so it cannot be stripped.
+message TrustEpochAssert {
+  string twinnet_id = 1;
+  uint64 trust_epoch = 2;
+  uint64 anchor_version = 3;
+  bytes delegation_set_digest = 4;
+}
+
+// -- Path lifecycle, inside the established encrypted Session (C5/C6) --------
+
+// docs/protocol.md §11.2 and §12.2.
+//
+// These travel INSIDE the existing encrypted Session, so they inherit its
+// mutual authentication and are ordered by `path_epoch`. A LOWER path_epoch
+// MUST BE IGNORED.
+//
+// MAKE-BEFORE-BREAK IS MANDATORY: the old path MUST remain usable until the new
+// one passes an explicit reachability probe. NEVER TEAR DOWN BEFORE VALIDATING
+// — premature teardown is the "random tunnel disconnect" symptom.
+//
+// AUTHORIZATION: in-session, therefore already mutually authenticated. AN
+// UNVALIDATED PATH MUST NOT CARRY TRAFFIC, which is also the
+// anti-migration-hijack control. A relay can ASK a device to leave
+// (RelayDrain) but CAN NEVER REDIRECT A SESSION BY ITSELF — the peers decide.
+message PathOffer {
+  bytes session_nonce = 1;
+
+  // Monotone per Session. Idempotent by path_epoch: re-offering the same epoch
+  // is a no-op.
+  uint64 path_epoch = 2;
+
+  // The proposed path. Either a direct endpoint or a relay binding.
+  oneof target {
+    Endpoint direct_endpoint = 3;
+    bytes relay_flow_id = 4;
+  }
+
+  AddressFamily family = 5;
+
+  // MTU MUST be re-probed on migration; a stale MTU is a top cause of
+  // "throughput degradation" and "connects but nothing loads", and v6 paths
+  // commonly have a smaller effective MTU than the v4 path they replace.
+  uint32 mtu_hint = 6;
+}
+
+message PathProbe {
+  bytes session_nonce = 1;
+  uint64 path_epoch = 2;
+  bytes probe_id = 3;
+}
+
+message PathProbeAck {
+  bytes session_nonce = 1;
+  uint64 path_epoch = 2;
+  bytes probe_id = 3;
+}
+
+message PathAck {
+  bytes session_nonce = 1;
+  uint64 path_epoch = 2;
+  bool accepted = 3;
+
+  // On refusal, the specific cause. docs/protocol.md §11.2: a failed path
+  // validation returns the Session to the path class it came from (applying
+  // T_MIGRATE_COOLDOWN to the rejected candidate) or enters RECONNECTING if the
+  // old path is gone — and it is NEVER `DEGRADED`, because a failed validation
+  // is not a MEASURED QUALITY VIOLATION (docs/reliability.md R6).
+  string reason_code = 4;
+}
+
+// Session resumption. docs/protocol.md §12.1.
+//
+// ===================================================================
+// USES ONLY LOCALLY CACHED MATERIAL. NO SERVER INVOLVEMENT WHATSOEVER.
+// ===================================================================
+// Resumption MUST work with the control plane COMPLETELY DOWN (I5): peer key,
+// last-known Endpoints, and the ADR-0001 resumption secret are all local.
+// Requiring a control-plane round trip to resume is the root cause of "missing
+// auto-reconnect" and "unreliable mobile background operation".
+//
+// NOT triggered by process restart: resumption keys are IN-MEMORY ONLY (S-13,
+// ADR-0001 RS-1), so a restarted agent re-establishes with a FULL HANDSHAKE
+// from cached TrustedPeer state — which is still control-plane-free.
+//
+// AUTHORIZATION additionally requires a revocation_epoch check: a device MUST
+// REFUSE TO RESUME with a peer revoked since the session began.
+message ResumeSession {
+  bytes session_nonce = 1;
+
+  // Opaque handle from the ADR-0001 resumption exchange. NOT the resumption
+  // secret — this schema carries no key material.
+  bytes resumption_id = 2;
+
+  Endpoint new_endpoint_hint = 3;
+  uint64 path_epoch = 4;
+
+  // The resumer's current epoch, so a lagging peer can refuse rather than
+  // resume into a stale trust state.
+  uint64 revocation_epoch = 5;
+}
+
+// Explicit teardown by one peer. Peer-direct, in-session.
+//
+// EndSession is a COURTESY, NOT A REQUIREMENT: the receiving peer must handle
+// a Session that simply stops (liveness timeout), because a device that crashes
+// or loses power sends nothing. Building correctness on this message arriving
+// would reintroduce the failure it exists to make tidy.
+message EndSession {
+  bytes session_nonce = 1;
+
+  // NET.SESSION.CLOSED_BY_USER, AUTH.DEVICE_REVOKED, and so on.
+  string reason_code = 2;
+}
+
+// The peer's view of the shared path, exchanged in-session.
+// docs/protocol.md §16 row 32.
+//
+// This exists because ONE-SIDED MEASUREMENTS SYSTEMATICALLY MISDIAGNOSE
+// ASYMMETRIC PATHS. "Your upload is fine, the peer sees 40% loss inbound" is
+// actionable; "connection is bad" is not.
+message PeerHealthReport {
+  bytes session_nonce = 1;
+  ConnectionHealth health = 2;
+}

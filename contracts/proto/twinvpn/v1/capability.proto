@@ -1,0 +1,124 @@
+// TwinVPN shared contracts — capability declaration and negotiation.
+//
+// Authority: ADR-0014 §11.3 (N-11..N-15), §11.11 (the initial registry),
+// docs/protocol.md §10.3, docs/architecture.md §3.3 `Capability`.
+//
+// TRUST BOUNDARY: a CapabilitySet arrives PRE-AUTHENTICATION inside a
+// ConnectOffer/ConnectAnswer forwarded by an untrusted rendezvous. ADR-0014
+// N-9: no Session state, no floor, and no cached advertisement may be written
+// from an offer or answer before the handshake completes and NegotiationConfirm
+// matches. The caps in N-10 are enforced BEFORE any allocation proportional to
+// a declared length.
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+// How a parameter is reduced when two peers' values differ. ADR-0014 N-13.
+//
+// NORMATIVE: reduction MUST NOT be role-dependent. "Initiator wins" would be an
+// asymmetric-authority downgrade lever, which is the exact shape ADR-0014 §7.1
+// shows an adversary probes.
+enum ParameterReduction {
+  PARAMETER_REDUCTION_UNSPECIFIED = 0;
+  PARAMETER_REDUCTION_MIN = 1;
+  PARAMETER_REDUCTION_MAX = 2;
+  // Set intersection.
+  PARAMETER_REDUCTION_INTERSECT = 3;
+  // A mismatch DROPS the token entirely and emits
+  // PROTO.CAPABILITY_PARAM_INCOMPATIBLE.
+  PARAMETER_REDUCTION_EQUAL = 4;
+}
+
+// One parameter of a parameterised capability.
+message CapabilityParameter {
+  // lower_snake_case. <= 24 bytes.
+  string name = 1;
+
+  // The reduction rule is declared in the REGISTRY
+  // (contracts/registry/capabilities.json), not chosen on the wire. This field
+  // is the emitter's copy for diagnosis. A receiver MUST use its own registry's
+  // rule and MUST reject the token if the two disagree — otherwise a peer could
+  // pick the reduction that favours it.
+  ParameterReduction reduction = 2;
+
+  oneof value {
+    uint64 uint_value = 3;
+    // For INTERSECT parameters. Canonically sorted, deduplicated.
+    // At most 8 entries, 32 bytes each.
+    StringSet set_value = 4;
+  }
+}
+
+// A canonically sorted, deduplicated set of short tokens.
+message StringSet {
+  repeated string values = 1;
+}
+
+// A single capability token.
+//
+// ADR-0014 N-11: the token is `name/major`. `name` matches
+// [a-z][a-z0-9_]{0,23}; `major` is a decimal integer >= 1, no leading zeros.
+//
+// ADR-0014 N-12: a token is negotiated iff (name, major) appears in BOTH
+// advertisements. DIFFERENT MAJORS OF THE SAME NAME ARE DISTINCT CAPABILITIES
+// and do not intersect. There is no implicit "higher major implies lower" — a
+// device MAY advertise several majors of one name, and must, if it means to
+// interoperate with both.
+message Capability {
+  string name = 1;
+  uint32 major = 2;
+  // At most 8 parameters, <= 256 bytes of parameters total (ADR-0014 N-10).
+  repeated CapabilityParameter parameters = 3;
+}
+
+// A device's advertised capability set.
+//
+// ADR-0014 N-14 (the real-probe rule): a Capability MUST be advertised only if
+// the Platform Network Adapter's probe OBSERVED the ability IN THIS PROCESS, on
+// THIS OS BUILD, with THE PERMISSIONS CURRENTLY GRANTED. A build-time constant,
+// a compile flag, or an OS-version table MUST NOT be the sole basis. Where the
+// ability cannot be observed non-destructively, the probe performs a
+// rollback-guaranteed install-then-remove and records the result — it never
+// infers it.
+//
+// This is also a privacy control (ADR-0014 §7.4/K-1): because only
+// probe-verified tokens are advertised, the list is not a static platform
+// fingerprint. Canonical sorting means the ORDER leaks nothing either.
+message CapabilitySet {
+  // Canonically sorted by (name ASC, major ASC). ADR-0014 N-4.
+  //
+  // HARD CAPS, enforced pre-authentication (ADR-0014 N-10): at most 32 tokens;
+  // at most 512 bytes total for the serialized set. Violation => drop the
+  // message, emit PROTO.MALFORMED_MESSAGE, NO STATE CHANGE, NO ANSWER.
+  repeated Capability capabilities = 1;
+}
+
+// The result of ADR-0014 N-4's SELECT function.
+//
+// The function is total, deterministic and symmetric. Because the epoch space
+// is totally ordered, the selected version is a UNIQUE MAXIMUM: there is no
+// tie-breaking rule, by construction, and therefore no tie-break for an
+// adversary to exploit.
+message NegotiationResult {
+  // hi = min(a_max, b_max), refused if hi < lo = max(a_min, b_min).
+  uint32 selected_epoch = 1;
+
+  // The intersection, canonically sorted, each parameter reduced by its
+  // registry-declared rule.
+  CapabilitySet selected_capabilities = 2;
+
+  // SHA-256("TWINVPN-NEG-v1" || H_initiator || H_responder || dCBOR(Selection)).
+  // Exactly 32 bytes. ADR-0014 N-6.
+  //
+  // This is CONTRIBUTED to the Noise prologue owned by ADR-0001 §7.3.1 —
+  // this contract does not define the prologue.
+  //
+  // ADR-0014 §7.1 is why the halves and not just the selection are bound: an
+  // attacker that rewrites BOTH peers' advertised maxima consistently makes
+  // both peers compute the SAME lowered selection, so binding the selection
+  // alone leaves the downgrade undetected. Binding each peer's own
+  // advertisement AS SENT alongside the peer's AS RECEIVED cannot be defeated
+  // that way, because a peer cannot be made to forget what it sent.
+  bytes negotiation_hash = 3;
+}

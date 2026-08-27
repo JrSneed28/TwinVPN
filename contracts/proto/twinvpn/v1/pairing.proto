@@ -1,0 +1,213 @@
+// TwinVPN shared contracts — the pairing ceremony.
+//
+// Authority: ADR-0007 §7.4 and N-15..N-19, docs/protocol.md §8.2,
+// docs/architecture.md §3.3 `Pairing`, ADR-0008 §11.3 (CEREMONY class).
+//
+// SECRET-FIELD PROHIBITION: `pairing_secret`, the SPAKE2 password, `K_pair`,
+// and `PairSecret` NEVER appear in this schema and MUST NOT be added.
+// `pairing_id = SHA-256(pairing_secret)[0..15]` is the PUBLIC rendezvous handle
+// and doubles as the HKDF salt for the ceremony channel; the secret it is
+// derived from is entered by a human out of band and never transits.
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/capability.proto";
+import "twinvpn/v1/errors.proto";
+import "twinvpn/v1/identity.proto";
+
+// The out-of-band ceremony used to establish trust. ADR-0007 N-16: the method
+// MUST be recorded in the Pairing record and surfaced in diagnostics — "which
+// ceremony did this trust come from" is an audit question that cannot be
+// answered retroactively.
+enum PairingCeremonyType {
+  PAIRING_CEREMONY_TYPE_UNSPECIFIED = 0;
+
+  // SPAKE2 (RFC 9382), RFC-specified P-256 parameters, 9-digit code.
+  // ADR-0007 N-17: at most 5 failed runs per pairing_id, single-use codes, and
+  // a 120 s expiry enforced INDEPENDENTLY by both devices and the rendezvous.
+  //
+  // ADR-0007 N-15 is why a PAKE and not a hash comparison: the transcript must
+  // not be an offline-testable function of the code. A ceremony whose
+  // transcript permits offline dictionary attack on a 9-digit human-entered
+  // secret MUST NOT be implemented.
+  PAIRING_CEREMONY_TYPE_SPAKE2_CODE = 1;
+
+  // A QR code carrying high-entropy material, scanned by the joining device.
+  PAIRING_CEREMONY_TYPE_QR = 2;
+}
+
+// Lifecycle state. docs/architecture.md §3.3 `Pairing`.
+//
+// ADR-0007 N-18: a Pairing MUST complete on BOTH devices or on NEITHER. There
+// is no state meaning "confirmed on one side", because asymmetric trust is the
+// defect this ceremony exists to prevent — it produces a mutual-authentication
+// failure at every subsequent handshake that looks like a crypto bug and is
+// actually a delivery bug.
+enum PairingState {
+  PAIRING_STATE_UNSPECIFIED = 0;
+  PAIRING_STATE_PENDING = 1;
+  PAIRING_STATE_CONFIRMED = 2;
+  PAIRING_STATE_EXPIRED = 3;
+  PAIRING_STATE_ABORTED = 4;
+  PAIRING_STATE_REJECTED = 5;
+  PAIRING_STATE_REVOKED = 6;
+}
+
+// The pairing record.
+//
+// STATE OWNERSHIP: S-04. The control plane owns the REGISTERED FACT; BOTH
+// devices own their local TrustedPeer result. STRONG, guarded by an
+// ADR-0008 CEREMONY-class idempotency key. An idempotency key collapses
+// duplicates to one Pairing; divergent confirmations abort the ceremony.
+message Pairing {
+  // SHA-256(pairing_secret)[0..15]. Exactly 16 bytes.
+  //
+  // COMPUTED BY THE JOINING DEVICE and carried TO the coordination service
+  // (ADR-0007 §7.4, docs/protocol.md §8.2) — it is NOT minted by the server.
+  // A server-minted value would break two things at once: it doubles as the
+  // HKDF salt for the ceremony channel, and a server-chosen handle would let
+  // the rendezvous correlate a handle to a secret it must never see.
+  //
+  // Single-use. Never reused, not even after expiry: reuse would let the 5-run
+  // attempt budget be reset by an attacker.
+  bytes pairing_id = 1;
+
+  string twinnet_id = 2;
+
+  // The two participants. `initiator_device_id` is the device that proposed.
+  bytes initiator_device_id = 3;
+  bytes joiner_device_id = 4;
+
+  PairingCeremonyType ceremony_type = 5;
+  PairingState state = 6;
+
+  // ADR-0007 N-17: 120 s from proposal, enforced independently by both devices
+  // AND the rendezvous. Independent enforcement is the point — a single
+  // enforcement point is a single thing to compromise.
+  uint64 expires_at_ms = 7;
+
+  // Remaining attempts before AUTH.PAIRING_ATTEMPTS_EXCEEDED. Starts at 5;
+  // a failed run BURNS one and burns the code (ADR-0007 §7.4).
+  uint32 attempts_remaining = 8;
+
+  uint64 created_at_ms = 9;
+  uint64 version = 10;
+}
+
+// A device's half of the ceremony outcome.
+//
+// Deterministic CBOR, DeviceKey-signed:
+//   PairingAttestation{ pairing_id, peer_key_id, own_key_id, transcript_hash,
+//                       not_after_ms }
+//
+// Rule B (docs/protocol.md §3): the coordination service TRANSPORTS
+// attestations it CANNOT FORGE, so it cannot inject a TrustedPeer. This is the
+// concrete mechanism by which the coordination tier is semi-trusted rather than
+// trusted.
+message PairingAttestation {
+  SignedStatement statement = 1;
+
+  // Which device produced it. A hint for routing; the authoritative signer is
+  // inside the signed payload and MUST be re-read after verification.
+  bytes attesting_device_id = 2;
+}
+
+// A pairing proposal. docs/protocol.md §8.2 `ProposePairingReq`.
+message PairingRequest {
+  bytes pairing_id = 1;
+  string twinnet_id = 2;
+
+  // How the joining device was located, e.g. a rendezvous hint. Opaque and
+  // size-capped at 256 bytes.
+  bytes peer_hint = 3;
+
+  PairingCeremonyType ceremony_type = 4;
+
+  // Proof that an existing device holding an OSK with the ENROLL power
+  // authorized this join (ADR-0007 §7.5). Owner-signed.
+  //
+  // THERE IS NO "OWNER ACCOUNT": authorization is a KEY HELD BY A DEVICE, never
+  // a credential held by a server. A coordination service that could authorize
+  // a join could add a device to the TwinNet.
+  SignedStatement owner_challenge = 5;
+
+  // What the joining device can do, exchanged so the pair knows before the
+  // first handshake. Subject to the same probe rule as any advertisement.
+  CapabilitySet capabilities = 6;
+}
+
+// One round of the ceremony's cryptographic exchange.
+//
+// The SPAKE2 messages themselves are opaque here: ADR-0007 owns the ceremony,
+// and re-expressing a PAKE's group elements in protobuf fields would invite an
+// implementation to validate them structurally instead of cryptographically.
+message PairingChallenge {
+  bytes pairing_id = 1;
+
+  // Opaque ceremony payload. <= 512 bytes. Interpreted only by the ceremony
+  // implementation, never by the transport.
+  bytes ceremony_payload = 2;
+
+  // Monotone round counter within one ceremony run. A repeated or lower round
+  // is discarded.
+  uint32 round = 3;
+}
+
+// The approving device's decision.
+message PairingApproval {
+  bytes pairing_id = 1;
+
+  // The approver's attestation. Present iff approved.
+  PairingAttestation attestation = 2;
+
+  // Permissions the approver grants the joining device at pairing time. These
+  // are a PROPOSAL into the Owner-signed PolicyBundle, not an enforceable grant
+  // on their own: enforcement reads the signed bundle (S-06), so a device
+  // cannot widen its own access by asserting it here.
+  bool approved = 3;
+}
+
+// The terminal outcome, as both sides record it.
+message PairingResult {
+  bytes pairing_id = 1;
+  PairingState state = 2;
+
+  // Both attestations. docs/protocol.md §8.2: the durable event
+  // PairingCompleted carries `attestation_a` and `attestation_b` together,
+  // because a peer that receives only one has no evidence the other side
+  // completed.
+  PairingAttestation attestation_a = 3;
+  PairingAttestation attestation_b = 4;
+
+  // Present iff the ceremony did not confirm. REQUIRED and non-empty on a
+  // non-CONFIRMED result: docs/protocol.md §8.2 requires a timeout to be
+  // surfaced as a distinct, actionable state, never a generic failure. The
+  // AUTH.PAIRING_* codes distinguish expiry, code mismatch, attempt exhaustion,
+  // and missing ENROLL authorization — four different user problems with four
+  // different next actions.
+  ErrorEnvelope error = 5;
+
+  uint64 committed_at_net_seq = 6;
+}
+
+// Withdrawal of a previously confirmed pairing.
+//
+// This is DISTINCT FROM DEVICE REVOCATION and the distinction is load-bearing.
+// Revocation (ADR-0007 N-25) is an Owner-authority statement about a DEVICE and
+// is enforced fleet-wide and irreversibly. A pairing revocation removes ONE
+// relationship — the two devices stop trusting each other; neither is revoked,
+// and both keep operating with every other peer.
+message PairingRevocation {
+  bytes pairing_id = 1;
+
+  // Owner-signed. A device MUST NOT be able to revoke a pairing on its own
+  // authority any more than it can revoke a peer (docs/protocol.md §8.3).
+  SignedStatement statement = 2;
+
+  // Machine-readable cause, from the AUTH domain.
+  string reason_code = 3;
+
+  uint64 effective_from_ms = 4;
+}

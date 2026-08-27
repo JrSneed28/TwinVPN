@@ -1,0 +1,505 @@
+// TwinVPN shared contracts — control-plane request/response contracts (C1).
+//
+// Authority: docs/protocol.md §8-§13 (the interaction contracts) and §16 (the
+// message catalogue), ADR-0002 (§11 the C1 binding), ADR-0008 §11.3 (operation
+// classification), ADR-0009 (consistency).
+//
+// ===========================================================================
+// SCOPE: THIS FILE CONTAINS ONLY C1. Several operations that look like
+// control-plane commands are NOT, and Phase 1 says so explicitly.
+// ===========================================================================
+// NOT IN THIS FILE, and why:
+//
+//   BeginConnection / ExchangeCandidates -> signaling.proto (C4).
+//     docs/protocol.md §10.1: negotiation is ephemeral signaling and is "NOT a
+//     control-plane RPC, because the coordination service must not be in the
+//     critical path of every reconnect (I5)".
+//
+//   RequestRelay / ReleaseRelay -> relay.proto BIND/BOUND on C6.
+//     docs/protocol.md §16 row 21 is WITHDRAWN. §11.1: the reservation is made
+//     "directly with the Relay, NOT through the coordination service. Routing
+//     reservations through coordination would put the control plane in the data
+//     path and break I5."
+//
+//   ResumeSession / EndSession -> peer-direct C5.
+//     docs/protocol.md §12.1: resumption "MUST work with the control plane
+//     completely down (I5)" and uses only locally cached material. Requiring a
+//     control-plane round trip to resume is the root cause of "missing
+//     auto-reconnect".
+//
+//   UpdatePeerPermissions / UpdateRoutePolicy / UpdateDNSPolicy -> PutPolicyReq.
+//     All three live inside the ONE Owner-signed PolicyBundle (§13.4). Separate
+//     commands would create a second policy author, which is exactly what
+//     Rule B exists to prevent.
+//
+//   ReportConnectionHealth -> diagnostics.proto on C7 (management plane).
+//     §14: health is ephemeral, batched, loss-tolerant, and "MUST NOT affect
+//     the control or data plane".
+//
+// See contracts/docs/contract-matrix.md for the full placement table.
+// ===========================================================================
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/capability.proto";
+import "twinvpn/v1/common.proto";
+import "twinvpn/v1/device.proto";
+import "twinvpn/v1/errors.proto";
+import "twinvpn/v1/identity.proto";
+import "twinvpn/v1/pairing.proto";
+import "twinvpn/v1/peer.proto";
+import "twinvpn/v1/policy.proto";
+import "twinvpn/v1/presence.proto";
+import "twinvpn/v1/routing.proto";
+import "twinvpn/v1/gateway.proto";
+
+// Common result header on every mutating C1 response.
+message MutationResult {
+  // ADR-0002 N-3 / docs/protocol.md §5.1 and §15.1 E-2.
+  //
+  // The net_seq the effect was committed at, allocated INSIDE THE MUTATING
+  // TRANSACTION in the SAME LOG the device reads on C2. A mutating response
+  // MUST NOT return this before that transaction has committed (and, for
+  // E-1-class operations, before QUORUM commit).
+  //
+  // NORMATIVE CLIENT OBLIGATION: the client library MUST NOT report the
+  // operation complete to the UI until the C2 cursor has advanced to or past
+  // this value. That is a PROTOCOL OBLIGATION, NOT A CLIENT CONVENIENCE — it is
+  // what closes the seam where a device pairs a peer, gets 200 OK, and
+  // immediately fails to connect because its local TrustedPeer cache has not
+  // seen the pairing event.
+  uint64 committed_at_net_seq = 1;
+
+  // Carried on EVERY C1 response so a device detects it is behind without
+  // draining the log.
+  uint64 revocation_epoch = 2;
+
+  // Set when the server served a RECORDED OUTCOME for a duplicate
+  // idempotency_key rather than executing.
+  //
+  // ADR-0008 N-5: the control plane records
+  // (device_id, idempotency_key) -> (outcome, response) durably for the dedup
+  // window and MUST REPLAY THE RECORDED RESPONSE VERBATIM for duplicates within
+  // it. This flag makes the replay OBSERVABLE (ADR-0008 §10.2 requires
+  // `idempotent_replay_served` as a structured event) without changing the
+  // response body — a client that ignores it still behaves correctly.
+  bool idempotent_replay = 3;
+}
+
+// -- Device lifecycle -------------------------------------------------------
+
+// docs/protocol.md §8.1. CEREMONY class; idempotency key REQUIRED, derived from
+// a device-local enrolment nonce so a retry after a lost response returns the
+// SAME device_id rather than creating a duplicate device.
+//
+// CONSISTENCY: STRONG/linearizable on (twinnet_id, device_pubkey) uniqueness.
+message RegisterDeviceRequest {
+  MessageMetadata metadata = 1;
+
+  // The device's PUBLIC identity, including the IK-signed TunnelKeyBinding.
+  // The private half never transits (I4).
+  DeviceIdentity identity = 2;
+
+  // Platform attestation of the key store, where the platform provides one.
+  // Opaque; verified against a trusted platform root by the approving OSK
+  // device (ADR-0007 N-6).
+  bytes key_attestation = 3;
+
+  DevicePlatformInfo platform = 4;
+  repeated DeviceRole declared_roles = 5;
+  ProtocolVersion protocol_version = 6;
+  CapabilitySet capabilities = 7;
+
+  // Owner-scoped enrolment credential, proving an OSK with the ENROLL power
+  // approved this join. There is no owner ACCOUNT; authorization is a key held
+  // by a device.
+  SignedStatement enrollment_proof = 8;
+}
+
+message RegisterDeviceResponse {
+  // ===================================================================
+  // AN ECHO, NEVER AN ASSIGNMENT. NORMATIVE.
+  // ===================================================================
+  // docs/protocol.md §8.1: device_id is DERIVED ON-DEVICE from the generation-0
+  // identity public key and is already known before the device contacts the
+  // coordination service. The device MUST compare this to its own derived value
+  // and MUST ABORT REGISTRATION WITH AUTH.IDENTITY_MISMATCH on disagreement. IT
+  // MUST NOT ADOPT THE SERVER'S VALUE.
+  //
+  // A server-assigned identifier would break self-certifying identity and the
+  // S-08 address derivation that depends on it.
+  bytes device_id_echo = 1;
+
+  string twinnet_id = 2;
+
+  // BOTH are assigned at registration. A device MUST receive both, even on a
+  // v4-only or v6-only network.
+  IPv4Address assigned_twinnet_addr_v4 = 3;
+  IPv6Address assigned_twinnet_addr_v6 = 4;
+
+  // Where to reach the control plane. Names, not literals, so GeoDNS works;
+  // resolved in the bootstrap DNS scope (ADR-0011 DN-0).
+  repeated string coordination_endpoints = 5;
+
+  MutationResult result = 6;
+  ErrorEnvelope error = 7;
+}
+
+// docs/protocol.md §8.1 (mutation of the mutable subset). DECLARATIVE class:
+// no idempotency key; guarded by VersionPrecondition.
+//
+// Only the MUTABLE attributes are here. `device_id`, the assigned TwinNet
+// addresses, and the identity generation are NOT mutable by this command:
+// addresses are immutable for the device's life (S-08) and identity changes go
+// through RotateDeviceCredential.
+message UpdateDeviceMetadataRequest {
+  MessageMetadata metadata = 1;
+  bytes device_id = 2;
+
+  // ADR-0008 N-2: conditional on the version the caller believes it is
+  // updating.
+  VersionPrecondition precondition = 3;
+
+  string label = 4;
+  DevicePlatformInfo platform = 5;
+  repeated DeviceRole declared_roles = 6;
+  CapabilitySet capabilities = 7;
+  ProtocolVersion protocol_version = 8;
+}
+
+message UpdateDeviceMetadataResponse {
+  Device device = 1;
+  MutationResult result = 2;
+  ErrorEnvelope error = 3;
+}
+
+// docs/protocol.md §8.3. CEREMONY class; idempotency key REQUIRED.
+//
+// CONSISTENCY: the STRONGEST requirement in TwinVPN (§15.1 E-1) — linearizable
+// admission, single writer per TwinNet revocation log, monotonic reads at every
+// consumer, no forked history.
+//
+// AUTHORIZATION: Owner authority. A DEVICE MUST NOT BE ABLE TO REVOKE A PEER ON
+// ITS OWN AUTHORITY.
+message RevokeDeviceRequest {
+  MessageMetadata metadata = 1;
+  bytes target_device_id = 2;
+
+  // Deterministic CBOR, OWNER-AUTHORITY-SIGNED:
+  //   RevocationStatement{ twinnet_id, target_device_id, target_identity_id,
+  //                        effective_from_ms, reason_code, issuer_osk_id }
+  //
+  // ADR-0007 N-25: TWO SEPARABLE EFFECTS WITH TWO DIFFERENT AUTHORITIES.
+  //   (1) PEER REFUSAL is LOCAL and takes effect the instant a device verifies
+  //       this statement, WHATEVER ITS PROVENANCE, requiring no epoch number and
+  //       no control-plane reachability. This is the effect that survives a
+  //       partition.
+  //   (2) trust_epoch ADVANCE is totally ordered. The Owner AUTHORIZES by
+  //       signing; the control-plane shard writer ASSIGNS the epoch number at
+  //       admission under its fenced lease. A statement not yet admitted is
+  //       fully effective for (1) and PENDING for (2), and MUST NOT be assigned
+  //       an epoch locally.
+  //
+  // The split is what makes a forked history structurally impossible rather
+  // than merely detectable.
+  SignedStatement revocation_statement = 3;
+
+  // Machine-readable cause from the AUTH domain, mirrored for indexing. The
+  // authoritative value is inside the signed statement.
+  string reason_code = 4;
+}
+
+message RevokeDeviceResponse {
+  // The admitted entry: the statement wrapped by the writer with its assigned
+  // ordering.
+  //
+  //   RevocationEntry{ statement, trust_epoch, net_seq, prev_entry_hash }
+  //
+  // docs/protocol.md §8.3: THE TWO SIGNERS ARE DELIBERATELY SEPARATE — the
+  // Owner authorizes, the writer orders. A RevocationEntry whose inner
+  // statement signature does not verify MUST BE REJECTED OUTRIGHT: A
+  // WELL-FORMED WRAPPER AUTHORIZES NOTHING.
+  SignedStatement revocation_entry = 1;
+
+  // The epoch assigned at admission. MONOTONE; a lower value offered later is
+  // AUTH.TRUST_EPOCH_ROLLBACK, refused rather than applied.
+  uint64 trust_epoch = 2;
+
+  MutationResult result = 3;
+  ErrorEnvelope error = 4;
+}
+
+// docs/protocol.md §8.4. CEREMONY class; idempotency key REQUIRED.
+//
+// TWO DISTINCT STATEMENTS, because TwinVPN has two key types with different
+// rotation semantics (ADR-0007 N-21):
+//   IdentitySuccession — DUAL-SIGNED by BOTH the old and the new IK; creates a
+//     new DeviceIdentity at generation+1 and does NOT change device_id.
+//     Overlap T_IK_OVERLAP = 30 d.
+//   TunnelKeyBinding — IK-signed; rotates the X25519 tunnel key WITHOUT
+//     changing DeviceIdentity. MUST be rotated at least every 180 days.
+//     Overlap T_TK_OVERLAP = 14 d.
+//
+// AUTHORIZATION on IdentitySuccession is DUAL SIGNATURE (old AND new). A
+// single-signature rotation would let a stolen key rotate itself into
+// permanence; an old-key-only signature would let a compromised old key install
+// an attacker's new key.
+message RotateDeviceCredentialRequest {
+  MessageMetadata metadata = 1;
+  bytes device_id = 2;
+
+  oneof rotation {
+    SignedStatement identity_succession = 3;
+    SignedStatement tunnel_key_binding = 4;
+  }
+}
+
+message RotateDeviceCredentialResponse {
+  DeviceIdentity identity = 1;
+  MutationResult result = 2;
+  ErrorEnvelope error = 3;
+}
+
+// -- Pairing ----------------------------------------------------------------
+
+// docs/protocol.md §8.2 ProposePairingReq. CEREMONY class; key REQUIRED.
+// A duplicate initiate MUST return the ORIGINAL pairing_id, never mint a
+// second.
+message BeginPairingRequest {
+  MessageMetadata metadata = 1;
+  PairingRequest pairing = 2;
+}
+
+message BeginPairingResponse {
+  bytes pairing_id = 1;
+
+  // ADR-0007 N-17: 120 s, enforced independently by both devices AND the
+  // rendezvous.
+  uint64 expires_at_ms = 2;
+
+  MutationResult result = 3;
+  ErrorEnvelope error = 4;
+
+  // NOTE, and this is deliberate: `verification_words[]` is NOT returned here.
+  // docs/protocol.md §8.2 / ADR-0007 §7.4 C-C: a SAS is displayed AFTER
+  // completion for RECOGNITION and is explicitly NOT A SECURITY GATE, because a
+  // distracted user comparing words produces SILENT COMPROMISE rather than a
+  // failed ceremony. The PAKE is the gate.
+}
+
+// docs/protocol.md §8.2 ConfirmPairingReq. CEREMONY class; key REQUIRED.
+// A replay MUST return the ORIGINAL OUTCOME — this is the RQ-3 case in
+// ADR-0008, and it is the difference between a deterministic result and two
+// devices disagreeing about whether they trust each other.
+message CompletePairingRequest {
+  MessageMetadata metadata = 1;
+  bytes pairing_id = 2;
+  PairingAttestation attestation = 3;
+  VersionPrecondition precondition = 4;
+}
+
+message CompletePairingResponse {
+  PairingResult result_detail = 1;
+  MutationResult result = 2;
+  ErrorEnvelope error = 3;
+}
+
+// Abandon an in-flight ceremony before expiry. CEREMONY class.
+//
+// Cancelling BURNS the pairing_id: it is single-use, and a cancelled id is
+// never reissued. Reissuing it would reset the 5-attempt budget.
+message CancelPairingRequest {
+  MessageMetadata metadata = 1;
+  bytes pairing_id = 2;
+  string reason_code = 3;
+}
+
+message CancelPairingResponse {
+  MutationResult result = 1;
+  ErrorEnvelope error = 2;
+}
+
+// Withdraw an existing confirmed pairing. CEREMONY class.
+// Distinct from RevokeDevice — see pairing.proto PairingRevocation.
+message RevokePairingRequest {
+  MessageMetadata metadata = 1;
+  PairingRevocation revocation = 2;
+}
+
+message RevokePairingResponse {
+  MutationResult result = 1;
+  ErrorEnvelope error = 2;
+}
+
+// -- Discovery and presence -------------------------------------------------
+
+// docs/protocol.md §9.1 GetPeersReq. Read-only, trivially idempotent.
+//
+// SNAPSHOT-PLUS-DELTA: a cold start needs a bounded, complete answer (a stream
+// alone would require replaying the whole log); steady state needs deltas (a
+// poll would burn battery). `since_net_seq` makes the two composable WITHOUT A
+// GAP, and this pairing is the general pattern for every cached collection in
+// TwinVPN.
+//
+// FAILURE: on control-plane unavailability the device MUST use its last cached
+// peer set and enter discovery from cache, surfacing
+// CONTROL.STALE_POLICY_IN_USE. Per I5 this MUST NOT prevent connecting to a
+// known peer.
+message DiscoverPeersRequest {
+  MessageMetadata metadata = 1;
+
+  // 0 for a full snapshot; otherwise the device's current cursor.
+  uint64 since_net_seq = 2;
+}
+
+message DiscoverPeersResponse {
+  repeated TrustedPeer peers = 1;
+  uint64 revocation_epoch = 2;
+  uint64 snapshot_net_seq = 3;
+  ErrorEnvelope error = 4;
+}
+
+// docs/protocol.md §9.2. REGISTER class: timestamped last-writer-wins, NO
+// dedup log, and PERMITTED TO BE LOST (ADR-0008 N-9). Idempotent by
+// construction — it is a state assertion, not a command.
+message PublishPresenceRequest {
+  MessageMetadata metadata = 1;
+  Heartbeat heartbeat = 2;
+}
+
+message PublishPresenceResponse {
+  HeartbeatAck ack = 1;
+  ErrorEnvelope error = 2;
+}
+
+// -- Advertisements ---------------------------------------------------------
+
+// docs/protocol.md §13.1. DECLARATIVE class: the desired advertised set plus a
+// monotone epoch. The ADVERTISER is the single writer (S-16).
+//
+// Named `Put`, not `Advertise`, because it is whole-state: the request carries
+// the complete set the advertiser wants in force, not a delta to add.
+message PutRouteAdvertisementRequest {
+  MessageMetadata metadata = 1;
+  RouteAdvertisement advertisement = 2;
+}
+
+message PutRouteAdvertisementResponse {
+  MutationResult result = 1;
+  ErrorEnvelope error = 2;
+}
+
+// Withdraw previously advertised prefixes. Carries a HIGHER advertisement_epoch
+// with an empty prefix set, so withdrawal travels through the same monotone
+// ordering as advertisement and cannot be reordered ahead of it.
+message WithdrawRouteAdvertisementRequest {
+  MessageMetadata metadata = 1;
+  bytes advertiser_device_id = 2;
+  uint64 advertisement_epoch = 3;
+  SignedStatement signed = 4;
+}
+
+message WithdrawRouteAdvertisementResponse {
+  MutationResult result = 1;
+  ErrorEnvelope error = 2;
+}
+
+// docs/protocol.md §13.3. DECLARATIVE class, monotone by offer_epoch.
+message PutExitNodeOfferRequest {
+  MessageMetadata metadata = 1;
+  ExitNode offer = 2;
+}
+
+message PutExitNodeOfferResponse {
+  MutationResult result = 1;
+  ErrorEnvelope error = 2;
+}
+
+message WithdrawExitNodeOfferRequest {
+  MessageMetadata metadata = 1;
+  bytes device_id = 2;
+  uint64 offer_epoch = 3;
+  SignedStatement signed = 4;
+}
+
+message WithdrawExitNodeOfferResponse {
+  MutationResult result = 1;
+  ErrorEnvelope error = 2;
+}
+
+// -- Policy -----------------------------------------------------------------
+
+// docs/protocol.md §13.4 PutPolicyReq. CEREMONY class; key REQUIRED.
+// E-1-class: commits to a QUORUM before responding.
+//
+// ===================================================================
+// THIS IS THE ONLY POLICY MUTATION COMMAND IN THE CONTRACT SET.
+// ===================================================================
+// Peer permissions, route policy, DNS policy, exit policy, relay-region policy
+// and the kill-switch floor all travel INSIDE this one Owner-signed,
+// monotone-versioned, whole-state bundle. There is no UpdatePeerPermissions, no
+// UpdateRoutePolicy and no UpdateDNSPolicy, and adding one would create a
+// second policy author — the exact capability Rule B removes from the
+// infrastructure.
+message PutPolicyRequest {
+  MessageMetadata metadata = 1;
+
+  // Owner-authority-signed. The coordination service DISTRIBUTES but CANNOT
+  // AUTHOR.
+  PolicyBundle bundle = 2;
+
+  VersionPrecondition precondition = 3;
+}
+
+message PutPolicyResponse {
+  uint64 policy_version = 1;
+  MutationResult result = 2;
+  ErrorEnvelope error = 3;
+}
+
+// -- Event stream and state documents ---------------------------------------
+
+// docs/protocol.md §16 row 33. Opens or resumes the C2 stream.
+//
+// ADR-0002 §11.7 rule 4: a device whose cursor is still within the retention
+// floor MUST RESUME FROM IT. Re-snapshotting on every reconnect is PROHIBITED —
+// it converts a reconnect storm into a bandwidth storm.
+message SubscribeEventsRequest {
+  MessageMetadata metadata = 1;
+
+  // The device's durable high-water mark (S-27). A server-offered cursor BELOW
+  // the local high-water MUST BE REJECTED by the device.
+  uint64 from_net_seq = 2;
+
+  // Below the retention floor (30 days or 10^6 events, whichever is greater)
+  // the server answers CONTROL.CURSOR_TOO_OLD and the device performs a full
+  // declarative re-snapshot — which is always correct, because every durable
+  // event is independently applicable (ADR-0002 N-5).
+}
+
+message SubscribeEventsResponse {
+  uint64 current_net_seq = 1;
+  uint64 revocation_epoch = 2;
+  ErrorEnvelope error = 3;
+}
+
+// docs/protocol.md §16 row 40. Declarative re-read of a signed document.
+message GetStateDocumentRequest {
+  MessageMetadata metadata = 1;
+  StateDocumentType doc_type = 2;
+
+  // 0 means "the current version".
+  uint64 version = 3;
+}
+
+message GetStateDocumentResponse {
+  StateDocumentRef reference = 1;
+
+  // The document itself, as signed octets. Verified against BOTH the digest in
+  // `reference` AND the Owner signature.
+  SignedStatement document = 2;
+
+  ErrorEnvelope error = 3;
+}

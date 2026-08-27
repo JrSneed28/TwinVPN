@@ -1,0 +1,104 @@
+// TwinVPN shared contracts — the Tunnel.
+//
+// Authority: docs/architecture.md §3.3 `Tunnel` and §3.4, S-13, ADR-0001
+// (owns all cryptography), ADR-0014 N-16/N-17 (per-Tunnel immutability of the
+// negotiated set).
+//
+// ===========================================================================
+// SECRET-FIELD PROHIBITION
+// ===========================================================================
+// S-13: Tunnel key state is held by the Tunnel Engine IN MEMORY, with "None —
+// MUST NOT be persisted or replicated" and durability "NON-DURABLE BY
+// REQUIREMENT". Loss simply means a new handshake.
+//
+// This file therefore carries NO session keys, NO chaining key, NO nonce or
+// counter state, NO handshake hash, and NO resumption secret. TunnelDescriptor
+// is a DESCRIPTION of a Tunnel for state reporting and diagnostics — it is not
+// a serialization of one, and there is deliberately no message in this package
+// from which a Tunnel could be reconstructed.
+// ===========================================================================
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/capability.proto";
+import "twinvpn/v1/connection.proto";
+
+// Lifecycle of the cryptographic transport instance.
+//
+// Distinct from ConnectionState, which is a property of the SESSION
+// (docs/architecture.md §3.4 normative consequence 3). A Tunnel teardown MUST
+// NOT destroy the Session; it triggers RECONNECTING (consequence 2).
+enum TunnelState {
+  TUNNEL_STATE_UNSPECIFIED = 0;
+
+  // No cryptographic state exists.
+  TUNNEL_STATE_ABSENT = 1;
+
+  // The ADR-0001 handshake is in flight. Half-open state is garbage-collected
+  // by session_nonce so retries do not leak state (docs/protocol.md §10.6).
+  TUNNEL_STATE_HANDSHAKING = 2;
+
+  // Keys established, but NegotiationConfirm has not yet matched.
+  //
+  // ADR-0014 N-8: NegotiationConfirm MUST be the FIRST in-session message each
+  // peer sends. ADR-0014 N-9: no Session state, no floor and no cached
+  // advertisement may be written before the handshake completes AND
+  // NegotiationConfirm matches. This state is that gap, named so it is
+  // observable rather than implicit.
+  TUNNEL_STATE_CONFIRMING = 3;
+
+  // Established and carrying traffic.
+  TUNNEL_STATE_ESTABLISHED = 4;
+
+  // Rekeying IN PLACE. The Tunnel identity is UNCHANGED — a rekey does not
+  // create a new Tunnel (docs/architecture.md §3.4: "Survives rekey? Yes, same
+  // Tunnel, new key generation"). Capability `rekey_in_place/1`.
+  TUNNEL_STATE_REKEYING = 5;
+
+  // Terminal. A new Tunnel is required. The Session survives.
+  TUNNEL_STATE_CLOSED = 6;
+}
+
+// A description of a live Tunnel.
+message TunnelDescriptor {
+  // EPHEMERAL, tied to a key generation, 16 bytes, process-local. Not durable
+  // (S-13), not globally unique, never persisted. A new Tunnel is created only
+  // when cryptographic state must be RE-ESTABLISHED — not on a path change and
+  // not on a rekey.
+  bytes tunnel_id = 1;
+
+  bytes session_id = 2;
+
+  TunnelState state = 3;
+
+  // The negotiated result, RECORDED ON THE TUNNEL and immutable for its
+  // lifetime.
+  //
+  // ADR-0014 N-16 (confirming architecture.md A-18 and S-19): the negotiated
+  // (V, C) governs this Tunnel for its lifetime REGARDLESS of any later
+  // advertisement change. ADR-0014 N-17(3): when a capability disappears
+  // mid-session the negotiated set is NOT MUTATED — renegotiation requires a
+  // NEW Tunnel, never a mutated one. Mutating it in place would silently change
+  // what a peer is entitled to assume about a live tunnel.
+  NegotiationResult negotiated = 4;
+
+  // Monotone counter of in-place rekeys. Bounds the amount of data under one
+  // key without creating a new Tunnel.
+  uint64 key_generation = 5;
+
+  // Paths currently bound. >= 1 while ESTABLISHED; multiple MAY coexist
+  // (active plus warm standby).
+  repeated NetworkPath bound_paths = 6;
+
+  // Effective inner MTU. Clamped to the safe floor during MIGRATING and
+  // re-probed after (docs/protocol.md §12.2).
+  uint32 mtu = 7;
+
+  // The trust epoch this Tunnel's psk2 was derived at. ADR-0007 N-25(2): a
+  // device MUST NOT accept a handshake below its `min_acceptable_epoch`. This
+  // is the second revocation lever — advancing the epoch rotates EpochSeed and
+  // removes a revoked device's ability to derive psk2 at all.
+  uint64 trust_epoch = 8;
+}

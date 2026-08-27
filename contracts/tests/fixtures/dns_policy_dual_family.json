@@ -1,0 +1,33 @@
+{
+  "type": "twinvpn.v1.DNSPolicy",
+  "value": {
+    "dnspolicyId": "dnspolicy-1",
+    "version": "7",
+    "mode": "DNS_MODE_SPLIT",
+    "serversV4": [
+      {
+        "octets": "CgABAQ=="
+      }
+    ],
+    "serversV6": [
+      {
+        "octets": "/XyeXSoQ//8AAAAAAAAAUw=="
+      }
+    ],
+    "serversDeclaredV4": true,
+    "serversDeclaredV6": true,
+    "blockFallbackV4": true,
+    "blockFallbackV6": true,
+    "splitDomains": [
+      {
+        "suffix": "corp.example.com",
+        "disposition": "SPLIT_DOMAIN_DISPOSITION_PROTECTED_UPSTREAM"
+      }
+    ],
+    "searchDomains": [
+      "t-abc.tnet.twinvpn.net"
+    ],
+    "dnssecValidate": true,
+    "notAfterMs": "1756400000000"
+  }
+}

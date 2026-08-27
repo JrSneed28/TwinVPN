@@ -1,0 +1,35 @@
+{
+  "dependencies": {
+    "@claude-flow/aidefence": "^3.0.3",
+    "agentic-flow": "^2.1.2",
+    "enabled": "^2.0.0",
+    "scripts": "^0.1.0"
+  },
+  "devDependencies": {
+    "ruflo": "^3.38.20",
+    "ruv-swarm": "^1.0.20",
+    "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "better-sqlite3": "12.11.1"
+  },
+  "allowScripts": {
+    "onnxruntime-node@1.21.0": true,
+    "onnxruntime-node@1.24.3": true,
+    "argon2@0.44.0": true,
+    "better-sqlite3@11.10.0": true,
+    "better-sqlite3@12.11.1": true,
+    "hnswlib-node@3.0.0": true,
+    "sharp@0.34.5": true,
+    "sharp@0.32.6": true,
+    "protobufjs@7.6.5": true,
+    "protobufjs@6.11.6": true,
+    "@google/genai@1.52.0": true,
+    "@claude-flow/cli@3.38.20": true,
+    "agentic-flow@2.1.2": true,
+    "agentic-flow@3.0.0-alpha.2": true,
+    "agentdb@3.0.0-alpha.20": true,
+    "agentdb@1.6.1": true,
+    "tldjs@2.3.2": true
+  }
+}

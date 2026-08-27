@@ -1,0 +1,313 @@
+// TwinVPN shared contracts — relay identity, selection, and binding.
+//
+// Authority: ADR-0005 (§7.4 pair_tag binding, §11.3 RelayCapabilityToken),
+// ADR-0006 (§11.2 the signed relay map, ranking, failover),
+// docs/protocol.md §11.1/§11.2 and §16 rows 42-44, S-09/S-10/S-29/S-30/S-31.
+//
+// ===========================================================================
+// ZERO-PLAINTEXT-ACCESS TRUST MODEL — the reason for the shape of this file.
+// ===========================================================================
+// I1: infrastructure holds no tunnel key. docs/protocol.md §1: a Relay is
+// UNTRUSTED and forwards OPAQUE CIPHERTEXT ONLY.
+//
+// Nothing in this file carries, or may be extended to carry: tunnel plaintext,
+// a session key, a device private key, a resumption secret, a PairSecret, or an
+// EpochSeed. ADR-0005 §11.1(3) goes further and removes IDENTITY itself from
+// the relay's view:
+//
+//   - The relay's table is keyed by `pair_tag`, an HKDF output over the
+//     peer-pair secret, scoped to one relay_id and one 10-minute bucket. It is
+//     ONE-WAY and useless at another relay or another bucket.
+//   - THERE IS NO `peer_key_id`. docs/protocol.md §16 row 21 (the former
+//     ReserveRelayReq) is WITHDRAWN precisely because that field would have told
+//     the relay which two devices are talking, defeating A11.
+//   - The token's `sub` is a PER-OPERATOR, PER-DAY PSEUDONYM derived by HKDF,
+//     NEVER `device_id`.
+//
+// A relay that is fully compromised learns: that some bearer of a valid
+// capability token is forwarding some bytes between two legs. That is the
+// designed maximum.
+// ===========================================================================
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/common.proto";
+import "twinvpn/v1/connection.proto";
+import "twinvpn/v1/identity.proto";
+
+// Transport carriages a relay leg may use. ADR-0005 §11, ADR-0014 §11.11.
+enum RelayCarriage {
+  RELAY_CARRIAGE_UNSPECIFIED = 0;
+  // capability `relay_udp/1`
+  RELAY_CARRIAGE_UDP = 1;
+  // capability `relay_quic/1` — the UDP:443 rung
+  RELAY_CARRIAGE_QUIC = 2;
+  // capability `relay_tls/1` — the last rung on UDP-blocked networks (R-18)
+  RELAY_CARRIAGE_TLS = 3;
+}
+
+// Operator-declared lifecycle of a relay instance. ADR-0006 §11.2 `admin_state`.
+enum RelayAdminState {
+  RELAY_ADMIN_STATE_UNSPECIFIED = 0;
+  RELAY_ADMIN_STATE_ACTIVE = 1;
+  // Accepting no new binds; existing flows have until the drain deadline.
+  RELAY_ADMIN_STATE_DRAINING = 2;
+  RELAY_ADMIN_STATE_RETIRED = 3;
+}
+
+// A geographic/network locality. docs/architecture.md §3.3 `RelayRegion`.
+message RelayRegion {
+  // ASSIGNED by the relay-fleet operator. Opaque to a device: a device MUST
+  // NOT parse it for geography and MUST NOT rank by string comparison. Ranking
+  // uses `adjacent_regions` and the device's OWN MEASURED RTT.
+  string region_id = 1;
+
+  // Coarse locality label for display, e.g. "eu-west". Never a coordinate,
+  // never a city, never anything finer than a continent-scale hint.
+  string geo_hint = 2;
+
+  // Ordered fallbacks with their expected added latency.
+  repeated AdjacentRegion adjacent_regions = 3;
+}
+
+message AdjacentRegion {
+  string region_id = 1;
+  uint32 added_rtt_ms_p50 = 2;
+  uint32 order = 3;
+}
+
+// One relay instance, as published in the Owner-signed relay map.
+// ADR-0006 §11.2.
+message Relay {
+  // ASSIGNED by the relay-fleet operator, opaque, 8 bytes. Scoped to the
+  // operator group. NOT reused after retirement: a reused relay_id would let a
+  // cached ranking or an S-31 quality record from a decommissioned instance be
+  // applied to a new one.
+  bytes relay_id = 1;
+
+  // The unit of ADMISSION. ADR-0005 §11.3: the token's `aud` is the OPERATOR
+  // GROUP, never a single relay_id — one token works across the whole ranked
+  // set, which is what makes ADR-0006's offline failover possible at all.
+  string operator_group_id = 2;
+
+  string region_id = 3;
+
+  // The relay's static Noise public key, from the signed map.
+  //
+  // ADR-0006 §11.2: a device MUST NOT bind a relay whose relay_id and static
+  // Noise public key are not present in a VERIFIED map. Note ADR-0005 §7.3:
+  // this key is NOT an input to the L-DATA Noise_IKpsk2 handshake — the relay
+  // is not a party to it, and holding this key gives it no read access.
+  bytes static_noise_public_key = 4;
+
+  // ===================================================================
+  // LITERAL ADDRESSES, BOTH FAMILIES. NEVER HOSTNAMES.
+  // ===================================================================
+  // ADR-0011 DN-0: relay endpoints are excluded from the bootstrap DNS scope
+  // because they are IP LITERALS AND NEVER HOSTNAMES. RELAY REACHABILITY MUST
+  // NOT DEPEND ON DNS — otherwise recovering from BLOCKED would require the
+  // resolver that the relay is needed to reach.
+  //
+  // docs/protocol.md §11.1: a relay MUST publish both, and a device on
+  // IPv6-only cellular MUST be able to reserve and use a relay with NO IPv4
+  // PATH WHATSOEVER.
+  repeated Endpoint endpoints_v4 = 5;
+  repeated Endpoint endpoints_v6 = 6;
+
+  repeated RelayCarriage carriages = 7;
+
+  // Correlated-failure label. ADR-0006 requires >= 2 alternates per region
+  // ACROSS >= 2 FAILURE DOMAINS, and requires the standby to be in a DIFFERENT
+  // failure domain from the active relay — a standby that fails with its
+  // primary is not a standby.
+  string failure_domain = 8;
+
+  // Operator's static ranking hint, 0-100. ADVISORY: the device's own measured
+  // RTT and its S-31 bind-success history always override it. Treating a
+  // coordination-supplied ranking as authoritative is how a stale central view
+  // produces the "excessive relay latency" complaint (docs/protocol.md §11.1).
+  uint32 server_rank = 9;
+
+  // 0-3, coarse. Load is a hint, never a gate.
+  uint32 load_class = 10;
+
+  uint32 capacity_weight = 11;
+  RelayAdminState admin_state = 12;
+
+  // Whether this relay is operated by the TwinNet's own Owner rather than by
+  // the product's fleet.
+  bool self_hosted = 13;
+
+  bool supports_drain = 14;
+  bool supports_caps = 15;
+}
+
+// The observed health of a relay. docs/architecture.md §3.3, S-10.
+//
+// CONSISTENCY: EVENTUAL. Freshest observation wins, and A CLIENT'S OWN PROBE
+// FAILURE ALWAYS OUTRANKS A "HEALTHY" REPORT. Per docs/reliability.md §4.1 this
+// MUST NOT gate a connection attempt — it contributes a score delta to
+// selection and nothing more.
+message RelayHealth {
+  bytes relay_id = 1;
+  HealthState health = 2;
+
+  // Aggregated from relay self-reports. Coarse and non-identifying: ADR-0015
+  // O-13 forbids any per-session or peer-pair label on relay telemetry, so this
+  // message carries no session_id, no pair_tag, and no device identifier.
+  uint32 load_class = 3;
+
+  uint64 observed_at_ms = 4;
+}
+
+// The ephemeral, ADVISORY hint from the coordination service.
+// docs/protocol.md §11.1 `RelayAssignmentHint`, §7 (ephemeral), S-09.
+//
+// ===================================================================
+// CLASSIFICATION: EPHEMERAL, ADVISORY. NOT A RESERVATION.
+// ===================================================================
+// docs/protocol.md §6.2's bridge rule applies: the HINT ("region eu-west looks
+// best for you two right now") is re-derivable, decays in minutes, and losing
+// it only costs a worse choice — so it is ephemeral. The RESERVATION is a
+// synchronous resource acquisition made DIRECTLY WITH THE RELAY, not through
+// the coordination service: routing reservations through coordination would put
+// the control plane in the data path and BREAK I5.
+//
+// CONSISTENCY: eventual, advisory. NO CONVERGENCE REQUIREMENT. The device's own
+// measured RTT always overrides.
+message RelayAssignment {
+  // Ranked regions with their candidate relays. The device re-ranks locally
+  // using measured RTT (weight dominant) and its S-31 per-network-fingerprint
+  // bind-success history.
+  repeated RelayRegion regions = 1;
+  repeated Relay relays = 2;
+
+  // Monotone version of the signed relay map this hint was derived from.
+  uint64 map_version = 3;
+
+  uint64 expires_at_ms = 4;
+}
+
+// The device's local record of an active relay leg binding.
+//
+// STATE OWNERSHIP: S-29, held by the RELAY INSTANCE in memory, with "None —
+// MUST NOT be persisted or replicated" and durability "NON-DURABLE BY
+// REQUIREMENT". Loss means flow death, which means MIGRATING — a recoverable
+// outcome. This message is the DEVICE-SIDE view for diagnostics and failover.
+message RelayBinding {
+  bytes relay_id = 1;
+
+  // The blinded join key. ADR-0005 §11.1(3):
+  //   pair_tag = HKDF-Expand(RelayPairKey, "tag" || relay_id || bucket, 16)
+  //
+  // 16 bytes. Scoped to ONE relay_id and ONE 10-minute bucket; both peers
+  // accept bucket, bucket-1 and bucket+1 for skew. A tag observed at one relay
+  // is USELESS AT ANOTHER, and it rotates every bucket.
+  //
+  // The relay's table is keyed by this. The FIRST BIND creates a pending slot;
+  // the SECOND on the same tag binds it. The relay never learns which two
+  // devices are talking beyond what forwarding requires.
+  bytes pair_tag = 2;
+
+  // Relay-assigned handle for the bound flow. Local to that relay instance.
+  bytes flow_id = 3;
+
+  RelayCarriage carriage = 4;
+
+  // The two half-flows of one pair_tag MAY use DIFFERENT ADDRESS FAMILIES and
+  // DIFFERENT CARRIAGES (ADR-0005 §11.1(6)) — an IPv6-only peer and an
+  // IPv4-only peer meet at the relay, which is a large part of why the relay
+  // exists.
+  AddressFamily family = 5;
+
+  MonotonicMicros bound_at = 6;
+}
+
+// Descriptor of the RelayCapabilityToken a device holds. ADR-0005 §11.3.
+//
+// ===================================================================
+// THE TOKEN ITSELF IS AN OPAQUE COSE_Sign1 BLOB. THESE ARE ITS PUBLIC CLAIMS,
+// CARRIED FOR DIAGNOSIS AND FOR LOCAL EXPIRY SCHEDULING ONLY.
+// ===================================================================
+// A verifier MUST verify the COSE signature and read the claims FROM THE
+// VERIFIED PAYLOAD. The decoded fields here are attacker-controlled until then.
+//
+// Verification is a PURE FUNCTION performed ENTIRELY OFFLINE by the relay:
+// COSE signature against a held issuer key -> `aud` matches this operator group
+// -> `cnf` equals the presented relay-leg static -> nbf/exp within skew ->
+// epoch >= epoch_floor -> jti unseen. NO CONTROL-PLANE CALL, per packet, per
+// bind, or per reconnect (ADR-0005 RQ2, architecture A-12).
+//
+// STATE OWNERSHIP: S-30. The device holds its own token DURABLY — that is what
+// enables control-plane-free relay reconnect. MONOTONIC by `epoch`; a token
+// whose epoch is below the device's known floor MUST NOT be used.
+message RelayCapabilityTokenDescriptor {
+  SignedStatement token = 1;
+
+  // The operator group this token admits to. NEVER a single relay_id.
+  string audience_operator_group_id = 2;
+
+  // The trust epoch at issuance. ADR-0005: a token with epoch < epoch_floor is
+  // refused with RELAY.TOKEN_EPOCH_STALE.
+  //
+  // RELAY DENIAL IS DEFENCE IN DEPTH ONLY. Revocation is enforced AT THE PEER,
+  // so a lagging relay leaks no access and no confidentiality — the revoked
+  // device still cannot complete a peer handshake. The relay's revocation lag
+  // is a bounded RESOURCE-ABUSE window, capped absolutely at the 24 h token
+  // lifetime.
+  uint64 epoch = 3;
+
+  // 24 h lifetime, refreshed at 50% (12 h). Relay clock skew tolerance is
+  // +/- 300 s. On RELAY.TOKEN_EXPIRED the relay includes its own current time;
+  // the device computes an OFFSET, retries ONCE, and on a second failure emits
+  // RELAY.CLOCK_SKEW_EXCESSIVE.
+  //
+  // A DEVICE MUST NOT SET ITS SYSTEM CLOCK FROM A RELAY. The offset is held for
+  // token-validity evaluation only. (This is also the recovery path for
+  // AUTH.CLOCK_IMPLAUSIBLE on an RTC-less router, which needs no egress.)
+  uint64 not_before_ms = 4;
+  uint64 not_after_ms = 5;
+
+  // Set when the relay itself renewed the token under ADR-0005's epoch-equality
+  // rule, with no control-plane involvement.
+  //
+  // This is NOT A NEW GRANT: a relay can only extend an authority the control
+  // plane ALREADY ISSUED, at an epoch the control plane ALREADY PUBLISHED, and
+  // never above its own epoch_floor. It exists because the alternative — a
+  // 30-hour cliff after which a partitioned device loses relay admission —
+  // would make the control plane a bounded liveness dependency of the data
+  // plane, which I5 forbids.
+  bool renewed_by_relay = 6;
+
+  // Quota claims, carried so a device can schedule within them rather than
+  // discovering them as refusals.
+  RelayQuota quota = 7;
+}
+
+message RelayQuota {
+  uint32 max_concurrent_flows = 1;
+  uint32 max_bitrate_kbps = 2;
+  uint64 max_bytes_per_hour = 3;
+  uint32 max_binds_per_min = 4;
+}
+
+// A relay asking a device to leave. docs/protocol.md §11.2 `RelayDrain`.
+//
+// AUTHORIZATION: a relay can ASK a device to leave but can NEVER REDIRECT A
+// SESSION BY ITSELF — the peers decide, via PathOffer/PathAck inside the
+// existing encrypted Session. This prevents a compromised relay from steering
+// traffic to a relay of its choosing.
+message RelayDrain {
+  bytes relay_id = 1;
+  bytes flow_id = 2;
+
+  // How long the flow may persist. Each client picks its migration instant
+  // uniformly within [0, deadline - 60 s], which is the herd-safe pattern.
+  uint64 drain_deadline_ms = 3;
+
+  // Suggested alternates. A HINT: the device re-ranks against its own map and
+  // its own measurements, and MUST NOT bind a relay absent from a verified map.
+  repeated bytes suggested_relay_ids = 4;
+}

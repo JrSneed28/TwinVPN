@@ -1,0 +1,31 @@
+{
+  "type": "twinvpn.v1.CapabilitySet",
+  "value": {
+    "capabilities": [
+      {
+        "name": "exit_node",
+        "major": 2,
+        "parameters": [
+          {
+            "name": "families",
+            "reduction": "PARAMETER_REDUCTION_INTERSECT",
+            "setValue": {
+              "values": [
+                "v4",
+                "v6"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "kill_switch_os",
+        "major": 1
+      },
+      {
+        "name": "path_migration",
+        "major": 1
+      }
+    ]
+  }
+}

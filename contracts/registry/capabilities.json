@@ -1,0 +1,415 @@
+{
+  "$schema": "twinvpn/v1/capabilities.cddl",
+  "registry_version": 1,
+  "advertisement_byte_budget": 512,
+  "max_tokens_per_advertisement": 32,
+  "capabilities": [
+    {
+      "name": "ipv6_underlay",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "bind a v6 socket and obtain a routable source address",
+      "absent_consequence": "No v6 candidates gathered; higher relay incidence",
+      "owning_adr": "ADR-0010",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "dplpmtud",
+      "major": 1,
+      "parameters": [
+        {
+          "name": "floor_mtu",
+          "reduction": "MAX"
+        },
+        {
+          "name": "ceiling_mtu",
+          "reduction": "MIN"
+        }
+      ],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "emit a padded authenticated probe on the tunnel socket",
+      "absent_consequence": "MTU stays clamped at the 1280 B floor; throughput cost only",
+      "owning_adr": "ADR-0010",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "portmap",
+      "major": 1,
+      "parameters": [
+        {
+          "name": "protocols",
+          "reduction": "INTERSECT",
+          "allowed_values": [
+            "pcp",
+            "nat_pmp",
+            "upnp_igd"
+          ]
+        }
+      ],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "issue a real PCP/NAT-PMP request to the default gateway",
+      "absent_consequence": "Fewer server-reflexive candidates",
+      "owning_adr": "ADR-0004",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "site_remap",
+      "major": 1,
+      "parameters": [
+        {
+          "name": "max_prefixes",
+          "reduction": "MIN"
+        }
+      ],
+      "security_relevant": true,
+      "session_critical": false,
+      "probe_evidence": "policy-routing table writable and per-prefix translation programmable",
+      "absent_consequence": "Overlapping LAN prefixes cannot be disambiguated; the route is REFUSED, not mis-delivered",
+      "owning_adr": "ADR-0010",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "per_app_routing",
+      "major": 1,
+      "parameters": [
+        {
+          "name": "selector",
+          "reduction": "INTERSECT",
+          "allowed_values": [
+            "uid",
+            "pid",
+            "bundle_id",
+            "cgroup"
+          ]
+        }
+      ],
+      "security_relevant": true,
+      "session_critical": false,
+      "probe_evidence": "per-app VPN binding API present AND entitlement granted",
+      "absent_consequence": "Split-by-app policy unenforceable; policy fails closed",
+      "owning_adr": "ADR-0012",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "path_migration",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": true,
+      "session_critical": true,
+      "probe_evidence": "tunnel engine supports endpoint rebinding in this build",
+      "absent_consequence": "Roaming drops the Session (R-07 lost)",
+      "owning_adr": "ADR-0001",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "multipath_probe",
+      "major": 1,
+      "parameters": [
+        {
+          "name": "max_concurrent",
+          "reduction": "MIN"
+        }
+      ],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "concurrent probe sockets available",
+      "absent_consequence": "Direct-path upgrade while RELAYED is slower (R-12)",
+      "owning_adr": "ADR-0004",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "relay_udp",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "relay handshake completes over UDP",
+      "absent_consequence": "-",
+      "owning_adr": "ADR-0005",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "relay_quic",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "relay handshake completes over QUIC",
+      "absent_consequence": "Loses the UDP:443 rung",
+      "owning_adr": "ADR-0005",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "relay_tls",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "relay handshake completes over TCP/TLS",
+      "absent_consequence": "UDP-blocked networks lose the last rung (R-18)",
+      "owning_adr": "ADR-0005",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "relay_standby",
+      "major": 1,
+      "parameters": [
+        {
+          "name": "max_standby",
+          "reduction": "MIN"
+        }
+      ],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "a second relay flow can be held warm",
+      "absent_consequence": "Failover is cold; the R-10 bound is not met",
+      "owning_adr": "ADR-0005",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "relay_multiplex",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "multiple peer flows on one relay binding",
+      "absent_consequence": "One relay flow per peer pair",
+      "owning_adr": "ADR-0005",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "exit_node",
+      "major": 2,
+      "parameters": [
+        {
+          "name": "families",
+          "reduction": "INTERSECT",
+          "allowed_values": [
+            "v4",
+            "v6"
+          ]
+        }
+      ],
+      "security_relevant": true,
+      "session_critical": false,
+      "probe_evidence": "forwarding AND source translation programmable, per family",
+      "absent_consequence": "The family is not offered - never silently forwarded untranslated",
+      "owning_adr": "ADR-0013",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "lan_gateway",
+      "major": 1,
+      "parameters": [
+        {
+          "name": "max_prefixes",
+          "reduction": "MIN"
+        }
+      ],
+      "security_relevant": true,
+      "session_critical": false,
+      "probe_evidence": "forwarding + per-peer policy hooks installable",
+      "absent_consequence": "Subnet routes are not accepted (R-17 diagnostics apply)",
+      "owning_adr": "ADR-0013",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "gateway_multiclient",
+      "major": 1,
+      "parameters": [
+        {
+          "name": "max_peers",
+          "reduction": "MIN"
+        }
+      ],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "per-peer state and accounting available",
+      "absent_consequence": "The I7 gateway role is unavailable",
+      "owning_adr": "ADR-0013",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "dns_split",
+      "major": 1,
+      "parameters": [
+        {
+          "name": "max_domains",
+          "reduction": "MIN"
+        }
+      ],
+      "security_relevant": true,
+      "session_critical": false,
+      "probe_evidence": "per-domain resolver API present (NRPT / resolved / NE)",
+      "absent_consequence": "Split DNS unavailable; policy picks full or off - never system-resolver fallback (R-14)",
+      "owning_adr": "ADR-0011",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "dns_full",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": true,
+      "session_critical": false,
+      "probe_evidence": "global resolver override installable",
+      "absent_consequence": "Full-tunnel DNS unavailable",
+      "owning_adr": "ADR-0011",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "kill_switch_os",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": true,
+      "session_critical": true,
+      "probe_evidence": "install-then-remove a DUAL-FAMILY probe rule in the OS filter engine; both families or neither",
+      "absent_consequence": "I3 unenforceable; the device MUST NOT claim protection it cannot deliver",
+      "owning_adr": "ADR-0012",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "kill_switch_boot",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": true,
+      "session_critical": false,
+      "probe_evidence": "verify the boot-time rule set is present before the agent starts",
+      "absent_consequence": "The boot window is unprotected; disclosed per platform, observable fleet-wide",
+      "owning_adr": "ADR-0012",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "dns_scoped_api",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": true,
+      "session_critical": false,
+      "probe_evidence": "probe the platform split-DNS API (NRPT / matchDomains / per-link resolved)",
+      "absent_consequence": "Steering degrades to containment-only; DNS.PLATFORM.* diagnostic",
+      "owning_adr": "ADR-0011",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "dns_dnssec_validate",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "validate a known-good and a known-bad zone",
+      "absent_consequence": "Validation not performed; stated, not silent",
+      "owning_adr": "ADR-0011",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "dns_upstream_dot",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "open a DoT connection to the configured upstream",
+      "absent_consequence": "Upstream is Do53 inside the overlay",
+      "owning_adr": "ADR-0011",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "dns_config_dies_with_tunnel",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": true,
+      "session_critical": false,
+      "probe_evidence": "platform property: resolver configuration is scoped to the interface lifetime",
+      "absent_consequence": "Requires HostResolverRestorePoint (S-34) and a boot restore unit",
+      "owning_adr": "ADR-0011",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "relay_map_gossip",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "accept a peer-carried signed relay map",
+      "absent_consequence": "Relay map refresh requires the control plane",
+      "owning_adr": "ADR-0006",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "kernel_datapath",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "open the kernel WireGuard / WinTun-class device",
+      "absent_consequence": "Userspace throughput budget applies (R-15)",
+      "owning_adr": "ADR-0001",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "rekey_in_place",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": true,
+      "session_critical": true,
+      "probe_evidence": "in-process",
+      "absent_consequence": "Listed so its absence is nameable; mandatory at every Phase 1 epoch",
+      "owning_adr": "ADR-0001",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "psk_epoch",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": true,
+      "session_critical": true,
+      "probe_evidence": "in-process",
+      "absent_consequence": "The R-13 revocation lever is unavailable => refuse",
+      "owning_adr": "ADR-0001",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    },
+    {
+      "name": "diag_bundle",
+      "major": 1,
+      "parameters": [],
+      "security_relevant": false,
+      "session_critical": false,
+      "probe_evidence": "in-process",
+      "absent_consequence": "No R-23 connectivity report obtainable from that peer",
+      "owning_adr": "ADR-0015",
+      "introduced_in_epoch": 1,
+      "status": "ACTIVE"
+    }
+  ],
+  "capability_name_max_length": 32,
+  "_capability_name_note": "ADR-0014 N-11, as amended 2026-08-27: [a-z][a-z0-9_]{0,31}. The bound was 24 and contradicted ADR-0014 \u00a711.11's own registry table. Resolved by amendment (CF-6), not by renaming a security_relevant token."
+}

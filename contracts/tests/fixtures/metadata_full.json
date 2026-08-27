@@ -1,0 +1,15 @@
+{
+  "type": "twinvpn.v1.MessageMetadata",
+  "value": {
+    "protoVersion": 1,
+    "messageId": "AZGb8ABxc2SLnZ2en5+goQ==",
+    "correlationId": "AZGb8ABxc2SLnZ2en5+gog==",
+    "causationId": "AZGb8ABxc2SLnZ2en5+gow==",
+    "causalityToken": "b3BhcXVl",
+    "senderTimeMs": "1756300000000",
+    "twinnetId": "tn-01H0",
+    "senderId": "twd1abcdefghijklmnop",
+    "netSeq": "9007199254740993",
+    "idempotencyKey": "AAECAwQFBgcICQoLDA0ODw=="
+  }
+}

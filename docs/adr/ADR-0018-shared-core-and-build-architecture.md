@@ -1194,8 +1194,30 @@ version.
 
 - **VR-1.** The three advance independently. A core release that changes no wire behaviour MUST NOT
   bump `ProtocolEpoch` (ADR-0014 N-1). A core release that changes no ABI MUST NOT bump `abi_major`.
-- **VR-2.** `abi_*` MUST NOT appear on any wire, and `ProtocolEpoch` MUST NOT appear in any
-  shell↔core compatibility check. A message carrying an `abi_*` value on the wire is a defect.
+- **VR-2.** `abi_*` MUST NOT be used as a **compatibility input** anywhere except between a
+  shell and a core **in the same process**, and `ProtocolEpoch` MUST NOT appear in any
+  shell↔core compatibility check. A message that carries an `abi_*` value **as a negotiation,
+  gating, or routing input** is a defect.
+
+  > **Clarified 2026-08-27.** As originally written this read "`abi_*` MUST NOT appear on
+  > **any wire**", which contradicts **S-46** in §11.17: `CoreBuildIdentity` *includes*
+  > `abi_major`/`abi_minor`, and S-46 states that "every diagnostic bundle embeds it; telemetry
+  > holds a lossy replica" — and telemetry is channel C7, which is a wire. This is conflict
+  > **CF-8** in `contracts/docs/phase1-conflicts.md`.
+  >
+  > The two rules were never in real tension; the wording was. **The prohibition is on `abi_*`
+  > being a decision input outside one process, not on the bytes existing.** An ABI version is
+  > meaningless between machines — it describes a linkage inside a single address space — so
+  > using it to decide anything across a wire is the defect. Recording it as **build
+  > provenance**, so a support case can answer "which core was loaded", is not.
+  >
+  > Normative consequences, so this is not re-litigated:
+  > 1. `abi_*` MAY appear in a **Tier-1 diagnostic bundle** and in `CoreBuildIdentity`.
+  > 2. `abi_*` MUST NOT appear in any **C1, C2, C4, C5 or C6** message.
+  > 3. `abi_*` MUST be **omitted** from **Tier-2 aggregate telemetry**, which
+  >    [ADR-0015](ADR-0015-observability-and-diagnostics.md) §11.1 restricts to coarse,
+  >    identifier-free counters — an ABI pair is build-identifying and has no aggregate meaning.
+  > 4. No receiver may branch on a received `abi_*` value.
 - **VR-3.** The relation between them is a **table, not an inference**: `CoreBuildIdentity` (S-46)
   carries `{core_version, abi_major, abi_minor, protocol_epoch_min, protocol_epoch_max,
   schema_digest, reason_registry_version, crypto_provider, profile, target_triple, source_commit}`. Anything needing "which

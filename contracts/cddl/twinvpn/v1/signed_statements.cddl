@@ -1,0 +1,523 @@
+; TwinVPN B2 signed statements — deterministic CBOR schema.
+;
+; Authority: ADR-0003 §11 (the B2 row), §11.5 (the statement inventory and the
+; network contract), §7 (security implications), ADR-0007 (identity, pairing,
+; revocation), ADR-0005 §11.3 (RelayCapabilityToken), ADR-0002 §S-3 (LogHead).
+;
+; =============================================================================
+; ENCODING RULES — NORMATIVE, AND NOT NEGOTIABLE
+; =============================================================================
+; Every statement below is:
+;
+;   1. Encoded as RFC 8949 §4.2.1 CORE DETERMINISTIC ENCODING. Two conforming
+;      implementations MUST produce byte-identical output for the same logical
+;      value. Non-canonical input MUST BE REJECTED with
+;      PROTO.NON_CANONICAL_CBOR, NEVER NORMALIZED — normalizing attacker input
+;      before verifying is a signature-bypass pattern.
+;
+;   2. Wrapped in a COSE_Sign1 envelope (RFC 9052).
+;
+;   3. VERIFIED OVER THE RECEIVED OCTETS. An implementation MUST NOT
+;      re-serialize before verifying. This is the "sign the bytes you received,
+;      forward the bytes you received" discipline; it eliminates a bug class
+;      rather than testing for it.
+;
+;   4. Carried on the wire as an OPAQUE protobuf `bytes` field
+;      (twinvpn.v1.SignedStatement.cose_sign1). Protobuf never parses the
+;      inside. ADR-0003 §11 rule 1: a signed statement MUST NOT be represented
+;      in more than one encoding anywhere in the system.
+;
+;   5. Rejected on UNKNOWN NON-`crit` FIELDS, unlike unsigned transport
+;      messages, which preserve and forward them. ADR-0003 §7: the asymmetry is
+;      deliberate — a preserved-but-unverified field is a place to smuggle data
+;      past a policy check.
+;
+;   6. Bounded in lifetime. `not_after_ms` is MANDATORY on every statement.
+;
+; THE `crit` SET (ADR-0003 §7, R11)
+; ---------------------------------
+; Following the X.509 critical-extension and COSE `crit` pattern: `crit` names
+; the fields whose semantics a verifier MUST understand. A VERIFIER
+; ENCOUNTERING AN UNRECOGNIZED CRITICAL FIELD MUST REJECT THE STATEMENT with
+; PROTO.UNKNOWN_CRITICAL_FIELD.
+;
+; Without this, adding a future RESTRICTION would be silently ignored by old
+; devices, which converts a tightening into a no-op — A SILENT AUTHORIZATION
+; HOLE.
+;
+; INTEGERS
+; --------
+; ADR-0003 §11 rule 2: integers are explicitly sized. All counters, epochs and
+; sequence numbers below are uint (64-bit range). No float appears anywhere in
+; this schema.
+; =============================================================================
+
+; --- Common primitives -------------------------------------------------------
+
+device-id       = bstr .size 32   ; SHA-256, untruncated. ADR-0007 N-2.
+identity-id     = bstr .size 32
+pairing-id      = bstr .size 16   ; SHA-256(pairing_secret)[0..15]
+relay-id        = bstr .size 8
+digest256       = bstr .size 32
+key-id          = tstr .size (1..64)
+twinnet-id      = tstr .size (1..64)
+epoch-ms        = uint             ; UTC milliseconds. Advisory except where a
+                                   ; validity window says otherwise; evaluated
+                                   ; against LOCAL time with a skew allowance.
+crit-set        = [+ tstr]         ; field names a verifier MUST understand
+
+cose-key        = bstr             ; COSE_Key, deterministic CBOR
+
+; --- 1. DeviceIdentityRecord --------------------------------------------------
+; The public identity, self-certifying. Verifiable offline by any peer.
+
+device-identity-record = {
+  1: twinnet-id,
+  2: device-id,
+  3: identity-id,
+  4: uint,            ; generation. MONOTONE. Peers hold highest_generation_seen
+                      ; and MUST reject any statement at or below it (N-22).
+  5: cose-key,        ; IK public. ES256 / P-256.
+  6: cose-key,        ; TK public. X25519.
+  7: uint,            ; tk_generation. Separately monotone from `generation`.
+  8: bool,            ; hardware_backed. A SELF-REPORT. A peer MUST NOT treat an
+                      ; UNATTESTED true as evidence (N-6).
+  9: epoch-ms,        ; not_before_ms
+ 10: epoch-ms,        ; not_after_ms. Backstop of enrolment + 10 years (N-27);
+                      ; real freshness is enforced by T_TRUST_REFRESH (6 h),
+                      ; T_TRUST_STALE (24 h), T_TRUST_HARD (30 d).
+ 11: crit-set,        ; MUST include "generation" and "tk_generation"
+}
+
+; --- 2. TunnelKeyBinding ------------------------------------------------------
+; IK-signed binding of the X25519 tunnel key to the hardware-held identity key.
+;
+; ADR-0007 N-4: a peer MUST verify this BEFORE writing TK into TrustedPeer. The
+; check MUST NOT be skippable by configuration and MUST have dedicated
+; conformance vectors. A SKIPPED CHECK IS A FULL AUTHENTICATION BYPASS: it is
+; the only thing tying the software-held tunnel key to the element-held identity
+; that authorizes it. No secure element does X25519, which is why this binding
+; exists at all rather than TK simply living in the element.
+
+tunnel-key-binding = {
+  1: device-id,
+  2: identity-id,
+  3: cose-key,        ; tk_pub
+  4: uint,            ; tk_generation. MUST rotate at least every 180 days —
+                      ; this bounds an extracted tunnel key, and it replaced
+                      ; certificate expiry in that role. T_TK_OVERLAP = 14 d.
+  5: epoch-ms,        ; not_after_ms
+  6: crit-set,        ; MUST include "tk_generation"
+}
+
+; --- 3. IdentitySuccession ----------------------------------------------------
+; DUAL-SIGNED by BOTH the old and the new IK (two COSE_Sign1 signatures over
+; this payload).
+;
+; ADR-0007 N-21, docs/protocol.md §8.4: a single-signature rotation would let a
+; STOLEN KEY ROTATE ITSELF INTO PERMANENCE; an old-key-only signature would let
+; a COMPROMISED OLD KEY INSTALL AN ATTACKER'S NEW KEY. Both signatures are
+; required, and a verifier that accepts one is non-conforming.
+;
+; `device_id` DOES NOT CHANGE on succession — otherwise S-08's immutable address
+; allocation would break on every rotation.
+
+identity-succession = {
+  1: device-id,
+  2: identity-id,     ; old_identity_id
+  3: identity-id,     ; new_identity_id
+  4: uint,            ; generation. Exactly old generation + 1.
+  5: epoch-ms,        ; not_after_ms. T_IK_OVERLAP = 30 d.
+  6: crit-set,        ; MUST include "generation"
+}
+
+; --- 4. PairingAttestation ----------------------------------------------------
+; One device's half of a completed ceremony. DeviceKey-signed.
+;
+; Rule B: the coordination service TRANSPORTS attestations it CANNOT FORGE, so
+; it cannot inject a TrustedPeer.
+
+pairing-attestation = {
+  1: pairing-id,
+  2: key-id,          ; peer_key_id
+  3: key-id,          ; own_key_id
+  4: digest256,       ; transcript_hash of the ceremony
+  5: epoch-ms,        ; not_after_ms. Ceremony expiry is 120 s (N-17).
+  6: crit-set,
+}
+
+; --- 5. RevocationStatement ---------------------------------------------------
+; OWNER-AUTHORITY-SIGNED. The inner statement; the writer wraps it.
+;
+; ADR-0007 N-25 — TWO SEPARABLE EFFECTS, TWO AUTHORITIES:
+;   (1) PEER REFUSAL is LOCAL and immediate on verification, WHATEVER THE
+;       PROVENANCE. No epoch number, no control-plane reachability. This effect
+;       survives a partition.
+;   (2) trust_epoch ADVANCE is totally ordered: the Owner AUTHORIZES by signing,
+;       the shard writer ASSIGNS the number at admission. A statement not yet
+;       admitted is fully effective for (1) and PENDING for (2), and MUST NOT be
+;       assigned an epoch locally.
+;
+; NOTE the deliberate ABSENCE of a `revoked: bool`. ADR-0008 N-7: revocation is
+; a MONOTONE EPOCH PLUS A NEVER-SHRINKING SET. A mutable boolean is exactly the
+; shape that permits UN-REVOCATION by replaying an older record.
+
+revocation-statement = {
+  1: twinnet-id,
+  2: device-id,               ; target_device_id
+  3: identity-id / null,      ; target_identity_id. null = EVERY generation.
+  4: epoch-ms,                ; effective_from_ms
+  5: tstr .size (1..64),      ; reason_code, from the AUTH domain
+  6: key-id,                  ; issuer_osk_id
+  7: crit-set,                ; MUST include "target_device_id"
+}
+
+; --- 6. RevocationEntry -------------------------------------------------------
+; The ADMITTED form: the writer's wrapper, assigning the ordering.
+;
+; docs/protocol.md §8.3: THE TWO SIGNERS ARE DELIBERATELY SEPARATE — the Owner
+; AUTHORIZES, the writer ORDERS. A RevocationEntry whose INNER statement
+; signature does not verify MUST BE REJECTED OUTRIGHT: A WELL-FORMED WRAPPER
+; AUTHORIZES NOTHING.
+;
+; `prev_entry_hash` is verified as a chain (N-26); a break raises
+; AUTH.TRUST_HISTORY_FORKED. This is DETECTION of an inconsistent log, NOT
+; prevention — peer refusal rests on the inner statement's OSK signature alone,
+; so a forked or withheld chain CANNOT UN-REVOKE a device at a peer that has
+; already seen the statement.
+
+revocation-entry = {
+  1: bstr,            ; the inner RevocationStatement, as COSE_Sign1 octets,
+                      ; verified over THESE bytes
+  2: uint,            ; trust_epoch, assigned at admission
+  3: uint,            ; net_seq
+  4: digest256,       ; prev_entry_hash
+  5: crit-set,
+}
+
+; --- 7. TrustEpochBundle ------------------------------------------------------
+; Distributes the new EpochSeed after a trust_epoch advance.
+;
+; EACH SEED IS HPKE-SEALED TO ITS RECIPIENT. A courier peer forwards seals it
+; CANNOT OPEN (N-28). The plaintext EpochSeed appears nowhere in this schema and
+; MUST NOT be added: S-33 says each Device holds only the seal addressed to it,
+; openable by no other party.
+;
+; This is the carriage for the SECOND revocation lever. RevocationTransfer
+; propagates REFUSAL; only this lets a lagging peer advance
+; `min_acceptable_epoch` and derive psk2 at the new epoch — without it, the
+; PSK-epoch lever has no path around a control-plane outage.
+
+epoch-seal = {
+  1: device-id,       ; recipient
+  2: bstr,            ; HPKE-sealed EpochSeed. OPAQUE CIPHERTEXT.
+}
+
+trust-epoch-bundle = {
+  1: twinnet-id,
+  2: uint,            ; trust_epoch. MONOTONE; a lower value is
+                      ; AUTH.TRUST_EPOCH_ROLLBACK, refused rather than applied.
+  3: [+ epoch-seal],
+  4: epoch-ms,        ; not_after_ms
+  5: crit-set,        ; MUST include "trust_epoch"
+}
+
+; --- 8. OwnerTrustAnchor ------------------------------------------------------
+; The root, ORK-signed, PINNED BY EVERY DEVICE AT ENROLMENT.
+;
+; S-32: higher anchor_version with a valid signature wins; EQUAL VERSION WITH
+; DIFFERENT CONTENT is AUTH.TRUST_HISTORY_FORKED — the classic fork detector,
+; and the reason `anchor_version` is not merely monotone but content-determining.
+
+owner-trust-anchor = {
+  1: twinnet-id,
+  2: uint,            ; anchor_version. MONOTONE, MUST NOT decrease.
+  3: cose-key,        ; ORK public
+  4: epoch-ms,        ; not_after_ms
+  5: crit-set,        ; MUST include "anchor_version"
+}
+
+; --- 9. OwnerDelegation -------------------------------------------------------
+; An OSK and the powers it carries.
+;
+; ADR-0007 N-11: HIGH-POWER operations (mint an OSK, revoke an ENROLL/DELEGATE
+; device, publish an anchor) require EITHER one ORK signature OR
+; k = min(2, n_osk) INDEPENDENT OSK SIGNATURES, EXCLUDING ANY OSK BELONGING TO
+; THE TARGET. Ordinary operations require one OSK signature bearing the matching
+; power.
+
+osk-power = "ENROLL" / "REVOKE" / "POLICY" / "DELEGATE" / "ADMINISTER"
+
+owner-delegation = {
+  1: twinnet-id,
+  2: key-id,          ; osk_id
+  3: cose-key,        ; OSK public
+  4: [+ osk-power],
+  5: uint,            ; anchor_version this delegation is bound to
+  6: epoch-ms,        ; not_after_ms
+  7: crit-set,        ; MUST include "powers"
+}
+
+; --- 10. PolicyBundle ---------------------------------------------------------
+; WHOLE-STATE, never a delta. docs/protocol.md §15.1 E-3: delta-encoded policy
+; requires exactly-once delivery, WHICH DOES NOT EXIST.
+;
+; `killswitch_floor` is A FLOOR, NEVER A CEILING. Effective enforcement is
+; max(local_mode, policy_required_mode). THERE IS NO ENCODING OF THIS FIELD THAT
+; LOWERS ENFORCEMENT BELOW THE DEVICE'S LOCAL SETTING. A fully compromised
+; coordination service can make a device MORE blocked, NEVER LESS.
+;
+; The protobuf projection of this payload is twinvpn.v1.PolicyBundle; that
+; projection is a VIEW for routing logic, and enforcement reads THIS payload.
+
+policy-bundle = {
+  1: twinnet-id,
+  2: uint,            ; policy_version. MONOTONE. A device MUST reject <= its
+                      ; high-water mark. Replaying an older bundle is a POLICY
+                      ; ROLLBACK ATTACK.
+  3: tstr,            ; policy_id
+  4: bstr,            ; access_rules, as deterministic-CBOR encoded structure
+  5: bstr,            ; dns_policy
+  6: bstr,            ; route_policy
+  7: bstr,            ; exit_policy
+  8: bstr,            ; relay_region_policy
+  9: uint,            ; killswitch_floor. Ordered so higher = stricter.
+ 10: epoch-ms,        ; not_after_ms. On expiry: GRANTS SUSPEND, DENIALS PERSIST
+                      ; (ADR-0009 §11.4). Behaviour on expiry is NOT a policy
+                      ; input and is NOT remotely selectable.
+ 11: crit-set,        ; MUST include "policy_version" and "killswitch_floor"
+}
+
+; --- 11. RouteAdvertisement ---------------------------------------------------
+; DEVICE-SIGNED. The advertising device is authoritative for its own routes
+; (S-16); the coordination service is a replica that cannot forge them.
+;
+; Without the signature, a coordination service that could mint routes could
+; advertise 0.0.0.0/0 and ::/0 and CAPTURE THE WHOLE TwinNet'S TRAFFIC.
+;
+; The two prefix lists are SEPARATE AND CO-EQUAL. A device MUST NOT infer v6
+; reachability from a v4 advertisement or vice versa.
+
+ip-prefix-v4 = [bstr .size 4, uint]    ; [octets, prefix_len 0..32], canonical
+ip-prefix-v6 = [bstr .size 16, uint]   ; [octets, prefix_len 0..128], canonical
+
+route-advertisement = {
+  1: device-id,       ; advertiser
+  2: twinnet-id,
+  3: [* ip-prefix-v4],
+  4: [* ip-prefix-v6],
+  5: uint,            ; metric
+  6: uint,            ; advertisement_epoch. MONOTONE PER ADVERTISER; a lower
+                      ; epoch from the same advertiser MUST BE IGNORED.
+  7: epoch-ms,        ; not_after_ms. Default 1 h, refreshed at half TTL.
+                      ; Expiry MUST produce a visible
+                      ; ROUTE.ADVERTISEMENT_EXPIRED, not a silent disappearance.
+  8: [* tstr],        ; requires_capability
+  9: crit-set,        ; MUST include "advertisement_epoch"
+}
+
+; --- 12. ExitNodeOffer --------------------------------------------------------
+; DEVICE-SIGNED, TTL'd.
+;
+; PER-FAMILY AND EXPLICIT, WITH NO DEFAULTING: an absent field is a DENIAL, not
+; a permission. A v4-only exit grant with v6 leaking to the local ISP is the
+; exact IPv6 leak this product must never ship.
+
+exit-node-offer = {
+  1: device-id,
+  2: [* ("v4" / "v6")],   ; egress_families
+  3: bool,                ; supports_default_v4
+  4: bool,                ; supports_default_v6
+  5: tstr,                ; geo_hint. Never finer than a country.
+  6: uint,                ; bandwidth_class
+  7: uint,                ; offer_epoch. MONOTONE PER OFFERER.
+  8: epoch-ms,            ; not_after_ms
+  9: crit-set,            ; MUST include "supports_default_v4" and
+                          ; "supports_default_v6" — a future restriction on
+                          ; either MUST NOT be silently ignored by an old device
+}
+
+; --- 13. RelayCapabilityToken -------------------------------------------------
+; ADR-0005 §11.3. Ed25519-signed by the TwinNet's relay-credential issuer.
+;
+; VERIFICATION IS A PURE FUNCTION, PERFORMED ENTIRELY OFFLINE BY THE RELAY:
+;   COSE signature against a held issuer key
+;   -> `aud` matches this operator group
+;   -> `cnf` equals the presented relay-leg static
+;   -> nbf/exp within +/- 300 s skew
+;   -> epoch >= epoch_floor
+;   -> jti unseen in the bounded replay cache
+; NO CONTROL-PLANE CALL, PER PACKET, PER BIND, OR PER RECONNECT.
+;
+; `sub` IS A PSEUDONYM, NEVER device_id:
+;   relay_sub = HKDF-Expand(HKDF-Extract("", DeviceIdentityPub),
+;                           "twinvpn/relay-sub/v1" || operator_group_id
+;                           || epoch_day, 16)
+; per-operator, per-day. A relay learns a rotating pseudonym, not an identity.
+;
+; `aud` IS THE OPERATOR GROUP, NEVER A SINGLE relay_id — one token works across
+; the whole ranked set, which is what makes offline failover possible at all.
+
+relay-capability-token = {
+  1: key-id,          ; iss
+  2: tstr,            ; aud — operator group id
+  3: bstr .size 16,   ; sub — the per-operator per-day pseudonym
+  4: cose-key,        ; cnf (RFC 7800) carrying RLK_pub
+  5: epoch-ms,        ; nbf
+  6: epoch-ms,        ; exp. 24 h lifetime, refreshed at 50%.
+  7: uint,            ; epoch — the S-03 trust epoch at issuance
+  8: {                ; quota
+       1: uint,       ;   max_concurrent_flows
+       2: uint,       ;   max_bitrate_kbps
+       3: uint,       ;   max_bytes_per_hour
+       4: uint,       ;   max_binds_per_min
+     },
+  9: bstr .size 16,   ; jti
+ 10: bool,            ; renewed_by_relay. NOT A NEW GRANT: a relay may only
+                      ; extend an authority the control plane already issued, at
+                      ; an epoch it already published, never above the relay's
+                      ; own epoch_floor.
+ 11: crit-set,        ; MUST include "epoch" and "aud"
+}
+
+; --- 14. RelayEpochFloor ------------------------------------------------------
+; OWNER-SIGNED, MONOTONE. Pushed by the control plane best-effort AND
+; PIGGYBACKABLE BY ANY CONNECTING CLIENT — because it is Owner-signed and
+; monotone, a relay partitioned from the control plane STILL LEARNS OF
+; REVOCATIONS FROM ITS OWN USERS.
+;
+; Relay denial is DEFENCE IN DEPTH ONLY: revocation is enforced at the peer, so
+; a lagging relay leaks no access and no confidentiality. Its lag is a bounded
+; RESOURCE-ABUSE window, capped at the 24 h token lifetime.
+
+relay-epoch-floor = {
+  1: twinnet-id,
+  2: tstr,            ; operator_group_id
+  3: uint,            ; epoch_floor. MONOTONE.
+  4: epoch-ms,        ; not_after_ms
+  5: crit-set,        ; MUST include "epoch_floor"
+}
+
+; --- 15. RelayMap -------------------------------------------------------------
+; OWNER-SIGNED. ADR-0006 §11.2: a device MUST NOT BIND A RELAY whose relay_id
+; and static Noise public key are not present in A VERIFIED MAP.
+;
+; ENDPOINTS ARE LITERAL, NEVER HOSTNAMES — relay reachability MUST NOT depend on
+; DNS, or recovering from BLOCKED would require the resolver the relay is needed
+; to reach.
+
+relay-entry = {
+  1: relay-id,
+  2: tstr,                ; operator_group_id
+  3: cose-key,            ; static_noise_pub
+  4: [* [bstr .size 4, uint]],   ; endpoints_v4 as [octets, port]
+  5: [* [bstr .size 16, uint]],  ; endpoints_v6 as [octets, port]
+  6: [* ("R-UDP" / "R-QUIC" / "R-TLS")],
+  7: tstr,                ; region_id
+  8: tstr,                ; failure_domain. >= 2 alternates per region across
+                          ; >= 2 failure domains; a standby that fails with its
+                          ; primary is not a standby.
+  9: uint,                ; server_rank 0..100. ADVISORY — the device's own
+                          ; measured RTT always overrides.
+ 10: uint,                ; load_class 0..3
+ 11: uint,                ; capacity_weight
+ 12: ("ACTIVE" / "DRAINING" / "RETIRED"),
+ 13: bool,                ; self_hosted
+ 14: bool,                ; supports_drain
+ 15: bool,                ; supports_caps
+}
+
+relay-map = {
+  1: twinnet-id,
+  2: uint,                ; map_version. MONOTONE.
+  3: [* relay-entry],
+  4: epoch-ms,            ; not_after_ms
+  5: crit-set,            ; MUST include "map_version"
+}
+
+; --- 16. LogHead --------------------------------------------------------------
+; The periodic freshness proof, emitted every 60 s and on demand.
+;
+; STATED LIMITATION: the signing key is an ONLINE control-plane key, so a
+; COMPROMISED control plane CAN FORGE FRESHNESS. It cannot forge TRUST — that
+; requires the Owner authority — but it can lie about there being nothing to
+; fetch. LogHead defends against a PARTITIONED, BUGGY or PARTIALLY-FAILED
+; front-end and against a network attacker who drops events. The key carries NO
+; DELEGATED TRUST POWER: it proves liveness, never trust.
+;
+; A device that receives no valid, unexpired LogHead within THREE INTERVALS MUST
+; emit CONTROL.FRESHNESS_PROOF_MISSING and begin treating cached documents as
+; approaching expiry.
+
+log-head = {
+  1: twinnet-id,
+  2: uint,            ; net_seq
+  3: uint,            ; revocation_epoch
+  4: epoch-ms,        ; issued_at_ms
+  5: epoch-ms,        ; not_after_ms
+  6: crit-set,
+}
+
+; --- 17. NetworkContract ------------------------------------------------------
+; ADR-0003 §11.5. The signed contract that ADR-0010, ADR-0011 and ADR-0013
+; consume OFFLINE.
+;
+; NC-2 ATOMICITY: a contract generation applies ATOMICALLY. A device either
+; installs the WHOLE generation — addresses, routes, DNS fields — or NONE of it.
+; THERE IS NO PARTIAL APPLICATION, and a failure mid-apply reverts to the
+; previous generation.
+;
+; NC-3 ANTI-ROLLBACK: a device MUST REJECT a contract whose `contract_seq` is AT
+; OR BELOW its high-water mark.
+;
+; NC-4 THE crit SET IS FIXED at {contract_seq, address_v4, address_v6, routes,
+; dns}. A device that does not understand a member MUST REJECT THE CONTRACT
+; rather than apply it partially — this is the mechanism that stops a future
+; field restriction from being silently ignored by an old device.
+
+contract-peer = {
+  1: device-id,
+  2: tstr,                    ; label, the DNS label
+  3: bstr .size 4,            ; overlay v4 address
+  4: bstr .size 16,           ; overlay v6 address
+}
+
+network-contract = {
+  1: twinnet-id,
+  2: uint,                    ; contract_seq. MONOTONE. NC-3.
+  3: bstr .size 4,            ; address_v4 — THIS device's /32
+  4: bstr .size 16,           ; address_v6 — THIS device's /128
+  5: bstr,                    ; routes, deterministic-CBOR encoded
+  6: bstr,                    ; dns, deterministic-CBOR encoded
+  7: [* contract-peer],       ; the forward and reverse index source for
+                              ; ADR-0011 DN-7: resolution comes from THIS, never
+                              ; from a control-plane call, a presence lookup, or
+                              ; a peer probe.
+  8: epoch-ms,                ; not_after_ms
+  9: crit-set,                ; NC-4: EXACTLY {contract_seq, address_v4,
+                              ; address_v6, routes, dns}
+}
+
+; --- The closed inventory -----------------------------------------------------
+; ADR-0003 §11.5 records that B2 has grown from seven statement types to
+; seventeen, and that §14 revisit trigger 7 fires at ~20. The count is stated
+; here so it is visible rather than resting on a stale number: adding an
+; eighteenth is permitted; adding a twenty-first reopens ADR-0003.
+
+signed-statement = device-identity-record
+                 / tunnel-key-binding
+                 / identity-succession
+                 / pairing-attestation
+                 / revocation-statement
+                 / revocation-entry
+                 / trust-epoch-bundle
+                 / owner-trust-anchor
+                 / owner-delegation
+                 / policy-bundle
+                 / route-advertisement
+                 / exit-node-offer
+                 / relay-capability-token
+                 / relay-epoch-floor
+                 / relay-map
+                 / log-head
+                 / network-contract

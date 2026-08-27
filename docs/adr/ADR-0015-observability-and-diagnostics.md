@@ -395,6 +395,55 @@ existing domains by subdomain:
 be rejected by the registry's CI check, because `DOMAIN` is the only segment with forward-compatibility
 meaning and deeper nesting buys nothing while breaking prefix degradation.
 
+**Rejected alternative: a flat `TVPN-<FAMILY>` prefix scheme (recorded 2026-08-27).**
+
+During Phase 2 contract implementation a flat family scheme was proposed —
+`TVPN-AUTH`, `TVPN-PAIR`, `TVPN-NAT`, `TVPN-RELAY`, `TVPN-TUNNEL`, `TVPN-ROUTE`,
+`TVPN-DNS`, `TVPN-IPV4`, `TVPN-IPV6`, `TVPN-POLICY`, `TVPN-PLATFORM`,
+`TVPN-PROTOCOL`, `TVPN-CONTROL`, `TVPN-UPDATE`, `TVPN-INTERNAL`. It is
+**rejected**, and recorded here so it is not re-proposed. This is conflict
+**CF-3** in `contracts/docs/phase1-conflicts.md`.
+
+Three reasons, in order of weight:
+
+1. **A product-name prefix carries no information and destroys the one segment
+   that does.** Forward compatibility in this taxonomy is by `DOMAIN` prefix
+   (rule 5): a receiver meeting an unknown code degrades on its first segment.
+   Under `TVPN-*` the first segment is `TVPN` on every code, so there is nothing
+   to degrade on — every unknown code degrades to "it is a TwinVPN error", which
+   is what the user already knows. Every code in this product is a TwinVPN code;
+   saying so costs five bytes and buys nothing.
+
+2. **`TVPN-IPV4` and `TVPN-IPV6` would make the family asymmetry the corpus
+   forbids *expressible*, in the one layer where no owning ADR would look for
+   it.** [ADR-0010](ADR-0010-ipv4-ipv6-routing.md) R1 makes the families
+   co-equal; [ADR-0014](ADR-0014-protocol-versioning-and-capability-negotiation.md)
+   §11.11 refuses a per-family `scope` parameter on `kill_switch_os/1` in exactly
+   these terms, because it would make a v4-only kill switch *expressible,
+   negotiable and contagious*. Per-family **domains** do the same thing to the
+   diagnostic layer: they make "we have a v4 story and a v6 story" sayable, when
+   the design is that there is **one** story covering both. Address family is
+   therefore an **evidence field** (`Evidence.family_value`), never a namespace —
+   so a v4 failure and a v6 failure are the *same* condition with different
+   evidence, and neither can acquire a diagnostic vocabulary the other lacks.
+
+3. **`TVPN-PAIR` and `TVPN-TUNNEL` split conditions that have one owner.**
+   Pairing is an identity condition and lives in `AUTH.PAIRING_*`; a separate
+   domain would split identity across two prefixes and force prefix degradation
+   to choose between them. "Tunnel" spans **two** owners — handshake and key state
+   belong to [ADR-0001](ADR-0001-tunnel-protocol-and-cryptographic-foundation.md)
+   (`CRYPTO.*`), path and session lifecycle to
+   [docs/reliability.md](../reliability.md) (`NET.PATH.*`, `NET.SESSION.*`) — and a
+   single `TVPN-TUNNEL` domain would violate the rule that every domain names
+   exactly one owning document.
+
+The scheme's legitimate goal — *"every error must have a stable, greppable,
+documented identifier, and no user may ever see a bare `Error 110`"* — is fully
+met by the existing taxonomy, and more strongly: every code carries `class`,
+`severity`, `terminal`, `user_actionable`, `remediation_class`, `scope`,
+`doc_anchor` and declared `evidence_fields`, and a `user_actionable` code without
+a `next_action_key` fails the registry's CI check.
+
 **Domain contribution rule.** This ADR owns the taxonomy, the namespace, the required
 attributes, and the stability rules. The ADR owning a domain contributes and names the codes
 within it. `INTERNAL` is owned here.

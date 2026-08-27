@@ -1,0 +1,434 @@
+// TwinVPN shared contracts — diagnostic context, local session events, and
+// telemetry (C7).
+//
+// Authority: ADR-0015 (§11.1 the three tiers, §11.3 the Diagnostic record,
+// §11.4 classification, §11.7 metrics, §11.8 the connectivity report, §11.10
+// the privacy summary), docs/protocol.md §14, docs/reliability.md §4.5,
+// ADR-0018 §11.12 (the three version numbers), S-46.
+//
+// ===========================================================================
+// SESSION AND PATH EVENTS ARE LOCAL, NOT CONTROL-PLANE EVENTS.
+// ===========================================================================
+// docs/protocol.md §7 makes `SessionStateChanged` LOCAL-AUTHORITY, and calls it
+// one of the two load-bearing entries in the event-ownership table:
+//
+//   "If the coordination service were authoritative for Session state, a
+//    control-plane outage would put every session into an INDETERMINATE state,
+//    and any reconciliation logic would EVENTUALLY TEAR TUNNELS DOWN. Because
+//    the device owns it, the coordination service losing the whole event log
+//    changes NOTHING about a running Tunnel."
+//
+// Every event in this file is therefore emitted by the DEVICE THAT OWNS THE
+// Session, is EPHEMERAL, lives in the Tier-0 local ledger, and reaches
+// infrastructure only as an opt-in Tier-1 bundle or a Tier-2 aggregate. NONE of
+// them is a durable control-plane event, and promoting any of them to C2 would
+// break I5.
+//
+// This is what the Phase 2 objective's warning names: "Do not turn ephemeral
+// connection signaling into durable events merely for convenience."
+// ===========================================================================
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/candidate.proto";
+import "twinvpn/v1/common.proto";
+import "twinvpn/v1/connection.proto";
+import "twinvpn/v1/dns.proto";
+import "twinvpn/v1/errors.proto";
+import "twinvpn/v1/relay.proto";
+import "twinvpn/v1/tunnel.proto";
+
+// The observability tier a record belongs to. ADR-0015 §11.1.
+enum ObservabilityTier {
+  OBSERVABILITY_TIER_UNSPECIFIED = 0;
+  // ALWAYS ON, CANNOT BE DISABLED, NEVER LEAVES THE DEVICE.
+  OBSERVABILITY_TIER_LOCAL_LEDGER = 1;
+  // Produced on demand; leaves the device ONLY BY EXPLICIT USER ACT, per
+  // artifact. Redacted, pseudonymized, signed, expiring.
+  OBSERVABILITY_TIER_BUNDLE = 2;
+  // OFF by default, opt-in. Coarse, IDENTIFIER-FREE, k-anonymous counters only.
+  OBSERVABILITY_TIER_AGGREGATE = 3;
+}
+
+// Structured context attached to a diagnostic or a transition.
+//
+// ===================================================================
+// PRIVACY BOUNDARY. This message carries CONTEXT, never CONTENT.
+// ===================================================================
+// ADR-0015 §11.10's NEVER column, which this schema must make unrepresentable:
+//   - tunnel plaintext or packet payloads
+//   - private key material, pairing secrets
+//   - DNS query names transmitted off-device
+//   - browsing / destination history
+//   - peer-pair correlation on infrastructure (O-13)
+//   - any stable device/user identifier in Tier 2
+//
+// ADR-0015 §11.10 also draws a distinction this message depends on: a SINGLE
+// endpoint or hostname in one Diagnostic is SENSITIVE — redacted by default,
+// renderable in an auto-expiring DEBUG capture the Owner initiates on their own
+// device. A retained, time-ordered record of WHAT A PEER CONTACTED is a
+// DIFFERENT ASSET and is SECRET: NO RENDERING PATH EXISTS, in any build, at any
+// log level, in any tier. The difference is RETENTION AND CORRELATION, not
+// field type — which is why there is no `destinations` or `queries` field here
+// and why one may not be added.
+message DiagnosticContext {
+  // Which tier this record is being rendered for. Determines the redaction the
+  // emitter applies BEFORE serializing. Redaction is applied by the emitter
+  // from the schema classification; there is no "scrub before sending" step,
+  // because that approach FAILS OPEN (ADR-0015 O-14).
+  ObservabilityTier tier = 1;
+
+  // Session and path this context belongs to.
+  //
+  // In an OBSERVABILITY_TIER_BUNDLE these are PSEUDONYMIZED with a PER-BUNDLE
+  // RANDOM MAPPING: two occurrences of one value map to the same token WITHIN
+  // one bundle and to DIFFERENT tokens ACROSS bundles, so support can follow
+  // the topology of one incident and CANNOT CORRELATE A USER ACROSS INCIDENTS.
+  // The mapping is generated per bundle and discarded.
+  //
+  // In OBSERVABILITY_TIER_AGGREGATE both MUST be empty.
+  bytes session_id = 2;
+  bytes path_id = 3;
+
+  // The protocol correlation, joining this record to the message that caused
+  // it. Already on the wire in MessageMetadata, so it leaks nothing new.
+  bytes correlation_id = 4;
+  bytes causation_id = 5;
+
+  ConnectionState state = 6;
+  Component component = 7;
+
+  // Local monotonic instant. Not comparable across devices.
+  MonotonicMicros observed_at = 8;
+
+  // Typed, registry-declared, classified evidence. Same shape and same rules as
+  // ErrorEnvelope.evidence.
+  repeated Evidence evidence = 9;
+}
+
+// One state-machine transition. docs/reliability.md §4.5.
+//
+// NORMATIVE: every transition emits EXACTLY ONE of these, and emission is A
+// PROPERTY OF THE TRANSITION ITSELF, NOT OF A CALL SITE — a single choke point
+// in the state machine, so that NO CODE PATH CAN MOVE THE MACHINE WITHOUT
+// PRODUCING THE RECORD.
+//
+// This event stream is the PRIMARY TEST ORACLE for the whole corpus.
+message TransitionEvent {
+  ConnectionState from = 1;
+  ConnectionState to = 2;
+
+  // THE EVENT OR TIMER THAT FIRED, not just the target state.
+  //
+  // docs/reliability.md §4.5 consequence 1: this is what distinguishes
+  // EV_PATH_DEAD-with-an-alternate from EV_PATH_DEAD-without-one, and
+  // T_MIGRATE-with-the-old-path-alive from T_MIGRATE-with-it-dead. Without
+  // `trigger` the transition-coverage merge gate cannot tell those pairs apart.
+  string trigger = 3;
+
+  // MANDATORY on every transition whose target is DEGRADED, BLOCKED,
+  // RECONNECTING or FAILED. A transition into one of those four WITHOUT a
+  // reason_code is itself INTERNAL.INVARIANT_VIOLATED.
+  //
+  // On a transition to a steady or resting state it MAY be empty, except where
+  // docs/reliability.md names an emit action — successes must be
+  // reconstructable too, not only failures.
+  string reason_code = 4;
+
+  // NEVER EMPTY. `session_id` is durable and survives process restart (S-12),
+  // which is what lets an outage be reconstructed ACROSS A CRASH.
+  bytes session_id = 5;
+
+  // NULLABLE: DISCONNECTED, DISCOVERING and NEGOTIATING have no Path.
+  bytes path_id = 6;
+
+  MonotonicMicros occurred_at = 7;
+
+  // Present when the transition carried a full diagnostic.
+  ErrorEnvelope diagnostic = 8;
+}
+
+// Local, device-authoritative session and path observations.
+//
+// EVERY EVENT HERE IS EPHEMERAL AND LOCAL. See the file header.
+message SessionEvent {
+  bytes session_id = 1;
+  DiagnosticContext context = 2;
+
+  oneof event {
+    TransitionEvent transition = 10;
+
+    // Establishment, per docs/protocol.md §10. All local observations of a
+    // peer-direct or ephemeral-signaling exchange — none is a control-plane
+    // fact.
+    ConnectionRequested connection_requested = 11;
+    ConnectionNegotiated connection_negotiated = 12;
+    CandidateUpdated candidate_updated = 13;
+    DirectPathEstablished direct_path_established = 14;
+
+    // Relay lifecycle. Observations of the device<->relay leg (C6), NOT
+    // control-plane events: the reservation never travels through the
+    // coordination service.
+    RelayBindRequested relay_bind_requested = 20;
+    RelayBound relay_bound = 21;
+    RelayUnavailable relay_unavailable = 22;
+    RelayChanged relay_changed = 23;
+
+    // Session and path lifecycle.
+    SessionStarted session_started = 30;
+    SessionResumed session_resumed = 31;
+    SessionEnded session_ended = 32;
+    PathChanged path_changed = 33;
+    TunnelStateChanged tunnel_state_changed = 34;
+    ConnectionHealthChanged connection_health_changed = 35;
+  }
+}
+
+message ConnectionRequested {
+  bytes peer_device_id = 1;
+  // What asked for it: user, policy, autostart, or a peer-initiated offer.
+  string trigger = 2;
+}
+
+message ConnectionNegotiated {
+  NegotiatedProtocolVersionRef negotiated = 1;
+  // Capabilities advertised locally but ABSENT from the negotiated set.
+  //
+  // ADR-0014 N-27: each of these MUST produce EXACTLY ONE Diagnostic per
+  // (Session, token, Tunnel) — loud once, NEVER a per-packet or per-attempt
+  // source. N-28: SILENCE IS A DEFECT. A negotiated set smaller than the local
+  // advertisement with no Diagnostic is an I6 violation and a P1 test failure.
+  repeated string lost_capabilities = 2;
+}
+
+message NegotiatedProtocolVersionRef {
+  uint32 epoch = 1;
+}
+
+message CandidateUpdated {
+  CandidateSet candidates = 1;
+  // True when only one address family was gathered. docs/protocol.md §4.1
+  // requires this to be flagged NAT.SINGLE_FAMILY_CANDIDATES — it is the
+  // leading cause of "works at home, fails on cellular".
+  bool single_family = 2;
+}
+
+message DirectPathEstablished {
+  NetworkPath path = 1;
+
+  // ADR-0004 §11.6 added NAT.DIRECT_ESTABLISHED because the ladder previously
+  // emitted a code for every way direct could FAIL and none for the way it
+  // SUCCEEDS — so success was assertable only as the absence of failure.
+  CandidateKind candidate_kind = 2;
+  uint64 elapsed_ms_from_connect_requested = 3;
+
+  // Set when this was an UPGRADE from RELAYED (NAT.DIRECT_UPGRADED, R-12).
+  uint64 relayed_duration_ms = 4;
+}
+
+message RelayBindRequested {
+  bytes relay_id = 1;
+  string region_id = 2;
+  RelayCarriage carriage = 3;
+}
+
+message RelayBound {
+  RelayBinding binding = 1;
+
+  // ADR-0006 P02: relay SELECTION MUST BE AUDITABLE, NOT A BLACK BOX. The
+  // score, the rank, the considered top-k and the inputs that produced them are
+  // recorded so "why this relay" is answerable after the fact.
+  RelaySelectionAudit audit = 2;
+}
+
+message RelaySelectionAudit {
+  bytes relay_id = 1;
+  string region_id = 2;
+  string failure_domain = 3;
+  uint32 score = 4;
+  uint32 rank = 5;
+  uint64 map_version = 6;
+  uint64 map_age_ms = 7;
+  uint64 measured_rtt_ms = 8;
+  uint32 server_rank = 9;
+  HealthState health = 10;
+  uint32 load_class = 11;
+  repeated RelayCandidateScore top_k = 12;
+}
+
+message RelayCandidateScore {
+  bytes relay_id = 1;
+  uint32 score = 2;
+}
+
+message RelayUnavailable {
+  bytes relay_id = 1;
+  // RELAY.NONE_REACHABLE, RELAY.REGION_UNAVAILABLE, RELAY.CAPACITY_REJECTED,
+  // RELAY.TOKEN_INVALID, RELAY.TOKEN_EPOCH_STALE, RELAY.ALL_REGIONS_FAILED,
+  // RELAY.FAILOVER_EXHAUSTED.
+  string reason_code = 2;
+}
+
+message RelayChanged {
+  bytes from_relay_id = 1;
+  bytes to_relay_id = 2;
+  // RELAY.DRAINING, RELAY.FAILOVER_VALIDATED.
+  string reason_code = 3;
+  // Whether the new path was validated BEFORE the old one was released.
+  // Make-before-break is mandatory; a false here is a defect, recorded so it is
+  // detectable rather than inferred.
+  bool make_before_break = 4;
+}
+
+message SessionStarted {
+  ConnectionSession session = 1;
+}
+
+message SessionResumed {
+  bytes session_id = 1;
+  uint64 path_epoch = 2;
+  // NET.RESUME_OK, NET.RESUME_STALE, NET.FULL_RENEGOTIATE — each fallback step
+  // MUST be visible (docs/protocol.md §12.1).
+  string reason_code = 3;
+}
+
+message SessionEnded {
+  bytes session_id = 1;
+  string reason_code = 2;
+}
+
+message PathChanged {
+  NetworkPath from_path = 1;
+  NetworkPath to_path = 2;
+  // NET.PATH.MIGRATED, NET.PATH.MIGRATION_ABORTED, NET.PATH.MIGRATION_FAILED,
+  // NET.PATH.DIRECT_LOST.
+  string reason_code = 3;
+}
+
+message TunnelStateChanged {
+  TunnelState from = 1;
+  TunnelState to = 2;
+  bytes tunnel_id = 3;
+  string reason_code = 4;
+}
+
+message ConnectionHealthChanged {
+  ConnectionHealth health = 1;
+  HealthState from = 2;
+  HealthState to = 3;
+}
+
+// -- Telemetry (C7) ---------------------------------------------------------
+
+// docs/protocol.md §14. Batched, coalesced, backoff-scheduled.
+//
+// AT-LEAST-ONCE, LOSS-TOLERANT. Idempotent by (device_id, sample_epoch).
+// Collector unavailability MUST NOT affect the control or data plane. Samples
+// are buffered in a BOUNDED RING and dropped oldest-first; the drop is itself
+// reported as INTERNAL.BUFFER_OVERFLOW rather than silently swallowed.
+//
+// AUTHORIZATION: channel-authenticated. Per I1 a sample MUST NOT contain tunnel
+// plaintext, and MUST NOT contain peer IP addresses BEYOND WHAT THE REPORTING
+// DEVICE ALREADY KNOWS.
+message HealthSample {
+  bytes device_id = 1;
+
+  // Absolute sample instant; the collector reorders. Samples are unordered on
+  // the wire.
+  uint64 sample_epoch = 2;
+
+  ConnectionState connection_state = 3;
+  HealthState health_state = 4;
+
+  repeated ConnectionHealth per_session = 5;
+  repeated InterfaceHealth per_interface = 6;
+
+  // ===================================================================
+  // NOT OPTIONAL. THE PROTOCOL-LEVEL TEETH BEHIND I6.
+  // ===================================================================
+  // docs/protocol.md §14: a HealthSample reporting DEGRADED or FAILED with an
+  // EMPTY reason_codes[] is A MALFORMED MESSAGE and MUST BE REJECTED by the
+  // collector with INTERNAL.MISSING_REASON.
+  repeated string reason_codes = 7;
+
+  string agent_version = 8;
+  uint32 proto_version = 9;
+
+  // ADR-0015 §11.8 items 3 and 8: the connectivity report MUST carry the active
+  // resolvers and the effective DNSPolicy, and MUST carry the current
+  // ProtectionAssertion FOR BOTH FAMILIES.
+  //
+  // This is the assertion, not the configuration: protection is ASSERTED BY
+  // QUERYING THE ENFORCEMENT LAYER, never assumed from what the agent believes
+  // it configured (ADR-0015 §11.6 rule 1). A stale assertion renders UNKNOWN,
+  // never PROTECTED.
+  DNSProtectionAssertion dns_protection = 10;
+}
+
+// Per-interface observation for the connectivity report.
+//
+// ADR-0015 §11.8 item 2: address families are reported SIDE BY SIDE AND ALWAYS
+// BOTH. A report that shows v4 and omits v6 cannot distinguish "v6 is fine"
+// from "we never looked", which is the difference between a working diagnosis
+// and a misleading one.
+message InterfaceHealth {
+  AddressFamily family = 1;
+  bool has_default_route = 2;
+  bool dns_servers_configured = 3;
+
+  // Result of the leak canary for this family. ADR-0015 §11.6 rule 4: the
+  // watchdog compares CLAIMED state against DATA-PLANE COUNTERS, because the
+  // black-hole case is invisible to configuration inspection.
+  string leak_probe_result = 4;
+}
+
+// The build identity of the loaded core. S-46, ADR-0018 §11.12 VR-3.
+//
+// ===================================================================
+// LOCAL AND DIAGNOSTIC-BUNDLE ONLY. NOT A C1/C2/C4/C5/C6 BODY.
+// ===================================================================
+// ADR-0018 VR-2: `abi_*` MUST NOT appear on any wire, and a message carrying an
+// abi_* value on the wire is a defect. VR-3: the relation between the three
+// version numbers is A TABLE, NOT AN INFERENCE — anything needing "which epochs
+// does this build speak" READS THIS TABLE, and deriving it from `core_version`
+// is prohibited.
+//
+// See contracts/docs/phase1-conflicts.md CF-8: S-46 also says telemetry holds a
+// lossy replica of this record, which is in tension with VR-2's "any wire".
+// This contract resolves the tension conservatively — the message exists for
+// the local ledger and the Tier-1 bundle, and the abi fields MUST be omitted by
+// an emitter targeting Tier 2 — and refers the tension to architecture review
+// rather than deciding it.
+message CoreBuildIdentity {
+  // V-A. SemVer. For humans, support, and telemetry.
+  string core_version = 1;
+
+  // V-B. The twinvpn.h C ABI. Compared ONLY between a shell binary and the core
+  // binary IN THE SAME PROCESS. Never on a wire.
+  uint32 abi_major = 2;
+  uint32 abi_minor = 3;
+
+  // V-C. The epoch range this build speaks.
+  uint32 protocol_epoch_min = 4;
+  uint32 protocol_epoch_max = 5;
+
+  // V-1 content identity. Not a version.
+  bytes schema_digest = 6;
+
+  uint32 reason_registry_version = 7;
+  string crypto_provider = 8;
+
+  // Build profile, e.g. "full" or "core-lite".
+  string profile = 9;
+  string target_triple = 10;
+  string source_commit = 11;
+
+  // ADR-0018 CB-6a: whether the platform key API performs the record AEAD
+  // itself, or the key is core-held. DECLARED PER TARGET rather than inferred,
+  // so "this device's vault key was software-held" is A READABLE FACT rather
+  // than an inference. On 8 of 10 targets the software-held path is the NORM,
+  // not the fallback — the declaration's value is DISCRIMINATION, not rarity.
+  bool hardware_backed = 12;
+}

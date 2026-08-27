@@ -1,0 +1,209 @@
+// TwinVPN shared contracts — routing.
+//
+// Authority: ADR-0010 (address plan, route installation, precedence, §11.5 the
+// I3 mechanism), docs/protocol.md §13.1, docs/architecture.md §3.3 `Route`,
+// S-16/S-17, S-50 (RouteConsentRecord).
+//
+// ===========================================================================
+// IPv4 AND IPv6 ARE CO-EQUAL. This is enforced structurally, not by review.
+// ===========================================================================
+// Every route-bearing message below carries `prefixes_v4` and `prefixes_v6` as
+// SEPARATE, CO-EQUAL, BOTH-REQUIRED-TO-BE-PRESENT lists (an empty list is a
+// meaningful value: "no prefixes in this family"). A device MUST NOT infer v6
+// reachability from a v4 advertisement or vice versa (docs/protocol.md §13.1).
+//
+// There is deliberately no single `prefixes` list with a family tag per entry:
+// that shape makes "I forgot to populate v6" indistinguishable from "there is
+// no v6", which is exactly the asymmetry that turns a v6-aware design into a
+// v4-only one.
+// ===========================================================================
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/common.proto";
+import "twinvpn/v1/identity.proto";
+
+// Where a route came from. Decides its precedence and what its loss means.
+enum RouteSource {
+  ROUTE_SOURCE_UNSPECIFIED = 0;
+  // The TwinNet's own overlay prefixes.
+  ROUTE_SOURCE_TWINNET = 1;
+  // A subnet advertised by a LANGateway.
+  ROUTE_SOURCE_LAN_GATEWAY = 2;
+  // A default route offered by a selected ExitNode.
+  ROUTE_SOURCE_EXIT_NODE = 3;
+}
+
+// The local decision on an advertised route. ADR-0010 P5 and S-50.
+enum RouteAcceptance {
+  ROUTE_ACCEPTANCE_UNSPECIFIED = 0;
+  // No Owner decision recorded. ABSENCE IS DENIAL (docs/threat-model.md TM-A3).
+  ROUTE_ACCEPTANCE_PENDING_CONSENT = 1;
+  ROUTE_ACCEPTANCE_ACCEPTED = 2;
+  ROUTE_ACCEPTANCE_REJECTED = 3;
+  // Overlaps an accepted prefix or an on-link network. Surfaces
+  // ROUTE.PREFIX_CONFLICT and MUST NOT be auto-resolved (S-50, R-17).
+  ROUTE_ACCEPTANCE_CONFLICTED = 4;
+}
+
+// A prefix carried in a routing contract, with the metadata a route decision
+// needs.
+message RoutePrefix {
+  // Canonical: every bit below prefix_len is zero. A non-canonical prefix is
+  // REJECTED, never normalized (see common.proto IPPrefix).
+  IPPrefix prefix = 1;
+
+  // Lower is preferred among equal-length prefixes from different gateways
+  // (ADR-0010 P4). Ties break on measured path quality first, then on
+  // advertiser device_id.
+  uint32 metric = 2;
+}
+
+// A LANGateway's signed statement that a set of subnets lives behind it.
+//
+// CLASSIFICATION: DURABLE control-plane event, TTL'd (docs/protocol.md §13.1).
+// E1 fails — no other device can re-derive that 10.7.0.0/24 lives behind that
+// gateway. E3 fails — a device that misses it blackholes the subnet
+// indefinitely and the user sees "the VPN is connected but I can't reach my
+// NAS", the archetypal cryptic failure. TTL'd because a crashed gateway must
+// not advertise forever.
+//
+// STATE OWNERSHIP: S-16. THE ADVERTISING DEVICE IS AUTHORITATIVE for its own
+// routes; the coordination service is a replica that warehouses a statement it
+// cannot forge (Rule B). A coordination service that could mint routes could
+// redirect an Owner's traffic for a subnet to an attacker-controlled device.
+message RouteAdvertisement {
+  bytes advertiser_device_id = 1;
+  string twinnet_id = 2;
+
+  // Both lists are structurally present. An advertisement MAY legitimately
+  // carry only one family populated.
+  repeated RoutePrefix prefixes_v4 = 3;
+  repeated RoutePrefix prefixes_v6 = 4;
+
+  // Monotone per advertiser. A LOWER epoch from the same advertiser MUST BE
+  // IGNORED (docs/protocol.md §13.1, S-16). Idempotent by
+  // (advertiser_device_id, advertisement_epoch).
+  uint64 advertisement_epoch = 5;
+
+  // Default 1 h, refreshed at half TTL. Expiry MUST produce a visible
+  // ROUTE.ADVERTISEMENT_EXPIRED, NOT a silent route disappearance.
+  uint64 not_after_ms = 6;
+
+  // Capability tokens a consumer must have negotiated for this advertisement to
+  // be usable, e.g. `site_remap/1` for an overlapping-prefix site. A consumer
+  // lacking one MUST REFUSE the route rather than install it and mis-deliver
+  // (ADR-0014 §11.11 `site_remap/1`: "the route is refused, not mis-delivered").
+  repeated string requires_capability = 7;
+
+  // The Rule-B signed original. The fields above are the DECODED VIEW for
+  // routing logic; this is what authorization is decided on, verified over
+  // received octets.
+  //
+  // NORMATIVE: a receiver MUST verify `signed` and MUST re-read the decoded
+  // fields FROM THE VERIFIED PAYLOAD, not from the protobuf fields above. The
+  // protobuf fields are attacker-controlled until that check passes.
+  SignedStatement signed = 8;
+}
+
+// The routing mode in force for the local device. ADR-0010, ADR-0012 §11.1.
+enum RoutingMode {
+  ROUTING_MODE_UNSPECIFIED = 0;
+
+  // Only TwinNet overlay prefixes go through the tunnel. Everything else uses
+  // the host's own routing untouched.
+  ROUTING_MODE_TWINNET_ONLY = 1;
+
+  // TwinNet prefixes plus explicitly included routes.
+  ROUTING_MODE_SPLIT_TUNNEL = 2;
+
+  // Default route for BOTH FAMILIES via the selected ExitNode.
+  //
+  // docs/protocol.md §13.3 and ADR-0010 §11.5(3): if a client requests
+  // full-tunnel egress and the exit node grants only one family, THE CLIENT
+  // MUST BLOCK THE UNGRANTED FAMILY rather than letting it egress locally. A
+  // v4-only exit grant with v6 leaking to the local ISP is the exact IPv6 leak
+  // this product must never ship.
+  ROUTING_MODE_FULL_TUNNEL = 3;
+}
+
+// The local device's effective routing program.
+//
+// STATE OWNERSHIP: S-17, class LOCAL. Each device decides what it installs.
+// Conflicts with pre-existing system routes SURFACE AS DIAGNOSTICS (R-17),
+// NEVER a silent overwrite.
+//
+// ADR-0008 N-8: local OS-state application MUST be a reconciliation of a
+// FULLY-COMPUTED desired state, conflict-checked against pre-existing system
+// state BEFORE any mutation, ALL-OR-NOTHING, with verified read-back. This
+// message is that fully-computed desired state — it exists so that a partial
+// apply is representable as a failure rather than as a half-populated table.
+message RoutePolicy {
+  // Stable identifier of the policy this program was derived from. Assigned by
+  // the Owner authority; see policy.proto.
+  string policy_id = 1;
+
+  // Monotone. A device MUST reject a lower version (ADR-0008 N-3).
+  uint64 policy_version = 2;
+
+  RoutingMode mode = 3;
+
+  // Prefixes routed INTO the tunnel. Co-equal lists.
+  repeated RoutePrefix included_v4 = 4;
+  repeated RoutePrefix included_v6 = 5;
+
+  // Prefixes explicitly kept OFF the tunnel, evaluated after `included_*` by
+  // longest-prefix match (ADR-0010 P1).
+  repeated RoutePrefix excluded_v4 = 6;
+  repeated RoutePrefix excluded_v6 = 7;
+
+  // Whether a default route is claimed, PER FAMILY. Two independent booleans,
+  // never one flag.
+  //
+  // ADR-0010 §11.3: on every platform, IPv4 and IPv6 routes MUST be installed
+  // in THE SAME apply() TRANSACTION. An implementation that can install one
+  // family's routes without the other's is NON-CONFORMING.
+  //
+  // docs/protocol.md §13.1: advertising 0.0.0.0/0 without ::/0, or the reverse,
+  // is a LEAK CONDITION and MUST be rejected with ROUTE.DEFAULT_SINGLE_FAMILY
+  // unless the local kill-switch configuration explicitly BLOCKS the
+  // unadvertised family.
+  optional bool default_route_v4 = 8;
+  optional bool default_route_v6 = 9;
+
+  // ADR-0010 P6: only a selected ExitNode may supply a default route.
+  // Otherwise ROUTE.SCOPE_VIOLATION.
+  bytes default_route_exit_node_device_id = 10;
+
+  // The device's own LAN prefixes, kept reachable in split and TwinNet-only
+  // modes. Populated from the local interface set, never from a peer.
+  repeated RoutePrefix lan_v4 = 11;
+  repeated RoutePrefix lan_v6 = 12;
+}
+
+// One installed or considered route, with its acceptance decision.
+// docs/architecture.md §3.3 `Route`.
+message Route {
+  // Identity is (device_id, prefix, family) — DERIVED, not assigned. There is
+  // no route_id: a route is not an object with a lifetime, it is a fact about a
+  // prefix and a next hop.
+  bytes next_hop_device_id = 1;
+  IPPrefix prefix = 2;
+  AddressFamily family = 3;
+
+  RouteSource source = 4;
+  uint32 metric = 5;
+  RouteAcceptance acceptance = 6;
+
+  // The advertiser's epoch this route was derived from.
+  uint64 advertisement_epoch = 7;
+
+  // Set when acceptance is CONFLICTED. Names the competing prefix and its
+  // source, because ADR-0010 P5 requires the conflict to name BOTH prefixes,
+  // BOTH sources, and the winner — silently picking a winner is how traffic
+  // ends up at the wrong gateway.
+  IPPrefix conflicting_prefix = 8;
+  bytes conflicting_source_device_id = 9;
+}

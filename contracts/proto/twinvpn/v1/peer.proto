@@ -1,0 +1,196 @@
+// TwinVPN shared contracts — the peer relationship and its permissions.
+//
+// Authority: docs/architecture.md §3.3 `TrustedPeer`, S-05 (LOCAL, no remote
+// replica), ADR-0007 N-19, ADR-0007 §11.3 (S-05 amendment), ADR-0014 §11.5
+// (S-37 negotiation floor), docs/protocol.md §9.1, §13.2, §13.4.
+//
+// TERMINOLOGY: Phase 1 calls this entity `TrustedPeer`, not `Peer`. The name is
+// load-bearing: it states that the relationship IS the trust, established by a
+// Pairing ceremony and destroyed by revocation. `Peer` would suggest a
+// discovered network participant, which LAN discovery explicitly may not
+// introduce (docs/protocol.md §9.1: "LAN discovery MUST NOT be able to
+// introduce a peer").
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/capability.proto";
+import "twinvpn/v1/common.proto";
+import "twinvpn/v1/identity.proto";
+
+// The degree of trust currently held in a peer, as DERIVED locally.
+//
+// This is a computed view, never a transmitted authority: a peer does not tell
+// you how much you trust it. It is recomputed from the local TrustedPeer
+// record, the revocation state, and the trust-freshness timers of
+// ADR-0007 N-27.
+enum PeerTrust {
+  PEER_TRUST_UNSPECIFIED = 0;
+
+  // A confirmed Pairing exists, the TunnelKeyBinding verified, and trust state
+  // was refreshed within T_TRUST_REFRESH (6 h).
+  PEER_TRUST_TRUSTED = 1;
+
+  // No trust refresh for T_TRUST_STALE (24 h). AUTH.TRUST_STATE_STALE; the
+  // Session goes DEGRADED. Connectivity continues.
+  PEER_TRUST_STALE = 2;
+
+  // No trust refresh for T_TRUST_HARD (30 d, Owner-configurable within
+  // [24 h, 90 d]). AUTH.TRUST_STATE_EXPIRED.
+  //
+  // ADR-0007 N-27, and this is the subtle one: every GRANTED authority is
+  // suspended — ExitNode use, LANGateway access, route acceptance, new Pairing
+  // — but this MUST NOT refuse a new handshake to an already-known TrustedPeer
+  // (R-11), and established Sessions MUST continue (I5). Expiry withdraws
+  // grants; it does not withdraw identity.
+  PEER_TRUST_EXPIRED = 3;
+
+  // An Owner-signed RevocationStatement for this peer has been verified.
+  // TERMINAL. ADR-0007 N-25(1): peer refusal is LOCAL and takes effect the
+  // instant the statement verifies, whatever its provenance — control plane,
+  // peer relay, or manual import — and requires no epoch number and no
+  // control-plane reachability. This is the effect that must survive a
+  // partition, and it does.
+  PEER_TRUST_REVOKED = 4;
+}
+
+// One access-control decision. docs/architecture.md §3.3 `AccessPolicy`.
+//
+// AUTHORSHIP: an Owner authority holding an OSK with the POLICY power authors
+// these; they are distributed inside the Owner-signed PolicyBundle (S-06). The
+// coordination service WAREHOUSES and DISTRIBUTES but CANNOT AUTHOR — otherwise
+// a compromised coordination service could disable every kill switch in the
+// fleet, which would make I1 and I3 jointly worthless.
+//
+// ENFORCEMENT: at the RESOURCE OWNER, never at the requester
+// (docs/protocol.md §13.2). The gateway evaluates its own AccessPolicy against
+// the requesting DeviceIdentity; the client's view of policy is advisory. That
+// asymmetry is what makes a compromised client unable to grant itself access.
+message PeerPermission {
+  // Subject: the device this rule is about. Empty means "every device in the
+  // TwinNet".
+  bytes subject_device_id = 1;
+
+  // Object of the permission. Exactly one.
+  oneof object {
+    // Peer-to-peer reachability of a specific device.
+    bytes object_device_id = 2;
+    // A routed prefix behind a LANGateway.
+    IPPrefix object_prefix = 3;
+    // Use of a device as an ExitNode.
+    bytes object_exit_node_device_id = 4;
+  }
+
+  // ALLOW or DENY. Absence of a matching rule is DENIAL, not permission
+  // (docs/threat-model.md TM-A3, and docs/protocol.md §13.3 for the exit-node
+  // case: "an absent field is a denial, not a permission").
+  optional bool allow = 5;
+
+  // Optional port/protocol narrowing. An empty list means "all ports".
+  repeated PortRange port_ranges = 6;
+
+  // Which address families this rule covers. EMPTY IS MALFORMED, not "both":
+  // a rule that is silent about a family is exactly the single-family
+  // authorization hole ADR-0010 §11.5 and docs/protocol.md §13.2's
+  // POLICY.FAMILY_UNSUPPORTED exist to prevent.
+  repeated AddressFamily families = 7;
+
+  // Validity window on the rule itself, independent of the bundle's.
+  uint64 not_before_ms = 8;
+  uint64 not_after_ms = 9;
+}
+
+message PortRange {
+  // IANA protocol number: 6 TCP, 17 UDP, 1 ICMP, 58 ICMPv6.
+  uint32 ip_protocol = 1;
+  // Inclusive. 1..65535. `first <= last`.
+  uint32 first_port = 2;
+  uint32 last_port = 3;
+}
+
+// The local view of a paired peer. docs/protocol.md §9.1 `TrustedPeer`.
+//
+// STATE OWNERSHIP: S-05, class LOCAL. "No remote replica, by construction"
+// (ADR-0007 §11.3 amendment). Local wins, except deletion forced by S-03
+// revocation.
+//
+// SECRET-FIELD NOTE: the on-device TrustedPeer record ALSO holds `PairSecret`
+// and the pinned anchor/delegation chain and the current EpochSeed
+// (ADR-0007 N-19). NONE of those appear in this message, and none may be added:
+// N-19 states PairSecret "MUST NOT be transmitted, backed up, or replicated".
+// This message is the TRANSMISSIBLE projection of that record — what a
+// GetPeersResp may carry — and is deliberately a strict subset.
+message TrustedPeer {
+  bytes peer_device_id = 1;
+
+  // The peer's public identity, including the verified TunnelKeyBinding.
+  DeviceIdentity identity = 2;
+
+  // Owner-chosen label, used in every user-facing diagnostic. ADR-0014 N-27
+  // requires a lost capability to name the peer BY ITS USER-VISIBLE LABEL, so
+  // this field is what makes "Update Study PC" possible instead of a hex id.
+  string label = 3;
+
+  // Overlay addresses. Both required; see device.proto.
+  IPv4Address twinnet_address_v4 = 4;
+  IPv6Address twinnet_address_v6 = 5;
+
+  repeated DeviceRoleRef roles = 6;
+
+  // The peer's advertised set. A CACHED HINT for UI and pre-flight prediction
+  // only. ADR-0014 §9: it MUST NOT be used to omit the advertisement, because
+  // the advertisement is precisely what gets bound into the transcript. A
+  // cached set is a hint; the wire is the contract.
+  CapabilitySet capabilities = 7;
+
+  ProtocolVersion protocol_version = 8;
+
+  // Locally derived; never transmitted as an authority.
+  PeerTrust trust = 9;
+
+  // The revocation epoch at which this record was last confirmed. MONOTONIC:
+  // a device keeps a high-water mark and rejects any lower epoch as a rollback
+  // attempt (docs/protocol.md §8.3, ADR-0007 N-26).
+  uint64 revocation_epoch = 10;
+}
+
+// Indirection so device.proto's DeviceRole enum is not duplicated here while
+// keeping peer.proto independently reviewable.
+message DeviceRoleRef {
+  // Numeric value of twinvpn.v1.DeviceRole.
+  uint32 role = 1;
+}
+
+// The per-TrustedPeer anti-downgrade floor. ADR-0014 §11.5, state row S-37.
+//
+// STATE OWNERSHIP: S-37. Authoritative writer is the LOCAL Device. "None by
+// construction — NEVER TRANSMITTED, NEVER REPLICATED." Class MONOTONIC.
+//
+// THIS MESSAGE IS DEFINED FOR LOCAL PERSISTENCE AND DIAGNOSTIC RENDERING ONLY.
+// It MUST NOT appear as the body of any C1, C2, C4, C5, C6 or C7 message.
+// ADR-0014 N-20: clearing or lowering a floor requires an authenticated LOCAL
+// management-plane action by the Owner, MUST name the peer, the recorded floor
+// and the offered value, and MUST NOT be triggerable by the control plane or by
+// any peer. A floor that could be transmitted could be lowered remotely, which
+// would delete the anti-rollback property entirely.
+message NegotiationFloor {
+  bytes peer_device_id = 1;
+
+  // Highest ProtocolEpoch ever successfully negotiated with this peer. An offer
+  // strictly below this is refused with PROTO.DOWNGRADE_REFUSED.
+  uint32 floor_epoch = 2;
+
+  // ADR-0014 N-19 NARROWS ADR-0001 D3 here, and the narrowing matters: the
+  // floor covers only tokens the registry marks `security_relevant: true`, not
+  // the whole capability set. A whole-set ratchet is unsound because capability
+  // sets are a PARTIAL order and a capability can legitimately vanish when an
+  // OS revokes a permission — ratcheting the whole set would permanently brick
+  // an honest device. Losing a non-security capability is a legitimate,
+  // surfaced degradation; losing a security-relevant one is refused.
+  repeated Capability security_relevant_capabilities = 3;
+
+  // Local monotonic reading of when the floor last advanced. Never compared
+  // across devices.
+  MonotonicMicros last_advanced_at = 4;
+}

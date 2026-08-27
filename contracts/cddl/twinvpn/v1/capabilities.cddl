@@ -1,0 +1,80 @@
+; TwinVPN capability registry schema.
+;
+; Authority: ADR-0014 §10 (the registry is a machine-readable artifact,
+; `capabilities.cddl` + `capabilities.json`, published immutably per release and
+; DIFFED IN CI AS APPEND-ONLY), §11.3 (N-11..N-15), §11.11 (the initial
+; registry), ADR-0003 §11 rule 4, ADR-0018 §11.16 (I-4).
+;
+; This schema constrains contracts/registry/capabilities.json. The JSON is the
+; artifact; this is its contract.
+
+capability-name = tstr .regexp "[a-z][a-z0-9_]{0,31}"   ; N-11, snake_case, <= 32 chars
+;
+; The bound was raised from 24 to 32 characters by the 2026-08-27 amendment to
+; ADR-0014 N-11. As originally written, N-11 contradicted ADR-0014 §11.11's own
+; registry table, which lists `dns_config_dies_with_tunnel/1` at 27 characters.
+; Raising the bound was preferred over renaming the token because the token is
+; `security_relevant` and therefore participates in the S-37 monotonic floor,
+; where a rename is a COMPATIBILITY EVENT rather than an editorial change.
+; N-10's 32-token and 512 B caps are unchanged and remain the binding limits.
+
+reduction = "MIN" / "MAX" / "INTERSECT" / "EQUAL"       ; N-13
+
+; N-13: reduction MUST NOT be role-dependent. "Initiator wins" would be an
+; asymmetric-authority downgrade lever.
+capability-parameter = {
+  name: tstr .size (1..24),
+  reduction: reduction,
+  ? allowed_values: [+ tstr],   ; for INTERSECT parameters
+}
+
+capability-entry = {
+  name: capability-name,
+
+  ; N-12: DIFFERENT MAJORS OF THE SAME NAME ARE DISTINCT CAPABILITIES and do not
+  ; intersect. There is no implicit "higher major implies lower".
+  major: uint,
+
+  ; <= 8 parameters, <= 256 B of parameters total (N-10).
+  parameters: [* capability-parameter],
+
+  ; N-19: participates in the S-37 monotonic floor. The floor covers ONLY these
+  ; tokens, NOT the whole capability set — a whole-set ratchet would permanently
+  ; brick an honest device whose OS revokes a permission, because capability
+  ; sets are a PARTIAL order and a capability can legitimately vanish.
+  security_relevant: bool,
+
+  ; N-17(4): loss mid-session forces a NEW Tunnel (the Session and its
+  ; session_id survive). N-17(3): the negotiated set is NEVER MUTATED.
+  session_critical: bool,
+
+  ; N-14, THE REAL-PROBE RULE. What the Platform Network Adapter must have
+  ; OBSERVED — in this process, on this OS build, with the permissions currently
+  ; granted — before this token may be advertised. A build-time constant, a
+  ; compile flag, or an OS-version table MUST NOT be the sole basis.
+  probe_evidence: tstr,
+
+  ; What a user is told when the token is absent from the negotiated set.
+  ; N-27: exactly ONE Diagnostic per (Session, token, Tunnel) — loud once, never
+  ; a per-packet source. N-28: SILENCE IS A DEFECT.
+  absent_consequence: tstr,
+
+  ; The ADR that owns this token and must confirm or rename it (§11.12 I-6).
+  owning_adr: tstr,
+
+  ; The epoch at which this token was added. Append-only.
+  introduced_in_epoch: uint,
+
+  status: "ACTIVE" / "DEPRECATED" / "RETIRED",
+  ? alias_of: capability-name,
+}
+
+capability-registry = {
+  registry_version: uint,
+  ; N-10: a CI contract test MUST serialise the COMPLETE CURRENT REGISTRY and
+  ; assert it fits the 512 B advertisement reservation, so REGISTRY GROWTH FAILS
+  ; THE BUILD RATHER THAN THE FIELD.
+  advertisement_byte_budget: uint,
+  max_tokens_per_advertisement: uint,
+  capabilities: [+ capability-entry],
+}

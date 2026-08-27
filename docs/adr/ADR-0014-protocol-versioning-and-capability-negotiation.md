@@ -522,9 +522,30 @@ complete current registry and assert it fits the 512 B reservation.
 ### 11.3 Normative rules — capabilities
 
 **N-11 — naming.** A capability token is `name/major` where `name` matches
-`[a-z][a-z0-9_]{0,23}` (snake_case) and `major` is a decimal integer ≥ 1 with no leading zeros.
-This matches the form already used by [docs/networking.md](../networking.md) A7
-(`ipv6_underlay`, …) and [ADR-0005](ADR-0005-relay-architecture.md) §11 (`relay_udp`, …).
+`[a-z][a-z0-9_]{0,31}` (snake_case, **at most 32 characters**) and `major` is a decimal integer
+≥ 1 with no leading zeros. This matches the form already used by
+[docs/networking.md](../networking.md) A7 (`ipv6_underlay`, …) and
+[ADR-0005](ADR-0005-relay-architecture.md) §11 (`relay_udp`, …).
+
+> **Amended 2026-08-27 — bound raised from 24 to 32 characters.**
+>
+> As originally written the bound was `{0,23}`, i.e. 24 characters. **§11.11 of this
+> same ADR lists `dns_config_dies_with_tunnel/1`, which is 27** — so the rule
+> contradicted its own registry, and the contract package could not implement both.
+> This is conflict **CF-6** in `contracts/docs/phase1-conflicts.md`.
+>
+> **Raising the bound is preferred over renaming the token**, for two reasons. The
+> token is marked `security_relevant`, so it participates in the **S-37 monotonic
+> floor**: renaming it is a *compatibility event* that would refuse connections
+> against any peer whose floor recorded the old spelling, not an editorial change.
+> And the cost of the wider bound is bounded and small — at most 8 additional bytes
+> per over-long token against the **512 B advertisement reservation** of N-10, which
+> the CI test in N-10 already asserts the whole registry fits.
+>
+> **N-10's caps are unchanged.** The 32-token count limit and the 512 B total remain
+> the binding constraints; this amendment relaxes only the per-name length, and the
+> N-10 test remains the gate that makes registry growth fail the build rather than
+> the field.
 
 **N-12 — intersection.** A token is negotiated iff `(name, major)` appears in **both**
 advertisements. Different majors of the same name are **distinct capabilities** and do not

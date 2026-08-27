@@ -1,0 +1,34 @@
+{
+  "type": "twinvpn.v1.ErrorEnvelope",
+  "value": {
+    "reasonCode": "PROTO.CAPABILITY_REQUIRED_UNAVAILABLE",
+    "domain": "PROTO",
+    "resolved": {
+      "class": "ERROR_CLASS_POLICY",
+      "severity": "ERROR_SEVERITY_ERROR",
+      "terminal": true,
+      "userActionable": true,
+      "remediationClass": "REMEDIATION_CLASS_POLICY_CHANGE",
+      "scope": "DIAGNOSTIC_SCOPE_SESSION",
+      "docAnchor": "adr-0014#proto_capability_required_unavailable",
+      "summaryKey": "reason.proto_capability_required_unavailable.summary",
+      "nextActionKey": "reason.proto_capability_required_unavailable.next_action"
+    },
+    "component": "COMPONENT_POLICY_ENGINE",
+    "evidence": [
+      {
+        "key": "capability",
+        "classification": "FIELD_CLASSIFICATION_PUBLIC",
+        "stringValue": "per_app_routing/1"
+      },
+      {
+        "key": "policy_version",
+        "classification": "FIELD_CLASSIFICATION_OPERATIONAL",
+        "uintValue": "42"
+      }
+    ],
+    "occurredAtMs": "1756300000000",
+    "stateFrom": 4,
+    "stateTo": 11
+  }
+}

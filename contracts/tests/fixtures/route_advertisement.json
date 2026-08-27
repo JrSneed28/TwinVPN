@@ -1,0 +1,35 @@
+{
+  "type": "twinvpn.v1.RouteAdvertisement",
+  "value": {
+    "advertiserDeviceId": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "twinnetId": "tn-01H0",
+    "prefixesV4": [
+      {
+        "prefix": {
+          "address": {
+            "v4": {
+              "octets": "CgcAAA=="
+            }
+          },
+          "prefixLen": 24
+        },
+        "metric": 10
+      }
+    ],
+    "prefixesV6": [
+      {
+        "prefix": {
+          "address": {
+            "v6": {
+              "octets": "/QABAgMEAAAAAAAAAAAAAAA="
+            }
+          },
+          "prefixLen": 64
+        },
+        "metric": 10
+      }
+    ],
+    "advertisementEpoch": "3",
+    "notAfterMs": "1756303600000"
+  }
+}

@@ -1,0 +1,256 @@
+// TwinVPN shared contracts — gateway and exit-node roles.
+//
+// Authority: docs/protocol.md §13.2 (LAN access) and §13.3 (exit-node
+// negotiation), ADR-0013 (multi-client gateway architecture),
+// docs/architecture.md §3.3 `ExitNode` / `LANGateway`, S-36.
+//
+// ===========================================================================
+// A GATEWAY IS A ROLE, NOT AN ENTITY. There is no `gateway_id`.
+// ===========================================================================
+// docs/architecture.md §3.3: `ExitNode` and `LANGateway` are both identified by
+// "the device_id of the acting device — DERIVED". A Device is at most one
+// ExitNode and at most one LANGateway.
+//
+// Minting a separate gateway_id would create a second name for one thing, and
+// therefore a second place for authorization to be decided. Every grant below
+// is keyed by device_id so that the peer's revocation state — the single fact
+// that must revoke access — applies without a join.
+// ===========================================================================
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/common.proto";
+import "twinvpn/v1/errors.proto";
+import "twinvpn/v1/identity.proto";
+import "twinvpn/v1/routing.proto";
+
+// A capability a device offers in a gateway role. These are the ADR-0014
+// §11.11 registry tokens, surfaced here as a typed enum for the offer/grant
+// contracts; the REGISTRY remains the sole source of token names and their
+// sec/crit flags.
+enum GatewayCapability {
+  GATEWAY_CAPABILITY_UNSPECIFIED = 0;
+  // `lan_gateway/1` — forwarding plus per-peer policy hooks installable.
+  // security_relevant. Absent => subnet routes are not accepted.
+  GATEWAY_CAPABILITY_LAN_GATEWAY = 1;
+  // `exit_node/2` — forwarding AND source translation programmable, PER
+  // FAMILY. security_relevant. Absent for a family => that family is NOT
+  // OFFERED, never silently forwarded untranslated.
+  GATEWAY_CAPABILITY_EXIT_NODE = 2;
+  // `gateway_multiclient/1` — per-peer state and accounting available.
+  // Absent => the I7 gateway role is unavailable.
+  GATEWAY_CAPABILITY_MULTI_CLIENT = 3;
+  // `site_remap/1` — policy-routing table writable and per-prefix translation
+  // programmable. security_relevant. Absent => overlapping LAN prefixes cannot
+  // be disambiguated and the route is REFUSED, not mis-delivered.
+  GATEWAY_CAPABILITY_SITE_REMAP = 4;
+}
+
+// A Device acting as a LANGateway. docs/architecture.md §3.3 `LANGateway`.
+message LanGateway {
+  bytes device_id = 1;
+
+  // The subnets offered. Carried as a RouteAdvertisement so there is exactly
+  // one advertisement shape in the system.
+  RouteAdvertisement advertisement = 2;
+
+  repeated GatewayCapability capabilities = 3;
+
+  // ADR-0013 / I7: a LANGateway MUST serve MANY concurrent clients with
+  // INDEPENDENT grants, per-client Route scoping, and per-client accounting.
+  // GRANTS MUST NOT BE GLOBAL GATEWAY STATE. This is the advertised ceiling,
+  // reduced by MIN against the peer's during capability negotiation.
+  uint32 max_peers = 4;
+
+  // NAT vs routed mode for the advertised subnets.
+  bool nat_mode = 5;
+}
+
+// A Device offering itself as an ExitNode. docs/protocol.md §13.3
+// `ExitNodeOffer`.
+//
+// CLASSIFICATION: DURABLE control-plane event, TTL'd, for the OFFER.
+// "Device X is willing to be an exit node" is not re-derivable and must reach
+// devices that were offline. The USE ("client Y is now egressing through X") is
+// a two-party session fact carried peer-direct, because it must survive a
+// control-plane outage.
+message ExitNode {
+  bytes device_id = 1;
+
+  // ===================================================================
+  // PER-FAMILY, INDEPENDENT, AND EXPLICIT. NO DEFAULTING.
+  // ===================================================================
+  // docs/protocol.md §13.3: `supports_default_v4` and `supports_default_v6` are
+  // INDEPENDENT. The protocol requires an explicit per-family offer with NO
+  // DEFAULTING — an absent field is a DENIAL, not a permission.
+  optional bool supports_default_v4 = 2;
+  optional bool supports_default_v6 = 3;
+
+  // Which families this node can actually egress. Must be consistent with the
+  // booleans above; a validator rejects a node claiming default-route support
+  // for a family it does not list here.
+  repeated AddressFamily egress_families = 4;
+
+  // Coarse locality for user selection. Never finer than a country.
+  string geo_hint = 5;
+
+  // Coarse bandwidth tier, not a measured number: a precise figure would be a
+  // fingerprint and would go stale immediately.
+  uint32 bandwidth_class = 6;
+
+  // Monotone per offerer. A lower epoch from the same offerer is IGNORED.
+  uint64 offer_epoch = 7;
+
+  uint64 not_after_ms = 8;
+
+  // The Rule-B device-signed original. Authorization is decided on this,
+  // verified over received octets; the fields above are the decoded view.
+  SignedStatement signed = 9;
+}
+
+// A client's in-session request to egress through an ExitNode.
+// docs/protocol.md §13.3 `ExitNodeEngage`.
+message ExitNodeEngageRequest {
+  bytes session_id = 1;
+
+  // Requested per family, independently.
+  bool request_default_v4 = 2;
+  bool request_default_v6 = 3;
+
+  // Which DNS mode the client wants while engaged. The ExitNode's grant is
+  // authoritative; ADR-0011 §11.5 forbids DNS_MODE_OFF while an ExitNode is
+  // engaged.
+  uint32 dns_mode = 4;
+}
+
+// The ExitNode's decision. docs/protocol.md §13.3 `ExitNodeEngaged`.
+//
+// AUTHORIZATION: THE ExitNode ENFORCES ITS OWN AccessPolicy; the client cannot
+// self-authorize. Both must be TrustedPeers at the current revocation_epoch.
+message ExitNodeGrant {
+  bytes session_id = 1;
+  bytes exit_node_device_id = 2;
+
+  // ===================================================================
+  // GRANTED PER FAMILY, INDEPENDENTLY. THE CRITICAL FIELD PAIR.
+  // ===================================================================
+  // docs/protocol.md §13.3: "IF A CLIENT REQUESTS FULL-TUNNEL EGRESS AND THE
+  // EXIT NODE GRANTS ONLY ONE FAMILY, THE CLIENT MUST BLOCK THE UNGRANTED
+  // FAMILY rather than letting it egress locally. A v4-only exit grant with v6
+  // leaking to the local ISP is the exact IPv6 leak this product must never
+  // ship."
+  //
+  // The enforcement mechanism is ADR-0012's; the CONTRACT OBLIGATION TO STATE
+  // BOTH FAMILIES EXPLICITLY is discharged here. An absent value is a denial.
+  optional bool granted_default_v4 = 3;
+  optional bool granted_default_v6 = 4;
+
+  // Resolvers to use while engaged, per family. Both lists structurally
+  // present; see dns.proto on why an empty list is a value and not an absence.
+  repeated IPv4Address dns_servers_v4 = 5;
+  repeated IPv6Address dns_servers_v6 = 6;
+
+  uint32 mtu = 7;
+  uint64 ttl_ms = 8;
+
+  // Present iff the engagement was refused or partially granted. A partial
+  // grant is NOT a silent success: the client must be told which family was
+  // withheld so it can block that family rather than leak it. Codes include
+  // POLICY.CAPACITY, POLICY.POLICY_DENIED, POLICY.OFFLINE, POLICY.NO_V6_EGRESS.
+  ErrorEnvelope error = 9;
+}
+
+// A client's in-session request to reach a subnet behind a LANGateway.
+// docs/protocol.md §13.2 `LANAccessRequest`.
+message LanAccessRequest {
+  bytes session_id = 1;
+  IPPrefix prefix = 2;
+  AddressFamily family = 3;
+}
+
+// The gateway's decision. docs/protocol.md §13.2 `LANAccessGrant`.
+//
+// STATE OWNERSHIP: S-36. The GATEWAY is the enforcement authority; the
+// requesting client caches its own grant with the grant TTL, and the client's
+// view of policy is ADVISORY. Non-durable and reconstructible from S-06 + S-16
+// plus the client's re-request.
+//
+// The gateway MUST re-evaluate on PolicyBundleUpdated and REVOKE LIVE GRANTS
+// that no longer pass, surfacing POLICY.GRANT_REVOKED_BY_POLICY.
+message LanAccessGrant {
+  bytes session_id = 1;
+  bytes gateway_device_id = 2;
+
+  IPPrefix prefix = 3;
+  AddressFamily family = 4;
+
+  optional bool granted = 5;
+
+  uint64 ttl_ms = 6;
+  uint32 mtu = 7;
+
+  // Resolvers and search domains for the granted subnet, per family.
+  repeated IPv4Address dns_servers_v4 = 8;
+  repeated IPv6Address dns_servers_v6 = 9;
+  repeated string search_domains = 10;
+
+  // Present iff not granted, or granted for fewer families than requested.
+  //
+  // docs/protocol.md §13.2 requires these to be NAMED PRECISELY:
+  //   POLICY.NOT_ADVERTISED       — the gateway does not advertise that prefix
+  //   POLICY.POLICY_DENIED        — AccessPolicy refuses this requester
+  //   POLICY.PREFIX_COLLIDES_LOCAL— the client's OWN LAN uses the same RFC 1918
+  //                                 range. An extremely common real-world
+  //                                 failure that MUST carry the colliding
+  //                                 prefix in the diagnostic.
+  //   POLICY.FAMILY_UNSUPPORTED   — the gateway can forward only one family and
+  //                                 SAYS SO, rather than granting v4 and
+  //                                 silently blackholing v6. Silent
+  //                                 single-family grants are a leak/blackhole
+  //                                 class defect.
+  ErrorEnvelope error = 11;
+}
+
+// The Owner-authored LAN-access rule set a gateway enforces.
+//
+// This is the POLICY INPUT (a projection of the signed PolicyBundle's
+// access_rules for LAN objects), distinct from LanAccessGrant which is the
+// gateway's runtime DECISION. Keeping them separate is what makes "the gateway
+// is the enforcement point" checkable: policy is signed and distributed, grants
+// are local and per-client.
+message LanAccessPolicy {
+  string policy_id = 1;
+  uint64 policy_version = 2;
+
+  bytes gateway_device_id = 3;
+
+  // Which peers may reach which advertised prefixes. Evaluated at the GATEWAY
+  // against the requesting DeviceIdentity.
+  repeated LanAccessRule rules = 4;
+}
+
+message LanAccessRule {
+  // Empty means "any peer in the TwinNet".
+  bytes peer_device_id = 1;
+
+  IPPrefix prefix = 2;
+
+  // Which families this rule covers. EMPTY IS MALFORMED, not "both" — see
+  // peer.proto PeerPermission.families for why.
+  repeated AddressFamily families = 3;
+
+  optional bool allow = 4;
+
+  // Optional port/protocol narrowing, sharing peer.proto's PortRange shape.
+  repeated PortRangeRef port_ranges = 5;
+}
+
+// Structural mirror of peer.proto PortRange, kept local so gateway.proto does
+// not import the peer relationship surface to express a port filter.
+message PortRangeRef {
+  uint32 ip_protocol = 1;
+  uint32 first_port = 2;
+  uint32 last_port = 3;
+}

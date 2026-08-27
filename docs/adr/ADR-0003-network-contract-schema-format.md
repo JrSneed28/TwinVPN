@@ -42,10 +42,49 @@ design a novel construction with signature-malleability holes.
 | R5 | Wire size on B1/B3 MUST be small enough that a mobile radio wakeup is not dominated by encoding overhead. |
 | R6 | Encode/decode cost on B1/B3 MUST be negligible relative to a network RTT on a low-end mobile CPU. |
 | R7 | B4 MUST have **zero** serialization framework in the packet path. |
-| R8 | Cross-language tooling MUST cover at minimum Go, Rust, Swift, Kotlin, C, and TypeScript (device agents across five OS families plus server and UI). |
+| R8 | Cross-language tooling MUST cover at minimum Go, Rust, Swift, Kotlin, C, and TypeScript (device agents across five OS families plus server and UI). **Amended 2026-08-27 — see §2.1.** |
 | R9 | B5 MUST be human-readable and diffable without tooling. |
 | R10 | The chosen format(s) MUST be expressible in a machine-checkable schema so contract drift between components is caught in CI, not in the field. |
 | R11 | Signed statements MUST support a "critical field" concept so that a security-relevant extension cannot be silently ignored by an old reader. |
+
+### 2.1 What R8 is, and is not (amendment, 2026-08-27)
+
+R8 is a **selection criterion on the format's ecosystem**, not a generation
+manifest. It was written to discriminate between candidate encodings — the
+question it answers is *"does this format have mature codegen everywhere we
+might plausibly need it?"*, which is why it names the union of every language
+the product could touch, and why it says **"at minimum"**.
+
+It is **not** a list of bindings that must be generated. The bindings actually
+generated are fixed by
+[ADR-0018](ADR-0018-shared-core-and-build-architecture.md) §11.12 —
+**Rust, Swift, Kotlin and C#** — one per real consumer:
+
+| Binding | Consumer | Source |
+|---|---|---|
+| Rust | the shared core, the Linux/Windows/OpenWrt shells, the relay server | ADR-0018 §11.3, §11.9 |
+| Swift | the iOS, iPadOS and macOS shells | ADR-0018 §11.9 |
+| Kotlin (+ Java) | the Android shell | ADR-0018 §11.9 |
+| C# | the Windows WinUI application shell | ADR-0018 §11.9, §12 item 9 |
+
+**Go, C and TypeScript are not generated**, because ADR-0018 assigns no Phase 1
+component to any of them. Generating an unassigned binding is not free: it
+becomes a permanent CI, review and compatibility obligation — every schema change
+must keep compiling in a language nobody consumes, and a language that cannot
+express a change would block it for no benefit.
+
+**This amendment resolves conflict CF-2** recorded in
+`contracts/docs/phase1-conflicts.md`. R8's *substance* is unchanged and still
+holds: protobuf was selected partly because its tooling reaches all six, and that
+reach is what makes adding a fifth binding a decision rather than a migration.
+
+**One measured constraint on ever adding a JS/TypeScript binding.** §11's B1 row
+requires unknown fields to be **preserved and forwarded**. The Phase 2 contract
+tests measured this across two runtimes: the Go implementation preserves unknown
+fields; **protobufjs does not**. Any language chosen for a component that
+*forwards* a message it does not fully understand — the coordination service, the
+rendezvous, a relay carrying an opaque `CALL` — MUST use a runtime with
+preserve-and-forward, and that MUST be verified rather than assumed.
 
 ## 3. Constraints
 

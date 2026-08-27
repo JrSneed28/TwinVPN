@@ -1,0 +1,117 @@
+// TwinVPN shared contracts — presence.
+//
+// Authority: docs/protocol.md §9.2, §6 (the ephemeral/durable test), §7 (event
+// ownership), S-11.
+//
+// ===========================================================================
+// CLASSIFICATION: EPHEMERAL. This is not a stylistic label.
+// ===========================================================================
+// docs/protocol.md §6 applies the four checks: presence is re-derivable by
+// probing (E1 pass), decays within ~60 s (E2 pass), missing it only makes the
+// UI stale and self-heals (E3 pass), and replay is useless (E4 pass).
+//
+// Making presence durable would be a defect on three axes at once
+// (docs/protocol.md §6.1):
+//   - COST: with N devices at a 30 s heartbeat, the durable log write rate is
+//     dominated by information with a 60 s shelf life.
+//   - SECURITY: on reconnect a device would have to drain thousands of obsolete
+//     presence events before reaching the one DeviceRevoked that matters — a
+//     DENIAL-OF-FRESHNESS surface an adversary triggers simply by flapping.
+//   - PRIVACY: a durable presence log is a permanent movement and IP-address
+//     history of the Owner held by infrastructure. Infrastructure that cannot
+//     read your traffic but can reconstruct where you were every hour for two
+//     years has not achieved zero knowledge.
+//
+// S-11 and docs/protocol.md §9.2: presence is EVENTUAL, TTL-bounded, and the
+// device is authoritative for its OWN presence — nobody may override it.
+// PRESENCE IS NEVER A GATE: a "peer offline" record MUST NOT suppress a
+// connection attempt (S-11, ADR-0002 §11.5).
+// ===========================================================================
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+enum PresenceState {
+  PRESENCE_STATE_UNSPECIFIED = 0;
+  PRESENCE_STATE_ONLINE = 1;
+  PRESENCE_STATE_IDLE = 2;
+  PRESENCE_STATE_SUSPENDING = 3;
+  PRESENCE_STATE_OFFLINE = 4;
+}
+
+// Coarse description of the underlay a device is currently attached to.
+// Used for ordering connection attempts, never for deciding whether to attempt.
+enum NetworkClass {
+  NETWORK_CLASS_UNSPECIFIED = 0;
+  NETWORK_CLASS_WIFI = 1;
+  NETWORK_CLASS_CELLULAR = 2;
+  NETWORK_CLASS_ETHERNET = 3;
+  NETWORK_CLASS_OTHER = 4;
+}
+
+// What a device can currently reach. docs/protocol.md §9.2 `reachability`.
+message Reachability {
+  bool has_v4 = 1;
+  bool has_v6 = 2;
+
+  // Whether a NAT64 prefix was detected (RFC 7050 / PREF64 RA option).
+  // docs/protocol.md §10.4: NAT64/DNS64 environments MUST be detected and
+  // reported here so an IPv6-only peer can be reached. IPv6-only cellular with
+  // NAT64 is a first-class case, not an edge case.
+  bool nat64_present = 3;
+
+  NetworkClass network_class = 4;
+}
+
+// A device's assertion about itself.
+//
+// AUTHORIZATION: channel-authenticated, and a device may assert presence ONLY
+// FOR ITSELF (docs/protocol.md §9.2). A Presence naming another device_id is
+// rejected.
+//
+// PRIVACY: this message deliberately carries NO endpoint, NO IP address, and NO
+// coarse location. `Reachability` says what families work, not where the device
+// is. Endpoints reach peers through the SIGNED CandidateSet on C4, not through
+// a presence record warehoused by infrastructure.
+message Presence {
+  bytes device_id = 1;
+  PresenceState state = 2;
+  Reachability reachability = 3;
+
+  // Absolute expiry on the emitter's wall clock.
+  //
+  // ABSOLUTE, NOT A RELATIVE DELTA, and that is deliberate: presence has NO
+  // ORDERING GUARANTEE (docs/protocol.md §9.2) and consumers MUST tolerate
+  // reordering. A relative TTL applied to a reordered pair of updates yields
+  // the wrong expiry; an absolute instant does not.
+  uint64 expires_at_ms = 4;
+}
+
+// The lightweight C1 heartbeat. docs/protocol.md §9.2.
+message Heartbeat {
+  Presence presence = 1;
+
+  // Requested TTL for the assertion.
+  uint64 ttl_ms = 2;
+}
+
+// docs/protocol.md §9.2 `HeartbeatAck`.
+message HeartbeatAck {
+  // Server-suggested heartbeat cadence. Advisory; the device coalesces it into
+  // its existing wake window rather than adding a wake (ADR-0002 §11.10).
+  uint64 suggested_interval_ms = 1;
+
+  // The current monotone revocation epoch. Carried on EVERY C1 response and C2
+  // event so a device can detect it is behind WITHOUT DRAINING THE LOG
+  // (docs/protocol.md §8.3).
+  uint64 revocation_epoch = 2;
+
+  // The highest net_seq the device has not yet consumed.
+  //
+  // THIS IS THE MAIN BATTERY LEVER IN THE PROTOCOL (docs/protocol.md §9.2): it
+  // lets a background-suspended device learn it is behind on durable events
+  // without opening the event stream, and therefore decide whether waking is
+  // worthwhile at all.
+  uint64 pending_net_seq = 3;
+}

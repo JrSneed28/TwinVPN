@@ -1,0 +1,251 @@
+// TwinVPN shared contracts — DNS policy.
+//
+// Authority: ADR-0011 (§11.1 scopes, §11.4 precedence, §11.5 modes and the
+// fallback prohibition, §11.6 A/AAAA rigor), docs/protocol.md §13.4,
+// docs/architecture.md §3.3 `DNSPolicy`, S-07, S-34.
+//
+// ===========================================================================
+// PRIVACY: NO QUERY CONTENT IN ANY CONTRACT.
+// ===========================================================================
+// ADR-0015 §11.10 lists "DNS query names transmitted off-device" in the NEVER
+// column, alongside tunnel plaintext and private keys.
+//
+// This file therefore defines POLICY — which resolvers, which domains are
+// steered where, which mode is in force — and carries NO resolved name, NO
+// query log, NO answer, and NO per-query counter keyed by name. The
+// `split_domains` entries below are POLICY INPUT authored by the Owner, not
+// observed traffic; they say what the user configured, never what the user
+// looked up.
+// ===========================================================================
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/common.proto";
+
+// ADR-0011 §11.5. Exactly the three values docs/architecture.md §3.3 defines.
+enum DNSMode {
+  DNS_MODE_UNSPECIFIED = 0;
+
+  // Default. TwinNet zones answered authoritatively and locally; default-class
+  // queries forwarded to the HOST'S PRE-EXISTING upstream resolvers over the
+  // underlay — and ONLY when the routing mode is TwinNet-only or split-tunnel,
+  // i.e. only when those destinations are outside the protected scope.
+  DNS_MODE_SPLIT = 1;
+
+  // TwinNet zones answered locally; default-class queries forwarded to the
+  // resolvers named by this policy or by ExitNodeEngaged, OVER THE OVERLAY
+  // ONLY.
+  DNS_MODE_FULL = 2;
+
+  // Not served; TwinVPN writes no resolver configuration. Permitted ONLY with
+  // TwinNet-only routing and an explicit policy setting; NEVER with FULL
+  // routing or an engaged ExitNode. Carries a persistent
+  // DNS.POLICY.HANDLING_DISABLED indication.
+  DNS_MODE_OFF = 3;
+}
+
+// Which of ADR-0011 §11.1's four resolution scopes answers a query.
+//
+// ADR-0011 DN-1: the four scopes share NO cache, NO chain cache, and NO
+// negative cache. An answer learned in one scope MUST NOT be served in another.
+enum ResolutionScope {
+  RESOLUTION_SCOPE_UNSPECIFIED = 0;
+
+  // Answered from the cached signed contract, authoritatively, with NO NETWORK
+  // I/O. Available even with the control plane down and the tunnel down.
+  // DN-7: resolution MUST NOT trigger a control-plane call, a presence lookup,
+  // or a peer probe — a peer being offline changes nothing about its name
+  // resolving.
+  RESOLUTION_SCOPE_TWINNET = 1;
+
+  // Upstream resolvers named by policy, reached ONLY over the overlay. Exists
+  // only while an authorized secure path exists; otherwise every query is a
+  // TYPED FAILURE.
+  RESOLUTION_SCOPE_PROTECTED = 2;
+
+  // The attaching interface's DHCP/RA resolvers, over a live
+  // PortalExemptionGrant only.
+  RESOLUTION_SCOPE_PORTAL = 3;
+
+  // The narrowest scope: AGENT-ORIGINATED ONLY, a CLOSED NAME SET of the
+  // control-plane and rendezvous FQDNs, available ALWAYS INCLUDING IN BLOCKED.
+  //
+  // ADR-0011 DN-0: it exists because the agent must resolve its OWN
+  // control-plane names to recover, and in full-tunnel mode that lookup would
+  // otherwise have to traverse the tunnel the control plane is needed to
+  // establish — the circular dependency the corpus forbids by name. Relay
+  // endpoints are EXCLUDED: they are IP literals, never hostnames, so relay
+  // reachability never depends on DNS.
+  RESOLUTION_SCOPE_BOOTSTRAP = 4;
+}
+
+// What a split-DNS rule does with a matching name. ADR-0011 §11.4 class 4.
+enum SplitDomainDisposition {
+  SPLIT_DOMAIN_DISPOSITION_UNSPECIFIED = 0;
+  // Answer authoritatively from the TwinNet contract.
+  SPLIT_DOMAIN_DISPOSITION_TWINNET = 1;
+  // Forward to the policy's protected upstream, over the overlay.
+  SPLIT_DOMAIN_DISPOSITION_PROTECTED_UPSTREAM = 2;
+  // REFUSED + EDE 18 Prohibited. Never NXDOMAIN — see below.
+  SPLIT_DOMAIN_DISPOSITION_REFUSE = 3;
+}
+
+// One steering rule.
+message SplitDomainRule {
+  // A DNS suffix in presentation form, lowercase, <= 253 octets.
+  //
+  // ADR-0011 DN-9: matching is on WHOLE LABELS. `example.com` matches
+  // `a.example.com` and `example.com`, NEVER `notexample.com`. Comparison is
+  // case-insensitive per RFC 4343 and performed on the WIRE-FORMAT LABELS, not
+  // on a presentation string — which is why an implementation must convert
+  // before comparing rather than doing a suffix test on this field's text.
+  string suffix = 1;
+
+  // When true, this rule matches only the exact name, taking precedence over
+  // every suffix rule (ADR-0011 §11.4 class 1: exact > longest suffix >
+  // default).
+  bool exact_match = 2;
+
+  SplitDomainDisposition disposition = 3;
+}
+
+// The DNS policy in force. docs/architecture.md §3.3 `DNSPolicy`.
+//
+// STATE OWNERSHIP: S-07. Authored by the OWNER AUTHORITY; the control plane
+// DISTRIBUTES ONLY. Class MONOTONIC — higher version wins, a lower version is
+// NEVER accepted. That is the anti-downgrade rule, and for DNS specifically it
+// is what prevents a stale DNSPolicy from reintroducing a leak that a newer
+// one closed.
+message DNSPolicy {
+  string dnspolicy_id = 1;
+
+  // Monotone. ADR-0008 N-3: a device MUST reject a lower version and MUST emit
+  // version_rollback_rejected as a SECURITY EVENT.
+  uint64 version = 2;
+
+  DNSMode mode = 3;
+
+  // Protected-scope upstream resolvers, PER FAMILY.
+  //
+  // ===================================================================
+  // BOTH LISTS ARE STRUCTURALLY REQUIRED. AN EMPTY LIST IS NOT ABSENCE.
+  // ===================================================================
+  // docs/protocol.md §13.4: "dns_policy MUST specify servers for both families
+  // and MUST state block_fallback per family. A DNS policy that configures v4
+  // resolvers and leaves v6 resolvers to the OS is a DNS LEAK; THE SCHEMA
+  // FORBIDS EXPRESSING IT by requiring both lists to be present (EMPTY LIST =
+  // 'BLOCK THIS FAMILY', which is different from ABSENT)."
+  //
+  // A validator MUST distinguish the two: in proto3 an empty repeated field and
+  // an absent one are indistinguishable on the wire, so `servers_declared_v4`
+  // and `servers_declared_v6` below carry the presence bit explicitly. A policy
+  // with `servers_declared_v6 == false` is MALFORMED, not "v6 unconfigured".
+  repeated IPv4Address servers_v4 = 4;
+  repeated IPv6Address servers_v6 = 5;
+
+  // Explicit presence bits for the two lists above. Both MUST be true for the
+  // policy to validate. They exist solely to make "the author forgot IPv6"
+  // representable as a validation failure rather than as silence.
+  optional bool servers_declared_v4 = 6;
+  optional bool servers_declared_v6 = 7;
+
+  // Steering rules, evaluated by ADR-0011 §11.4's precedence.
+  //
+  // ADR-0011 DN-8: two rules of equal specificity with different dispositions
+  // in one bundle are REJECTED AT BUNDLE VALIDATION with
+  // DNS.POLICY.RULE_CONFLICT, and the previous bundle continues to govern.
+  // THERE IS NO RUNTIME TIE-BREAKING, because a tie-break that is not in the
+  // signed document is a second policy author.
+  //
+  // Capped by the negotiated `dns_split/1` capability's `max_domains`
+  // parameter.
+  repeated SplitDomainRule split_domains = 8;
+
+  // Search domains pushed to the host, e.g.
+  // "<twinnet-label>.tnet.twinvpn.net" so `ssh nas` resolves.
+  repeated string search_domains = 9;
+
+  // Per-family: refuse rather than fall back when TwinVPN's resolution path
+  // fails.
+  //
+  // ADR-0011 DN-10 defines FALLBACK precisely: resolution reverting to a
+  // pre-existing resolver BECAUSE TwinVPN's path failed, was not installed,
+  // timed out, or was not matched. A query classified TWINNET or
+  // PROTECTED_UPSTREAM MUST NOT, UNDER ANY CONDITION — stub error, upstream
+  // timeout, SERVFAIL, tunnel loss, or policy expiry — be sent to a pre-existing
+  // resolver. SCOPE NEVER CHANGES ON FAILURE.
+  //
+  // docs/protocol.md §13.4: `block_fallback` is DENY-SHAPED. `true` is honoured;
+  // `false` is a GRANT that SUSPENDS on bundle expiry (ADR-0009 §11.4's
+  // grant/deny asymmetry). An expired bundle can therefore only ever become
+  // MORE restrictive.
+  optional bool block_fallback_v4 = 10;
+  optional bool block_fallback_v6 = 11;
+
+  // Whether the stub validates DNSSEC (capability `dns_dnssec_validate/1`).
+  bool dnssec_validate = 12;
+
+  // Whether upstream is reached over DoT (capability `dns_upstream_dot/1`).
+  // When false, upstream is Do53 INSIDE THE OVERLAY — which is stated, not
+  // silent.
+  bool upstream_dot = 13;
+
+  uint64 not_after_ms = 14;
+}
+
+// Whether configured DNS protection is ACTUALLY ACTIVE right now.
+//
+// ADR-0015 §11.6 rule 1: protection is ASSERTED, NOT ASSUMED. The user-visible
+// indicator is a pure function of the most recent assertion obtained by
+// QUERYING THE ENFORCEMENT LAYER, never of the agent's belief about what it
+// configured.
+//
+// ADR-0015 §11.6 rule 2: assertions EXPIRE. If not affirmatively renewed —
+// because the agent hung, was suspended, crashed, or was killed — the indicator
+// becomes UNKNOWN, NEVER PROTECTED. Staleness is fail-safe by construction, so
+// a dead agent cannot leave a reassuring green indicator on screen.
+//
+// SCOPE: local and diagnostic. This is an OBSERVATION of local state, not a
+// control-plane fact, and MUST NOT be transmitted as an authority.
+message DNSProtectionAssertion {
+  // The policy this assertion was evaluated against.
+  string dnspolicy_id = 1;
+  uint64 policy_version = 2;
+
+  DNSMode effective_mode = 3;
+
+  // Whether the stub is bound and answering on all four addresses of
+  // ADR-0011 §11.2. DN-5 (bind before pointing): the stub MUST be bound and
+  // answering BEFORE the host resolver is pointed at it, and the host MUST be
+  // pointed away BEFORE the stub is unbound. If any listener cannot bind,
+  // DNS.STUB.BIND_FAILED is raised and the client MUST NOT enter a protected
+  // state.
+  bool stub_listening_v4 = 4;
+  bool stub_listening_v6 = 5;
+
+  // Whether the host resolver configuration observed by READ-BACK matches what
+  // was intended. A mismatch raises CRITICAL and drives the state machine
+  // toward BLOCKED or DEGRADED.
+  bool host_resolver_matches_intent = 6;
+
+  // Whether a HostResolverRestorePoint (S-34) is present and its restore_token
+  // matches the installed configuration. A stale restore point means teardown
+  // would restore the wrong thing, surfaced as
+  // DNS.STUB.TEARDOWN_INCOMPLETE.
+  bool restore_point_valid = 7;
+
+  // Whether a resolver on the path was observed rewriting answers.
+  bool interception_detected = 8;
+
+  // Local monotonic instant of the assertion, and the window after which it
+  // becomes UNKNOWN rather than PROTECTED.
+  MonotonicMicros asserted_at = 9;
+  uint64 freshness_window_ms = 10;
+
+  // Codes explaining any negative field above. Never empty when any of
+  // `host_resolver_matches_intent`, `stub_listening_v4`, `stub_listening_v6` is
+  // false.
+  repeated string reason_codes = 11;
+}

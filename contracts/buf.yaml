@@ -1,0 +1,28 @@
+# TwinVPN shared contracts — buf module configuration.
+#
+# Authority: ADR-0003 §11 (protobuf at boundary B1/B3), ADR-0003 §11 rule 4
+# (contract artifacts published immutably per release and used as the input to
+# CI compatibility checks), ADR-0018 §11.12 (/contracts is the single source).
+version: v2
+modules:
+  - path: proto
+    name: buf.build/twinvpn/contracts
+lint:
+  use:
+    - STANDARD
+  except:
+    # ADR-0002 N-7 / protocol.md §1: a Device never addresses a broker and the
+    # control plane is not modelled here as gRPC services. This package defines
+    # message contracts only, so service-shaped lint rules have nothing to bind.
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+  enum_zero_value_suffix: _UNSPECIFIED
+  service_suffix: Service
+breaking:
+  use:
+    # WIRE_JSON is the strictest set that still permits the additive evolution
+    # ADR-0014 N-1 requires. Field-number reuse, enum-value reuse, type changes
+    # and field removals without reservation all fail here.
+    - WIRE_JSON
+    - FILE

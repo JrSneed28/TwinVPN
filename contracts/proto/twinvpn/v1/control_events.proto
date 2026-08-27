@@ -1,0 +1,355 @@
+// TwinVPN shared contracts — control-plane events (C2).
+//
+// Authority: docs/protocol.md §6 (the ephemeral/durable TEST), §7 (event
+// ownership — single publisher per type), §16 (catalogue), ADR-0002 (§11.3 the
+// log, N-5 independent applicability, N-8 compaction, N-9 the ephemeral
+// prohibition).
+//
+// ===========================================================================
+// DURABILITY IS DECIDED BY A TEST, NOT BY CONVENIENCE.
+// ===========================================================================
+// docs/protocol.md §6: a message is DURABLE if it fails ANY of four checks.
+//   E1 Re-derivability — can the receiver reconstruct it without the sender?
+//   E2 Time decay      — does its value decay to zero in seconds-to-minutes?
+//   E3 Miss consequence— if never seen, does the receiver settle into a
+//                        persistently WRONG state?
+//   E4 Replay harm     — is replay of an old copy actively harmful?
+//
+// Getting this wrong is a security failure in one direction and a privacy and
+// denial-of-freshness failure in the other (§6.1). Every event below carries
+// its classification and the check that decided it.
+//
+// ADR-0002 N-5 — INDEPENDENT APPLICABILITY, and it is what makes compaction
+// safe: every durable event MUST carry either the whole signed state document
+// or a {doc_type, version, digest} reference sufficient to pull it, and MUST
+// NOT be expressed as a DELTA AGAINST A PREDECESSOR EVENT. A receiver must be
+// able to apply it, or ignore it and re-read declaratively, without any
+// predecessor.
+// ===========================================================================
+
+syntax = "proto3";
+
+package twinvpn.v1;
+
+import "twinvpn/v1/common.proto";
+import "twinvpn/v1/device.proto";
+import "twinvpn/v1/errors.proto";
+import "twinvpn/v1/gateway.proto";
+import "twinvpn/v1/identity.proto";
+import "twinvpn/v1/pairing.proto";
+import "twinvpn/v1/peer.proto";
+import "twinvpn/v1/policy.proto";
+import "twinvpn/v1/presence.proto";
+import "twinvpn/v1/relay.proto";
+import "twinvpn/v1/routing.proto";
+
+// How a C2 event is delivered and retained. Carried on the wire so a receiver
+// can assert the classification it expected — a DURABLE event arriving with
+// net_seq == 0, or an EPHEMERAL one arriving with net_seq != 0, is a defect and
+// MUST be rejected rather than applied.
+enum EventDurability {
+  EVENT_DURABILITY_UNSPECIFIED = 0;
+
+  // Written to the per-TwinNet log, assigned a net_seq, resumable by cursor,
+  // at-least-once, retained for at least 30 days or 10^6 events.
+  EVENT_DURABILITY_DURABLE = 1;
+
+  // Delivered on C2 for latency but NOT written to the log, NOT assigned a
+  // net_seq, NOT resumable, and NOT replayed. ADR-0002 N-9.
+  EVENT_DURABILITY_EPHEMERAL = 2;
+}
+
+// The sole publisher of an event type. docs/protocol.md §7 / I8.
+//
+// NORMATIVE: a receiver MUST REJECT an event whose publisher does not match the
+// §7 table, with CONTROL.EVENT_WRONG_PUBLISHER, classified FATAL/CRITICAL and
+// treated as A SECURITY EVENT. ADR-0002 S-4 makes this a SCHEMA CONSTRAINT at
+// the log rather than a code-review convention: the event relation records the
+// publishing principal per row and rejects a mismatch at write time.
+enum EventPublisher {
+  EVENT_PUBLISHER_UNSPECIFIED = 0;
+  EVENT_PUBLISHER_COORDINATION_SERVICE = 1;
+  // The device that owns the fact. Used only for events the coordination
+  // service TRANSPORTS on behalf of a device-authoritative writer.
+  EVENT_PUBLISHER_ORIGINATING_DEVICE = 2;
+}
+
+// The envelope every C2 event travels in.
+message ControlEvent {
+  MessageMetadata metadata = 1;
+
+  EventDurability durability = 2;
+  EventPublisher publisher = 3;
+
+  oneof event {
+    // -- Device lifecycle: DURABLE ------------------------------------------
+    // E1 fails (not re-derivable), E3 fails (device invisible forever),
+    // E4 fails (harmful replay).
+    DeviceRegistered device_registered = 10;
+    DeviceMetadataUpdated device_metadata_updated = 11;
+    DeviceRevoked device_revoked = 12;
+    DeviceCredentialRotated device_credential_rotated = 13;
+
+    // -- Pairing: DURABLE ---------------------------------------------------
+    // E1 fails (nobody can re-derive a trust decision), E3 fails
+    // catastrophically (asymmetric trust: A trusts B, B does not trust A, and
+    // every handshake fails with a misleading crypto error), E4 fails (trust
+    // injection).
+    PairingRequested pairing_requested = 20;
+    PairingApproved pairing_approved = 21;
+    PairingRejected pairing_rejected = 22;
+    PairingExpired pairing_expired = 23;
+    PairingRevoked pairing_revoked = 24;
+
+    // -- Peer set: DURABLE --------------------------------------------------
+    PeerAdded peer_added = 30;
+    PeerUpdated peer_updated = 31;
+    PeerRemoved peer_removed = 32;
+
+    // -- Policy: DURABLE ----------------------------------------------------
+    // E3 fails badly (a device that misses a TIGHTENING keeps enforcing the
+    // old, looser policy — a silent authorization hole), E4 fails (replaying an
+    // older bundle is a POLICY ROLLBACK ATTACK).
+    //
+    // PeerPermissionsUpdated is NOT a separate event: permissions live inside
+    // the bundle, and a separate event would be a second policy author.
+    PolicyBundleUpdated policy_bundle_updated = 40;
+
+    // -- Advertisements: DURABLE, TTL'd -------------------------------------
+    // E1 fails (no other device can re-derive that a subnet lives behind that
+    // gateway), E3 fails (the subnet blackholes indefinitely — "the VPN is
+    // connected but I can't reach my NAS"). TTL'd because a crashed gateway
+    // must not advertise forever.
+    RouteAdvertised route_advertised = 50;
+    RouteWithdrawn route_withdrawn = 51;
+    ExitNodeAdvertised exit_node_advertised = 52;
+    ExitNodeWithdrawn exit_node_withdrawn = 53;
+
+    // -- Relay policy: DURABLE ----------------------------------------------
+    RelayRegionPolicyChanged relay_region_policy_changed = 60;
+    RelayEpochFloorAdvanced relay_epoch_floor_advanced = 61;
+
+    // -- Stream control: mixed ----------------------------------------------
+    StreamCompacted stream_compacted = 70;
+    StateDocumentAvailable state_document_available = 71;
+    LogHead log_head = 72;
+
+    // -- EPHEMERAL, delivered on C2 for latency, never logged ---------------
+    //
+    // ADR-0002 N-9: these MUST NOT be written to the durable log, MUST NOT be
+    // replayed from a cursor, and MUST NOT survive their TTL. Their metadata
+    // carries net_seq == 0.
+    PresenceUpdated presence_updated = 80;
+    RelayAssignmentHint relay_assignment_hint = 81;
+  }
+}
+
+// -- Durable event bodies ---------------------------------------------------
+
+message DeviceRegistered {
+  // The WHOLE record, not a delta. ADR-0002 N-5.
+  Device device = 1;
+}
+
+message DeviceMetadataUpdated {
+  // The whole post-update record. Covers what docs/protocol.md §7 calls
+  // DeviceRenamed and DeviceRoleChanged: they are one fact — "this device's
+  // mutable metadata is now X" — at one monotone version, and splitting them
+  // would require a receiver to apply two events in order, which N-5 forbids.
+  Device device = 1;
+}
+
+message DeviceRevoked {
+  // The admitted RevocationEntry{statement, trust_epoch, net_seq,
+  // prev_entry_hash}. Rule-B signed by the Owner authority; the coordination
+  // service transports what it cannot forge.
+  SignedStatement revocation_entry = 1;
+
+  uint64 trust_epoch = 2;
+
+  // ADR-0007 §11.2 requires the DeviceRevoked event to carry the full
+  // TrustEpochBundle. Each EpochSeed inside is HPKE-SEALED TO ITS RECIPIENT, so
+  // this event distributes seals that only their addressee can open — the log,
+  // the fan-out bus, and every non-addressed device see ciphertext.
+  //
+  // This is the SECOND revocation lever: refusal (from the statement) stops the
+  // revoked device at every peer that has seen it; the epoch advance removes
+  // its ability to derive psk2 at all.
+  SignedStatement trust_epoch_bundle = 3;
+}
+
+message DeviceCredentialRotated {
+  bytes device_id = 1;
+
+  // Either an IdentitySuccession (dual-signed by old AND new IK) or a
+  // TunnelKeyBinding (IK-signed). Peers hold TWO high-water marks per device_id
+  // — highest_generation_seen and highest_tk_generation_seen — and MUST reject
+  // any statement at or below the corresponding mark (ADR-0007 N-22).
+  SignedStatement rotation_statement = 2;
+
+  DeviceIdentity identity = 3;
+}
+
+message PairingRequested {
+  Pairing pairing = 1;
+}
+
+message PairingApproved {
+  // BOTH attestations. docs/protocol.md §8.2's PairingCompleted carries
+  // attestation_a and attestation_b together: a peer that receives only one has
+  // no evidence the other side completed, and half-completed trust is exactly
+  // the asymmetry ADR-0007 N-18 forbids.
+  PairingResult result = 1;
+}
+
+message PairingRejected {
+  bytes pairing_id = 1;
+  ErrorEnvelope error = 2;
+}
+
+message PairingExpired {
+  bytes pairing_id = 1;
+
+  // ADR-0007 N-17: 120 s, enforced independently by both devices AND the
+  // rendezvous. This event is the coordination service's own expiry firing; it
+  // is a NOTIFICATION, not the enforcement — a device that never receives it
+  // still expires the ceremony on its own timer.
+  uint64 expired_at_ms = 2;
+}
+
+message PairingRevoked {
+  PairingRevocation revocation = 1;
+}
+
+message PeerAdded {
+  TrustedPeer peer = 1;
+}
+
+message PeerUpdated {
+  TrustedPeer peer = 1;
+}
+
+message PeerRemoved {
+  bytes peer_device_id = 1;
+
+  // Why the peer left the set. AUTH.DEVICE_REVOKED and a voluntary pairing
+  // withdrawal are different facts with different consequences: revocation is
+  // terminal and fleet-wide, a pairing withdrawal affects one relationship.
+  string reason_code = 2;
+}
+
+message PolicyBundleUpdated {
+  uint64 policy_version = 1;
+
+  // Inline when <= 16 KiB; otherwise `reference` is set and the device pulls
+  // via GetStateDocument (ADR-0002 §11.4). Exactly one is populated.
+  PolicyBundle bundle = 2;
+  StateDocumentRef reference = 3;
+}
+
+message RouteAdvertised {
+  RouteAdvertisement advertisement = 1;
+}
+
+message RouteWithdrawn {
+  bytes advertiser_device_id = 1;
+  uint64 advertisement_epoch = 2;
+  SignedStatement signed = 3;
+}
+
+message ExitNodeAdvertised {
+  ExitNode offer = 1;
+}
+
+message ExitNodeWithdrawn {
+  bytes device_id = 1;
+  uint64 offer_epoch = 2;
+  SignedStatement signed = 3;
+}
+
+message RelayRegionPolicyChanged {
+  RelayRegionPolicy policy = 1;
+  uint64 policy_version = 2;
+}
+
+message RelayEpochFloorAdvanced {
+  // Owner-signed, monotone. Distributed to relays by the control plane and
+  // PIGGYBACKABLE BY ANY CONNECTING CLIENT — because it is Owner-signed and
+  // monotone, a relay partitioned from the control plane still learns of
+  // revocations from its own users.
+  SignedStatement relay_epoch_floor = 1;
+  uint64 epoch = 2;
+}
+
+// -- Stream control ---------------------------------------------------------
+
+// ADR-0002 N-8. A C2 stream MAY be compacted under backpressure, and a
+// compaction MUST be announced IN BAND AND IN ORDER. SILENT OMISSION IS
+// PROHIBITED.
+//
+// This preserves gap-freeness in the sense that matters: the device is never
+// silently skipped past anything; it is told EXACTLY which position it lands on
+// and that it must re-read declaratively. N-5's independent applicability is
+// what makes that recovery always sufficient.
+message StreamCompacted {
+  uint64 up_to_net_seq = 1;
+}
+
+// ADR-0002 §11.4. Notification that a newer signed document version exists,
+// for documents above the 16 KiB inline cap.
+message StateDocumentAvailable {
+  StateDocumentRef reference = 1;
+}
+
+// The periodic signed freshness proof. ADR-0002 §S-3.
+//
+// Emitted every 60 s and on demand. A device that receives no valid, unexpired
+// LogHead within THREE INTERVALS MUST emit CONTROL.FRESHNESS_PROOF_MISSING and
+// MUST begin treating its cached documents as approaching expiry.
+//
+// ===================================================================
+// STATED LIMITATION, NOT HIDDEN: the LogHead signing key is an ONLINE
+// control-plane key, so a COMPROMISED control plane CAN FORGE FRESHNESS.
+// ===================================================================
+// It cannot forge TRUST — that requires the Owner authority — but it can lie
+// about there being nothing to fetch. LogHead therefore defends against a
+// PARTITIONED, BUGGY, or PARTIALLY-FAILED front-end and against a network
+// attacker who drops events; it does NOT defend against a fully compromised
+// control plane. The signing key carries NO DELEGATED TRUST POWER
+// (ADR-0007 §7.9): it proves liveness, never trust.
+message LogHead {
+  // Deterministic-CBOR COSE_Sign1 over
+  //   {twinnet_id, net_seq, revocation_epoch, issued_at_ms, not_after_ms}
+  SignedStatement statement = 1;
+
+  uint64 net_seq = 2;
+  uint64 revocation_epoch = 3;
+  uint64 not_after_ms = 4;
+}
+
+// -- Ephemeral bodies -------------------------------------------------------
+
+// EPHEMERAL. See presence.proto for the full argument. Passes all four checks
+// of docs/protocol.md §6; making it durable would be a cost, security AND
+// privacy defect simultaneously.
+//
+// Covers what an application might call PeerOnline and PeerOffline: those are
+// not separate event types, they are values of PresenceState. Modelling them as
+// distinct events would imply an ordering guarantee that presence explicitly
+// does not have (§9.2: "NO ORDERING GUARANTEE — consumers MUST tolerate
+// reordering"), and a reordered Online/Offline pair would leave the wrong
+// terminal value. An absolute `expires_at_ms` on a single state assertion
+// cannot be reordered into the wrong answer.
+message PresenceUpdated {
+  Presence presence = 1;
+}
+
+// EPHEMERAL, ADVISORY. docs/protocol.md §7 and §11.1.
+//
+// The device's OWN MEASURED RTT ALWAYS OVERRIDES this hint. Never treat a
+// coordination-supplied relay ranking as authoritative — that is how a stale
+// central view produces the "excessive relay latency" complaint. Consistency
+// requirement: eventual, advisory, NO CONVERGENCE REQUIREMENT.
+message RelayAssignmentHint {
+  RelayAssignment assignment = 1;
+}
