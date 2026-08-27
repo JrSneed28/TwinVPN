@@ -11,6 +11,14 @@ license.workspace      = true
 repository.workspace   = true
 description = "the control-plane CLIENT. CD-I5: MUST NOT depend on any data-plane crate"
 
+[features]
+default = []
+# The deterministic test doubles in `src/testing.rs`. Never shipped, exactly as
+# `twinvpn-env`'s `test-support` and `twinvpn-platform`'s `mock` are never
+# shipped (CD-5). `cargo test --workspace` turns it on through the
+# dev-dependency on this crate below.
+test-support = ["twinvpn-env/test-support"]
+
 [dependencies]
 twinvpn-types         = { workspace = true }
 twinvpn-env           = { workspace = true }
@@ -21,6 +29,15 @@ twinvpn-platform      = { workspace = true }
 thiserror             = { workspace = true }
 bytes                 = { workspace = true }
 prost                 = { workspace = true }
+futures-core          = { workspace = true }
+tracing               = { workspace = true }
 
 [dev-dependencies]
 proptest              = { workspace = true }
+# The virtual clock (ADR-0018 CD-1) — every test in this crate drives time
+# deterministically rather than sleeping. `test-support` is never shipped.
+twinvpn-env           = { workspace = true, features = ["test-support"] }
+twinvpn-platform      = { workspace = true, features = ["mock"] }
+# Self-dependency so `cargo test` and the integration tests in `tests/` both see
+# `testing`. The pattern `core/README.md` §3 describes for `test-support`.
+twinvpn-cp-client     = { workspace = true, features = ["test-support"] }

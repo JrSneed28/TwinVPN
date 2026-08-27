@@ -1310,9 +1310,12 @@ name = "twinvpn-cp-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures-core",
  "proptest",
  "prost",
  "thiserror",
+ "tracing",
+ "twinvpn-cp-client",
  "twinvpn-env",
  "twinvpn-platform",
  "twinvpn-schema",
