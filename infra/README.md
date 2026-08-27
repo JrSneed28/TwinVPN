@@ -144,11 +144,29 @@ forbids exposing a broker protocol to a device even if one existed. Adding
 Kafka or NATS would be inventing topology the ADR explicitly rejected (B-1,
 B-2, B-5).
 
-Three databases: `twinvpn_control`, `twinvpn_presence`,
-`twinvpn_relay_directory`. Presence is explicitly *eventually consistent* and
-TTL'd and is a **hint service, never an authority** (architecture.md §2.13);
-putting it in the control-plane database would place hint rows in the same
-transactional scope as revocation.
+Three databases, split along architecture.md §5's state-ownership rows rather
+than along service names:
+
+| Database | Holds | §5 row |
+|---|---|---|
+| `twinvpn_control` | membership, revocation, policy, the durable event log, and the `RelayCapabilityToken` **issuance record** | S-30 among others |
+| `twinvpn_presence` | presence and last-known-endpoint records | S-11 |
+| `twinvpn_relay_directory` | the `Relay` fleet **registry *and* ranking**, plus aggregated `HealthState` | **S-09** |
+
+Presence is explicitly *eventually consistent* and TTL'd and is a **hint
+service, never an authority** (architecture.md §2.13); putting it in the
+control-plane database would place hint rows in the same transactional scope as
+revocation.
+
+**On the relay-fleet row.** §2.8 and §2.12 contradict each other about who owns
+the fleet registry, and both cannot be the single writer of one fact under I8.
+§5 is architecture.md's own named authority for that question, and **S-09
+assigns registry *and* ranking together to the Relay-Selection Service (2.12)**
+— so §2.8's sentence is a prose error. The control plane keeps S-30, the
+issuance record, which §5 *does* assign to it and which the relay never reads:
+it verifies an Owner-rooted token offline against a signed issuer key set
+(ADR-0005 §11.3, architecture.md A-12). `infra/postgres/initdb/10-databases.sh`
+carries the full reasoning.
 
 ### 2.3 Two relays, and no control-plane edge
 
@@ -680,12 +698,14 @@ mode the wave-1 objective names in its last line.
 | Check | Result |
 |---|---|
 | All 18 YAML files parse; no duplicate keys, tabs or trailing whitespace | pass |
-| `build/verify/check-compose.py` — secrets, bind sources, port collisions, wildcard binds, relay independence, relay floors, v6 override coverage, product-ULA-as-underlay | pass, 0 warnings |
+| `build/verify/check-compose.py --strict` — secrets, bind sources, port collisions, wildcard binds, relay independence, relay floors, v6 override coverage, product-ULA-as-underlay | pass, **0 warnings on a freshly bootstrapped tree** |
+| …its secret check, **negative-controlled three ways**: a key force-added to the index, a key excluded from the ignore rule, and git made unavailable | FAIL / FAIL / degraded-with-reason, as designed |
 | `build/verify/check-otel-redaction.py` — allowlist, filter-order, Tier-2 `abi_*` strip, correlation preserved, no service graph | pass, **and negative-controlled**: flipping `allow_all_keys` to `true` and removing `correlation_id` makes it fail with both diagnoses |
 | `build/budgets.toml` parses; `check-budgets.py --list` and `--check-image-pins` | pass |
 | All three Grafana dashboards are valid JSON with `uid`, `title`, panels | pass |
 | `bash -n` on every shell script | pass |
-| `make lint`, `make test-contracts` | pass — see the completion report |
+| `make lint`, `make test-contracts` | pass — 35801 contract checks, 0 failures |
+| `make arch-lint` (ADR-0018 CD-3 / CD-I2 / CD-I5 / CB-3) | pass — core-foundation has landed `core/xtask`, so the named CI job is green |
 
 **NOT verified here — Docker is not installed on this host:**
 
