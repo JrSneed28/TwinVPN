@@ -153,6 +153,37 @@ pub fn publish(
     }
 }
 
+/// `CONTROL.CHANNEL_BINDING_MISMATCH` — the claimed `device_id` is not
+/// answerable to the authenticated channel identity.
+///
+/// FATAL, CRITICAL, and `trust-boundaries.md` §4's words for it are "**a
+/// security event, never a parse error**". The registry declares no evidence
+/// fields and none is attached: naming the contested `device_id` would turn the
+/// refusal into an oracle for which devices are bound.
+#[must_use]
+pub fn channel_binding_mismatch() -> ServiceError {
+    ServiceError::new(codes::CONTROL_CHANNEL_BINDING_MISMATCH, crate::COMPONENT).build()
+}
+
+/// Encodes a refusal as a `PublishPresenceResponse` carrying only the envelope.
+///
+/// # Panics
+///
+/// Never: encoding into a `Vec` cannot fail.
+#[must_use]
+pub fn refusal_response(e: &ServiceError) -> Vec<u8> {
+    use prost::Message as _;
+    let response = v1::PublishPresenceResponse {
+        ack: None,
+        error: Some(e.envelope()),
+    };
+    let mut buf = Vec::with_capacity(response.encoded_len());
+    response
+        .encode(&mut buf)
+        .expect("a Vec never fails to grow");
+    buf
+}
+
 fn malformed(r: &Reject) -> ServiceError {
     ServiceError::from_reject(r, crate::COMPONENT)
 }

@@ -25,7 +25,7 @@ cannot read your traffic but can reconstruct where you were every hour for two
 years has not achieved zero knowledge."
 
 So: ephemeral, TTL'd, `EVENTUAL`, reordering-tolerant, bounded, never a gate, and
-with **no database client at all** — see `Cargo.toml`'s own comment and §8.
+with **no database client at all** — see `Cargo.toml`'s own comment and §9.
 
 ---
 
@@ -61,13 +61,13 @@ curl -s http://127.0.0.1:19003/metrics | grep twinvpn_presence
 | Variable | Type | Default | Required | If absent |
 |---|---|---|---|---|
 | `TWINVPN_PRESENCE_LISTEN_TCP` | socket addr | `[::]:443` | no | `[::]:443`, dual stack |
-| `TWINVPN_PRESENCE_LISTEN_QUIC` | socket addr | `[::]:443` | no | parsed; **not bound** (§9) |
-| `TWINVPN_PRESENCE_TLS_CERT_PATH` | path | `/run/secrets/presence/tls.crt` | yes (file) | **startup fails** |
-| `TWINVPN_PRESENCE_TLS_KEY_PATH` | path | `/run/secrets/presence/tls.key` | yes (file) | **startup fails** |
+| `TWINVPN_PRESENCE_LISTEN_QUIC` | socket addr | `[::]:443` | no | parsed; **not bound** (§10) |
+| `TWINVPN_PRESENCE_TLS_CERT_PATH` | path | `/run/secrets/presence/tls.crt` | yes (file) | **startup fails** if unreadable. **Not used** — RFC 7250 carries no certificate |
+| `TWINVPN_PRESENCE_TLS_KEY_PATH` | path | `/run/secrets/presence/tls.key` | yes (file) | **startup fails.** The server's whole identity; a key that will not parse stops the process rather than degrading to plaintext |
 | `TWINVPN_PRESENCE_CONTROL_PLANE_URL` | URL | `https://control-plane:443` | no | recorded; never called on the publish or readiness path |
 | `TWINVPN_PRESENCE_HEARTBEAT_INTERVAL_MS` | u64 ms | `30000` | no | returned as `HeartbeatAck.suggested_interval_ms`; **advisory** — a device coalesces it into an existing wake window rather than adding a wake (ADR-0002 §11.10) |
 | `TWINVPN_PRESENCE_RECORD_TTL_MS` | u64 ms | `180000` | no | how long a record is served, **and** the ceiling on how far ahead a device may place its own `expires_at_ms` |
-| `TWINVPN_DATABASE_URL` | secret | none | no | **validated when present and then deliberately unused** — §8. A `CHANGE-ME` value still fails at startup |
+| `TWINVPN_DATABASE_URL` | secret | none | no | **validated when present and then deliberately unused** — §9. A `CHANGE-ME` value still fails at startup |
 
 ### 3.1 Added by this domain
 
@@ -76,15 +76,54 @@ curl -s http://127.0.0.1:19003/metrics | grep twinvpn_presence
 | `TWINVPN_PRESENCE_MAX_DEVICES` | u64 | `65536` | device records held at once |
 | `TWINVPN_PRESENCE_FRAME_READ_TIMEOUT_MS` | u64 ms | `5000` | how long a **partially received** frame may take to finish |
 | `TWINVPN_PRESENCE_MAX_CONNECTIONS` | u64 | `16384` | concurrently served connections |
+| `TWINVPN_PRESENCE_BINDING_TTL_MS` | u64 ms | `600000` | how long a `device_id`↔channel binding outlives its connection |
+| `TWINVPN_PRESENCE_MAX_BINDINGS` | u64 | `16384` | concurrently held bindings |
 
 Everything in `twinvpn-service-common`'s README §3.2 also applies.
 
 ---
 
-## 4. The wire
+## 4. Authentication, and why S-11 needs it
+
+**TLS 1.3, mutual RFC 7250 raw public keys, client authentication mandatory,
+0-RTT prohibited** (`src/tls.rs`) — ADR-0001 §7.2's L-CONTROL, identical to the
+rendezvous's and for the same reasons (`services/rendezvous/README.md` §4.1).
+
+The reason it matters *here* is S-11. `presence.proto`: "a device may assert
+presence **only for itself**. A `Presence` naming another `device_id` is
+rejected." Without an authenticated channel that rule could only be checked
+against another unauthenticated claim — a `BIND` saying "I am D" compared with a
+`Presence` saying "I am D". Both were the attacker's to choose, so the check
+proved nothing.
+
+Now `BIND` is answerable to the key that completed the handshake
+(`src/binding.rs`), with the same one-to-one invariant the rendezvous uses:
+
+> **A `device_id` belongs to at most one channel identity, and a channel
+> identity speaks for at most one `device_id`, for the life of the binding.**
+
+A mismatch is **`CONTROL.CHANNEL_BINDING_MISMATCH`** — FATAL, CRITICAL, "a
+security event, never a parse error" (`trust-boundaries.md` §4) — and the answer
+names no `device_id`. The S-11 check then runs *on top* of that: a channel
+legitimately bound to A still may not assert for B, and that is still
+`CONTROL.EVENT_WRONG_PUBLISHER`. Authentication did not replace S-11; it made it
+mean something.
+
+The binding is **channel-pinned, not derived**, with the same limitation and the
+same blocked dependency as the rendezvous's — see `services/rendezvous/README.md`
+§4.2 and RZ-7.
+
+---
+
+## 5. The wire
 
 ```
-magic "TVP1" (4) │ version (1) │ opcode (1) │ body_len (4, big-endian)
+ offset  size  field
+      0     4  magic      = 0x54 0x56 0x50 0x31  ("TVP1")
+      4     1  version    = 0x01
+      5     1  opcode     (table below)
+      6     4  body_len   unsigned, big-endian, <= 65536
+     10     n  body       exactly body_len octets
 ```
 
 Presence is **C1**, not C4 (`docs/protocol.md` §16 row 13), so the caps are
@@ -110,7 +149,7 @@ this process transports it).
 
 ---
 
-## 5. Reordering, LWW, and the one refinement of the written rule
+## 6. Reordering, LWW, and the one refinement of the written rule
 
 `docs/protocol.md` §9.2 says "last-writer-wins **by arrival at the aggregator**",
 and in the same row says there is **no ordering guarantee** and that this is "why
@@ -138,7 +177,7 @@ disconnecting or back-pressuring a publisher**, for the same reason.
 
 ---
 
-## 6. What is retained, exactly
+## 7. What is retained, exactly
 
 Per device: a `PresenceState`, a `Reachability` (`has_v4`, `has_v6`,
 `nat64_present`, a coarse `NetworkClass`), an absolute `expires_at_ms`, a local
@@ -157,7 +196,7 @@ IPv6-only cellular with NAT64 is a first-class case here, not an edge case.
 
 ---
 
-## 7. What this service can still observe about users
+## 8. What this service can still observe about users
 
 **It can observe, transiently:**
 
@@ -193,54 +232,59 @@ nothing still connects.
 
 ---
 
-## 8. Findings for the integration lead
+## 9. Findings for the integration lead
 
 | # | Kind | Finding |
 |---|---|---|
 | **PR-1** | **architecture conflict** | **`docker-compose.yml` requires `TWINVPN_PRESENCE_DATABASE_URL` and `infra/README.md` §5 gives this service readiness "Postgres reachable".** This service has **no database client**: a presence record is ephemeral by contract and a durable one is the privacy defect protocol.md §6.1 names. The variable is loaded and validated (so an unedited `CHANGE-ME` still fails at startup) and then dropped, with a `WARN` at startup saying it is unused. **Needs a ruling:** either the compose requirement and the readiness row are dropped, or someone states what durable presence data is intended and why §6.1 does not apply. |
 | **PR-2** | **architecture conflict** | **`architecture.md` §2.13 says this service tracks "last-known `Endpoint`s".** `presence.proto` deliberately carries **no endpoint** — "this message deliberately carries NO endpoint, NO IP address, and NO coarse location". The frozen contract wins (`ownership.md` §3) and no endpoint is stored. §2.13's phrase looks like a prose survival from before the field was removed, in the same class as W-3. **Needs §2.13 amended.** |
-| **PR-3** | ruling taken locally | **LWW by `expires_at_ms` rather than by arrival** (§5). protocol.md §9.2 says "by arrival at the aggregator" and, one line later, that there is no ordering guarantee and that the absolute instant exists for exactly this. Arrival-order LWW makes a reordered pair settle wrong, which is the failure `PresenceUpdated`-as-one-event exists to prevent. Implemented as the reordering-tolerant reading; **§9.2's wording should be tightened** so the next implementer does not choose the other one. |
+| **PR-3** | ruling taken locally | **LWW by `expires_at_ms` rather than by arrival** (§6). protocol.md §9.2 says "by arrival at the aggregator" and, one line later, that there is no ordering guarantee and that the absolute instant exists for exactly this. Arrival-order LWW makes a reordered pair settle wrong, which is the failure `PresenceUpdated`-as-one-event exists to prevent. Implemented as the reordering-tolerant reading; **§9.2's wording should be tightened** so the next implementer does not choose the other one. |
 | **PR-4** | note | **`HeartbeatAck.revocation_epoch` and `pending_net_seq` are returned as 0.** Both are the control plane's to answer (ADR-0002 §11.4) and this service must not call it on this path (I5). `pending_net_seq` is described as "the main battery lever in the protocol", so a device that wants it must get it from the control plane's own C1 heartbeat, not from here. Worth a line in protocol.md §9.2 saying which endpoint answers it, since the same `Heartbeat`/`HeartbeatAck` pair is used in both places. |
 | **PR-5** | note | **`ReadinessPolicy::NoControlPlaneCalls`**, where `infra/README.md` §5 says `AnyDependency`. Same reasoning as the rendezvous's RZ-2: this service holds nothing durable, so there is no dependency whose absence could make its answer wrong, and reporting NOT READY on someone else's outage converts a latency degradation into a capability one. |
-| **PR-6** | note | **Three `TWINVPN_PRESENCE_*` ceilings added** (§3.1), all with defaults. |
+| **PR-6** | note | **Five `TWINVPN_PRESENCE_*` ceilings added** (§3.1), all with defaults. |
+| **PR-7** | note | **`src/tls.rs` and `src/binding.rs` duplicate the rendezvous's exactly.** See RZ-8 in `services/rendezvous/README.md` §9: both should move into `twinvpn-service-common`, which I do not own. |
 
 ---
 
-## 9. Known limitations
+## 10. Known limitations
 
-1. **TLS is not terminated and QUIC is not bound** — identical to the
-   rendezvous's limitation 1, same cause, same consequence. Without channel
-   authentication a `BIND` is an unauthenticated claim, so a caller could bind
-   another device's `device_id` and publish presence for it. The S-11 check
-   compares the assertion against the *bound* identity, so it catches a mismatch
-   within one connection but cannot verify the binding itself. **This must be
-   closed before the service is exposed.**
-2. **No container has been built or run.** Docker is absent from this host. The
-   tests run a real listener on loopback over IPv4 and IPv6.
-3. **No persistence, deliberately** (PR-1). A restart empties the table; every
+1. **QUIC is not bound** — same as the rendezvous's limitation 1, same cause.
+   TLS 1.3 with mutual raw public keys is terminated; QUIC is a binding to add.
+2. **First-contact impersonation is open** — RZ-7 in the rendezvous README, same
+   blocked derivation. An attacker who binds a `device_id` before the real device
+   ever does can publish presence for it until the binding lapses. Presence is a
+   hint and never a gate (§1), so the blast radius is a wrong hint rather than a
+   wrong decision — but it is still wrong, and the fix is a dependency ruling.
+3. **No container has been built or run.** Docker is absent from this host. The
+   tests run a real TLS 1.3 listener on loopback over IPv4 and IPv6.
+4. **No persistence, deliberately** (PR-1). A restart empties the table; every
    device re-asserts within one heartbeat interval, which is the designed
    recovery and the reason presence is classified ephemeral.
-4. **No `TwinNet` scoping on the fan-out.** A subscriber receives every
+5. **No `TwinNet` scoping on the fan-out.** A subscriber receives every
    `PresenceUpdated` this process sees, and the `twinnet_id` is echoed from the
-   publisher's own metadata. Real scoping needs an authenticated channel to
-   decide what a subscriber is entitled to, which limitation 1 blocks. Recorded
-   rather than half-built.
-5. **`suggested_interval_ms` is the configured constant**, not a computed
+   publisher's own metadata. The channel is now authenticated, so a subscriber
+   *has* an identity to scope against — but deciding which `TwinNet`s a
+   `device_id` belongs to is control-plane state this service does not hold and
+   must not fetch per connection. **This is now a real gap rather than a blocked
+   one, and it is the next thing to close.** Recorded rather than half-built.
+6. **`suggested_interval_ms` is the configured constant**, not a computed
    back-off. Adapting it to load is a real feature; a fabricated adaptive value
    would be worse than an honest constant.
 
 ---
 
-## 10. Debugging
+## 11. Debugging
 
 | Symptom | First thing to check |
 |---|---|
 | startup warns `unused_dependency` | `TWINVPN_DATABASE_URL` is set. It is deliberately unused — PR-1 |
-| a heartbeat is acked but nothing is stored | it was superseded, already expired, or claimed an expiry past `RECORD_TTL_MS`. `twinvpn_presence_heartbeats_ignored_total`. A loss is not an error (§5) |
+| a heartbeat is acked but nothing is stored | it was superseded, already expired, or claimed an expiry past `RECORD_TTL_MS`. `twinvpn_presence_heartbeats_ignored_total`. A loss is not an error (§6) |
 | `CONTROL.EVENT_WRONG_PUBLISHER` | a connection asserted presence for a `device_id` it did not bind. FATAL/CRITICAL — a **security event**, not a parse error |
 | `twinvpn_presence_frames_rejected_total` climbing | malformed C1. The `WARN` carries the registered code and the cap that fired |
 | a subscriber missed updates | it fell behind the broadcast buffer. By design: presence is at-most-once and permitted to be lost |
 | `/readyz` red | the table exceeded its ceiling. Everything else about this service is local |
+| a client cannot connect | it must offer TLS 1.3, present an RFC 7250 raw public key, and pin this server's key. `twinvpn_presence_tls_handshakes_refused_total` |
+| `twinvpn_presence_binding_mismatches_total` climbing | a `device_id` is being claimed on a channel not entitled to it — a security event, not a client bug |
 
 ```bash
 RUST_LOG=twinvpn_presence=debug cargo test -p twinvpn-presence -- --nocapture

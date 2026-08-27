@@ -15,6 +15,13 @@
 //! this crate. `tests/never_a_gate.rs` asserts that by reading the rendezvous's
 //! own manifest.
 //!
+//! # The channel is authenticated before a byte of framing is read
+//!
+//! TLS 1.3 with mutual RFC 7250 raw public keys, client authentication
+//! mandatory, 0-RTT prohibited ([`tls`]). A `BIND` is then bound to that
+//! authenticated key ([`binding`]) — which is what makes S-11 enforceable at
+//! all, rather than one unauthenticated claim checked against another.
+//!
 //! # S-11: the device is authoritative for its own presence
 //!
 //! `presence.proto`: "a device may assert presence **only for itself**. A
@@ -48,12 +55,14 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod binding;
 pub mod config;
 pub mod frame;
 pub mod ingress;
 pub mod server;
 pub mod store;
 pub mod testkit;
+pub mod tls;
 
 /// The `errors.proto` component this service reports itself as.
 pub const COMPONENT: twinvpn_types::Component = twinvpn_types::Component::Presence;

@@ -35,9 +35,13 @@ pub struct RendezvousConfig {
     /// `TWINVPN_RZ_LISTEN_QUIC`. Parsed and validated; **not yet bound** — see
     /// `README.md` §9.
     pub listen_quic: SocketAddr,
-    /// `TWINVPN_RZ_TLS_CERT_PATH`. Required to exist and be readable.
+    /// `TWINVPN_RZ_TLS_CERT_PATH`. Required to exist because `docker-compose.yml`
+    /// mounts it; **not used**. In RFC 7250 mode the server's identity is its
+    /// key, and a certificate is the naming system ADR-0001 §6 rejected.
     pub tls_cert_path: PathBuf,
-    /// `TWINVPN_RZ_TLS_KEY_PATH`. Required to exist and be readable.
+    /// `TWINVPN_RZ_TLS_KEY_PATH`. **The server's whole identity.** Required to
+    /// exist, be readable, and parse as a private key; anything else is a
+    /// startup failure, never a plaintext listener.
     pub tls_key_path: PathBuf,
     /// `TWINVPN_RZ_CONTROL_PLANE_URL`. Recorded for authorization work that is
     /// **not** on the `CALL` path and **not** on the readiness path (I5).
@@ -49,6 +53,8 @@ pub struct RendezvousConfig {
     pub mailbox: MailboxLimits,
     /// Attachment ceilings.
     pub attach: AttachLimits,
+    /// `device_id` ↔ channel-identity binding ceilings.
+    pub binding: crate::binding::BindingLimits,
     /// Per-source admission.
     pub admission: AdmissionLimits,
     /// How often the TTL sweep runs.
@@ -108,6 +114,10 @@ pub mod keys {
     pub const FRAME_READ_TIMEOUT_MS: &str = "TWINVPN_RZ_FRAME_READ_TIMEOUT_MS";
     /// **(new)** concurrently served connection ceiling.
     pub const MAX_CONNECTIONS: &str = "TWINVPN_RZ_MAX_CONNECTIONS";
+    /// **(new)** how long a `device_id`↔channel binding outlives its connection.
+    pub const BINDING_TTL_MS: &str = "TWINVPN_RZ_BINDING_TTL_MS";
+    /// **(new)** concurrently held binding ceiling.
+    pub const MAX_BINDINGS: &str = "TWINVPN_RZ_MAX_BINDINGS";
 }
 
 /// A frozen value arrived disagreeing with the compiled-in registry.
@@ -185,6 +195,15 @@ impl RendezvousConfig {
             ..admission_defaults
         };
 
+        let binding_defaults = crate::binding::BindingLimits::default();
+        let binding = crate::binding::BindingLimits {
+            ttl: l.duration_ms(keys::BINDING_TTL_MS, binding_defaults.ttl)?,
+            max_bindings: usize::try_from(
+                l.u64(keys::MAX_BINDINGS, binding_defaults.max_bindings as u64)?,
+            )
+            .unwrap_or(binding_defaults.max_bindings),
+        };
+
         Ok(Self {
             listen_tcp,
             listen_quic,
@@ -195,6 +214,7 @@ impl RendezvousConfig {
                 .duration_ms(keys::CALL_P50_BUDGET_MS, Duration::from_millis(150))?,
             mailbox,
             attach,
+            binding,
             admission,
             // A quarter of the shortest TTL: short enough that expired bytes do
             // not linger, long enough not to be a busy loop.

@@ -27,7 +27,7 @@ async fn a_call_to_an_attached_peer_is_forwarded_byte_for_byte() {
     let target = [0x11u8; 32];
     let payload = unknown_field_payload();
 
-    let mut responder = common::Client::connect(h.addr).await;
+    let mut responder = h.client().await;
     responder
         .write(&rz::frame::encode(rz::frame::Opcode::Attach, &target))
         .await;
@@ -35,7 +35,7 @@ async fn a_call_to_an_attached_peer_is_forwarded_byte_for_byte() {
         .await
         .expect("attach acked");
 
-    let mut initiator = common::Client::connect(h.addr).await;
+    let mut initiator = h.client().await;
     initiator
         .write(&testkit::call_frame(target, &payload))
         .await;
@@ -56,7 +56,7 @@ async fn a_call_to_a_detached_peer_is_mailboxed_and_delivered_on_attach() {
     let target = [0x22u8; 32];
     let payload = unknown_field_payload();
 
-    let mut initiator = common::Client::connect(h.addr).await;
+    let mut initiator = h.client().await;
     initiator
         .write(&testkit::call_frame(target, &payload))
         .await;
@@ -70,7 +70,7 @@ async fn a_call_to_a_detached_peer_is_mailboxed_and_delivered_on_attach() {
     );
 
     // The peer arrives afterwards; the jitter buffer hands it over.
-    let mut responder = common::Client::connect(h.addr).await;
+    let mut responder = h.client().await;
     responder
         .write(&rz::frame::encode(rz::frame::Opcode::Attach, &target))
         .await;
@@ -86,13 +86,18 @@ async fn a_mailboxed_call_is_never_replayed_to_a_second_attach() {
     let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
     let target = [0x23u8; 32];
 
-    let mut initiator = common::Client::connect(h.addr).await;
+    let mut initiator = h.client().await;
     initiator
         .write(&testkit::call_frame(target, &testkit::payload(16)))
         .await;
     common::within(initiator.read_until(rz::frame::Opcode::Ack)).await;
 
-    let mut first = common::Client::connect(h.addr).await;
+    // ONE device identity across both connections: a device reconnecting is
+    // the legitimate case, and since the binding is to the authenticated key, a
+    // *different* key would now be refused (see tls_binding.rs).
+    let device_key = common::TestKey::generate();
+
+    let mut first = h.client_as(&device_key).await;
     first
         .write(&rz::frame::encode(rz::frame::Opcode::Attach, &target))
         .await;
@@ -103,7 +108,7 @@ async fn a_mailboxed_call_is_never_replayed_to_a_second_attach() {
 
     // ADR-0002 N-9: a CALL is not replayed from a cursor, and the mailbox is not
     // durability. A second attach gets nothing.
-    let mut second = common::Client::connect(h.addr).await;
+    let mut second = h.client_as(&device_key).await;
     second
         .write(&rz::frame::encode(rz::frame::Opcode::Attach, &target))
         .await;
@@ -129,7 +134,7 @@ async fn the_service_reports_the_observed_source_address_on_both_families() {
         IpAddr::V4(Ipv4Addr::LOCALHOST),
     ] {
         let h = common::start(host).await;
-        let mut c = common::Client::connect(h.addr).await;
+        let mut c = h.client().await;
         let body = common::within(c.read_until(rz::frame::Opcode::Reflexive))
             .await
             .expect("networking.md A6(a): the reflexive report");
@@ -152,13 +157,18 @@ async fn a_second_attach_supersedes_the_first_and_the_first_is_told() {
     let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
     let target = [0x33u8; 32];
 
-    let mut first = common::Client::connect(h.addr).await;
+    // The SAME device identity on two connections: a device that reconnects
+    // before its old connection has closed. A different key is refused instead
+    // of superseding — that is `tls_binding.rs`'s subject.
+    let device_key = common::TestKey::generate();
+
+    let mut first = h.client_as(&device_key).await;
     first
         .write(&rz::frame::encode(rz::frame::Opcode::Attach, &target))
         .await;
     common::within(first.read_until(rz::frame::Opcode::Ack)).await;
 
-    let mut second = common::Client::connect(h.addr).await;
+    let mut second = h.client_as(&device_key).await;
     second
         .write(&rz::frame::encode(rz::frame::Opcode::Attach, &target))
         .await;
@@ -189,7 +199,7 @@ async fn a_flood_from_one_source_is_deferred_with_a_retry_hint_not_reset() {
     })
     .await;
 
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     let frame = testkit::call_frame([0x44u8; 32], &testkit::payload(16));
     let mut codes = Vec::new();
     for _ in 0..6 {

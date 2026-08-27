@@ -83,9 +83,9 @@ frozen value that is merely ignored is one nobody notices being wrong.
 | Variable | Type | Default | Frozen | If absent / if wrong |
 |---|---|---|---|---|
 | `TWINVPN_RZ_LISTEN_TCP` | socket addr | `[::]:443` | no | `[::]:443`, dual stack |
-| `TWINVPN_RZ_LISTEN_QUIC` | socket addr | `[::]:443` | no | parsed and validated; **not bound** (§9) |
-| `TWINVPN_RZ_TLS_CERT_PATH` | path | `/run/secrets/rendezvous/tls.crt` | no | **startup fails** — the file must exist and be readable |
-| `TWINVPN_RZ_TLS_KEY_PATH` | path | `/run/secrets/rendezvous/tls.key` | no | **startup fails** |
+| `TWINVPN_RZ_LISTEN_QUIC` | socket addr | `[::]:443` | no | parsed and validated; **not bound** (§10) |
+| `TWINVPN_RZ_TLS_CERT_PATH` | path | `/run/secrets/rendezvous/tls.crt` | no | **startup fails** if unreadable. **Not used** — RFC 7250 carries no certificate; the key *is* the identity (§4.1) |
+| `TWINVPN_RZ_TLS_KEY_PATH` | path | `/run/secrets/rendezvous/tls.key` | no | **startup fails.** This is the server's whole identity. A key that will not parse stops the process; there is no path to a plaintext listener |
 | `TWINVPN_RZ_CONTROL_PLANE_URL` | URL | `https://control-plane:443` | no | recorded; **never called on the `CALL` path or the readiness path** (I5) |
 | `TWINVPN_RZ_MAILBOX_TTL_MS` | u64 ms | `30000` | **yes** | any other value is a startup failure |
 | `TWINVPN_RZ_MAILBOX_CAPACITY_PER_TARGET` | u64 | `8` | **yes** | as above |
@@ -98,7 +98,7 @@ frozen value that is merely ignored is one nobody notices being wrong.
 
 ### 3.1 Added by this domain (`infra/README.md` §4.3 does not list them)
 
-Every one is a resource ceiling. They are reported to the integration lead in §8;
+Every one is a resource ceiling. They are reported to the integration lead in §9;
 each has a working default, so compose needs no change.
 
 | Variable | Type | Default | What it bounds |
@@ -110,18 +110,100 @@ each has a working default, so compose needs no change.
 | `TWINVPN_RZ_SOURCE_BURST` | u64 | `40` | burst depth for the above |
 | `TWINVPN_RZ_FRAME_READ_TIMEOUT_MS` | u64 ms | `5000` | how long a **partially received** frame may take to finish — the slowloris bound |
 | `TWINVPN_RZ_MAX_CONNECTIONS` | u64 | `16384` | concurrently served connections |
+| `TWINVPN_RZ_BINDING_TTL_MS` | u64 ms | `600000` | how long a `device_id`↔channel binding outlives its connection (§4.2) |
+| `TWINVPN_RZ_MAX_BINDINGS` | u64 | `16384` | concurrently held bindings |
 
 Everything in `twinvpn-service-common`'s README §3.2 also applies.
 
 ---
 
-## 4. The wire
+## 4. Authentication
 
-A fixed-layout header, then an opaque body:
+### 4.1 The channel
+
+**TLS 1.3, mutual RFC 7250 raw public keys, client authentication mandatory,
+0-RTT prohibited.** ADR-0001 §7.2's L-CONTROL block, implemented in `src/tls.rs`:
 
 ```
-magic "TVR1" (4) │ version (1) │ opcode (1) │ body_len (2, big-endian)
+Transport     : TLS 1.3 over TCP (QUIC is §10's gap, not a substitution)
+Client auth   : RFC 7250 raw public key, possession proved by CertificateVerify
+Server auth   : the server's own raw public key, for the client to pin
+0-RTT         : PROHIBITED — max_early_data_size is 0 and asserted at startup
+TLS 1.2       : not offered; a 1.2 downgrade is a downgrade of the authentication
 ```
+
+**Why raw public keys.** A `device_id` *is* a hash of the device's identity key
+(`identifiers.md` §2), so device identity is self-certifying and there is no
+authority to chain to. A PKI here would be a second, weaker naming system over a
+self-certifying one — ADR-0001 §6's "certificate/PKI baggage", declined.
+
+**There is no certificate.** `TWINVPN_RZ_TLS_KEY_PATH` is the whole of the
+server's identity; `server_public_key()` returns the SPKI an operator publishes
+for devices to pin, which is what ADR-0001's "pinned control-plane public key
+set, shipped in the build" means in practice.
+
+**What is authenticated, and what is not.** The handshake proves the peer holds
+the private half of the key it presented. It does **not** decide *which* keys may
+connect: this service is an untrusted courier with no trust store, the `CALL`
+bodies are Rule-B signed end to end, and asking the control plane per connection
+would put it back in the reconnect path (**I5**). Any well-formed key may
+connect — but it may only speak for itself, which is §4.2.
+
+### 4.2 The binding — `ATTACH` is answerable to the key
+
+Before this, `ATTACH` was an unauthenticated **claim**: anyone with a socket
+could say "I am `device_id` D" and receive D's `CALL`s. `src/binding.rs` makes
+the claim answerable:
+
+> **A `device_id` belongs to at most one channel identity, and a channel
+> identity speaks for at most one `device_id`, for the life of the binding.**
+
+- the first `ATTACH(D)` on a channel holding key `K` records `K ↔ D`;
+- `ATTACH(D')` on that channel with `D' ≠ D` is refused;
+- `ATTACH(D)` from any channel holding `K' ≠ K` is refused while `K ↔ D` is live.
+
+Refusal is **`CONTROL.CHANNEL_BINDING_MISMATCH`** — FATAL, CRITICAL, and
+`trust-boundaries.md` §4's words for it are "**a security event, never a parse
+error**". The answer names nothing: echoing the contested `device_id` would make
+the refusal an oracle for which devices are attached.
+
+The binding **outlives its connection** by `TWINVPN_RZ_BINDING_TTL_MS`, so a
+device that drops and reconnects finds its own binding and an attacker racing
+that reconnect finds it taken. It does lapse, so a device that legitimately
+rotates its identity key is not locked out for ever.
+
+**What this is not.** It is channel-pinned, not derived. It closes impersonation
+of a device that is attached or has attached within the binding TTL — which is
+every device in normal operation. It does **not** close *first-contact*
+impersonation: an attacker who attaches as D before the real D ever does holds
+the binding until it lapses. Closing that needs the server to compute D from the
+presented key, and that derivation exists — see RZ-7 in §9.
+
+---
+
+## 5. The wire
+
+A fixed-layout header, then an opaque body, **inside the authenticated
+channel**:
+
+```
+ offset  size  field
+      0     4  magic      = 0x54 0x56 0x52 0x31  ("TVR1")
+      4     1  version    = 0x01
+      5     1  opcode     (table below)
+      6     2  body_len   unsigned, big-endian, <= 1232
+      8     n  body       exactly body_len octets; no padding, no trailer
+```
+
+`body_len`'s ceiling is `identifiers.device_id_bytes` (32) plus
+`envelope.c4_max_bytes` (1200). It is validated **before** a body buffer exists.
+Trailing octets past `body_len` are a framing error, not something to skip: a
+tolerated tail is a place to smuggle bytes past a length check.
+
+The integration lead has blessed this framing (RZ-1) and asked that it be written
+down precisely so a future `CallEnvelope` contract can be specified against what
+shipped. The above is that specification; `src/frame.rs` is its only
+implementation and `tests/frame_proptest.rs` its executable statement.
 
 | Opcode | Direction | Body |
 |---|---|---|
@@ -152,17 +234,17 @@ would confirm the target exists." The connection is closed and a metric is
 incremented; the sender learns nothing.
 
 **There is no frozen message for this envelope**, and that is a contract gap, not
-a choice — see §8.
+a choice — see RZ-1 in §9.
 
 ---
 
-## 5. The `CALL` ladder and the resource envelope
+## 6. The `CALL` ladder and the resource envelope
 
 ADR-0002 §11.5:
 
 ```
 [1] target has a live control channel  ──▶ deliver on it            p50 ≤ 150 ms
-[2] target has a valid push token      ──▶ C3 wake hint      NOT IMPLEMENTED (§9)
+[2] target has a valid push token      ──▶ C3 wake hint     NOT IMPLEMENTED (§10)
 [3] mailbox: TTL 30 s, capacity 8/target, drop-oldest ──▶ CONTROL.MAILBOX_OVERFLOW
 [4] none of the above                                ──▶ CONTROL.CALL_UNDELIVERABLE
 ```
@@ -192,7 +274,7 @@ octets are retained, and every table evicts oldest-first rather than growing.
 
 ---
 
-## 6. Forward-verbatim (finding W-4)
+## 7. Forward-verbatim (finding W-4)
 
 `prost` 0.13 **drops unknown protobuf fields on decode and cannot re-emit them**,
 measured by `core-foundation` and recorded as CF-2. A forwarder that decodes and
@@ -211,7 +293,7 @@ every payload length from 2 to 1200.
 
 ---
 
-## 7. What this service can still observe about users
+## 8. What this service can still observe about users
 
 Stated plainly, because a rendezvous is a metadata chokepoint and ADR-0004 §7
 already concedes that "the rendezvous service learns which `Device`s are
@@ -262,7 +344,7 @@ what I5 forbids. `tests/…::a_fabricated_target_is_indistinguishable_from_a_det
 
 ---
 
-## 8. Findings for the integration lead
+## 9. Findings for the integration lead
 
 | # | Kind | Finding |
 |---|---|---|
@@ -271,52 +353,63 @@ what I5 forbids. `tests/…::a_fabricated_target_is_indistinguishable_from_a_det
 | **RZ-3** | **contract gap** | **`errors.proto` has no `COMPONENT_RENDEZVOUS_SERVICE`.** It has `COMPONENT_RENDEZVOUS_CLIENT` (7), the device-side component, and `COMPONENT_COORDINATION_SERVICE` (21). This service reports 21 — the closest truthful answer, since `architecture.md` §2.9 places the rendezvous in the control plane — rather than claiming to be the client. The registry is append-only, so adding one breaks nothing. |
 | **RZ-4** | gap | **Rung [2], the C3 push wake, is not implemented** (§9). No push credential store exists and a push gateway is an untrusted third party. A detached device's `CALL` falls straight to the mailbox. This costs latency, never correctness — the initiator never blocks on delivery (ADR-0002 §11.5). |
 | **RZ-5** | note | **Seven `TWINVPN_RZ_*` resource ceilings added** (§3.1), all with defaults, none in `infra/README.md` §4.3. A pre-authentication surface with no connection bound, no per-source rate bound and no partial-frame deadline is a descriptor- and memory-exhaustion primitive; these are not optional. Should be added to `infra/README.md` §4.3 when infrastructure next touches it. |
-| **RZ-6** | note | **`services/Cargo.lock` changed mechanically** — `proptest` 1.11 as a **dev**-dependency of this crate and `presence`, plus its 13 transitive dev-only entries (`autocfg`, `bit-set`, `bit-vec`, `fastrand`, `linux-raw-sys`, `num-traits`, `quick-error`, `rand_xorshift`, `rustix`, `rusty-fork`, `tempfile`, `unarray`, `wait-timeout`). No runtime dependency moved and no version of an existing dependency changed. `ownership.md` §6 makes the B3 parser's "never panics, never allocates unboundedly" a **property**, and a property needs a property test. The lockfile is the integration lead's to reconcile. |
+| **RZ-7** | **blocked dependency — decision needed** | **The `device_id`↔key binding is channel-pinned, not derived, and it cannot be derived from here.** `identifiers.md` §2 fixes the derivation: `device_id = SHA-256("TwinVPN/DeviceIdentity/v1" ‖ 0x00 ‖ dCBOR(COSE_Key(IK_pub)))`. It is implemented, tested and owned — in `core/crates/twinvpn-trust::derive_device_id` — and `services/Cargo.toml` permits a service exactly one edge into `/core`, `twinvpn-schema`. **Re-deriving it here is finding W-23's mistake verbatim** ("a specified derivation is not ours to improve"), and a wrong `device_id` derivation names the wrong device. So `src/binding.rs` ships a `Binding` **trait** with `ChannelPinned` behind it; the derived implementation is a one-file change. **The ask:** either permit a `twinvpn-trust` path dependency for the services, or have `core-security` expose `derive_device_id` (and the COSE_Key encoding it needs) in a crate services may link. Until then, first-contact impersonation is open and is stated in §4.2 and §10. |
+| **RZ-8** | **duplication — should move to `service-common`** | `src/tls.rs` and `src/binding.rs` are **byte-for-byte the same design** in `services/presence`, and `relay-plane` will need a third copy the moment its legs are authenticated. That is the R-31 divergence ADR-0018 CB-2 and `twinvpn-service-common` exist to prevent, and I own two of the copies rather than the shared crate. I did not edit `twinvpn-service-common` because it is `control-plane`'s (`ownership.md` §2). **The ask:** move `tls`/`binding` into `twinvpn-service-common` under its owner, and I will delete both copies. |
+| **RZ-9** | note | **`aws-lc-rs` added as a `[dev-dependencies]` entry** of both crates, used only to mint an ephemeral P-256 keypair per test run. It is **already in the graph** — `rustls` links it as its default provider — so the service gains no runtime cryptographic dependency it did not already have transitively, and the lockfile gains no crate from this line. The alternatives were committing a private key to the repository (against `CLAUDE.md`'s unqualified rule) or requiring `openssl` on every test host. Flagged because a crypto crate named in a service manifest deserves to be seen. |
+| **RZ-6** | note | **`services/Cargo.lock` changed mechanically**, twice. First: `proptest` 1.11 as a **dev**-dependency plus 13 transitive dev-only entries — `ownership.md` §6 makes the B3 parser's "never panics, never allocates unboundedly" a **property**, and a property needs a property test. Second: the TLS work resolves `rustls`, `tokio-rustls`, `rustls-pemfile`, `rustls-pki-types`, `rustls-webpki`, `aws-lc-rs`/`aws-lc-sys` and their build-time helpers (`cc`, `cmake`, `jobserver`, `shlex`, `pkg-config`, `dunce`, `fs_extra`, `find-msvc-tools`, `getrandom`, `r-efi`, `ring`, `untrusted`, and the `windows-*` target shims). All follow from the three lines the lead added to the workspace manifest. **`aws-lc-sys` compiles C**, and it built on this host **without `cmake` installed** — worth knowing before a CI image is trimmed. No existing dependency changed version. The lockfile is the lead's to reconcile. |
 
 ---
 
-## 9. Known limitations
+## 10. Known limitations
 
 Stated here rather than discovered later.
 
-1. **TLS is not terminated and QUIC is not bound.** `TWINVPN_RZ_LISTEN_TCP` is
-   bound and speaks the §4 framing in the clear.
-   `TWINVPN_RZ_LISTEN_QUIC`, `_TLS_CERT_PATH` and `_TLS_KEY_PATH` are parsed and
-   the files are required to exist, but no handshake happens: `rustls` is a
-   workspace dependency and `tokio-rustls` is not, and adding a dependency is the
-   integration lead's call. **Consequence:** there is no channel authentication in
-   this wave, so an `ATTACH` is an unauthenticated claim and a device could
-   attach as another device's `device_id` and receive its `CALL`s. The blobs are
-   Rule-B signed end to end, so the attacker learns ciphertext it cannot open and
-   cannot answer — but it can deny delivery. **This must be closed before the
-   service is exposed anywhere.**
-2. **No container has been built or run.** Docker is absent from this host
+1. **QUIC is not bound.** ADR-0001's L-CONTROL is QUIC + TLS 1.3; this is the
+   same authentication over TCP, which ADR-0002 §11.2's rung 2 already
+   contemplates as a degraded binding. What is lost is connection migration and
+   cross-stream head-of-line independence — a mobile device roaming between
+   networks re-handshakes rather than migrating. `quinn` is in the workspace
+   manifest, and the `tls.rs` `ServerConfig` is the one a QUIC endpoint would
+   take, so this is a binding to add rather than a design to change.
+2. **First-contact impersonation is open** — RZ-7, and §4.2 says exactly what
+   that means. An attacker who attaches as a `device_id` *before* the real device
+   ever has holds the binding until it lapses. It cannot read the `CALL`s (Rule-B
+   signed, opaque) and cannot answer them, but it can deny delivery. The fix is
+   the derived binding, and it is blocked on a dependency ruling, not on work.
+3. **No container has been built or run.** Docker is absent from this host
    (`infra/README.md` §9). Everything in §2 involving `docker compose` is
-   unexercised. The tests run a **real** listener on loopback, over both IPv4 and
-   IPv6, and drive real sockets.
-3. **Rung [2] (C3 push wake) is absent** — RZ-4.
-4. **`Verbatim::from_received` applies a *shape* check to the payload**, not only
+   unexercised. The tests run a **real** TLS 1.3 listener on loopback, over both
+   IPv4 and IPv6, and drive real mutually authenticated sockets.
+4. **`infra/scripts/bootstrap-local.sh` generates an Ed25519 key and a
+   self-signed certificate.** The key loads fine and the certificate is ignored,
+   which is correct for RFC 7250 — but an operator reading that script would
+   reasonably expect the certificate to matter. Worth a line there; raised with
+   `infrastructure` via RZ-5's channel rather than edited from here.
+5. **Rung [2] (C3 push wake) is absent** — RZ-4.
+6. **`Verbatim::from_received` applies a *shape* check to the payload**, not only
    a size check: `twinvpn_schema::depth::check` refuses octets that are not a
    well-formed protobuf record sequence. That is the depth guard doing its job
    pre-parse, and it is conservative in the safe direction, but it does mean a
    future C4 body that is *not* protobuf-shaped would be refused. Recorded
    because "the rendezvous never looks at the payload" is true of its *values*
    and not quite true of its *framing*.
-5. **The 1200-byte C4 cap is enforced; the IPv6 path MTU it is derived from is
+7. **The 1200-byte C4 cap is enforced; the IPv6 path MTU it is derived from is
    not measured.** On TCP the envelope never fragments, so the cap here is a
    protocol bound rather than a path property.
-6. **No relay-assisted fallback.** ADR-0002 §11.5 records that a `Relay` may
+8. **No relay-assisted fallback.** ADR-0002 §11.5 records that a `Relay` may
    carry a `CALL` when the rendezvous is unreachable. That is the relay's side
    and belongs to `relay-plane`; nothing here prevents it.
 
 ---
 
-## 10. Debugging
+## 11. Debugging
 
 | Symptom | First thing to check |
 |---|---|
 | startup fails naming `TWINVPN_RZ_C4_MAX_BYTES` | something set a frozen bound. The message names the value and the expectation |
-| startup fails naming a TLS path | the file does not exist or is not readable |
+| startup fails naming a TLS path | the file does not exist, is unreadable, or is not a parsable private key. There is no fallback to a plaintext listener, by design |
+| a client cannot connect at all | it must offer TLS 1.3, present an RFC 7250 raw public key, and pin this server's key. `twinvpn_rendezvous_tls_handshakes_refused_total` counts every failure without distinguishing them — deliberately, since the peer is unauthenticated |
+| `twinvpn_rendezvous_binding_mismatches_total` climbing | a `device_id` is being claimed on a channel not entitled to it. **A security event** (`CONTROL.CHANNEL_BINDING_MISMATCH`, FATAL/CRITICAL), not a client bug — unless a device rotated its identity key inside the binding TTL, which §4.2 covers |
 | `ConfigError::RegistryMismatch` | the mounted `contracts/registry` is not the one this binary was built against |
 | `/readyz` says `no_probes` | a wiring defect; reported red rather than green |
 | `twinvpn_rendezvous_frames_rejected_total` climbing | someone is sending malformed C4. The `WARN` line carries the registered code and the cap that fired — never the bytes |

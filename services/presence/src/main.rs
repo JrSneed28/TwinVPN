@@ -43,7 +43,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    degrade reconnect LATENCY and never CAPABILITY (architecture.md §2.13).
     //    Since this service holds nothing durable there is no dependency whose
     //    absence could make its answer wrong. Reported in README.md §8.
-    let shared = Arc::new(pr::server::Shared::new(pr_cfg.clone(), metrics.clone()));
+    // TLS before anything that could serve: a key that will not load must stop
+    // the process, not degrade it to a plaintext listener.
+    let shared = Arc::new(pr::server::Shared::new(pr_cfg.clone(), metrics.clone())?);
     let listener = tokio::net::TcpListener::bind(pr_cfg.listen_tcp).await?;
     let bound_addr = listener.local_addr()?;
 

@@ -27,7 +27,7 @@ async fn refused_without_answer(h: &common::Harness, bytes: &[u8], case: &str) {
         let r = h.shared.router.lock().await;
         (r.mailboxes.total_bytes(), r.attachments.len())
     };
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     c.write(bytes).await;
 
     // The only frame a refused connection may carry is the REFLEXIVE report the
@@ -155,7 +155,7 @@ async fn every_hostile_input_is_refused_without_an_answer_and_without_a_state_ch
     }
     // The "decoding terminated" half: after every one of those, a well-formed
     // CALL still works.
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     c.write(&testkit::call_frame([1u8; 32], &testkit::payload(16)))
         .await;
     let body = common::within(c.read_until(rz::frame::Opcode::Ack))
@@ -187,7 +187,7 @@ async fn a_declared_gigabyte_does_not_allocate_a_gigabyte() {
     // is that the process's retained memory does not move.
     let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
     for _ in 0..500 {
-        let mut c = common::Client::connect(h.addr).await;
+        let mut c = h.client().await;
         c.write(&testkit::declared_length_frame(
             rz::frame::Opcode::Call,
             u16::MAX,
@@ -210,7 +210,7 @@ async fn a_stalled_frame_does_not_hold_a_buffer_for_ever() {
     // Without a deadline that is a socket and a buffer an unauthenticated
     // caller owns the lifetime of — `ownership.md` §6 rule 10 read as meant.
     let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     let mut stalled = testkit::declared_length_frame(rz::frame::Opcode::Call, 1200, &[]);
     stalled.push(0x08);
     c.write(&stalled).await;
@@ -227,11 +227,11 @@ async fn a_stream_of_hostile_frames_never_wedges_the_accept_loop() {
     let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
     for (_, bytes) in hostile_cases() {
         for _ in 0..20 {
-            let mut c = common::Client::connect(h.addr).await;
+            let mut c = h.client().await;
             c.write(&bytes).await;
         }
     }
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     c.write(&testkit::call_frame([2u8; 32], &testkit::payload(8)))
         .await;
     assert!(

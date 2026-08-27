@@ -19,13 +19,13 @@ async fn a_heartbeat_is_accepted_and_fanned_out_as_one_presence_updated() {
     let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
     let device = [0x11u8; 32];
 
-    let mut subscriber = common::Client::connect(h.addr).await;
+    let mut subscriber = h.client().await;
     subscriber
         .write(&pr::frame::encode(pr::frame::Opcode::Subscribe, &[]))
         .await;
     common::within(subscriber.read_until(pr::frame::Opcode::Ack)).await;
 
-    let mut publisher = common::Client::connect(h.addr).await;
+    let mut publisher = h.client().await;
     publisher.bind(device).await;
     publisher
         .write(&testkit::publish_frame(&testkit::heartbeat(
@@ -71,7 +71,7 @@ async fn a_device_cannot_assert_another_devices_presence() {
     // S-11 and presence.proto: "a device may assert presence ONLY FOR ITSELF.
     // A Presence naming another device_id is rejected."
     let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     c.bind([0x22u8; 32]).await;
     c.write(&testkit::publish_frame(&testkit::heartbeat(
         [0x99u8; 32],
@@ -103,7 +103,7 @@ async fn a_reordered_pair_settles_on_the_right_answer() {
     let device = [0x33u8; 32];
     let base = now_ms();
 
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     c.bind(device).await;
 
     // The device emitted OFFLINE first and ONLINE second, and they arrive the
@@ -142,7 +142,7 @@ async fn a_lost_heartbeat_is_not_an_error_on_the_wire() {
     let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
     let device = [0x44u8; 32];
     let base = now_ms();
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     c.bind(device).await;
 
     for expiry in [base + 90_000, base + 30_000] {
@@ -167,7 +167,7 @@ async fn a_lost_heartbeat_is_not_an_error_on_the_wire() {
 async fn an_expiry_beyond_the_record_ttl_is_refused_never_clamped() {
     let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
     let device = [0x55u8; 32];
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     c.bind(device).await;
     c.write(&testkit::publish_frame(&testkit::heartbeat(
         device,
@@ -188,7 +188,7 @@ async fn an_expiry_beyond_the_record_ttl_is_refused_never_clamped() {
 async fn presence_works_identically_over_ipv4() {
     let h = common::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
     let device = [0x66u8; 32];
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     c.bind(device).await;
     c.write(&testkit::publish_frame(&testkit::heartbeat(
         device,
@@ -207,7 +207,7 @@ async fn presence_works_identically_over_ipv4() {
 #[tokio::test]
 async fn an_unbound_connection_cannot_assert_anything() {
     let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
-    let mut c = common::Client::connect(h.addr).await;
+    let mut c = h.client().await;
     c.write(&testkit::publish_frame(&testkit::heartbeat(
         [0x77u8; 32],
         v1::PresenceState::Online,
