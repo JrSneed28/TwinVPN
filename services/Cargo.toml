@@ -68,6 +68,25 @@ tower-http  = { version = "0.6", features = ["trace", "timeout"] }
 quinn       = "0.11"
 rustls      = "0.23"
 
+# TLS termination for the server artifacts.
+#
+# Added by the integration lead after `rendezvous-connectivity` reported the
+# consequence of their absence plainly rather than as a footnote: with no
+# channel authentication, ATTACH/BIND are unauthenticated CLAIMS, so an attacker
+# could attach as another device's device_id and receive its CALLs, or publish
+# presence for it. `rustls` alone is not enough to terminate a connection -- the
+# tokio integration and a PEM reader are what actually close that hole.
+#
+# NOTE the difference from the core: ADR-0018 CD-I2 confines a cryptographic
+# dependency to `twinvpn-crypto`, and finding W-12 rules that `rustls` therefore
+# belongs there and `quinn` may sit in `twinvpn-cp-client`. CD-I2 is a rule over
+# the /core workspace crate set; these are SEPARATE SERVER ARTIFACTS that do not
+# link the core (ADR-0018 §11.2 rows 2.8 and 2.11), so they terminate their own
+# transport. `cargo run -p xtask -- lint` scopes CD-I2 to /core accordingly.
+tokio-rustls     = "0.26"
+rustls-pemfile   = "2.2"
+rustls-pki-types = "1.15"
+
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-opentelemetry = "0.33"
