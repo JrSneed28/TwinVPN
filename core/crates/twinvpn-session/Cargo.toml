@@ -2,6 +2,9 @@
 #
 # Owner: core-dataplane. This manifest is owned by that agent; the WORKSPACE manifest
 # at core/Cargo.toml is owned by the integration lead and must not be edited here.
+#
+# CD-I5: no dependency here, direct or transitive, may reach twinvpn-cp-client.
+# The only path between the planes is twinvpn-store.
 [package]
 name    = "twinvpn-session"
 version.workspace      = true
@@ -21,6 +24,9 @@ twinvpn-tunnel        = { workspace = true }
 twinvpn-path          = { workspace = true }
 twinvpn-relay-client  = { workspace = true }
 thiserror             = { workspace = true }
+tracing               = { workspace = true }
 
 [dev-dependencies]
 proptest              = { workspace = true }
+twinvpn-env           = { workspace = true, features = ["test-support"] }
+twinvpn-platform      = { workspace = true, features = ["mock"] }

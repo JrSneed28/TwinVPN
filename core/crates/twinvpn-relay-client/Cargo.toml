@@ -23,3 +23,5 @@ bytes                 = { workspace = true }
 
 [dev-dependencies]
 proptest              = { workspace = true }
+twinvpn-env           = { workspace = true, features = ["test-support"] }
+twinvpn-platform      = { workspace = true, features = ["mock"] }
