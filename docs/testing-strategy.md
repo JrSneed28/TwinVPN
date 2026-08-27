@@ -144,6 +144,22 @@ regenerating a corpus to make CI green is the single most dangerous failure mode
 and is blocked procedurally: corpus files are owned by PROTOCOL and require an explicit,
 separately-reviewed change.
 
+**Control `CR-I2` — the novel-construction review gate (closes G-4, explicitly rather than by
+silence).** The `crypto-kat/` corpus proves *conformance to* each audited primitive. It cannot
+detect a novel construction assembled **around** correct primitives — a bespoke KDF chain, a
+hand-rolled nonce derivation, an ad-hoc MAC-then-encrypt composition — because every individual
+primitive still matches its published vectors. **I2 is a process invariant and is accepted as a
+REVIEW-class control.** The acceptance is recorded here with an owner and a trigger so that it is
+a decision rather than an omission:
+
+| | |
+|---|---|
+| **Trigger** | Any diff touching the key schedule, a KDF invocation, nonce or IV derivation, an AEAD call site, a signature construction, or the `crypto/` module boundary — detected mechanically at **T1** by a path-and-symbol filter, which is the *only* mechanical half of this control |
+| **Obligation** | The diff cannot merge without a review recorded by a second engineer, naming (a) every primitive invoked, (b) the published specification each is used **as specified by**, and (c) an explicit statement that no new construction was composed. "No crypto change" is an acceptable finding; **silence is not** |
+| **Evidence** | The recorded review is bound to the commit under C-5, the same way test evidence is |
+| **What it does not do** | It does not prove absence of novel construction. It makes the claim *someone's*, at a named point, on every qualifying diff. A control that is honest about its strength is worth more than one that is assumed to be mechanical |
+| **Escalation** | Where a review finds a genuinely new construction, I2 is **violated** and the change is refused, not risk-accepted — [ADR-0001](adr/ADR-0001-tunnel-protocol-and-cryptographic-foundation.md) owns the exception path |
+
 **Differential decoding.** Where two implementations of a codec exist (e.g. a fast path and a
 reference path, or two language bindings), all corpus classes run through both and must agree
 on accept/reject and on the decoded structure.
@@ -241,6 +257,33 @@ a teardown that leaves a route, a rule, an address, or a firewall entry behind i
 both families, including the ICMP/ICMPv6-blackhole variant; interface add/remove/change; and
 address-space collision detection against pre-existing virtual interfaces.
 
+**The `S-COLL-*` pre-flight conflict family (closes G-3).** §2.9's other rows verify that a
+*correct* install installs and a *correct* teardown removes. They do not verify the case **R-17
+actually exists to retire**: a conflict that is *detected* must be **reported and refused**, not
+silently overwritten. A product that quietly takes an address another component already holds has
+passed every other row in this level.
+
+| Case | Injected pre-existing state | Oracle |
+|---|---|---|
+| `S-COLL-ADDR` | A foreign virtual interface already carrying an address inside the `TwinNet` prefix, both families | `ROUTE.ADDRESS_COLLISION` (FATAL/CRITICAL, [ADR-0010](adr/ADR-0010-ipv4-ipv6-routing.md)) is emitted **before** any state change |
+| `S-COLL-IFACE` | Another product holding an adapter with our naming/owner tag, or a routing entry for our prefix | `ROUTE.IFACE_CONFLICT` (PERSISTENT/ERROR) is emitted, and the conflicting owner is named where the platform makes it determinable |
+| `S-COLL-RULE` | A pre-existing policy-routing rule at our priority, or a firewall entry in our table name | `ROUTE.IFACE_CONFLICT`, and the run does **not** proceed to arm enforcement |
+
+**Rule COLL-1 — the no-modification assertion is the point of the family.** Every case captures
+the host's interface list, address set, route table, policy-routing rules and firewall ruleset
+**before** the attempt, and asserts them **byte-identical after**. A case that emits the right
+code while having already created the interface **fails**: R-17 is a *pre-flight* requirement, and
+a report issued after the damage is a log line, not a conflict report.
+
+**Mutants (V2).** `M-COLL-1` detect-then-proceed (emits the code, installs anyway) — must fail
+COLL-1; `M-COLL-2` overwrite silently with no code — must fail the oracle; `M-COLL-3` detect only
+the v4 collision — must fail on the v6 case; `M-COLL-4` roll back after a partial install rather
+than refusing before it — must fail COLL-1, because a rollback is observable to anything watching
+the host in between.
+
+**Positive control (V4).** The same rig with no pre-existing conflict installs cleanly and emits
+no `ROUTE.*` code, proving the detector is not simply always-on. **Tier:** T2 and above.
+
 ### 2.10 NAT traversal
 
 Driven by the TwinLab NAT class matrix (§3.3). Per NAT-class-pair, the test asserts the
@@ -333,6 +376,27 @@ attacks (invitation replay, invitation phishing, out-of-band channel substitutio
 injection and replay, and a redaction/telemetry battery asserting
 [ADR-0015](adr/ADR-0015-observability-and-diagnostics.md)'s privacy claims (nothing leaves the
 device at Tier 0; no peer-pair record on relays; `SECRET` never rendered).
+
+**The key-custody battery, and the `hardware_backed` accuracy requirement (closes G-5).** I4's
+exclusion argument — that a private half cannot leave the device — is **conditional on the custody
+claim being true**, and on `hardware_backed = false` targets (routers, containers, VMs) the private
+half demonstrably *can* leave (**TM-13**, [ADR-0023](adr/ADR-0023-headless-cli-and-embedded-profile.md)
+`PLATFORM.EMBEDDED.IDENTITY_CLONEABLE`). The battery therefore verifies the **flag**, not only the
+key, because a false flag would make the whole argument unfalsifiable.
+
+| # | Assertion | Applies to |
+|---|---|---|
+| **KC-1** | On every target in §2.18's matrix, the **live probe** result for both Tier-1 backends (identity backend, vault-key backend) is compared against the target's **declared** custody class, and the derived `custody_class` equals the **minimum** of the two (`S-54`, ST-9a). A target whose declaration and probe disagree fails | all |
+| **KC-2** | **A false `hardware_backed = true` is impossible to produce.** On a target with the secure element removed, disabled, or emulated, the probe MUST report `false`. Asserted by running the same build on a hardware-backed and a deliberately software-only instance of the *same* platform and requiring the flag to differ | all |
+| **KC-3** | Where `hardware_backed = true`, an export attempt through every platform API that could plausibly return key material fails, and no private half appears in any process dump, backup set, or exported container | hardware-backed targets |
+| **KC-4** | Where `hardware_backed = false`, the test **asserts the clone succeeds** and that the device advertises `SOFTWARE_PORTABLE` and holds no `ENROLL`/`REVOKE`/`DELEGATE` OSK. This oracle is deliberately **inverted**: a build that claims non-exportability on a target where it is untrue fails here | software-custody targets |
+| **KC-5** | A downward transition of `custody_class` at runtime emits `STORE.CUSTODY_DEGRADED` and forces IK rotation ([ADR-0007](adr/ADR-0007-device-identity-and-pairing.md) N-24); a permanent `SOFTWARE_PORTABLE` steady state does **not** (EM-29a) | all |
+
+**Mutants.** `M-KC-1` hard-code `hardware_backed = true`; `M-KC-2` derive the flag from the
+platform name rather than the probe; `M-KC-3` report the **maximum** of the two backend probes
+instead of the minimum; `M-KC-4` suppress `STORE.CUSTODY_DEGRADED` on transition. **Positive
+control (V4):** a known-hardware-backed instance reports `true` and a known-software instance
+reports `false` in the same session, proving the probe discriminates at all.
 
 Security tests are the strictest consumers of **V2** and **V4**: every one ships with a mutant
 it must catch, and every negative result ships with a positive control proving the observation
@@ -709,18 +773,22 @@ spellings MUST be reconciled into it before these oracles can be mechanically ev
 
 ### 4.1 Conformance-surface ownership
 
-Nine ADRs wrote a **conformance surface** for a proof test: a named set of observables that ADR
-guarantees to expose, so the test can be written against a mechanism rather than an intention.
+**Twelve** ADRs (and, for P04, [docs/reliability.md](reliability.md)) wrote a **conformance
+surface** for a proof test: a named set of observables that document guarantees to expose, so the
+test can be written against a mechanism rather than an intention. Nine wrote one in the first
+pass; the remaining three — ADR-0004 §11.6 (P01), ADR-0003 §11.7 (P13) and reliability.md §4.5's
+T20 cause code (P04) — were added to close **G-10**, and **every proof test now has one.**
 **Rule PT-4: where a surface exists, this document consumes it verbatim and does not re-derive
-it.** A re-derived oracle that drifts from its ADR is a contradiction produced by this document,
+it.** With G-10 closed a surface always exists, so PT-4 is now unconditional: **this document
+re-derives no oracle.** A re-derived oracle that drifts from its ADR is a contradiction produced by this document,
 and it is the failure mode this table exists to prevent.
 
 | Test | Owning conformance surface | What it supplies |
 |---|---|---|
-| **P01** | **none** | See below |
+| **P01** | [ADR-0004](adr/ADR-0004-nat-traversal-strategy.md) §11.6 | `NAT.DIRECT_ESTABLISHED` / `NAT.DIRECT_UPGRADED` with `family`, `candidate_type`, `elapsed_ms`, `relay_gathered_at_ms`; the candidate ledger including losers; the **structural** parallelism assertion `relay_gathered_at_ms ≤ first_direct_probe_ms`; and the four catchable mutants |
 | **P02** | [ADR-0006](adr/ADR-0006-relay-discovery-and-failover.md) §11.16 | Injection (symmetric NAT both ends, no port mapping) + the three-part oracle: no user action, the full `RelaySelected{…}` event, and the [ADR-0002](adr/ADR-0002-control-plane-messaging-and-event-bus.md) §11.8 zero-control-plane-call assertion |
 | **P03** | [ADR-0006](adr/ADR-0006-relay-discovery-and-failover.md) §11.16 | The injection set, the six-clause oracle (a)–(f), and three variants (whole region; standby's domain too; control plane blackholed during failover) |
-| **P04** | **none** | See below |
+| **P04** | [docs/reliability.md](reliability.md) §4.5 T20 | `NET.PATH.DEAD_NO_ALTERNATE` (`TRANSIENT`) on entry to `RECONNECTING`, with the fault-specific cause in the `caused_by` evidence field — the discrimination `M-P04-5` injects against |
 | **P05** | [ADR-0006](adr/ADR-0006-relay-discovery-and-failover.md) §11.10 + §11.17 (A-01 confirmed for both directions) | The upgrade policy and the confirmation that P05's oracle "is sound as written" |
 | **P06** | [ADR-0013](adr/ADR-0013-multi-client-gateway-architecture.md) §11.16 | Twelve oracles with their falsifying builds, plus §11.11's metric names — `gw_peer_floor_share_bps` / `gw_peer_achieved_bps` are **designated the fairness oracle** |
 | **P07** | [ADR-0012](adr/ADR-0012-kill-switch-and-leak-prevention.md) §11.9 | The dual-family Tier-2 canary, `ruleset_digest`, and two named mutants |
@@ -729,19 +797,21 @@ and it is the failure mode this table exists to prevent.
 | **P10** | [ADR-0007](adr/ADR-0007-device-identity-and-pairing.md) §7.7 | The `EpochSeed`/`TwinNetPSK` construction that makes exclusion structural, and the propagation-bound table |
 | **P11** | [ADR-0014](adr/ADR-0014-protocol-versioning-and-capability-negotiation.md) §7.1 (**T1–T5**) + §7.2 | Five named attacks with their per-alternative outcomes — T2 and T3 are the whole argument — and the three-layer detection stack with the code each layer yields |
 | **P12** | [ADR-0014](adr/ADR-0014-protocol-versioning-and-capability-negotiation.md) §11.9 (**N-30, N-31(1)–(5)**) | The five-clause refusal contract, verbatim |
-| **P13** | **none** | See below |
+| **P13** | [ADR-0003](adr/ADR-0003-network-contract-schema-format.md) §11.7 | The closed **twelve-entry parser inventory** `PI-1 … PI-12` mapped to §2.12 fuzz targets; the three-outcome decode contract and rule **PA-1**; the per-input observables (outcome class, `PROTO.*` code, parser id, verified-octet digest); and the T1 inventory/target check |
 | **P14** | [ADR-0005](adr/ADR-0005-relay-architecture.md) §7.1 (mirrored in [docs/threat-model.md](threat-model.md) §8.1) | The **three-element key inventory** that converts P14 from a statistical observation into an enumeration |
 | **P15** | [ADR-0002](adr/ADR-0002-control-plane-messaging-and-event-bus.md) §11.8 | A four-step proof — architectural, enumerative over §16's message rows, **mechanical** (a build-time dependency-graph assertion), and negative — plus [docs/architecture.md](architecture.md) §4.4.5's five clauses |
 
-**Three tests have no owning conformance surface and are authored here from first principles.**
-This is a real asymmetry, not an oversight in the reading, and it is recorded so that the
-weakest-supported tests are known rather than assumed equal:
+**Three tests once had no owning conformance surface and were authored here from first
+principles.** That asymmetry — the weakest-supported tests being known rather than assumed equal —
+is **now closed (G-10)**; all three surfaces exist and are consumed under PT-4. The table is kept
+as the audit trail of what each was missing and where it landed, because the *shape* of the defect
+recurs: a test written against its own construction drifts from the mechanism silently.
 
-| Test | Why there is no surface | What it is built on instead |
+| Test | What was missing, and where it landed | What corroborates it |
 |---|---|---|
-| **P01** | [ADR-0004](adr/ADR-0004-nat-traversal-strategy.md) defines the traversal strategy but supplies **no conformance surface, no R-ID of its own for the direct-path outcome, and no `reason_code`** for "direct succeeded" | §2.10's **`DIRECT_EXPECTED` outcome class** — the only mechanism in the corpus that can fail a build which gave up on hole punching and always relayed — plus [docs/networking.md](networking.md) §3.2's traversability matrix and §3.6's per-pair budgets |
-| **P04** | [docs/reliability.md](reliability.md) T20 (`… → RECONNECTING`, no alternate) historically emitted **no `reason_code`**, so entry into `RECONNECTING` had nothing to assert on beyond the state name. T20 is being amended to emit a named cause code; P04's oracle is written against that amendment and carries it as a dependency | The amended T20 cause code, plus A-16's `Diagnostic`-on-entry rule, PB-8's backoff bounds, and the seeded jitter stream of §3.5 |
-| **P13** | [ADR-0003](adr/ADR-0003-network-contract-schema-format.md) specifies canonical encoding and rejection semantics but supplies **no fuzz conformance surface** and names no parser inventory | §2.3's frozen `malformed/` and `hostile/` corpora, §2.12's fuzz targets (now twelve, including the four added for the trust-document, capability-token, attestation and control-reorder families), and the **twelve-parser enumeration** authored in P13 itself |
+| **P01** | *(closed)* ADR-0004 supplied **no conformance surface, no R-ID of its own for the direct-path outcome, and no `reason_code`** for "direct succeeded". **Now §11.6**, which adds `NAT.DIRECT_ESTABLISHED` / `NAT.DIRECT_UPGRADED` and binds the outcome to **R-01**/**R-12** — the requirement was never missing, its *observable* was | The surface above; §2.10's **`DIRECT_EXPECTED` outcome class** and [docs/networking.md](networking.md) §3.2/§3.6 remain as the class-level corroboration |
+| **P04** | *(closed)* T20 historically emitted **no `reason_code`**, so entry into `RECONNECTING` had nothing to assert on beyond the state name. The amendment **has landed**: [docs/reliability.md](reliability.md) §4.5 T20 emits `NET.PATH.DEAD_NO_ALTERNATE` with the specific cause in `caused_by`. P04's oracle is no longer written against a pending change | The T20 cause code, plus A-16's `Diagnostic`-on-entry rule, PB-8's backoff bounds, and the seeded jitter stream of §3.5 |
+| **P13** | *(closed)* ADR-0003 specified canonical encoding and rejection semantics but supplied **no fuzz conformance surface** and named no parser inventory, so the twelve-parser enumeration lived in P13 itself and could silently fall behind the code. **Now §11.7**, where the inventory is normative, closed, and checked at T1 | The surface above; §2.3's frozen `malformed/` and `hostile/` corpora and §2.12's twelve fuzz targets are consumed by it rather than substituting for it |
 
 ---
 
@@ -1221,7 +1291,7 @@ actor (see P10's control-plane variant and KS-22).
 
 | | |
 |---|---|
-| **Proves** | I4 (custody is the basis of exclusion), I8 (S-03 single writer); threat-model rows **TM-02** and **TM-29**. **No R-number in [docs/vision.md](vision.md) §5 covers revocation** — recorded as a gap in §5 |
+| **Proves** | I4 (custody is the basis of exclusion), I8 (S-03 single writer); threat-model rows **TM-02** and **TM-29**. **R-24** ([docs/vision.md](vision.md) §5.4) is the owning requirement — an earlier draft recorded that no R-number covered revocation; that is superseded, and G-6 is closed. Formerly a gap in §5 |
 | **Lab scenario** | `S-AUTH-REVOKE-*`: (a) control plane reachable by all; (b) revoked device online, victim peer offline from the control plane but reachable by an updated peer; (c) **partitioned peer** — a peer reachable by neither the control plane nor any updated peer; (d) rollback attempt (replay an older revocation list / lower `trust_epoch`); (e) revocation during an established `Session` |
 | **Preconditions (V3)** | Three paired devices minimum (revoker, victim peer, revoked device); an *established, working* connection from the to-be-revoked device before revocation, so the test proves exclusion rather than never-worked |
 | **Assumptions** | **A-06**, A-02 |
@@ -1698,6 +1768,7 @@ runtime test. `GAP` — no covering test exists.
 | **R-21** Linux and router-class first class | §2.8 router row (real hardware nightly); §2.16 router throughput; **P06** on a router-class gateway | LEVEL | |
 | **R-22** stable `reason_code` + human text + next action | §2.4 checks 3 and 4 (registry append-only + completeness); every §4 oracle keys on codes | LEVEL | The registry-completeness check is the mechanical enforcement; §4 is the evidence the codes are actually emitted |
 | **R-23** self-contained connectivity report | **E2E-CR-1** (§2.7); [ADR-0015](adr/ADR-0015-observability-and-diagnostics.md) §11.8 | LEVEL | Was the corpus's one uncovered requirement; G-1 closed |
+| **R-24** revocation enforced at each peer's own handshake, with the residual window bounded and stated | **P10**; §2.14 revocation battery; [ADR-0007](adr/ADR-0007-device-identity-and-pairing.md) §7.7 propagation bounds | PROOF | Added when **G-6** closed. P10 previously discharged a threat-model row with no owning R-number — the inverse of a coverage gap |
 
 
 ### 5.1b R-25 … R-49 (application and platform)
@@ -1728,17 +1799,30 @@ runtime test. `GAP` — no covering test exists.
 
 ### 5.3 Gaps — named, not smoothed over
 
+**Register status: all ten resolved — nine closed on an applied remedy, one (G-4) formally
+accepted as a REVIEW-class control with a named owner and trigger.** The rows are retained in
+full rather than deleted: each records what was wrong, what closed it, and where the remedy
+lives, and several name a defect *shape* that recurs — a test written against its own
+construction (G-10), a summary register drifting from the documents it summarizes (G-8), a
+mechanism defeated by a different specified mechanism (the `ElapsedClock` defect). A register
+that empties itself loses the only history that makes the next instance recognizable.
+
+**Rule GR-1.** A gap is closed **only** when the remedy is in the owning document, not when it is
+proposed, scheduled, or agreed. A row may read *(accepted)* instead, as G-4 does — but the
+acceptance must state its owner, its trigger and what it does **not** prove. Silence is not
+acceptance, and that distinction is what G-4 itself was raised to force.
+
 | # | Gap | Severity | Remedy owed |
 |---|---|---|---|
 | **G-1** | *(closed)* **R-23 now has a covering test.** The gap was that no level in §2 and no proof test exercised the connectivity report ([ADR-0015](adr/ADR-0015-observability-and-diagnostics.md) §11.8) — that it can be produced without a rebuild or a debug binary, that it names every `ConnectionCandidate` tried and what each returned, that it names the blocking constraint, and that it survives the §11.4 redaction rules | — | **CLOSED — remedy applied.** §2.7 registers **E2E-CR-1 `connectivity-report conformance`**, driven from a *failed* `S-NAT-*` scenario, with five oracles, four mutants and a positive control, at T3 and T4. It is a Level 7 case, **not** a proof test: the acceptance set is enumerated in §4 and §4.3 and this document does not extend it. The earlier remedy note said the gap could not be closed "because the fifteen proof tests are fixed by the acceptance criteria" — that conflated *needs a covering test* with *needs a proof test*, and a Level 7 case was always the right instrument |
 | **G-2** | *(closed)* **I1's evidence is no longer a single nightly test.** P14 remains the only *proof test* for I1, and its structural strength is conditional on a domain-separation property owned elsewhere ([ADR-0005](adr/ADR-0005-relay-architecture.md) §11.2(a)–(b)) | — | **CLOSED — remedy applied.** `M-P14-1` (the domain-separation tripwire) is promoted to a **standing T1 build-time check** on the key-schedule inputs (§6.2), so a regression is caught at commit rather than at the nightly P14 run. The single-point-of-evidential-failure is retired: I1 now fails the build at T1 *and* fails P14 at T3/T4, which are independent observation channels (**V6**) |
-| **G-3** | **R-17's pre-flight conflict report is unasserted.** §2.9 verifies correct install and correct removal; nothing verifies that a *detected* conflict is surfaced as a named diagnostic rather than silently overwritten — which is the actual defect R-17 retires | Medium | Add a `S-COLL-*` case to §2.9 asserting `ROUTE.ADDRESS_COLLISION` / `ROUTE.IFACE_CONFLICT` is emitted **and** that no system state was modified |
-| **G-4** | **I2 has no runtime verification.** The `crypto-kat/` corpus proves the primitives we use match their specifications; it cannot detect a novel construction introduced around them | Medium — accepted | Accepted as a REVIEW-class control (I2 is a process invariant), but the acceptance must be explicit rather than implied by silence |
-| **G-5** | **I4's non-exportability is verified only at §2.14.** No proof test asserts that a private half cannot leave the device; and on `hardware_backed = false` targets (routers, containers, VMs) it demonstrably can (TM-13) | Medium | §2.14's key-custody battery must assert the `hardware_backed` flag's *accuracy* per target and that a false flag is impossible, since the whole exclusion argument degrades where it is false |
-| **G-6** | **P10 has no owning requirement.** Device revocation is verified by a mandatory proof test but appears nowhere in [docs/vision.md](vision.md) §5's R-numbers — the inverse of a coverage gap | Medium | [docs/vision.md](vision.md) §5 should add a revocation requirement (natural home: §5.4 "Correctness of protection") so P10 discharges a numbered requirement rather than a threat-model row |
+| **G-3** | *(closed)* **R-17's pre-flight conflict report was unasserted.** §2.9 verified correct install and correct removal; nothing verified that a *detected* conflict is surfaced as a named diagnostic rather than silently overwritten — which is the actual defect R-17 retires | — | **CLOSED — remedy applied.** §2.9 registers the **`S-COLL-*`** family: `S-COLL-ADDR`, `S-COLL-IFACE` and `S-COLL-RULE` assert `ROUTE.ADDRESS_COLLISION` / `ROUTE.IFACE_CONFLICT` is emitted, and rule **COLL-1** asserts the host's interfaces, addresses, routes, policy rules and firewall ruleset are **byte-identical after**. Four mutants, including `M-COLL-4` (roll back after a partial install rather than refusing before it), which fails COLL-1 because a rollback is observable in between. T2 and above |
+| **G-4** | *(accepted, explicitly)* **I2 has no runtime verification.** The `crypto-kat/` corpus proves the primitives we use match their specifications; it cannot detect a novel construction introduced around them | Medium — accepted | **CLOSED — the acceptance is now explicit rather than implied by silence**, which is exactly what this row asked for. §2.3 registers control **`CR-I2`**, the novel-construction review gate: a T1 path-and-symbol filter (its only mechanical half) triggers a recorded second-engineer review naming every primitive, the specification each is used as specified by, and an explicit statement that no new construction was composed — *"no crypto change" is an acceptable finding; silence is not.* The review binds to the commit under C-5, and a genuinely new construction is **refused**, not risk-accepted. The control does not prove absence; it makes the claim someone's, at a named point |
+| **G-5** | *(closed)* **I4's non-exportability was verified only at §2.14**, and on `hardware_backed = false` targets (routers, containers, VMs) the private half demonstrably can leave (TM-13) | — | **CLOSED — remedy applied.** §2.14's key-custody battery now asserts the **flag's accuracy**, not only the key: **KC-1** probe-vs-declaration with `custody_class` = min of both backends; **KC-2** a false `hardware_backed = true` is impossible to produce, asserted by running one build on hardware-backed and deliberately software-only instances of the *same* platform and requiring the flag to differ; **KC-3** export refusal where the flag is true; **KC-4** an **inverted** oracle where it is false — the clone MUST succeed, so a build claiming non-exportability where it is untrue fails; **KC-5** the degradation transition. Four mutants and a discriminating positive control |
+| **G-6** | *(closed)* **P10 had no owning requirement.** Device revocation was verified by a mandatory proof test but appeared nowhere in [docs/vision.md](vision.md) §5's R-numbers — the inverse of a coverage gap | — | **CLOSED.** [docs/vision.md](vision.md) **§5.4 R-24** is the owning requirement and covers what P10 proves: enforcement at each peer's own handshake, suspension of granted authority within `T_TRUST_HARD` at a partitioned peer, the residual window **stated rather than implied**, and no reversal by replaying an older trust document. §7's index lists it against ADR-0007 and ADR-0009; §5.1 above now carries its traceability row; P10's *Proves* line cites it instead of recording its absence |
 | **G-7** | *(closed)* The ADR-0007 §7.7 / ADR-0009 §11.5 disagreement on the partitioned-peer bound is **resolved**: baseline reachability survives indefinitely, granted authority suspends at `T_TRUST_HARD`. P10 variant (c) and mutants M-P10-6/7 now assert the resolved rule | — | None owed |
 | **G-8** | *(closed)* **A-14 was PRESENT as A-21 but NOT SUFFICIENT — the gap is narrowed, not closed.** [docs/architecture.md](architecture.md) §9 gained A-21, but review by [ADR-0018](adr/ADR-0018-shared-core-and-build-architecture.md) §11.8 (the section that must *realize* it) found six residual defects. **(1) Circular ownership:** A-21 declares it depends on this document's A-14, while §3.5 says L-3 is *required of* architecture.md — each names the other and **neither asserts it normatively in its own voice**. **(2) A-21 omits "a timer" from L-3's enumeration**, so a component may hold a correctly injected clock and still call the runtime's `sleep`/`after` — and [docs/reliability.md](reliability.md) §5 defines ~30 named timers, the largest determinism surface in the system. **(3)** "Injectable" is satisfied by a settable global; only *bound at construction* is checkable. **(4) A-21 scopes the duty to components 2.5 and 2.20**, which *implement* the providers — the consumers are 2.3, 2.4, 2.10, 2.12, 2.14, 2.16, 2.17 and the state machine, so read literally [ADR-0006](adr/ADR-0006-relay-discovery-and-failover.md)'s HRW hash is out of scope, which is the very case A-21 cites as its reason to exist. **(5) No mechanical-enforcement clause**, though §6.2's T1 row already budgets for "the §3.5 L-3 lint" that no document specifies. **(6)** §3.5's derived-stream rule is a *product-code* requirement (the core must expose `rng_for(consumer_id)`) written as though lab-side. **(7) NEW — suspend/resume discontinuity is unowned:** neither A-21 nor L-3 says whether an injected monotonic clock advances across suspend, and Linux `CLOCK_MONOTONIC` **excludes** it while Darwin's **includes** it — the same spelling, opposite meanings — so two conforming implementations disagree and every timer in [docs/reliability.md](reliability.md) §5 changes meaning ([ADR-0022](adr/ADR-0022-application-lifecycle-and-background-execution.md) LC-8 resolves this as **three** type-distinct clocks) | **High** — defects (2) and (5) would let a nondeterministic build ship green; (1) is why neither is currently anyone's job to fix | **CLOSED — remedy applied.** A-21 is withdrawn from [docs/architecture.md](architecture.md) §9 and **promoted to requirement R-DET-1 in that document's own voice** (§5.2), which discharges all four edits at once: it is stated as a requirement rather than an assumption pointing outward (1); it enumerates **wall-clock, monotonic, elapsed, timers and randomness** and requires them **bound at construction** (2, 3); it places the obligation on the **consumers** — 2.3, 2.4, 2.10, 2.12, 2.14, 2.16, 2.17 and the state machine — not on the providers 2.5/2.20 (4); it names the **three non-interchangeable clock types** of [ADR-0022](adr/ADR-0022-application-lifecycle-and-background-execution.md) LC-8 (7); and R-DET-1a points enforcement at [ADR-0018](adr/ADR-0018-shared-core-and-build-architecture.md) §11.8 **CD-3**, run in T1 — the lint §6.2 already budgets for (5). Item (6), the derived-stream rule, follows from CD-4 being cited there. [docs/reliability.md](reliability.md) §5.3.1 assigns every timer constant to a clock class |
-| **G-10** | **Three proof tests have no owning conformance surface** (§4.1): **P01** ([ADR-0004](adr/ADR-0004-nat-traversal-strategy.md) supplies no surface, no R-ID for the direct-path outcome, and no `reason_code`), **P13** ([ADR-0003](adr/ADR-0003-network-contract-schema-format.md) specifies rejection semantics but names no parser inventory and no fuzz surface), and **P04** (whose oracle was weak because [docs/reliability.md](reliability.md) T20 emitted no cause code). The other twelve are written against a mechanism their ADR guarantees to expose; these three are written against this document's own construction | Medium — asymmetric evidential strength across the acceptance criteria | T20's cause code is being added, which repairs P04. [ADR-0004](adr/ADR-0004-nat-traversal-strategy.md) and [ADR-0003](adr/ADR-0003-network-contract-schema-format.md) each owe a conformance-surface subsection of the shape the other nine ADRs wrote; until then P01 and P13 rest on §2.10's outcome classes and §2.3's corpora respectively |
+| **G-10** | *(closed)* **Three proof tests had no owning conformance surface** (§4.1): **P01** (ADR-0004 supplied no surface, no R-ID for the direct-path outcome and no `reason_code` for "direct succeeded"), **P13** (ADR-0003 specified rejection semantics but named no parser inventory and no fuzz surface), and **P04** (whose oracle was weak because T20 emitted no cause code) | — | **CLOSED — all three landed.** **P04:** [docs/reliability.md](reliability.md) §4.5 T20 emits `NET.PATH.DEAD_NO_ALTERNATE` with the fault-specific cause in `caused_by`. **P01:** [ADR-0004](adr/ADR-0004-nat-traversal-strategy.md) **§11.6** adds `NAT.DIRECT_ESTABLISHED` / `NAT.DIRECT_UPGRADED`, the candidate ledger including losers, and the **structural** parallelism assertion `relay_gathered_at_ms ≤ first_direct_probe_ms` — an ordering comparison, not a latency threshold a fast machine could pass with a serial build. **P13:** [ADR-0003](adr/ADR-0003-network-contract-schema-format.md) **§11.7** adds the closed twelve-entry parser inventory `PI-1 … PI-12` mapped to §2.12's targets, the three-outcome decode contract with rule **PA-1**, and a **T1 check** that fails the build when a new untrusted-input parser is not added to it. **PT-4 is now unconditional: this document re-derives no oracle** |
 | **G-9** | *(closed)* The underscore reason-code namespace is withdrawn corpus-wide; reliability.md §3.4 carries the old→new mapping and networking.md §10 now states the canonical dotted form | — | None owed |
 
 ---
@@ -1837,5 +1921,5 @@ record does not count toward any criterion above.
 
 **Rule C-6 — the honest-release rule.** A release MAY ship with a **known** limitation named in a
 specification (iOS boot enforcement, macOS Recovery, `hardware_backed = false` cloning, total
-relay-fleet unavailability, the §5.3 gaps). It MUST NOT ship with a limitation that is only
+relay-fleet unavailability, and §5.3's one accepted gap **G-4**). It MUST NOT ship with a limitation that is only
 known because a test was disabled, quarantined, or retried into green.

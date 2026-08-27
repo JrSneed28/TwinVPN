@@ -372,6 +372,65 @@ one of these, never a crash and never a silent accept.
 
 ---
 
+## 11.7 Fuzz conformance surface and parser inventory for P13 (discharging testing-strategy G-10)
+
+[docs/testing-strategy.md](../testing-strategy.md) §4.1 recorded that **P13 had no owning
+conformance surface**: this ADR specified canonical encoding and rejection semantics but named no
+**parser inventory** and no fuzz surface, so the test rested on §2.3's corpora rather than on a
+mechanism this ADR guarantees. That is the gap this section closes, in the shape the other nine
+ADRs used. **PT-4 applies.**
+
+**(a) The parser inventory — normative and closed.** Every entry point below decodes
+attacker-reachable octets. **The list is closed: a new parser of untrusted input MUST be added
+here in the same change that introduces it**, and the T1 check of (d) fails the build otherwise.
+Each maps to the §2.12 fuzz target that must exist for it.
+
+| # | Parser entry point | Input reachable from | Fuzz target (§2.12) |
+|---|---|---|---|
+| PI-1 | Outer envelope decoder | any peer, any relay, the control plane | `fz-control-decoder` |
+| PI-2 | Tunnel packet/frame parser | any host that can send to the bound UDP socket | `fz-packet-parser` |
+| PI-3 | Handshake message decoder | any host reaching the handshake port | `fz-handshake-state` |
+| PI-4 | Signed-statement (deterministic CBOR) decoder | control plane, peer relay of trust documents | `fz-trust-document` |
+| PI-5 | Network-contract decoder | the signed contract fetch | `fz-config-parser` |
+| PI-6 | Relay frame decoder | any relay | `fz-relay-frame` |
+| PI-7 | Trust/epoch bundle decoder | peers, control plane | `fz-bundle-parser` |
+| PI-8 | Capability-token decoder | relays, peers | `fz-capability-token` |
+| PI-9 | Attestation blob decoder | pairing peer | `fz-attestation-blob` |
+| PI-10 | Pairing URI / invite decoder | a QR code or a pasted string — **user-supplied, and the only one an attacker delivers through the human** | `fz-uri-and-invite` |
+| PI-11 | DNS response parser | the network | `fz-dns-response` |
+| PI-12 | Control-message reordering/reassembly | control plane | `fz-control-reorder` |
+
+**(b) The decode-outcome contract — what P13 asserts on.** Every parser in (a) MUST terminate in
+exactly one of three **typed** outcomes, and the set is exhaustive:
+
+1. **Accept**, with a decoded structure and — for signed statements — verification performed over
+   the **received octets**, never over a re-encoding (§7).
+2. **Reject**, with one of §11.6's `PROTO.*` codes. A bare error, an untyped exception, or a
+   boolean false is **not** a reject; it is the "zero unclassified decode outcomes" failure.
+3. **Reject-and-no-effect**, the same as (2) plus the assertion that **no state changed** — the
+   partial-application defect `M-P13-5` injects.
+
+**Rule PA-1.** There is no fourth outcome. A panic, an abort, a hang, an allocation proportional
+to a declared length, or a silent accept is a defect at P1, regardless of perceived
+exploitability — which is the same standard §6.5 **B-3** already applies to the fuzz fleet.
+
+**(c) Guaranteed observables.** Each parser emits, per input: the outcome class of (b); the
+`PROTO.*` code on reject; the parser id (`PI-*`), so a corpus finding is attributable to an entry
+point rather than to "the decoder"; and, for PI-4, the digest of the octets verification ran over,
+which is what makes `M-P13-2` (verify over a re-encoding) mechanically detectable rather than a
+code-reading exercise.
+
+**(d) Mechanical enforcement, at T1.** A build-time check asserts that (i) every symbol reachable
+from an untrusted-input boundary appears in (a), and (ii) every row in (a) has a live fuzz target
+in §2.12's set. An inventory that silently falls behind the code is the failure mode this whole
+section exists to prevent, and it is exactly how P13 lost its surface the first time.
+
+**(e) Known limit.** The inventory bounds *where* untrusted octets are parsed. It does not bound
+what the accepted structures then reach — that is [ADR-0014](ADR-0014-protocol-versioning-and-capability-negotiation.md)'s
+version and capability surface and §2.14's business, not this one's.
+
+---
+
 ## 12. Why the Selected Option Won
 1. **No single format was best at more than two of the five boundaries.** The boundaries
    have genuinely opposed requirements — determinism versus evolution tooling, zero-copy

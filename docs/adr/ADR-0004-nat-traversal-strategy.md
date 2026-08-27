@@ -309,6 +309,51 @@ told "NAT traversal", not "network".
 | `NAT.PORTMAP_FAILED` | TRANSIENT | INFO | no | no | PCP/NAT-PMP/UPnP port mapping was attempted and refused or unanswered |
 | `NAT.HAIRPIN_UNSUPPORTED` | PERSISTENT | INFO | no | no | Two peers behind the same NAT cannot reach each other via the external mapping; the local candidate is used instead |
 | `NAT.CLASS_OBSERVED` | TRANSIENT | INFO | no | no | Informational: the measured mapping and filtering class of both ends, for the R-23 connectivity report |
+| `NAT.DIRECT_ESTABLISHED` | TRANSIENT | INFO | no | no | **The direct-path success outcome.** A candidate pair validated and became the carrying `Path`. Carries `family`, `candidate_type` (`HOST_V6_GLOBAL` \| `SRFLX_V6` \| `HOST_V4_PRIVATE` \| `HOST_V6_LINKLOCAL` \| `SRFLX_V4` \| `PORTMAP` \| `PREDICTED`), `elapsed_ms` from `EV_CONNECT_REQUESTED`, and `relay_gathered_at_ms`. Added per §11.6: the ladder previously emitted a code for every way direct could *fail* and none for the way it succeeds, so success was assertable only as the absence of failure |
+| `NAT.DIRECT_UPGRADED` | TRANSIENT | INFO | no | no | A `RELAYED` `Path` was upgraded to a direct one by background probing (**R-12**, decision N5). Same evidence fields plus `relayed_duration_ms` |
+
+---
+
+## 11.6 Conformance surface for proof test P01 (discharging testing-strategy G-10)
+
+[docs/testing-strategy.md](../testing-strategy.md) §4.1 recorded that **P01 was the only
+direct-path proof test written against that document's own construction rather than against a
+mechanism this ADR guarantees to expose** — no conformance surface, no reason code for "direct
+succeeded". Nine other ADRs wrote such a surface; this is ADR-0004's, in the same shape, and
+**PT-4 applies: the test consumes it verbatim and does not re-derive it.**
+
+**(a) Guaranteed observables.** This ADR guarantees to expose, on every traversal attempt:
+
+| Observable | Contents | Consumed by |
+|---|---|---|
+| `NAT.DIRECT_ESTABLISHED` / `NAT.DIRECT_UPGRADED` (§11.5) | The success outcome with `family`, `candidate_type`, `elapsed_ms`, `relay_gathered_at_ms` | P01's terminal-state and `T_HE_BIAS` oracles |
+| `NAT.CLASS_OBSERVED` | The measured mapping/filtering class of **both** ends | P01's per-class pass criteria; the §3.6 class assignment |
+| The **candidate ledger** ([ADR-0015](ADR-0015-observability-and-diagnostics.md) §11.8) | Every gathered candidate — winners **and losers** — each with family, type, gather timestamp, validation outcome and per-candidate `reason_code` | P01's parallel-gathering oracle |
+| `relay_gathered_at_ms` specifically | The wall position of the relay candidate's **first** gathering round | The R-02 assertion that the relay was gathered from t=0, not after direct failure |
+
+**(b) The parallelism assertion is structural, not timing-based.** `relay_gathered_at_ms` is
+recorded at gathering, not at use. P01 asserts `relay_gathered_at_ms ≤ first_direct_probe_ms`,
+which is decidable from the ledger alone and does not depend on the rig's clock resolution — the
+property is *ordering*, and a timing threshold would have made a fast machine pass a serial build.
+
+**(c) The R-ID this surface binds to.** The direct-path outcome is **R-01** with **R-12** for the
+upgrade case; §2 already declares both discharged here. What was missing was not the requirement
+but its **observable**, which (a) now supplies. `NAT.DIRECT_ESTABLISHED` is the assertable form of
+R-01, and its absence on a `DIRECT_EXPECTED` pair is the failure R-01 names.
+
+**(d) Mutants this ADR guarantees are catchable**, corresponding to P01's `M-P01-1 … M-P01-4`:
+
+| Mutant | Caught by |
+|---|---|
+| Relay gathered only after direct-path timeout | `relay_gathered_at_ms > first_direct_probe_ms` in the ledger — a structural comparison, not a latency measurement |
+| Candidate racing serialized | Ledger gather timestamps are strictly ordered rather than overlapping |
+| IPv6 deprioritized | `NAT.DIRECT_ESTABLISHED.candidate_type` is a v4 type on a dual-stack pair where a v6 candidate also validated |
+| Keepalive fixed at 300 s | The 120 s re-drive emits a `NAT.*` code instead of continuing on the established path |
+
+**(e) Known limit, stated rather than inherited.** This surface makes P01's *behaviour* assertable
+per NAT class. It says nothing about whether the lab's personality set resembles the field — the
+distribution question P01 already records as its own known limit, and which only
+[docs/networking.md](../networking.md) §3.1's measured axes can answer.
 
 ---
 
