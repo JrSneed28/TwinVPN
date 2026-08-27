@@ -133,7 +133,10 @@ pub mod shutdown;
 pub mod tls;
 pub mod transport;
 
-pub use binding::{Binding, BindingCardinality, BindingLimits, ChannelPinned, Claim, Refusal};
+pub use binding::{
+    Binding, BindingCardinality, BindingLimits, ChannelPinned, Claim, DerivedPreferred, Provenance,
+    Refusal,
+};
 pub use config::{ConfigError, InstanceIdSource, ServiceConfig};
 pub use correlation::Correlation;
 pub use errors::ServiceError;
