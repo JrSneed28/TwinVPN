@@ -77,7 +77,7 @@ async fn a_client_pinning_the_wrong_server_key_refuses_the_server() {
         .await
         .expect("connect");
     let connector = tokio_rustls::TlsConnector::from(client_key.client_config(&wrong.spki));
-    let outcome = common::within(connector.connect(common::keys::server_name(), tcp)).await;
+    let outcome = common::within(connector.connect(common::server_name(), tcp)).await;
     assert!(outcome.is_err(), "a mispinned server key was accepted");
     h.stop().await;
 }
@@ -90,7 +90,7 @@ async fn a_tls_1_2_client_is_refused() {
         .expect("connect");
     let connector =
         tokio_rustls::TlsConnector::from(common::TestKey::tls12_only_client_config(&h.server_spki));
-    let outcome = common::within(connector.connect(common::keys::server_name(), tcp)).await;
+    let outcome = common::within(connector.connect(common::server_name(), tcp)).await;
     assert!(outcome.is_err(), "a TLS 1.2 client completed a handshake");
     h.stop().await;
 }
@@ -99,10 +99,11 @@ async fn a_tls_1_2_client_is_refused() {
 async fn the_configuration_permits_no_early_data() {
     // ADR-0001 R8.
     let key = common::TestKey::generate();
-    let path = key.write_pem("pr-early-data-probe");
-    let cfg = pr::tls::server_config(&path).expect("a usable key");
-    assert_eq!(cfg.max_early_data_size, 0);
-    assert!(pr::tls::assert_no_early_data(&cfg).is_ok());
+    let built = twinvpn_service_common::tls::ServerTlsBuilder::from_pkcs8_der(key.pkcs8().to_vec())
+        .build()
+        .expect("a usable key");
+    assert_eq!(built.config().max_early_data_size, 0);
+    assert!(twinvpn_service_common::tls::assert_no_early_data(&built.config()).is_ok());
 }
 
 /// The attack: publish presence as somebody else by claiming their `device_id`.
@@ -287,5 +288,100 @@ async fn s11_still_refuses_a_cross_device_assertion_on_an_authenticated_channel(
     let err = common::response(&body).error.expect("a refusal");
     assert_eq!(err.reason_code, "CONTROL.EVENT_WRONG_PUBLISHER");
     assert_eq!(h.shared.store.lock().await.len(), 0);
+    h.stop().await;
+}
+
+/// **The `release()` regression, at the level that can see it.**
+///
+/// The shared crate's absorption found a defect this service carried: `release`
+/// took only the channel and decremented **every** entry that channel held, and
+/// it was called unconditionally at teardown. So a *refused* connection sharing
+/// a key with a live one released **that connection's** hold — after which one
+/// key could publish presence for two identities, which **S-11 forbids**.
+///
+/// The unit tests could not see it because they released from a single
+/// synthetic channel. It needs a long-lived connection, which is what this
+/// harness has.
+#[tokio::test]
+async fn a_refused_sibling_connection_cannot_release_a_live_connections_hold() {
+    let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
+    let key = common::TestKey::generate();
+    let attacker_key = common::TestKey::generate();
+    let held = [0x61u8; 32];
+    let other = [0x62u8; 32];
+
+    // 1. A long-lived connection on key K speaks for `held`.
+    let mut live = h.client_as(&key).await;
+    live.bind(held).await;
+
+    // 2. A sibling on the SAME key claims a second identity and is refused...
+    {
+        let mut sibling = h.client_as(&key).await;
+        sibling
+            .write(&pr::frame::encode(pr::frame::Opcode::Bind, &other))
+            .await;
+        let body = common::within(sibling.read_until(pr::frame::Opcode::Ack))
+            .await
+            .expect("answered");
+        let err = common::response(&body).error.expect("a refusal");
+        assert_eq!(err.reason_code, "CONTROL.CHANNEL_BINDING_MISMATCH");
+        // 3. ...and tears down.
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // 4. A different key must still be unable to speak for `held`.
+    let mut attacker = h.client_as(&attacker_key).await;
+    attacker
+        .write(&pr::frame::encode(pr::frame::Opcode::Bind, &held))
+        .await;
+    let body = common::within(attacker.read_until(pr::frame::Opcode::Ack))
+        .await
+        .expect("answered");
+    assert!(
+        common::response(&body).error.is_some(),
+        "a refused sibling's teardown released a live connection's hold"
+    );
+
+    // 5. And one key still may not speak for two identities — S-11.
+    let mut again = h.client_as(&key).await;
+    again
+        .write(&pr::frame::encode(pr::frame::Opcode::Bind, &other))
+        .await;
+    let body = common::within(again.read_until(pr::frame::Opcode::Ack))
+        .await
+        .expect("answered");
+    assert!(
+        common::response(&body).error.is_some(),
+        "one key came to speak for two identities"
+    );
+    h.stop().await;
+}
+
+/// A full binding table answers `CONTROL.ADMISSION_DEFERRED`, not a mismatch.
+///
+/// They are different facts: the identity is not contested, the server is.
+#[tokio::test]
+async fn a_full_binding_table_defers_rather_than_claiming_the_subject_is_taken() {
+    let h = common::start_with(IpAddr::V6(Ipv6Addr::LOCALHOST), |mut c| {
+        c.binding.max_bindings = 1;
+        c
+    })
+    .await;
+
+    let mut first = h.client().await;
+    first.bind([0x71u8; 32]).await;
+
+    let mut second = h.client().await;
+    second
+        .write(&pr::frame::encode(pr::frame::Opcode::Bind, &[0x72u8; 32]))
+        .await;
+    let body = common::within(second.read_until(pr::frame::Opcode::Ack))
+        .await
+        .expect("answered, never reset — S-6");
+    let err = common::response(&body).error.expect("a refusal");
+    assert_eq!(
+        err.reason_code, "CONTROL.ADMISSION_DEFERRED",
+        "capacity must not be reported as a contested identity"
+    );
     h.stop().await;
 }

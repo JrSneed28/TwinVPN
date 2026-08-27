@@ -43,9 +43,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    `ProbeKind::ControlPlane`. The divergence is reported to the
     //    integration lead (README.md §8).
     // TLS before anything else that could serve: a key that cannot be loaded
-    // must stop the process, not degrade it to a plaintext listener.
-    let tls_config = rz::tls::server_config(&rz_cfg.tls_key_path)?;
-    let server_spki = rz::tls::server_public_key(&rz_cfg.tls_key_path)?;
+    // must stop the process, not degrade it to a plaintext listener. There is no
+    // code path in `service-common`'s builder that produces a plaintext or
+    // client-auth-optional configuration, so "degrade" is not an option this
+    // process has to decline — it is one it does not have.
+    let server_tls = svc::tls::ServerTlsBuilder::from_pem_file(&rz_cfg.tls_key_path).build()?;
+    let server_spki_len = server_tls.public_key().len();
 
     let shared = Arc::new(rz::server::Shared {
         router: tokio::sync::Mutex::new(rz::ingress::Router {
@@ -54,10 +57,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             labels: rz::label::Labeller::default(),
         }),
         limiter: tokio::sync::Mutex::new(rz::admission::SourceLimiter::new(rz_cfg.admission)),
-        bindings: tokio::sync::Mutex::new(Box::new(rz::binding::ChannelPinned::new(
+        bindings: tokio::sync::Mutex::new(Box::new(svc::binding::ChannelPinned::new(
             rz_cfg.binding,
         ))),
-        tls: tokio_rustls::TlsAcceptor::from(tls_config),
+        tls: tokio_rustls::TlsAcceptor::from(server_tls.config()),
         connections: Arc::new(tokio::sync::Semaphore::new(rz_cfg.max_connections)),
         config: rz_cfg.clone(),
         metrics: metrics.clone(),
@@ -127,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The server's own public key length, so an operator can see that RFC
         // 7250 mode came up. The key itself is printed by `--print-server-key`
         // rather than into every startup log line.
-        server_key_bytes = server_spki.len(),
+        server_key_bytes = server_spki_len,
         "rendezvous serving C4 ingress over TLS 1.3 with mutual raw public keys"
     );
 

@@ -83,7 +83,8 @@ mod tests {
 
     #[test]
     fn an_error_envelope_carries_the_code_and_no_message() {
-        let e = crate::ingress::channel_binding_mismatch();
+        let e = twinvpn_service_common::binding::Refusal::SubjectHeldByAnotherChannel
+            .to_error(crate::COMPONENT);
         let bytes = encode_error(&e);
         let env = v1::ErrorEnvelope::decode(&bytes[..]).unwrap();
         assert_eq!(env.reason_code, "CONTROL.CHANNEL_BINDING_MISMATCH");

@@ -2,14 +2,14 @@
 
 #![allow(dead_code)]
 
-pub mod keys;
-
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-pub use keys::TestKey;
 use twinvpn_presence as pr;
 use twinvpn_service_common as svc;
+// The shared TLS test kit — this was `tests/common/keys.rs` in both this
+// service and `rendezvous` (RZ-8).
+pub use svc::tls::testkit::{server_name, TestKey};
 
 /// A running service and the address it is listening on.
 pub struct Harness {
@@ -36,11 +36,14 @@ pub async fn start_with(
     // A fresh server identity per harness, so no key is ever checked in and two
     // concurrent tests cannot share one.
     let server_key = TestKey::generate();
-    let key_path = server_key.write_pem(&format!(
-        "pr-server-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
+    let key_path = server_key.write_pem(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &format!(
+            "pr-server-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ),
+    );
     let env = svc::config::MapEnv::new()
         .with(pr::config::keys::TLS_CERT, "Cargo.toml")
         .with(pr::config::keys::TLS_KEY, key_path.to_str().expect("utf-8"));
@@ -106,10 +109,7 @@ impl Harness {
         let tcp = tokio::net::TcpStream::connect(self.addr).await?;
         let connector =
             tokio_rustls::TlsConnector::from(TestKey::anonymous_client_config(&self.server_spki));
-        connector
-            .connect(keys::server_name(), tcp)
-            .await
-            .map(|_| ())
+        connector.connect(server_name(), tcp).await.map(|_| ())
     }
 }
 
@@ -119,7 +119,7 @@ impl Client {
         let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
         let connector = tokio_rustls::TlsConnector::from(key.client_config(server_spki));
         let stream = connector
-            .connect(keys::server_name(), tcp)
+            .connect(server_name(), tcp)
             .await
             .expect("the mutual raw-public-key handshake completes");
         Self { stream }

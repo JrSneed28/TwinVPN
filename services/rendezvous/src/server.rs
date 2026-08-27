@@ -3,7 +3,8 @@
 //! # What is bound, and what is not
 //!
 //! This wave binds **`TWINVPN_RZ_LISTEN_TCP`** and terminates **TLS 1.3 with
-//! mutual RFC 7250 raw-public-key authentication** on it ([`crate::tls`]).
+//! mutual RFC 7250 raw-public-key authentication** on it
+//! ([`twinvpn_service_common::tls`]).
 //! `TWINVPN_RZ_LISTEN_QUIC` is parsed and validated but **not bound**:
 //! ADR-0001's L-CONTROL is QUIC + TLS 1.3 and this is the TCP shape of the same
 //! authentication, which ADR-0002 §11.2's rung 2 already contemplates. That gap
@@ -38,6 +39,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use twinvpn_schema::{Channel, Reject};
+use twinvpn_service_common::binding::{Binding, Claim, Refusal};
+use twinvpn_service_common::tls::{self, ChannelIdentity};
 use twinvpn_service_common::transport::Admission;
 use twinvpn_service_common::{Metrics, ServiceError, ShutdownHandle};
 
@@ -45,11 +48,10 @@ use tokio::sync::Semaphore;
 
 use crate::admission::SourceLimiter;
 use crate::attach::{Attached, Egress};
-use crate::binding::{Binding, Claim};
+
 use crate::config::RendezvousConfig;
 use crate::frame::{self, Frame, Opcode, HEADER_LEN};
 use crate::ingress::{self, Disposition, Router};
-use crate::tls::ChannelIdentity;
 
 /// Everything a connection needs. `Router` is behind one mutex because the whole
 /// service state is four small tables and the work under the lock is a hash
@@ -60,7 +62,7 @@ pub struct Shared {
     /// Per-source admission.
     pub limiter: Mutex<SourceLimiter>,
     /// `device_id` ↔ authenticated channel identity.
-    pub bindings: Mutex<Box<dyn Binding>>,
+    pub bindings: Mutex<Box<dyn Binding<frame::DeviceId>>>,
     /// The TLS acceptor. Constructed at startup; a key that cannot be loaded is
     /// a startup failure, never a plaintext listener.
     pub tls: tokio_rustls::TlsAcceptor,
@@ -170,24 +172,13 @@ async fn accept_one(
     shared: Arc<Shared>,
 ) -> std::io::Result<()> {
     let _ = stream.set_nodelay(true);
-    let handshake =
-        tokio::time::timeout(shared.config.frame_read_timeout, shared.tls.accept(stream)).await;
     // No client key, an unprovable key, a TLS 1.2 hello, or plaintext. The peer
     // learns only that the handshake failed; nothing is answered and no state
-    // exists to change.
-    let Ok(Ok(tls)) = handshake else {
-        count(
-            &shared,
-            counters::HANDSHAKES_REFUSED,
-            "TLS handshakes that did not complete",
-        );
-        return Ok(());
-    };
-
-    // `client_auth_mandatory` means a completed handshake always presented a
-    // key. If that ever stops being true, refuse rather than serve an
-    // unidentified peer.
-    let Some(channel) = crate::tls::peer_identity(tls.get_ref().1) else {
+    // exists to change. The shared helper carries the deadline and the
+    // "a completed handshake always presented a key" assertion.
+    let Ok((tls, channel)) =
+        tls::accept_with_deadline(&shared.tls, stream, shared.config.frame_read_timeout).await
+    else {
         count(
             &shared,
             counters::HANDSHAKES_REFUSED,
@@ -243,6 +234,16 @@ where
     let mut bound: Option<(frame::DeviceId, u64)> = None;
     let outcome = read_loop(&mut rd, peer.ip(), &channel, &shared, &tx, &mut bound).await;
 
+    // Release EXACTLY what this connection claimed, and only if it claimed
+    // something.
+    //
+    // `bound` is `Some` only on an ACCEPTED claim, so a refused connection has
+    // nothing to release. That is the whole of the defect the shared crate
+    // found: an unconditional, channel-only release let a refused connection
+    // drop a *live sibling's* hold on the same key, after which one channel
+    // could speak for a second subject. This service previously did not release
+    // at all, which leaked holder counts until the TTL swept them — a slower
+    // path to the same table-at-capacity outcome, and equally wrong.
     if let Some((device_id, epoch)) = bound {
         shared
             .router
@@ -250,6 +251,14 @@ where
             .await
             .attachments
             .detach(device_id, epoch);
+        // The binding OUTLIVES the connection: this drops the holder count
+        // without dropping the claim, so a reconnect finds its own binding and
+        // an attacker racing that reconnect finds it taken.
+        shared
+            .bindings
+            .lock()
+            .await
+            .release(&channel, &device_id, Instant::now());
     }
     drop(tx);
     let _ = writer.await;
@@ -382,18 +391,25 @@ async fn handle_attach(
     now: Instant,
 ) -> bool {
     // The claim is checked against the AUTHENTICATED channel identity before
-    // anything is bound, delivered or drained. `CONTROL.CHANNEL_BINDING_MISMATCH`
-    // is FATAL/CRITICAL: `trust-boundaries.md` §4 calls a binding mismatch
-    // "a security event, never a parse error", and this is the same event one
-    // layer out — a device_id being claimed on a channel not entitled to it.
-    if let Claim::Refused(_) = shared.bindings.lock().await.claim(channel, device_id, now) {
-        let e = ingress::channel_binding_mismatch();
-        e.emit(&shared.metrics, "binding_mismatch");
-        count(
-            shared,
-            counters::BINDING_MISMATCHES,
-            "ATTACHes refused for a channel-binding mismatch",
-        );
+    // anything is bound, delivered or drained.
+    //
+    // The refusal carries its OWN reason code, and the two are different facts:
+    // a binding mismatch is `CONTROL.CHANNEL_BINDING_MISMATCH`, FATAL/CRITICAL,
+    // "a security event, never a parse error" (`trust-boundaries.md` §4);
+    // a full table is `CONTROL.ADMISSION_DEFERRED`, because the subject is not
+    // contested, the server is — and answering "held by another channel" there
+    // would tell a caller its device_id was taken when it was not.
+    let claim = shared.bindings.lock().await.claim(channel, device_id, now);
+    if let Claim::Refused(refusal) = claim {
+        let e = refusal.to_error(crate::COMPONENT);
+        e.emit(&shared.metrics, "binding_refused");
+        if refusal != Refusal::TableAtCapacity {
+            count(
+                shared,
+                counters::BINDING_MISMATCHES,
+                "ATTACHes refused for a channel-binding mismatch",
+            );
+        }
         ack(tx, &e);
         return false;
     }

@@ -6,14 +6,15 @@
 
 #![allow(dead_code)]
 
-pub mod keys;
-
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-pub use keys::TestKey;
 use twinvpn_rendezvous as rz;
 use twinvpn_service_common as svc;
+// The ephemeral RFC 7250 key material and the pinning / anonymous /
+// TLS-1.2-only clients. This was `tests/common/keys.rs` in both this service
+// and `presence`; it is the shared crate's now (RZ-8).
+pub use svc::tls::testkit::{server_name, TestKey};
 
 /// A running service and the address it is listening on.
 pub struct Harness {
@@ -48,17 +49,23 @@ pub async fn start_with(
     // A fresh server identity per harness, so two concurrently running tests
     // cannot share a key and a test can never depend on one that is checked in.
     let server_key = TestKey::generate();
-    let key_path = server_key.write_pem(&format!(
-        "rz-server-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
+    let key_path = server_key.write_pem(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &format!(
+            "rz-server-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ),
+    );
     let env = svc::config::MapEnv::new()
         .with(rz::config::keys::TLS_CERT, "Cargo.toml")
         .with(rz::config::keys::TLS_KEY, key_path.to_str().expect("utf-8"));
     let cfg = f(rz::config::RendezvousConfig::load(&env).expect("test config"));
     let tls = tokio_rustls::TlsAcceptor::from(
-        rz::tls::server_config(&cfg.tls_key_path).expect("a usable server key"),
+        svc::tls::ServerTlsBuilder::from_pem_file(&cfg.tls_key_path)
+            .build()
+            .expect("a usable server key")
+            .config(),
     );
 
     let metrics = svc::metrics::Metrics::new();
@@ -69,7 +76,7 @@ pub async fn start_with(
             labels: rz::label::Labeller::default(),
         }),
         limiter: tokio::sync::Mutex::new(rz::admission::SourceLimiter::new(cfg.admission)),
-        bindings: tokio::sync::Mutex::new(Box::new(rz::binding::ChannelPinned::new(cfg.binding))),
+        bindings: tokio::sync::Mutex::new(Box::new(svc::binding::ChannelPinned::new(cfg.binding))),
         tls,
         connections: Arc::new(tokio::sync::Semaphore::new(cfg.max_connections)),
         config: cfg,
@@ -134,10 +141,7 @@ impl Harness {
         let tcp = tokio::net::TcpStream::connect(self.addr).await?;
         let connector =
             tokio_rustls::TlsConnector::from(TestKey::anonymous_client_config(&self.server_spki));
-        connector
-            .connect(keys::server_name(), tcp)
-            .await
-            .map(|_| ())
+        connector.connect(server_name(), tcp).await.map(|_| ())
     }
 }
 
@@ -147,7 +151,7 @@ impl Client {
         let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
         let connector = tokio_rustls::TlsConnector::from(key.client_config(server_spki));
         let stream = connector
-            .connect(keys::server_name(), tcp)
+            .connect(server_name(), tcp)
             .await
             .expect("the mutual raw-public-key handshake completes");
         Self { stream }

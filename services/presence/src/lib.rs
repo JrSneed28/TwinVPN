@@ -18,9 +18,11 @@
 //! # The channel is authenticated before a byte of framing is read
 //!
 //! TLS 1.3 with mutual RFC 7250 raw public keys, client authentication
-//! mandatory, 0-RTT prohibited ([`tls`]). A `BIND` is then bound to that
-//! authenticated key ([`binding`]) — which is what makes S-11 enforceable at
-//! all, rather than one unauthenticated claim checked against another.
+//! mandatory, 0-RTT prohibited ([`twinvpn_service_common::tls`]). A `BIND` is
+//! then made answerable to that authenticated key
+//! ([`twinvpn_service_common::binding`]) — which is what makes S-11 enforceable
+//! at all, rather than one unauthenticated claim checked against another. Both
+//! modules were this domain's and now live in the shared crate; `README.md` §4.
 //!
 //! # S-11: the device is authoritative for its own presence
 //!
@@ -55,14 +57,12 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::module_name_repetitions)]
 
-pub mod binding;
 pub mod config;
 pub mod frame;
 pub mod ingress;
 pub mod server;
 pub mod store;
 pub mod testkit;
-pub mod tls;
 
 /// The `errors.proto` component this service reports itself as.
 pub const COMPONENT: twinvpn_types::Component = twinvpn_types::Component::Presence;
