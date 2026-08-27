@@ -6,13 +6,24 @@
 # Every dependency below is already declared in services/Cargo.toml's
 # [workspace.dependencies]. No version is named here, so no domain can drift one.
 #
-# `rustls` is deliberately NOT named. ownership.md §8 W-12 puts the TLS
-# implementation, the raw-public-key verifier and the CryptoProvider in
-# `twinvpn-crypto`, and `quinn` is the transport this crate may declare. `quinn`
-# re-exports the `rustls` types its own feature selection compiled (`rustls-ring`),
-# so naming `rustls` here would only risk activating a SECOND provider
-# (`aws-lc-rs` is `rustls`'s default feature) and with it a second answer to
-# "what cryptography do we use". See README.md §7.
+# ===========================================================================
+# `rustls` IS DELIBERATELY NOT NAMED HERE. DO NOT "FIX" THE MISSING DEPENDENCY.
+# ===========================================================================
+# `quinn` already re-exports the `rustls` types its own feature selection
+# compiled (`rustls-ring`), so this crate reaches them as `quinn::rustls::…` and
+# needs no dependency line of its own.
+#
+# Adding one is actively harmful. `rustls`'s DEFAULT feature set enables
+# `aws-lc-rs`, and cargo unifies features across the graph — so a `rustls` line
+# here would compile `aws-lc-rs` ALONGSIDE quinn's `ring` and give this one
+# artifact TWO CryptoProviders. ADR-0018 DP-8 bounds the fleet at two providers
+# precisely because "they double the assurance surface" and both must pass the
+# identical golden-vector corpus; a second provider arriving through a feature
+# flag rather than a dependency line is the same violation with no line to
+# review. (It also needs `cmake`, which the wave-1 host does not have.)
+#
+# If you need a rustls type, use `quinn::rustls::…`. If you need cryptography,
+# use `twinvpn-crypto` below. See README.md §7.
 [package]
 name    = "twinvpn-control-plane"
 version.workspace      = true
@@ -44,6 +55,20 @@ twinvpn-service-common = { workspace = true }
 twinvpn-schema = { workspace = true }
 twinvpn-types  = { workspace = true }
 
+# The audited crypto provider, permitted as a /core edge by the integration lead
+# (see services/Cargo.toml). Depending on it is not itself a cryptographic
+# dependency: it is the crate that ENCAPSULATES them, so this artifact inherits
+# the implementation the golden-vector corpus covers rather than a parallel one.
+#
+# Used for exactly three things, each of which must agree with the client BYTE
+# FOR BYTE: the ADR-0010 §11.1 v6 interface-id derivation
+# (`hkdf_sha256(device_key_pub, "twinvpn-v6-iid")`), the SHA-256 content digest
+# announced in `StateDocumentRef`, and COSE_Sign1 verification over received
+# octets. Adding `hkdf`/`sha2`/`p256` here instead would be the DP-8 second
+# provider whose agreement with the core's is untested — which is the exact
+# property these three uses depend on.
+twinvpn-crypto = { workspace = true }
+
 thiserror = { workspace = true }
 tracing   = { workspace = true }
 tokio     = { workspace = true }
@@ -65,3 +90,7 @@ tokio = { workspace = true, features = ["test-util"] }
 # Self-dependency so `cargo test` and the integration tests in `tests/` both see
 # `test-support`. The pattern `twinvpn-cp-client` uses for the same reason.
 twinvpn-control-plane = { path = ".", features = ["test-support"] }
+# Deterministic ES256 fixtures, so a signature in a test comes from the AUDITED
+# crate. CD-I2 covers dev-dependencies: naming `p256` here to sign a test vector
+# would be the second provider DP-8 bounds, arriving through a dev-dependency.
+twinvpn-crypto = { workspace = true, features = ["test-support"] }

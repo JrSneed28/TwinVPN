@@ -54,9 +54,6 @@ pub struct Ctx<'a> {
     /// in the bootstrap DNS scope (ADR-0011 DN-0). Returned by
     /// `RegisterDevice`.
     pub coordination_endpoints: &'a [String],
-    /// How the v6 overlay address is derived. See
-    /// [`addressing::Ipv6Derivation`].
-    pub v6_derivation: addressing::Ipv6Derivation,
 }
 
 /// What a handler produced.
@@ -144,6 +141,23 @@ pub fn require_quorum(ctx: &Ctx<'_>, command: crate::Command) -> Result<(), Serv
         return Err(crate::codes::quorum_unavailable());
     }
     Ok(())
+}
+
+/// The calling device's recorded `DeviceIdentityKey`, as COSE_Key octets.
+///
+/// **The recorded one, never the one the request carried.** A handler that took
+/// the key out of the body would be verifying a device-signed statement against
+/// a key the same body chose, which verifies nothing at all.
+///
+/// # Errors
+///
+/// `AUTH.PEER_UNTRUSTED` when the caller is not a member.
+pub fn caller_key<'a>(tx: &'a crate::NetTx, ctx: &Ctx<'_>) -> Result<&'a [u8], ServiceError> {
+    tx.state()
+        .devices
+        .get(&ctx.caller)
+        .map(|d| d.identity_public_key.as_slice())
+        .ok_or_else(|| crate::codes::bare(twinvpn_types::codes::AUTH_PEER_UNTRUSTED))
 }
 
 /// Refuses a request from a device in the never-shrinking revoked set.

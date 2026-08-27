@@ -80,22 +80,44 @@ async fn run() -> std::process::ExitCode {
         }
     };
 
-    // The two fail-closed bindings this build ships, said out loud at startup so
-    // an operator does not discover them from a refusal. See README.md §7.
-    tracing::warn!(
-        reason_code = twinvpn_types::codes::AUTH_KEY_UNAVAILABLE.as_str(),
-        "no Owner trust anchor is bound: RevokeDevice, PutPolicy, \
-         RotateDeviceCredential, CompletePairing and every advertisement will be \
-         refused. Registration, discovery, presence and the C2 stream are unaffected."
-    );
+    // 2b. The signature verifier. Real: COSE_Sign1 through `twinvpn-crypto`,
+    //     the same audited provider the client verifies with.
+    let anchors = match cp_cfg.load_owner_anchors() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("control-plane: owner anchor set refused: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let verifier = match cp::verify::CryptoVerifier::new(&anchors) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "control-plane: owner anchor set refused: {}",
+                e.code().as_str()
+            );
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    if verifier.has_owner_anchor() {
+        tracing::info!(
+            anchors = anchors.len(),
+            "Owner trust anchor set pinned; Owner-authority statements are verifiable"
+        );
+    } else {
+        // Said out loud at startup so an operator does not discover it from a
+        // refusal. See README.md §7.
+        tracing::warn!(
+            reason_code = twinvpn_types::codes::AUTH_KEY_UNAVAILABLE.as_str(),
+            "no Owner trust anchor is bound: RevokeDevice, PutPolicy, RevokePairing \
+             and the enrolment proof on RegisterDevice will be refused. \
+             Device-signed statements, discovery, presence and the C2 stream are \
+             unaffected."
+        );
+    }
     tracing::warn!(
         reason_code = twinvpn_types::codes::CONTROL_HANDSHAKE_REJECTED.as_str(),
         "no raw-public-key peer verifier is bound: every mTLS handshake will be refused"
-    );
-    tracing::warn!(
-        derivation = cp::domain::addressing::Ipv6Derivation::DeviceIdTruncation.as_str(),
-        "the v6 overlay address is derived by truncating device_id, NOT by \
-         device.proto's HKDF(DeviceKey_pub, \"twinvpn-v6-iid\"). See README.md §8."
     );
 
     // 3. The store, then health. Readiness genuinely reaches Postgres and the
@@ -164,6 +186,7 @@ async fn run() -> std::process::ExitCode {
     //    listener that accepts in order to refuse is a listener that has to be
     //    rate-limited for no benefit. README.md §7 records what a composition
     //    root must bind to turn this on.
+    let _ = &verifier;
     tracing::info!(
         listen_quic = %cp_cfg.listen_quic,
         drain_deadline_ms = cp_cfg.drain_deadline_ms(),

@@ -60,6 +60,19 @@ pub struct ControlPlaneConfig {
     pub listen_quic: SocketAddr,
     /// `TWINVPN_CP_LISTEN_TCP`, default `[::]:443`. Rungs 2–4; see README §7.
     pub listen_tcp: SocketAddr,
+    /// `TWINVPN_CP_OWNER_ANCHOR_PATH`.
+    ///
+    /// A file of newline-separated base16 COSE_Key entries for the pinned
+    /// `OwnerTrustAnchor` set (S-32). **Optional, and its absence is a
+    /// capability lost rather than a startup failure**: with no anchor this
+    /// service still enrols, discovers and streams, and refuses every
+    /// `Owner`-authority statement with `AUTH.KEY_UNAVAILABLE`. That is the
+    /// correct set of things to lose, and it is announced at startup rather
+    /// than discovered from a refusal.
+    ///
+    /// **New variable.** `infra/README.md` §4.3 does not list it yet; reported
+    /// to the integration lead (README §11).
+    pub owner_anchor_path: PathBuf,
     /// `TWINVPN_CP_TLS_CERT_PATH`.
     pub tls_cert_path: PathBuf,
     /// `TWINVPN_CP_TLS_KEY_PATH`.
@@ -114,6 +127,10 @@ impl ControlPlaneConfig {
         let cfg = Self {
             listen_quic: l.socket_addr("TWINVPN_CP_LISTEN_QUIC", "[::]:443")?,
             listen_tcp: l.socket_addr("TWINVPN_CP_LISTEN_TCP", "[::]:443")?,
+            owner_anchor_path: PathBuf::from(l.string(
+                "TWINVPN_CP_OWNER_ANCHOR_PATH",
+                "/run/secrets/control-plane/owner-anchors.hex",
+            )),
             tls_cert_path: PathBuf::from(l.string(
                 "TWINVPN_CP_TLS_CERT_PATH",
                 "/run/secrets/control-plane/tls.crt",
@@ -192,6 +209,36 @@ impl ControlPlaneConfig {
         Ok(cfg)
     }
 
+    /// Loads the pinned `OwnerTrustAnchor` COSE_Key set.
+    ///
+    /// One base16 key per line; blank lines and `#` comments are ignored. An
+    /// absent file is an **empty set**, not an error — see
+    /// [`ControlPlaneConfig::owner_anchor_path`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] when a line is present but is not base16. A
+    /// malformed anchor is a startup failure rather than a silently skipped
+    /// key: skipping one produces a service that refuses statements a
+    /// correctly-configured one would admit, which reads as an outage.
+    pub fn load_owner_anchors(&self) -> Result<Vec<Vec<u8>>, ConfigError> {
+        let Ok(text) = std::fs::read_to_string(&self.owner_anchor_path) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            out.push(from_hex(line).ok_or(ConfigError::Invalid {
+                key: "TWINVPN_CP_OWNER_ANCHOR_PATH",
+                expected: "one base16 COSE_Key per line",
+            })?);
+        }
+        Ok(out)
+    }
+
     /// The drain deadline as the milliseconds a `GOAWAY` carries.
     #[must_use]
     pub fn drain_deadline_ms(&self) -> u64 {
@@ -204,6 +251,21 @@ impl ControlPlaneConfig {
     pub const fn requires_quorum(&self) -> bool {
         self.quorum_replicas > 0
     }
+}
+
+/// Decodes lowercase or uppercase base16.
+fn from_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    for pair in bytes.chunks(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out.push(u8::try_from(hi * 16 + lo).ok()?);
+    }
+    Some(out)
 }
 
 /// Refuses a frozen bound set to anything other than its registry value.
@@ -282,6 +344,39 @@ mod tests {
                 "{key} must not be environment-tunable"
             );
         }
+    }
+
+    #[test]
+    fn an_absent_anchor_file_is_an_empty_set_and_not_a_startup_failure() {
+        // Losing the anchor loses REVOCATION and POLICY AUTHORSHIP, which is a
+        // capability, not a reason to refuse to serve reads and the C2 stream.
+        let cfg = ControlPlaneConfig::load(
+            &minimal().with("TWINVPN_CP_OWNER_ANCHOR_PATH", "/nonexistent/anchors.hex"),
+        )
+        .expect("loads");
+        assert!(cfg.load_owner_anchors().expect("empty").is_empty());
+    }
+
+    #[test]
+    fn a_malformed_anchor_line_fails_at_startup_rather_than_being_skipped() {
+        // A silently skipped key produces a service that refuses statements a
+        // correctly-configured one would admit — an outage wearing a
+        // misconfiguration's clothes.
+        let dir = std::env::temp_dir().join("twinvpn-cp-anchor-test");
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let path = dir.join("anchors.hex");
+        std::fs::write(&path, "# a comment\n\nzznotbase16\n").expect("write");
+        let cfg = ControlPlaneConfig::load(
+            &minimal().with("TWINVPN_CP_OWNER_ANCHOR_PATH", &path.to_string_lossy()),
+        )
+        .expect("loads");
+        let err = cfg.load_owner_anchors().expect_err("malformed");
+        assert!(format!("{err}").contains("TWINVPN_CP_OWNER_ANCHOR_PATH"));
+
+        std::fs::write(&path, "# a comment\n\nA1B2\nc3d4\n").expect("write");
+        let keys = cfg.load_owner_anchors().expect("base16");
+        assert_eq!(keys, vec![vec![0xa1, 0xb2], vec![0xc3, 0xd4]]);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -17,7 +17,7 @@
 //!
 //! - It cannot author a `PolicyBundle`, a `RevocationStatement`, a
 //!   `RouteAdvertisement` or an `ExitNodeOffer`. Each arrives as an opaque
-//!   [`verify::SignedOctets`] and is admitted only if a
+//!   opaque [`Verbatim`](twinvpn_service_common::forward::Verbatim) and is admitted only if a
 //!   [`verify::StatementVerifier`] says it verified **over the received
 //!   octets** against the authority `required_authority` names for its type.
 //!   With no verifier bound, every one of them is **refused** — fail closed.

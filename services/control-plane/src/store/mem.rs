@@ -196,7 +196,6 @@ impl ControlStore for MemStore {
                 quorum_available: request.quorum_available,
                 correlation: request.correlation,
                 coordination_endpoints: request.coordination_endpoints,
-                v6_derivation: request.v6_derivation,
             };
 
             let outcome = dispatch::execute(

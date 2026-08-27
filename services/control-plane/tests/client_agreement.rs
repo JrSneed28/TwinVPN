@@ -34,6 +34,10 @@ const CONTROL_EVENTS_PROTO: &str =
     include_str!("../../../contracts/proto/twinvpn/v1/control_events.proto");
 /// The frozen contract matrix.
 const MATRIX: &str = include_str!("../../../contracts/docs/contract-matrix.md");
+/// The client-side statement of the ADR-0010 §11.1 address plan.
+const CLIENT_PLAN: &str = include_str!("../../../core/crates/twinvpn-route/src/plan.rs");
+/// The frozen `Device` record, which states the derivation normatively.
+const DEVICE_PROTO: &str = include_str!("../../../contracts/proto/twinvpn/v1/device.proto");
 
 #[test]
 fn every_event_kind_has_the_durability_the_client_expects() {
@@ -245,4 +249,57 @@ fn the_eleven_forbidden_requests_are_forbidden_on_both_sides() {
         CLIENT_IDEMPOTENCY.contains("FORBIDDEN_ON_C1")
             || CLIENT_COMMANDS.contains("FORBIDDEN_ON_C1")
     );
+}
+
+// ---------------------------------------------------------------------------
+// The address plan. A disagreement here is a wrong overlay address for every
+// device, visible only when a real client connects.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_v6_derivation_matches_the_clients_address_plan() {
+    use twinvpn_control_plane::domain::addressing as addr;
+
+    // The `info` string, byte for byte. `twinvpn-route`'s `V6_IID_INFO` is what
+    // the client's binding passes to the same `twinvpn-crypto` HKDF.
+    assert!(
+        CLIENT_PLAN.contains(r#"pub const V6_IID_INFO: &[u8] = b"twinvpn-v6-iid";"#),
+        "twinvpn-route's info string moved"
+    );
+    assert_eq!(addr::V6_IID_INFO, b"twinvpn-v6-iid");
+
+    // And the contract's own normative sentence still says HKDF over the KEY,
+    // not a truncation of `device_id`. This is the assertion that would have
+    // caught the bug this test was added for.
+    assert!(
+        DEVICE_PROTO.contains(r#"truncate64(HKDF(DeviceKey_pub, "twinvpn-v6-iid"))"#),
+        "device.proto's derivation moved"
+    );
+
+    // The pinned product ULA and the reserved service ranges.
+    assert!(CLIENT_PLAN.contains("fd7c:9e5d:2a10::/48"));
+    assert_eq!(addr::V6_ULA_48, [0xfd, 0x7c, 0x9e, 0x5d, 0x2a, 0x10]);
+    assert!(CLIENT_PLAN.contains("fd7c:9e5d:2a10:ffff::/64"));
+    assert_eq!(addr::RESERVED_SERVICE_V6_SUBNET, [0xff, 0xff]);
+    assert!(CLIENT_PLAN.contains("100.64.0.0/10"));
+    assert_eq!(addr::V4_BASE, [100, 64, 0, 0]);
+    assert_eq!(addr::V4_PREFIX_LEN, 10);
+    assert!(CLIENT_PLAN.contains("100.127.255.0/24"));
+    assert_eq!(addr::RESERVED_SERVICE_V4, ([100, 127, 255, 0], 24));
+
+    // RFC 7136's U/L clear, spelled the same way on both sides.
+    assert!(
+        CLIENT_PLAN.contains("id[0] &= 0b1111_1101;"),
+        "the client clears the U/L bit differently"
+    );
+}
+
+#[test]
+fn the_state_document_digest_is_the_sha_256_the_contract_announces() {
+    // `policy.proto`: "SHA-256 of the document bytes, exactly 32 bytes." A
+    // device verifies the announced digest against one it computed itself, so a
+    // lookalike of the right width fails every pull.
+    let d = twinvpn_control_plane::domain::policy::content_digest(b"twinvpn");
+    assert_eq!(d, twinvpn_crypto::sha256(b"twinvpn"));
+    assert_eq!(d.len(), 32);
 }

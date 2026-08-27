@@ -38,7 +38,6 @@ pub mod pg;
 use futures::future::BoxFuture;
 use twinvpn_service_common::{Correlation, ServiceError};
 
-use crate::domain::addressing::Ipv6Derivation;
 use crate::event::EphemeralEvent;
 use crate::model::{DeviceKey, StoredEvent};
 use crate::verify::StatementVerifier;
@@ -64,8 +63,6 @@ pub struct Request<'a> {
     pub correlation: Correlation,
     /// Returned by `RegisterDevice`.
     pub coordination_endpoints: &'a [String],
-    /// How the v6 overlay address is derived.
-    pub v6_derivation: Ipv6Derivation,
     /// Which command.
     pub code: CommandCode,
     /// The untrusted body. Bounded by [`crate::wire`] before it reaches here.

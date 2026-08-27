@@ -593,7 +593,6 @@ impl ControlStore for PgStore {
                 quorum_available: request.quorum_available,
                 correlation: request.correlation,
                 coordination_endpoints: request.coordination_endpoints,
-                v6_derivation: request.v6_derivation,
             };
 
             // The budget is per-TwinNet and per-process here. A multi-front-end

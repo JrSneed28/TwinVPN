@@ -32,7 +32,7 @@ use twinvpn_service_common::ServiceError;
 use crate::codes;
 use crate::event::DurableEvent;
 use crate::model::{PairingRecord, PairingState};
-use crate::verify::{self, SignedOctets, StatementKind};
+use crate::verify::{self, StatementKind};
 use crate::{Command, NetTx};
 use twinvpn_schema::v1::control_event::Event as EventBody;
 
@@ -205,13 +205,15 @@ pub fn complete(
         .as_ref()
         .and_then(|a| a.statement.as_ref())
         .ok_or_else(|| codes::bare(codes::SIGNATURE_INVALID))?;
-    let octets = SignedOctets::from_received(bytes::Bytes::from(attestation.cose_sign1.clone()))
+    let octets = verify::opaque_statement(bytes::Bytes::from(attestation.cose_sign1.clone()))
         .map_err(|r| ServiceError::from_reject(&r, crate::COMPONENT))?;
+    let signer = super::caller_key(tx, ctx)?.to_vec();
     let verified = verify::admit(
         ctx.verifier,
         &octets,
         StatementKind::PairingAttestation,
         ctx.now_ms,
+        verify::SignerKey::Device(&signer),
     )?;
 
     let result_detail = v1::PairingResult {
@@ -327,13 +329,16 @@ pub fn revoke_pairing(
         .ok_or_else(|| codes::bare(twinvpn_types::codes::AUTH_PAIRING_NOT_AUTHORIZED))?;
 
     if let Some(statement) = revocation.statement.as_ref() {
-        let octets = SignedOctets::from_received(bytes::Bytes::from(statement.cose_sign1.clone()))
+        let octets = verify::opaque_statement(bytes::Bytes::from(statement.cose_sign1.clone()))
             .map_err(|r| ServiceError::from_reject(&r, crate::COMPONENT))?;
+        // Owner authority: "A device MUST NOT be able to revoke a pairing on
+        // its own authority any more than it can revoke a peer."
         verify::admit(
             ctx.verifier,
             &octets,
             StatementKind::PairingRevocation,
             ctx.now_ms,
+            verify::SignerKey::OwnerAnchors,
         )?;
     } else {
         return Err(codes::bare(codes::SIGNATURE_INVALID));
