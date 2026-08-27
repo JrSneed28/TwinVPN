@@ -1,0 +1,18 @@
+# Ruflo local secrets and runtime data
+.env
+.env.local
+.env.*.local
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/
+
+# Dependencies
+node_modules/
+
+# Ruflo memory / vector stores (local runtime state, not source)
+.swarm/
+ruvector.db
+ruvector.db-*
+
+# Claude Code local (machine-specific) settings
+.claude/settings.local.json
