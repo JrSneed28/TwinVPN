@@ -1339,6 +1339,7 @@ version = "0.1.0"
 dependencies = [
  "futures-core",
  "thiserror",
+ "tokio",
  "twinvpn-types",
 ]
 
@@ -1388,6 +1389,7 @@ dependencies = [
  "thiserror",
  "twinvpn-env",
  "twinvpn-types",
+ "zeroize",
 ]
 
 [[package]]
@@ -1489,7 +1491,10 @@ dependencies = [
 name = "twinvpn-types"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
+ "subtle",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]
