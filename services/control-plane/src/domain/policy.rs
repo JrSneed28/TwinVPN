@@ -30,7 +30,7 @@ use twinvpn_service_common::ServiceError;
 use crate::codes;
 use crate::event::DurableEvent;
 use crate::model::{DocumentRecord, DocumentType};
-use crate::verify::{self, SignedOctets, StatementKind};
+use crate::verify::{self, StatementKind};
 use crate::wire;
 use crate::{Command, NetTx};
 use twinvpn_schema::v1::control_event::Event as EventBody;
@@ -65,13 +65,14 @@ pub fn put(
         .signed
         .as_ref()
         .ok_or_else(|| codes::bare(codes::SIGNATURE_INVALID))?;
-    let octets = SignedOctets::from_received(bytes::Bytes::from(statement.cose_sign1.clone()))
+    let octets = verify::opaque_statement(bytes::Bytes::from(statement.cose_sign1.clone()))
         .map_err(|r| ServiceError::from_reject(&r, crate::COMPONENT))?;
     let verified = verify::admit(
         ctx.verifier,
         &octets,
         StatementKind::PolicyBundle,
         ctx.now_ms,
+        verify::SignerKey::OwnerAnchors,
     )?;
 
     // N-2. The current version is 0 before the first bundle, which is what
@@ -124,32 +125,20 @@ pub fn put(
     }))
 }
 
-/// A content digest over the **verified octets**.
+/// SHA-256 over the **verified octets**, as `StateDocumentRef.digest` requires.
 ///
-/// Not a cryptographic hash: `services/Cargo.toml` declares no digest crate and
-/// CD-I2 puts one in `twinvpn-crypto`, which this artifact does not link. This
-/// is a 256-bit FNV-1a fold, used **only** for ADR-0009 R-4's equal-version fork
-/// detection *inside this service's own store*, where both sides of the
-/// comparison are values this service wrote.
+/// `policy.proto`: "SHA-256 of the document bytes, exactly 32 bytes. Verified
+/// ALONGSIDE the signature, not instead of it: the digest proves the pull
+/// returned what was announced, the signature proves the `Owner` authored it."
 ///
-/// It is **not** the `content_hash` of ADR-0009 §11.3's `DocumentHeader` and is
-/// never put on a wire: the header's hash lives inside the `Owner`-signed
-/// payload, which this service forwards verbatim and cannot compute. Reported as
-/// an integration item — see `README.md` §8.
+/// It is `twinvpn-crypto`'s SHA-256 — the audited provider — for the same reason
+/// the v6 derivation is: a device verifies this digest against one it computed
+/// itself, so a second implementation inside the services workspace would be the
+/// DP-8 second provider whose agreement is untested. The same value serves
+/// ADR-0009 R-4's equal-version fork detection.
 #[must_use]
 pub fn content_digest(octets: &[u8]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for (lane, chunk) in out.chunks_mut(8).enumerate() {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (lane as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        for b in octets {
-            h ^= u64::from(*b);
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        h ^= octets.len() as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        chunk.copy_from_slice(&h.to_be_bytes());
-    }
-    out
+    twinvpn_crypto::sha256(octets)
 }
 
 #[cfg(test)]
@@ -157,22 +146,33 @@ mod tests {
     use super::content_digest;
 
     #[test]
+    fn the_digest_is_sha_256_and_not_a_lookalike() {
+        // The bug this replaced: a 256-bit FNV-1a fold has the right WIDTH and
+        // separates content, and a device verifying an announced digest against
+        // its own SHA-256 fails every single time.
+        assert_eq!(
+            content_digest(b"twinvpn"),
+            twinvpn_crypto::sha256(b"twinvpn")
+        );
+
+        // RFC 6234's vector for the empty string, so this is pinned to SHA-256
+        // itself and not merely to whatever the provider currently returns.
+        let empty = content_digest(b"");
+        assert_eq!(
+            &empty[..4],
+            &[0xe3, 0xb0, 0xc4, 0x42],
+            "SHA-256(\"\") begins e3b0c442"
+        );
+        assert_eq!(empty.len(), 32, "policy.proto: exactly 32 bytes");
+    }
+
+    #[test]
     fn the_fork_detector_separates_different_content() {
-        // ADR-0009 R-4 only needs "same version, different bytes" to be
-        // detectable within this store. That is what this asserts, and the
-        // module docs say plainly what it is not.
+        // ADR-0009 R-4 needs "same version, different bytes" to be detectable.
         assert_eq!(content_digest(b"a"), content_digest(b"a"));
         assert_ne!(content_digest(b"a"), content_digest(b"b"));
         assert_ne!(content_digest(b"ab"), content_digest(b"ba"));
         assert_ne!(content_digest(b""), content_digest(b"\0"));
         assert_ne!(content_digest(b"a"), content_digest(b"aa"));
-    }
-
-    #[test]
-    fn every_lane_of_the_digest_is_used() {
-        // A fold that left half the output zero would halve the space a
-        // collision has to find.
-        let d = content_digest(b"twinvpn");
-        assert!(d.chunks(8).all(|c| c != [0u8; 8]));
     }
 }

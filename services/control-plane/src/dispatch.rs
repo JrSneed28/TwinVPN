@@ -31,7 +31,7 @@ use crate::{Command, CommandCode, NetTx};
 /// `max_depth` to the raw octets, so a hostile declared length never reaches
 /// `prost`. It is the right primitive here — this body *is* a protobuf message —
 /// and it is deliberately not the primitive used for a COSE_Sign1 statement; see
-/// [`crate::verify::SignedOctets`] for why.
+/// [`crate::verify::opaque_statement`] for why.
 fn retain(body: &[u8]) -> Result<Verbatim, ServiceError> {
     Verbatim::from_received(
         bytes::Bytes::copy_from_slice(body),

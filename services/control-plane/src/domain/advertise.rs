@@ -23,19 +23,20 @@
 //!    would produce — is refused with `AUTH.UNEXPECTED_DELEGATION`.
 
 use twinvpn_schema::v1;
+use twinvpn_service_common::forward::Verbatim;
 use twinvpn_service_common::ServiceError;
 
 use crate::codes;
 use crate::event::DurableEvent;
-use crate::verify::{self, SignedOctets, StatementKind};
+use crate::verify::{self, StatementKind};
 use crate::NetTx;
 use twinvpn_schema::v1::control_event::Event as EventBody;
 
 use super::{fixed, mutation_result, record, require_not_revoked, Ctx, Outcome};
 
-fn opaque(statement: Option<&v1::SignedStatement>) -> Result<SignedOctets, ServiceError> {
+fn opaque(statement: Option<&v1::SignedStatement>) -> Result<Verbatim, ServiceError> {
     let s = statement.ok_or_else(|| codes::bare(codes::SIGNATURE_INVALID))?;
-    SignedOctets::from_received(bytes::Bytes::from(s.cose_sign1.clone()))
+    verify::opaque_statement(bytes::Bytes::from(s.cose_sign1.clone()))
         .map_err(|r| ServiceError::from_reject(&r, crate::COMPONENT))
 }
 
@@ -98,11 +99,13 @@ pub fn put_route(
     check_prefixes(&ad.prefixes_v6)?;
 
     let octets = opaque(ad.signed.as_ref())?;
+    let signer = super::caller_key(tx, ctx)?.to_vec();
     let verified = verify::admit(
         ctx.verifier,
         &octets,
         StatementKind::RouteAdvertisement,
         ctx.now_ms,
+        verify::SignerKey::Device(&signer),
     )?;
 
     tx.put_route_set(
@@ -147,11 +150,13 @@ pub fn withdraw_route(
         return Err(codes::bare(twinvpn_types::codes::AUTH_PEER_UNTRUSTED));
     }
     let octets = opaque(req.signed.as_ref())?;
+    let signer = super::caller_key(tx, ctx)?.to_vec();
     verify::admit(
         ctx.verifier,
         &octets,
         StatementKind::RouteAdvertisement,
         ctx.now_ms,
+        verify::SignerKey::Device(&signer),
     )?;
 
     tx.put_route_set(advertiser, req.advertisement_epoch, Vec::new())?;
@@ -195,11 +200,13 @@ pub fn put_offer(
         return Err(codes::bare(twinvpn_types::codes::AUTH_PEER_UNTRUSTED));
     }
     let octets = opaque(offer.signed.as_ref())?;
+    let signer = super::caller_key(tx, ctx)?.to_vec();
     let verified = verify::admit(
         ctx.verifier,
         &octets,
         StatementKind::ExitNodeOffer,
         ctx.now_ms,
+        verify::SignerKey::Device(&signer),
     )?;
 
     tx.put_offer(
@@ -241,11 +248,13 @@ pub fn withdraw_offer(
         return Err(codes::bare(twinvpn_types::codes::AUTH_PEER_UNTRUSTED));
     }
     let octets = opaque(req.signed.as_ref())?;
+    let signer = super::caller_key(tx, ctx)?.to_vec();
     verify::admit(
         ctx.verifier,
         &octets,
         StatementKind::ExitNodeOffer,
         ctx.now_ms,
+        verify::SignerKey::Device(&signer),
     )?;
 
     tx.put_offer(offerer, req.offer_epoch, Vec::new())?;

@@ -14,17 +14,18 @@
 //! protocol implementation … that takes its cryptography from rustls and
 //! implements none itself".
 //!
-//! This server is a **separate artifact** and does not link the core, so it
-//! cannot import what `twinvpn-crypto` vends. The resolution, stated rather than
+//! This server is a **separate artifact** with its own transport to terminate.
+//! The integration lead's ruling scopes CD-I2 to the `/core` crate set, so these
+//! server artifacts may terminate TLS; the resolution here is stated rather than
 //! worked around:
 //!
 //! - `Cargo.toml` declares `quinn` and **not** `rustls`. `quinn` re-exports the
 //!   `rustls` types its own feature selection compiled (`rustls-ring`), so this
 //!   module names `quinn::rustls::…` and never introduces a second
 //!   `CryptoProvider`. Naming `rustls` directly would activate its default
-//!   `aws-lc-rs` feature alongside quinn's `ring` and give the artifact two
-//!   answers to "what cryptography do we use" — precisely what CD-I2 exists to
-//!   prevent.
+//!   `aws-lc-rs` feature alongside quinn's `ring` and give one artifact two
+//!   providers — ADR-0018 **DP-8**'s bound violated through a feature flag
+//!   rather than a dependency line, with no line to review.
 //! - The **server's** TLS material and the **client's** raw-public-key verifier
 //!   are supplied through [`TlsMaterial`] and [`PeerIdentityVerifier`], the same
 //!   shape `twinvpn-cp-client` uses for its own binding. What this crate owns is
@@ -72,9 +73,9 @@ pub const CHANNEL_BINDING_BYTES: usize = 32;
 
 /// The server's TLS key material, supplied at construction.
 ///
-/// **An integration item.** Parsing a private key and building a certified key
-/// are `twinvpn-crypto`'s under CD-I2; this artifact takes the finished
-/// `rustls` types. `README.md` §7 records what a composition root must bind.
+/// **An integration item.** `README.md` §7 records what a composition root must
+/// bind; this crate takes the finished `rustls` types so the key parsing and the
+/// certified-key construction stay in one place rather than in six services.
 pub struct TlsMaterial {
     /// The server's certificate chain, or a single raw-public-key certificate.
     pub chain: Vec<rustls::pki_types::CertificateDer<'static>>,

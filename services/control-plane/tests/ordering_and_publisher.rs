@@ -445,8 +445,6 @@ fn a_lease_less_writer_is_refused_rather_than_writing_optimistically() {
         quorum_available: true,
         correlation: twinvpn_service_common::Correlation::empty(),
         coordination_endpoints: &[],
-        v6_derivation:
-            twinvpn_control_plane::domain::addressing::Ipv6Derivation::DeviceIdTruncation,
         code: CommandCode::RegisterDevice,
         body: &common::register_request(1, &key(1)),
     }))

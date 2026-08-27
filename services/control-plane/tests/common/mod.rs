@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 
 use prost::Message;
 use twinvpn_control_plane as cp;
-use twinvpn_control_plane::domain::addressing::Ipv6Derivation;
 use twinvpn_control_plane::store::{Committed, ControlStore, Request};
 use twinvpn_control_plane::verify::testing::ScriptedVerifier;
 use twinvpn_control_plane::verify::{RefuseUnverifiable, StatementVerifier};
@@ -67,7 +66,6 @@ impl Net {
             quorum_available: true,
             correlation: Correlation::empty(),
             coordination_endpoints: &self.endpoints,
-            v6_derivation: Ipv6Derivation::DeviceIdTruncation,
             code,
             body,
         }))
@@ -91,7 +89,6 @@ impl Net {
             quorum_available: false,
             correlation: Correlation::empty(),
             coordination_endpoints: &self.endpoints,
-            v6_derivation: Ipv6Derivation::DeviceIdTruncation,
             code,
             body,
         }))

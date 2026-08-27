@@ -172,7 +172,6 @@ mod tests {
             quorum_available: true,
             correlation: Correlation::empty(),
             coordination_endpoints: &[],
-            v6_derivation: crate::domain::addressing::Ipv6Derivation::DeviceIdTruncation,
         }
     }
 

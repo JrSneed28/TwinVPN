@@ -23,12 +23,13 @@
 //! here from the **received octets** of that statement, never re-encoded.
 
 use twinvpn_schema::v1;
+use twinvpn_service_common::forward::Verbatim;
 use twinvpn_service_common::ServiceError;
 
 use crate::codes;
 use crate::event::DurableEvent;
 use crate::model::{DeviceRecord, PairingState};
-use crate::verify::{self, SignedOctets, StatementKind};
+use crate::verify::{self, StatementKind};
 use crate::{Command, NetTx};
 
 use super::addressing;
@@ -36,9 +37,9 @@ use super::{fixed, mutation_result, record, require_not_revoked, require_quorum,
 use twinvpn_schema::v1::control_event::Event as EventBody;
 
 /// Wraps received octets for verification and forwarding.
-fn opaque(statement: Option<&v1::SignedStatement>) -> Result<SignedOctets, ServiceError> {
+fn opaque(statement: Option<&v1::SignedStatement>) -> Result<Verbatim, ServiceError> {
     let s = statement.ok_or_else(|| codes::bare(codes::SIGNATURE_INVALID))?;
-    SignedOctets::from_received(bytes::Bytes::from(s.cose_sign1.clone()))
+    verify::opaque_statement(bytes::Bytes::from(s.cose_sign1.clone()))
         .map_err(|r| ServiceError::from_reject(&r, crate::COMPONENT))
 }
 
@@ -96,6 +97,7 @@ pub fn register(
         &proof,
         StatementKind::OwnerDelegation,
         ctx.now_ms,
+        verify::SignerKey::OwnerAnchors,
     )?;
 
     // Linearizable admission. A duplicate enrol finds the SAME row — "device_id
@@ -112,7 +114,10 @@ pub fn register(
         return Ok(record(&resp, 0, set_replay));
     }
 
-    let alloc = addressing::allocate(tx.state(), &device_id, ctx.v6_derivation)?;
+    // ADR-0010 §11.1 derives the v6 IID from `DeviceKey_pub` — the COSE_Key
+    // octets, the same input `device_id` is derived from — so the address this
+    // service records is the one the device computes for itself.
+    let alloc = addressing::allocate(tx.state(), &device_id, &identity.identity_public_key)?;
 
     // `RegisterDeviceRequest` carries no label: the Owner names a device, and
     // `UpdateDeviceMetadata` is where that happens. A device that could name
@@ -300,16 +305,19 @@ pub fn revoke(
     require_quorum(ctx, Command::RevokeDevice)?;
     let target = fixed::<32>("device_id_bytes", &req.target_device_id)?;
 
-    // STEP 1 — AUTHORIZE. The Owner signs; this service cannot. `verify::admit`
-    // refuses anything whose signature chains to a device key, and the shipped
-    // verifier refuses everything, so a control plane with no anchor cannot
-    // revoke at all. That is the correct failure.
+    // STEP 1 — AUTHORIZE. The Owner signs; this service cannot. `SignerKey`
+    // fixes the key set to the pinned OwnerTrustAnchor, `verify::admit` refuses
+    // a device key before any signature arithmetic, and a control plane with no
+    // anchor configured cannot revoke at all. That last one is the correct
+    // failure, not a gap: admitting an unverifiable revocation would be this
+    // service granting authority it does not have.
     let statement = opaque(req.revocation_statement.as_ref())?;
     let verified = verify::admit(
         ctx.verifier,
         &statement,
         StatementKind::RevocationStatement,
         ctx.now_ms,
+        verify::SignerKey::OwnerAnchors,
     )?;
 
     // ADR-0008 N-7: re-revoking is a no-op. The revoked set never shrinks and
@@ -419,7 +427,20 @@ pub fn rotate_credential(
         }
     };
     let octets = opaque(Some(statement))?;
-    let verified = verify::admit(ctx.verifier, &octets, kind, ctx.now_ms)?;
+    // The device's OWN key, as this service recorded it. A rotation is a
+    // device speaking about itself, so nothing else could be the signer — and
+    // for an `IdentitySuccession` this is the OLD key, which is one half of
+    // ADR-0007 N-21's dual signature. The NEW key's half is verified by the
+    // peer that pins it; this service cannot, because it does not hold the
+    // successor until this very command commits. Recorded in README.md §7.
+    let signer = super::caller_key(tx, ctx)?.to_vec();
+    let verified = verify::admit(
+        ctx.verifier,
+        &octets,
+        kind,
+        ctx.now_ms,
+        verify::SignerKey::Device(&signer),
+    )?;
 
     let mut device = decode_device(&current)?;
     let mut identity = device
