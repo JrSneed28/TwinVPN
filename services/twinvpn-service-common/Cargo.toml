@@ -2,6 +2,10 @@
 #
 # Owner: control-plane. The WORKSPACE manifest at services/Cargo.toml is owned by the
 # integration lead and must not be edited from this domain.
+#
+# Every dependency below is already declared in services/Cargo.toml's
+# [workspace.dependencies] by the integration lead; this manifest only selects
+# from that set. No version is named here, so no domain can drift a version.
 [package]
 name    = "twinvpn-service-common"
 version.workspace      = true
@@ -16,4 +20,25 @@ publish = false
 twinvpn-schema = { workspace = true }
 twinvpn-types  = { workspace = true }
 thiserror      = { workspace = true }
-tracing        = { workspace = true }
+
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# OpenTelemetry, ADR-0015 §11.1: permitted as an INTERNAL, infrastructure-side
+# instrumentation library only.
+tracing-opentelemetry = { workspace = true }
+opentelemetry         = { workspace = true }
+opentelemetry_sdk     = { workspace = true }
+opentelemetry-otlp    = { workspace = true }
+
+tokio  = { workspace = true }
+axum   = { workspace = true }
+tower  = { workspace = true }
+bytes  = { workspace = true }
+prost  = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# `test-util` is not in tokio's `full`; the shutdown and log-level-expiry tests
+# drive virtual time so they assert a 120 s drain without taking 120 s.
+tokio = { workspace = true, features = ["test-util"] }
