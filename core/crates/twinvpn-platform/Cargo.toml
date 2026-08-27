@@ -2,6 +2,9 @@
 #
 # Owner: core-foundation. This manifest is owned by that agent; the WORKSPACE manifest
 # at core/Cargo.toml is owned by the integration lead and must not be edited here.
+#
+# CB-3: no `#[cfg(target_os)]` appears in this crate, and `cargo run -p xtask -- lint`
+# fails the build if one appears outside a `twinvpn-platform-*` crate.
 [package]
 name    = "twinvpn-platform"
 version.workspace      = true
@@ -11,8 +14,17 @@ license.workspace      = true
 repository.workspace   = true
 description = "the platform adapter TRAIT only - ADR-0018 §11.6, this crate is the seam"
 
+[features]
+default = []
+# CD-5: the in-memory binding that makes 100% decision coverage affordable on a
+# Linux CI runner with no VM and no device farm. Never shipped.
+mock = []
+
 [dependencies]
 twinvpn-types         = { workspace = true }
 twinvpn-env           = { workspace = true }
 thiserror             = { workspace = true }
 futures-core          = { workspace = true }
+
+[dev-dependencies]
+twinvpn-platform      = { path = ".", features = ["mock"] }

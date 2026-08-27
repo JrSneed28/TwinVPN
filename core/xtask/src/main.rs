@@ -1,24 +1,63 @@
-//! TwinVPN T1 architectural lints.
+//! `cargo run -p xtask -- lint` — the T1 architectural lints.
 //!
-//! **Authority:** ADR-0018 §11.7 (CD-I2, CD-I5, CD-CB3) and §11.8 (CD-3).
-//!
-//! ADR-0018 CD-3 is explicit that the deny-list *is* the mechanism — "a
-//! violation fails the merge" — so these checks belong in the build, not in a
-//! review checklist. Nothing is implemented yet; `core-foundation` owns this
-//! binary and supplies the four checks:
-//!
-//! - **CD-3** deny-list: `SystemTime::now`, `Instant::now`, `getrandom`,
-//!   thread-local RNG constructors, the runtime's time module, `chrono` now-
-//!   constructors and the platform time syscalls, everywhere except
-//!   `twinvpn-env`'s implementations.
-//! - **CD-I2**: only `twinvpn-crypto` may declare a cryptographic dependency.
-//! - **CD-I5**: no data-plane crate may reach `twinvpn-cp-client`, directly or
-//!   transitively, and the reverse edge is equally denied. Only `twinvpn-core`
-//!   may name both.
-//! - **CD-CB3**: `#[cfg(target_os = …)]` outside `twinvpn-platform-*`.
+//! See the library crate's documentation for what each check asserts and why it
+//! is a build step rather than a review checklist.
+
 #![forbid(unsafe_code)]
 
-fn main() -> std::process::ExitCode {
-    eprintln!("xtask: no lint implemented yet (owner: core-foundation)");
-    std::process::ExitCode::FAILURE
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    let command = std::env::args().nth(1);
+    match command.as_deref() {
+        Some("lint") => lint(),
+        Some(other) => {
+            eprintln!("xtask: unknown command `{other}`");
+            usage();
+            ExitCode::FAILURE
+        }
+        None => {
+            usage();
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn usage() {
+    eprintln!("usage: cargo run -p xtask -- lint");
+    eprintln!();
+    eprintln!("  lint   run the ADR-0018 T1 checks: CD-3, CD-I2, CD-I5, CD-CB3");
+}
+
+fn lint() -> ExitCode {
+    // `core/xtask` -> `core`. The lints run over the core workspace, which is the
+    // exact crate set ADR-0018 §11.12 gives them.
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let Some(workspace_root) = manifest_dir.parent() else {
+        eprintln!("xtask: cannot locate the core workspace root");
+        return ExitCode::FAILURE;
+    };
+    let manifest = workspace_root.join("Cargo.toml");
+
+    let violations = match xtask::run(&manifest) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("xtask: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if violations.is_empty() {
+        println!("xtask lint: CD-3, CD-I2, CD-I5, CD-CB3 — all clean");
+        return ExitCode::SUCCESS;
+    }
+
+    eprintln!("xtask lint: {} violation(s)", violations.len());
+    for v in &violations {
+        eprintln!("  {v}");
+    }
+    eprintln!();
+    eprintln!("ADR-0018 CD-3: \"A violation fails the merge.\"");
+    ExitCode::FAILURE
 }

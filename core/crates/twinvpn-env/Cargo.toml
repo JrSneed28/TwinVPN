@@ -2,6 +2,10 @@
 #
 # Owner: core-foundation. This manifest is owned by that agent; the WORKSPACE manifest
 # at core/Cargo.toml is owned by the integration lead and must not be edited here.
+#
+# CD-I2: this crate declares NO cryptographic dependency. CD-4's HKDF-SHA-256
+# derivation is supplied by the binding through the `StreamDerivation` trait —
+# see src/rng.rs for the conflict and the integration lead's resolution.
 [package]
 name    = "twinvpn-env"
 version.workspace      = true
@@ -11,10 +15,22 @@ license.workspace      = true
 repository.workspace   = true
 description = "the ONLY source of time, timers, randomness and the runtime (ADR-0018 CD-1..CD-4)"
 
+[features]
+default = ["runtime-tokio"]
+# ADR-0018 §11.3's two production runtime bindings. Off in a build that supplies
+# its own scheduler; on by default because the core is async over a Runtime.
+runtime-tokio = ["dep:tokio"]
+# The virtual-clock driver TwinLab drives (§11.3's third binding). Never shipped.
+test-support = []
+
 [dependencies]
 twinvpn-types         = { workspace = true }
 thiserror             = { workspace = true }
 futures-core          = { workspace = true }
+# CD-3 permits `tokio::time` only under src/binding/; `cargo run -p xtask -- lint`
+# enforces that path exclusion.
+tokio                 = { workspace = true, optional = true, features = ["rt", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
 proptest              = { workspace = true }
+twinvpn-env           = { path = ".", features = ["test-support"] }

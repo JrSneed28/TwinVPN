@@ -12,6 +12,14 @@ repository.workspace   = true
 description = "TwinVPN T1 architectural lints (ADR-0018 CD-3, CD-I2, CD-I5, CB-3)"
 publish = false
 
+[lib]
+name = "xtask"
+path = "src/lib.rs"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
 [dependencies]
 serde      = { workspace = true }
 serde_json = { workspace = true }

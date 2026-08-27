@@ -11,6 +11,25 @@ license.workspace      = true
 repository.workspace   = true
 description = "the generated contract bindings plus untrusted-input validation against registry/limits.json"
 
+[lib]
+# The generated bindings are `include!`d from the FROZEN contracts tree, and the
+# proto comments they carry become Rust doc comments. Several are indented code
+# blocks that rustdoc treats as doctests — for instance `KillSwitchFloor`'s
+# `max(local_mode, policy_required_mode)`, which is a specification of the
+# floor rule, not Rust. They cannot compile and they are not meant to.
+#
+# `contracts/` is frozen (ownership.md §3), so the comments cannot be fenced as
+# `text`, and re-writing them at include time would create a second copy of the
+# bindings that CI's regenerate-and-diff check does not cover. Disabling doctests
+# for this crate is the change that stays on our side of the freeze.
+#
+# The cost is that this crate cannot carry doctests of its own. Its behaviour is
+# covered by `tests/validation.rs` instead.
+doctest = false
+
+[build-dependencies]
+serde_json            = { workspace = true }
+
 [dependencies]
 twinvpn-types         = { workspace = true }
 prost                 = { workspace = true }
