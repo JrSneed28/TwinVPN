@@ -19,7 +19,7 @@
 //!
 //! `salt` is absent from that expression, so extraction uses the all-zero salt
 //! RFC 5869 §2.2 specifies for the "not provided" case. That is asserted against
-//! the RFC's own test vectors in [`tests`], not merely stated.
+//! the RFC's own test vectors in this module's `tests`, not merely stated.
 
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};

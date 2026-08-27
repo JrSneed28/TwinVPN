@@ -27,9 +27,9 @@
 //!
 //! So [`record_aad`] length-prefixes every variable-length field with a
 //! big-endian `u32`. This is an under-specification in ADR-0020 §11.5 rather
-//! than a disagreement with it, it is reported as one, and
-//! [`tests::the_aad_is_unambiguous_across_a_namespace_key_boundary`] is the test
-//! that would fail if it were ever "simplified" back.
+//! than a disagreement with it, it is reported as one, and the unit test
+//! `the_aad_is_unambiguous_across_a_namespace_key_boundary` is what would fail
+//! if it were ever "simplified" back.
 //!
 //! # ST-13
 //!
