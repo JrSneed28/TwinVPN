@@ -16,7 +16,9 @@ use twinvpn_session::event::LinkKind;
 use twinvpn_session::keepalive::{NatKeepalive, WakeWindow};
 use twinvpn_session::liveness::{Liveness, PathLiveness};
 use twinvpn_session::machine::Outcome;
-use twinvpn_session::resumption::{fate, next_step, Disruption, Fate, Item, RecoveryStep, WakeStep};
+use twinvpn_session::resumption::{
+    fate, next_step, Disruption, Fate, Item, RecoveryStep, WakeStep,
+};
 use twinvpn_session::state::EnforcementMode;
 use twinvpn_session::timers::{self, ClockClass, TimerProfile};
 use twinvpn_session::{Context, Event, Guards, Row, SessionMachine, SessionState, TimerId};
@@ -143,7 +145,10 @@ fn path_death_with_an_alternate_migrates_and_without_one_reconnects() {
 
     // Without: T20, with a named cause.
     let (mut m, g) = established(PathClass::WanDirect);
-    assert_eq!(drive(&mut m, Event::LinkDown(LinkKind::Cellular), g), Row::T20);
+    assert_eq!(
+        drive(&mut m, Event::LinkDown(LinkKind::Cellular), g),
+        Row::T20
+    );
     assert_eq!(m.state(), SessionState::Reconnecting { parked: false });
     assert!(m.history().last().unwrap().reason_code.is_some());
 }
@@ -331,7 +336,10 @@ fn an_open_breaker_penalises_selection_and_never_filters_it() {
         b.observe_failure(twinvpn_types::ErrorClass::Transient);
     }
     assert_eq!(b.state(), BreakerState::Open);
-    assert_eq!(b.score_penalty(), twinvpn_session::budget::OPEN_BREAKER_PENALTY);
+    assert_eq!(
+        b.score_penalty(),
+        twinvpn_session::budget::OPEN_BREAKER_PENALTY
+    );
     // §6.3: a POLICY code opens no breaker at all.
     let mut p = Breaker::new();
     for _ in 0..10 {
@@ -446,7 +454,10 @@ fn the_nat_ladder_climbs_additively_and_reverts_to_the_last_known_good_rung() {
     }
     assert_eq!(k.interval(), Duration::from_secs(120));
     // A known network resumes at the right cadence immediately.
-    assert_eq!(NatKeepalive::resume_at(70).interval(), Duration::from_secs(70));
+    assert_eq!(
+        NatKeepalive::resume_at(70).interval(),
+        Duration::from_secs(70)
+    );
 }
 
 #[test]
@@ -553,7 +564,10 @@ fn the_twinnet_aggregate_never_looks_healthier_than_reality() {
         has_usable_path: false,
     };
 
-    let a = aggregate(&[healthy_peer, healthy_peer, healthy_peer, broken_peer], true);
+    let a = aggregate(
+        &[healthy_peer, healthy_peer, healthy_peer, broken_peer],
+        true,
+    );
     assert_eq!(a.state, ConnectionState::Reconnecting, "worst wins");
     assert_eq!(a.healthy, 3);
     assert_eq!(a.total, 4);

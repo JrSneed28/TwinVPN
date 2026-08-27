@@ -131,8 +131,7 @@ impl Guards {
     /// device untunneled, and "we have not been told" is not a licence.
     #[must_use]
     pub fn fail_closed(self) -> bool {
-        self.enforcement
-            .is_none_or(EnforcementMode::is_fail_closed)
+        self.enforcement.is_none_or(EnforcementMode::is_fail_closed)
     }
 
     /// Whether `trust_state_expired` may contribute to a `BLOCKED` decision.
@@ -162,7 +161,10 @@ impl Guards {
             ("credentials_expired", self.credentials_expired),
             ("peer_authorized", self.peer_authorized),
             ("usable_candidate", self.usable_candidate),
-            ("no_candidate_either_family", self.no_candidate_either_family),
+            (
+                "no_candidate_either_family",
+                self.no_candidate_either_family,
+            ),
             ("path_validated", self.path_validated),
             ("no_l2_path_won", self.no_l2_path_won),
             ("no_direct_path_won", self.no_direct_path_won),

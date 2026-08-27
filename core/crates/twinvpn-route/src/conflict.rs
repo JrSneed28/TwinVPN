@@ -91,10 +91,7 @@ pub fn resolve(candidates: &[Candidate]) -> Resolution {
 
     for cand in candidates {
         // P1: identical prefixes are never installed twice.
-        if let Some(pos) = installed
-            .iter()
-            .position(|c| c.prefix == cand.prefix)
-        {
+        if let Some(pos) = installed.iter().position(|c| c.prefix == cand.prefix) {
             let existing = installed[pos];
             let winner = pick(existing, *cand);
             conflicts.push(Conflict {
@@ -161,7 +158,11 @@ fn pick(a: Candidate, b: Candidate) -> Candidate {
     // stable tie-break on the advertiser so the outcome is reproducible rather
     // than dependent on iteration order.
     if a.measured_score != b.measured_score {
-        return if a.measured_score > b.measured_score { a } else { b };
+        return if a.measured_score > b.measured_score {
+            a
+        } else {
+            b
+        };
     }
     if a.metric != b.metric {
         return if a.metric < b.metric { a } else { b };
@@ -201,7 +202,10 @@ pub fn default_route_permitted(cand: Candidate, selected_exit_node: Option<Devic
 /// comparing on-link underlay prefixes and the underlay default gateway against
 /// the assigned `TwinNet` `/22`(s) — never resolved by clobbering.
 #[must_use]
-pub fn cgnat_space_collision(twinnet_v4_blocks: &[IpPrefix], underlay_on_link: &[IpPrefix]) -> bool {
+pub fn cgnat_space_collision(
+    twinnet_v4_blocks: &[IpPrefix],
+    underlay_on_link: &[IpPrefix],
+) -> bool {
     twinnet_v4_blocks
         .iter()
         .any(|t| underlay_on_link.iter().any(|u| overlaps(*t, *u)))

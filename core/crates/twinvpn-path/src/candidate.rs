@@ -78,10 +78,9 @@ impl Kind {
     pub const fn family(self) -> Option<AddressFamily> {
         match self {
             Kind::HostV6Global | Kind::HostV6LinkLocal | Kind::SrflxV6 => Some(AddressFamily::V6),
-            Kind::HostV4Private
-            | Kind::SrflxV4
-            | Kind::PortmapV4
-            | Kind::PredictedV4 => Some(AddressFamily::V4),
+            Kind::HostV4Private | Kind::SrflxV4 | Kind::PortmapV4 | Kind::PredictedV4 => {
+                Some(AddressFamily::V4)
+            }
             // A relay publishes both families and a device on IPv6-only cellular
             // must be able to bind one with no IPv4 path whatsoever.
             Kind::Relay => None,
@@ -265,12 +264,8 @@ pub fn synthesize_nat64(prefix: Nat64Prefix, v4: V4Addr) -> twinvpn_types::V6Add
 /// 'works at home, fails on cellular'."
 #[must_use]
 pub fn single_family(candidates: &[Candidate]) -> Option<AddressFamily> {
-    let has_v4 = candidates
-        .iter()
-        .any(|c| c.family() == AddressFamily::V4);
-    let has_v6 = candidates
-        .iter()
-        .any(|c| c.family() == AddressFamily::V6);
+    let has_v4 = candidates.iter().any(|c| c.family() == AddressFamily::V4);
+    let has_v6 = candidates.iter().any(|c| c.family() == AddressFamily::V6);
     match (has_v4, has_v6) {
         (true, false) => Some(AddressFamily::V4),
         (false, true) => Some(AddressFamily::V6),

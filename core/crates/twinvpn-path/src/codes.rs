@@ -17,7 +17,9 @@
 //! `NET.EGRESS_RESTRICTED`, `NET.PROXY_REQUIRED` and `NET.HAIRPIN_UNSUPPORTED`,
 //! none of which is registered either.
 
-use twinvpn_types::{codes as reg, AddressFamily, Component, Diagnostic, EvidenceValue, ReasonCode};
+use twinvpn_types::{
+    codes as reg, AddressFamily, Component, Diagnostic, EvidenceValue, ReasonCode,
+};
 
 use crate::candidate::Kind;
 
@@ -98,11 +100,7 @@ pub fn direct_established(
 /// `NAT.DIRECT_UPGRADED` — a `RELAYED` path became direct by background probing
 /// (R-12).
 #[must_use]
-pub fn direct_upgraded(
-    family: AddressFamily,
-    kind: Kind,
-    relayed_duration_ms: u64,
-) -> Diagnostic {
+pub fn direct_upgraded(family: AddressFamily, kind: Kind, relayed_duration_ms: u64) -> Diagnostic {
     Diagnostic::builder(reg::NAT_DIRECT_UPGRADED, Component::NatTraversal)
         .evidence("family", EvidenceValue::Family(family))
         .evidence(

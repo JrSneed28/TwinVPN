@@ -91,7 +91,10 @@ pub trait NoiseHandshake: Send + Sync {
     /// [`CryptoUnavailable`] on any authentication failure. A failed handshake
     /// produces **no session keys** — §7.3.1: "a mismatch fails the handshake
     /// without producing key-derivation output".
-    fn read_response(&mut self, message: &[u8]) -> Result<Box<dyn TransportKeys>, CryptoUnavailable>;
+    fn read_response(
+        &mut self,
+        message: &[u8],
+    ) -> Result<Box<dyn TransportKeys>, CryptoUnavailable>;
 
     /// Consumes an initiation and writes the response, for the responder role.
     ///
@@ -121,8 +124,12 @@ pub trait TransportKeys: Send + Sync {
     /// # Errors
     ///
     /// [`CryptoUnavailable`] when the keys have been zeroed.
-    fn seal(&self, counter: u64, plaintext: &[u8], out: &mut Vec<u8>)
-        -> Result<(), CryptoUnavailable>;
+    fn seal(
+        &self,
+        counter: u64,
+        plaintext: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<(), CryptoUnavailable>;
 
     /// Opens one L-DATA payload under the receive key.
     ///
@@ -130,8 +137,12 @@ pub trait TransportKeys: Send + Sync {
     ///
     /// [`CryptoUnavailable`] on any authentication failure. A failed open is a
     /// **drop**, never a degraded accept.
-    fn open(&self, counter: u64, ciphertext: &[u8], out: &mut Vec<u8>)
-        -> Result<(), CryptoUnavailable>;
+    fn open(
+        &self,
+        counter: u64,
+        ciphertext: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<(), CryptoUnavailable>;
 
     /// Zeroes the key material.
     ///

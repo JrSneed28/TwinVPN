@@ -206,11 +206,7 @@ pub fn exclusion(relay: &Relay, device: &DeviceCapability) -> Option<Excluded> {
     if !reachable {
         return Some(Excluded::NoCandidateForFamily);
     }
-    if !relay
-        .carriages
-        .iter()
-        .any(|c| device.carriages.contains(c))
-    {
+    if !relay.carriages.iter().any(|c| device.carriages.contains(c)) {
         return Some(Excluded::NoCarriageSupported);
     }
     None

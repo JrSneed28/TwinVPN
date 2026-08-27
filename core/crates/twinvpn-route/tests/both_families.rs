@@ -99,10 +99,7 @@ fn ap_1_the_product_ula_is_pinned_and_a_foreign_prefix_is_refused() {
 
 #[test]
 fn every_mode_produces_routes_for_both_families_in_one_plan() {
-    for mode in [
-        RoutingMode::TwinnetOnly,
-        RoutingMode::SplitTunnel,
-    ] {
+    for mode in [RoutingMode::TwinnetOnly, RoutingMode::SplitTunnel] {
         let plan = compute(&inputs(mode), ContractGeneration(1)).unwrap();
         assert!(plan.carries(AddressFamily::V4), "{mode:?} lost IPv4");
         assert!(plan.carries(AddressFamily::V6), "{mode:?} lost IPv6");
@@ -128,10 +125,7 @@ fn full_tunnel_installs_two_slash_one_routes_per_family_and_never_a_default() {
         let halves = default_route_halves(family).unwrap();
         for h in halves {
             assert!(
-                plan.routes
-                    .get(family)
-                    .iter()
-                    .any(|r| r.destination == h),
+                plan.routes.get(family).iter().any(|r| r.destination == h),
                 "{family:?} is missing a /1 half"
             );
         }

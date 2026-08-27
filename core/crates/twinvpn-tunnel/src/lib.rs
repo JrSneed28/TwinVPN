@@ -63,7 +63,7 @@ pub mod rekey;
 pub mod replay;
 pub mod transport;
 
-pub use crypto::{CryptoUnavailable, NoiseHandshake, Prologue, TransportKeys, Transcript};
+pub use crypto::{CryptoUnavailable, NoiseHandshake, Prologue, Transcript, TransportKeys};
 pub use engine::{Tunnel, TunnelError, TunnelState};
 pub use negotiate::{Advertisement, MonotonicFloor, Selection};
 pub use rekey::{Action, KeepalivePolicy, KeyState};

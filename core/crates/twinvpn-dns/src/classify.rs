@@ -160,8 +160,7 @@ pub fn classify(
     // 4 — longest matching suffix.
     let mut best: Option<&crate::policy::SplitRule> = None;
     for r in policy.split_rules.iter().filter(|r| !r.exact) {
-        if is_suffix_of(&r.labels, &labels)
-            && best.is_none_or(|b| r.labels.len() > b.labels.len())
+        if is_suffix_of(&r.labels, &labels) && best.is_none_or(|b| r.labels.len() > b.labels.len())
         {
             best = Some(r);
         }

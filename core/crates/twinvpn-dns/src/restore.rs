@@ -181,9 +181,7 @@ impl ProtectionAssertion {
                     )
                     .build(),
             ),
-            Posture::Unprotected(code) => {
-                Some(Diagnostic::builder(code, Component::Dns).build())
-            }
+            Posture::Unprotected(code) => Some(Diagnostic::builder(code, Component::Dns).build()),
         }
     }
 }

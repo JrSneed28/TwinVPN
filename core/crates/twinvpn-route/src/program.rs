@@ -173,7 +173,10 @@ pub fn default_route_halves(family: AddressFamily) -> Result<[IpPrefix; 2], Rout
 // WHOLE before any mutation; splitting it into stages that each return a
 // partial plan is the shape that rule exists to forbid.
 #[allow(clippy::too_many_lines)]
-pub fn compute(inputs: &PlanInputs, generation: ContractGeneration) -> Result<RoutePlan, RouteError> {
+pub fn compute(
+    inputs: &PlanInputs,
+    generation: ContractGeneration,
+) -> Result<RoutePlan, RouteError> {
     if inputs.mode == RoutingMode::PerApp {
         return Err(RouteError::PerAppUnsupported);
     }
@@ -256,12 +259,12 @@ pub fn compute(inputs: &PlanInputs, generation: ContractGeneration) -> Result<Ro
     // R1: both overlay addresses are present at all times, whatever the underlay
     // offers. `OverlayAddresses` has two non-optional fields, so this cannot
     // populate one half.
-    addresses.get_mut(AddressFamily::V4).push(
-        IpPrefix::new(IpAddr::V4(inputs.overlay.v4), 32).map_err(RouteError::Address)?,
-    );
-    addresses.get_mut(AddressFamily::V6).push(
-        IpPrefix::new(IpAddr::V6(inputs.overlay.v6), 128).map_err(RouteError::Address)?,
-    );
+    addresses
+        .get_mut(AddressFamily::V4)
+        .push(IpPrefix::new(IpAddr::V4(inputs.overlay.v4), 32).map_err(RouteError::Address)?);
+    addresses
+        .get_mut(AddressFamily::V6)
+        .push(IpPrefix::new(IpAddr::V6(inputs.overlay.v6), 128).map_err(RouteError::Address)?);
 
     for c in installed {
         // An on-link physical prefix is the host's, not ours: it participates in

@@ -450,14 +450,29 @@ fn dn_5_refuses_to_point_the_host_until_both_families_are_answering() {
 #[test]
 fn dn_19_never_unbinds_before_restoring() {
     let t = TeardownStep::SEQUENCE;
-    let restore = t.iter().position(|s| *s == TeardownStep::RestoreHostResolver).unwrap();
-    let unbind = t.iter().position(|s| *s == TeardownStep::UnbindStub).unwrap();
+    let restore = t
+        .iter()
+        .position(|s| *s == TeardownStep::RestoreHostResolver)
+        .unwrap();
+    let unbind = t
+        .iter()
+        .position(|s| *s == TeardownStep::UnbindStub)
+        .unwrap();
     assert!(restore < unbind, "never unbind-then-restore");
     // And the restore point is persisted BEFORE the mutation.
     let a = ApplyStep::SEQUENCE;
-    let persist = a.iter().position(|s| *s == ApplyStep::PersistRestorePoint).unwrap();
-    let apply = a.iter().position(|s| *s == ApplyStep::ApplyScopedDns).unwrap();
-    assert!(persist < apply, "DN-18: written and flushed BEFORE the mutation");
+    let persist = a
+        .iter()
+        .position(|s| *s == ApplyStep::PersistRestorePoint)
+        .unwrap();
+    let apply = a
+        .iter()
+        .position(|s| *s == ApplyStep::ApplyScopedDns)
+        .unwrap();
+    assert!(
+        persist < apply,
+        "DN-18: written and flushed BEFORE the mutation"
+    );
 }
 
 #[test]

@@ -55,7 +55,9 @@ pub struct Observations {
 pub fn score(relay: &Relay, obs: Observations) -> i32 {
     let rtt = -i32::try_from(obs.ewma_rtt_ms).unwrap_or(i32::MAX).max(-250);
     let loss = -(i32::try_from(obs.loss_pct.saturating_mul(8)).unwrap_or(i32::MAX)).max(-120);
-    let jitter = -i32::try_from(obs.ewma_jitter_ms / 2).unwrap_or(i32::MAX).max(-40);
+    let jitter = -i32::try_from(obs.ewma_jitter_ms / 2)
+        .unwrap_or(i32::MAX)
+        .max(-40);
 
     // Server rank × freshness: 1.0 at age <= 1 h, decaying linearly to 0.0 at
     // 24 h. Capped at +100, which is what makes a 100 ms measured advantage win
@@ -86,8 +88,8 @@ pub fn score(relay: &Relay, obs: Observations) -> i32 {
     // +120 only when a self-hosted relay can actually signal drain and honour
     // caps: ADR-0005 §10's "SHOULD rank below hosted" is satisfied by the ABSENT
     // bonus, not by a penalty.
-    let self_hosted = i32::from(relay.self_hosted && relay.supports_drain && relay.supports_caps)
-        * 120;
+    let self_hosted =
+        i32::from(relay.self_hosted && relay.supports_drain && relay.supports_caps) * 120;
 
     let draining = i32::from(relay.admin_state == AdminState::Draining) * -300;
 

@@ -9,9 +9,7 @@ use std::sync::Arc;
 use twinvpn_env::MonotonicInstant;
 use twinvpn_tunnel::crypto::{CryptoUnavailable, Prologue, TransportKeys};
 use twinvpn_tunnel::engine::{Tunnel, TunnelError, TunnelState};
-use twinvpn_tunnel::negotiate::{
-    self, Advertisement, MonotonicFloor, OwnerLocalAction, Selection,
-};
+use twinvpn_tunnel::negotiate::{self, Advertisement, MonotonicFloor, OwnerLocalAction, Selection};
 use twinvpn_tunnel::rekey::{self, Action, KeepalivePolicy, KeyState};
 use twinvpn_tunnel::replay::{ReplayWindow, SendCounter, WINDOW_BITS};
 use twinvpn_tunnel::transport::{self, TransportMode};
@@ -25,7 +23,12 @@ struct StubKeys {
 }
 
 impl TransportKeys for StubKeys {
-    fn seal(&self, counter: u64, plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), CryptoUnavailable> {
+    fn seal(
+        &self,
+        counter: u64,
+        plaintext: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<(), CryptoUnavailable> {
         if self.fail {
             return Err(CryptoUnavailable);
         }
@@ -33,7 +36,12 @@ impl TransportKeys for StubKeys {
         out.extend_from_slice(plaintext);
         Ok(())
     }
-    fn open(&self, _counter: u64, ciphertext: &[u8], out: &mut Vec<u8>) -> Result<(), CryptoUnavailable> {
+    fn open(
+        &self,
+        _counter: u64,
+        ciphertext: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<(), CryptoUnavailable> {
         if self.fail {
             return Err(CryptoUnavailable);
         }
@@ -54,7 +62,11 @@ fn endpoint(last: u8) -> Endpoint {
 
 fn established(zeroized: &Arc<AtomicUsize>) -> Tunnel {
     let now = MonotonicInstant::ORIGIN;
-    let mut t = Tunnel::absent(TunnelId::from_array([1; 16]), SessionId::from_array([2; 16]), now);
+    let mut t = Tunnel::absent(
+        TunnelId::from_array([1; 16]),
+        SessionId::from_array([2; 16]),
+        now,
+    );
     t.handshake_completed(
         Box::new(StubKeys {
             zeroized: Arc::clone(zeroized),
@@ -101,7 +113,11 @@ fn switching_transport_changes_nothing_l_data_cares_about() {
     t.open(5, b"ciphertext", &mut plain).unwrap();
 
     let before = t.security_snapshot();
-    for mode in [TransportMode::Relay, TransportMode::Quic, TransportMode::Udp] {
+    for mode in [
+        TransportMode::Relay,
+        TransportMode::Quic,
+        TransportMode::Udp,
+    ] {
         let after = t.switch_transport(mode);
         assert!(
             after.unchanged_from(&before),
@@ -213,7 +229,10 @@ fn a_rekey_is_in_place_and_never_creates_a_new_tunnel() {
     let now = MonotonicInstant::ORIGIN.saturating_add(rekey::REKEY_AFTER_TIME);
     t.begin_rekey(now);
     assert_eq!(t.state(), TunnelState::Rekeying);
-    assert!(t.state().carries_traffic(), "the overlap keeps traffic flowing");
+    assert!(
+        t.state().carries_traffic(),
+        "the overlap keeps traffic flowing"
+    );
     t.complete_rekey(
         Box::new(StubKeys {
             zeroized: Arc::clone(&z),
@@ -231,7 +250,9 @@ fn a_long_suspend_forces_a_full_handshake_on_the_elapsed_clock() {
     // reliability §11.3 and T35: the ElapsedClock delta decides, not the
     // monotonic one, which does not advance across suspend.
     assert!(!KeyState::force_full_handshake(Duration::from_secs(60)));
-    assert!(KeyState::force_full_handshake(Duration::from_secs(8 * 3600)));
+    assert!(KeyState::force_full_handshake(Duration::from_secs(
+        8 * 3600
+    )));
 }
 
 #[test]
@@ -241,7 +262,11 @@ fn the_persistent_keepalive_runs_only_behind_nat_or_on_a_relay() {
         relayed: false,
     };
     assert!(!direct.persistent_runs());
-    assert_eq!(direct.interval(false), None, "a clean direct path pays nothing");
+    assert_eq!(
+        direct.interval(false),
+        None,
+        "a clean direct path pays nothing"
+    );
     assert_eq!(
         direct.interval(true),
         Some(rekey::PASSIVE_KEEPALIVE),
@@ -324,10 +349,7 @@ fn an_exhausted_counter_refuses_to_seal_rather_than_reusing_a_nonce() {
         MonotonicInstant::ORIGIN,
     );
     broken.confirm_negotiation(&[1u8; 32], &[1u8; 32]).unwrap();
-    assert_eq!(
-        broken.seal(b"x", &mut out),
-        Err(TunnelError::Crypto)
-    );
+    assert_eq!(broken.seal(b"x", &mut out), Err(TunnelError::Crypto));
 }
 
 #[test]
@@ -347,7 +369,11 @@ fn a_replayed_counter_surfaces_as_a_typed_error_from_the_engine() {
 fn traffic_does_not_flow_until_the_transcript_matches() {
     let z = Arc::new(AtomicUsize::new(0));
     let now = MonotonicInstant::ORIGIN;
-    let mut t = Tunnel::absent(TunnelId::from_array([1; 16]), SessionId::from_array([2; 16]), now);
+    let mut t = Tunnel::absent(
+        TunnelId::from_array([1; 16]),
+        SessionId::from_array([2; 16]),
+        now,
+    );
     t.handshake_completed(
         Box::new(StubKeys {
             zeroized: Arc::clone(&z),
@@ -367,7 +393,11 @@ fn traffic_does_not_flow_until_the_transcript_matches() {
 fn a_transcript_mismatch_tears_down_the_tunnel_and_zeroes_the_keys() {
     let z = Arc::new(AtomicUsize::new(0));
     let now = MonotonicInstant::ORIGIN;
-    let mut t = Tunnel::absent(TunnelId::from_array([1; 16]), SessionId::from_array([2; 16]), now);
+    let mut t = Tunnel::absent(
+        TunnelId::from_array([1; 16]),
+        SessionId::from_array([2; 16]),
+        now,
+    );
     t.handshake_completed(
         Box::new(StubKeys {
             zeroized: Arc::clone(&z),
@@ -382,7 +412,11 @@ fn a_transcript_mismatch_tears_down_the_tunnel_and_zeroes_the_keys() {
         Err(TunnelError::TranscriptMismatch)
     );
     assert_eq!(t.state(), TunnelState::Closed);
-    assert_eq!(z.load(Ordering::SeqCst), 1, "keys are zeroed, not left around");
+    assert_eq!(
+        z.load(Ordering::SeqCst),
+        1,
+        "keys are zeroed, not left around"
+    );
     // The Session survives a Tunnel teardown.
     assert_eq!(t.session(), SessionId::from_array([2; 16]));
 }

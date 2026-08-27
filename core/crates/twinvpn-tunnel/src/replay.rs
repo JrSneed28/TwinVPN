@@ -100,9 +100,7 @@ impl ReplayWindow {
         }
         let idx = ((behind - 1) / 64) as usize;
         let off = (behind - 1) % 64;
-        self.bitmap
-            .get(idx)
-            .is_some_and(|w| (w >> off) & 1 == 1)
+        self.bitmap.get(idx).is_some_and(|w| (w >> off) & 1 == 1)
     }
 
     fn set_bit(&mut self, behind: u64) {
@@ -132,7 +130,11 @@ impl ReplayWindow {
         let len = self.bitmap.len();
         if words > 0 {
             for i in (0..len).rev() {
-                self.bitmap[i] = if i >= words { self.bitmap[i - words] } else { 0 };
+                self.bitmap[i] = if i >= words {
+                    self.bitmap[i - words]
+                } else {
+                    0
+                };
             }
         }
         if bits > 0 {

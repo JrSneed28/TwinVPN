@@ -106,17 +106,13 @@ impl RouteError {
             RouteError::ScopeViolation { prefix, advertiser } => {
                 b = b.evidence("prefix", EvidenceValue::Prefix(*prefix));
                 if let Some(d) = advertiser {
-                    b = b.evidence(
-                        "advertiser_device_id",
-                        EvidenceValue::Text(d.fingerprint()),
-                    );
+                    b = b.evidence("advertiser_device_id", EvidenceValue::Text(d.fingerprint()));
                 }
             }
             RouteError::DefaultSingleFamily { granted } => {
                 b = b.evidence("family", EvidenceValue::Family(*granted));
             }
-            RouteError::ConflictUnresolved { prefix }
-            | RouteError::AddressCollision { prefix } => {
+            RouteError::ConflictUnresolved { prefix } | RouteError::AddressCollision { prefix } => {
                 b = b.evidence("prefix", EvidenceValue::Prefix(*prefix));
             }
             _ => {}

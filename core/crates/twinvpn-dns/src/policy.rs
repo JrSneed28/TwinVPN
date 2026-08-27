@@ -207,7 +207,8 @@ pub fn validate(msg: &v1::DnsPolicy) -> Result<Dnspolicy, PolicyError> {
 
     let mut servers = PerFamily::new(Vec::new(), Vec::new());
     for a in &msg.servers_v4 {
-        let addr = V4Addr::from_slice(&a.octets).map_err(|_| PolicyError::Malformed("servers_v4"))?;
+        let addr =
+            V4Addr::from_slice(&a.octets).map_err(|_| PolicyError::Malformed("servers_v4"))?;
         servers.get_mut(AddressFamily::V4).push(IpAddr::V4(addr));
     }
     for a in &msg.servers_v6 {
@@ -229,10 +230,7 @@ pub fn validate(msg: &v1::DnsPolicy) -> Result<Dnspolicy, PolicyError> {
     // DN-8: ties are a policy defect, not a runtime coin-flip.
     for (i, a) in split_rules.iter().enumerate() {
         for b in &split_rules[i + 1..] {
-            if a.labels == b.labels
-                && a.exact == b.exact
-                && a.disposition != b.disposition
-            {
+            if a.labels == b.labels && a.exact == b.exact && a.disposition != b.disposition {
                 return Err(PolicyError::RuleConflict);
             }
         }

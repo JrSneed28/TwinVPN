@@ -63,7 +63,10 @@ impl Standing {
     /// answers `true` without validation.
     #[must_use]
     pub const fn may_carry_traffic(self) -> bool {
-        matches!(self, Standing::Validated | Standing::Carrying | Standing::Warm)
+        matches!(
+            self,
+            Standing::Validated | Standing::Carrying | Standing::Warm
+        )
     }
 
     /// Whether the candidate is re-eligible at `now`.

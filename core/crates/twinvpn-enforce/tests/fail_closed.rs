@@ -20,9 +20,7 @@ use twinvpn_enforce::reconciler::{
 };
 use twinvpn_enforce::scope::{LocalNetworkAccess, Tier1, Tier2};
 use twinvpn_env::{ElapsedInstant, MonotonicInstant};
-use twinvpn_platform::{
-    ContractGeneration, EnforcementCustody, InterfaceIndex, Ruleset,
-};
+use twinvpn_platform::{ContractGeneration, EnforcementCustody, InterfaceIndex, Ruleset};
 use twinvpn_route::RoutingMode;
 use twinvpn_types::{
     AddressFamily, Endpoint, IpAddr, IpPrefix, PerFamily, Port, TrafficDisposition, V4Addr, V6Addr,
@@ -63,8 +61,7 @@ fn full_tunnel_tier_1_is_complement_form_and_never_prefix_enumerated() {
     assert!(!full.is_prefix_enumerated());
     assert!(full.contains(v4([1, 1, 1, 1])), "everything is in scope");
 
-    let overlay =
-        IpPrefix::new(v4([100, 100, 0, 0]), 22).unwrap();
+    let overlay = IpPrefix::new(v4([100, 100, 0, 0]), 22).unwrap();
     let twinnet_only = Tier1::for_mode(RoutingMode::TwinnetOnly, vec![overlay], Vec::new());
     assert!(twinnet_only.contains(v4([100, 100, 0, 7])));
     // KS-3a: traffic outside the Tier-1 set is NOT governed by the §11.2 table
@@ -153,7 +150,11 @@ fn underlay_control_traffic_is_permitted_for_both_families() {
     }
     // Not an egress path for anything else.
     assert!(!exempt::is_underlay_control(AddressFamily::V4, 443, None));
-    assert!(!exempt::is_underlay_control(AddressFamily::V6, 0, Some(128)));
+    assert!(!exempt::is_underlay_control(
+        AddressFamily::V6,
+        0,
+        Some(128)
+    ));
 }
 
 #[test]
@@ -371,7 +372,10 @@ fn the_interface_comes_up_only_after_the_contract_is_applied() {
         .position(|x| *x == ArmStep::SwapToProtected)
         .unwrap();
     assert!(blocked < create, "the deny predates the interface");
-    assert!(create < apply && apply < up, "created DOWN, then configured");
+    assert!(
+        create < apply && apply < up,
+        "created DOWN, then configured"
+    );
     assert!(up < swap, "KS-18 is checked after the link is up");
 }
 

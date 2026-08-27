@@ -19,7 +19,9 @@ use twinvpn_session::codes::{class_admissible, SUBSTITUTIONS};
 use twinvpn_session::event::{LinkKind, PolicyViolationKind, QosMetric};
 use twinvpn_session::machine::Outcome;
 use twinvpn_session::state::EnforcementMode;
-use twinvpn_session::{Context, Event, Guards, Row, SessionMachine, SessionState, TimerId, Trigger};
+use twinvpn_session::{
+    Context, Event, Guards, Row, SessionMachine, SessionState, TimerId, Trigger,
+};
 use twinvpn_types::PathClass;
 
 const RELIABILITY_MD: &str = include_str!("../../../../docs/reliability.md");

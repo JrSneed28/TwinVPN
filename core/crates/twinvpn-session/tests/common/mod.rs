@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use twinvpn_env::virtual_time::VirtualTime;
-use twinvpn_env::{Env, EnvError, EnvParts, Entropy, Rng, RngSource, ConsumerId, WallClockReading};
+use twinvpn_env::{ConsumerId, Entropy, Env, EnvError, EnvParts, Rng, RngSource, WallClockReading};
 use twinvpn_session::{EnforcementMode, Guards};
 use twinvpn_types::SessionId;
 
@@ -18,7 +18,10 @@ struct CounterRng(u64);
 impl Rng for CounterRng {
     fn fill_bytes(&mut self, dst: &mut [u8]) {
         for b in dst.iter_mut() {
-            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             *b = (self.0 >> 33) as u8;
         }
     }

@@ -24,31 +24,97 @@ use crate::state::SessionState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[allow(missing_docs)]
 pub enum Row {
-    T01, T02, T03, T04, T05, T06, T07, T08, T09, T10,
-    T11, T12, T13, T14, T15, T16, T17, T18, T19, T20,
-    T21, T22, T23, T24, T25, T26, T27, T28, T29, T30,
-    T31, T32, T33, T34, T35, T36, T37, T38,
+    T01,
+    T02,
+    T03,
+    T04,
+    T05,
+    T06,
+    T07,
+    T08,
+    T09,
+    T10,
+    T11,
+    T12,
+    T13,
+    T14,
+    T15,
+    T16,
+    T17,
+    T18,
+    T19,
+    T20,
+    T21,
+    T22,
+    T23,
+    T24,
+    T25,
+    T26,
+    T27,
+    T28,
+    T29,
+    T30,
+    T31,
+    T32,
+    T33,
+    T34,
+    T35,
+    T36,
+    T37,
+    T38,
 }
 
 impl Row {
     /// Every row of §4.5, in table order — which is also guard-evaluation order.
     pub const ALL: [Row; 38] = [
-        Row::T01, Row::T02, Row::T03, Row::T04, Row::T05, Row::T06, Row::T07,
-        Row::T08, Row::T09, Row::T10, Row::T11, Row::T12, Row::T13, Row::T14,
-        Row::T15, Row::T16, Row::T17, Row::T18, Row::T19, Row::T20, Row::T21,
-        Row::T22, Row::T23, Row::T24, Row::T25, Row::T26, Row::T27, Row::T28,
-        Row::T29, Row::T30, Row::T31, Row::T32, Row::T33, Row::T34, Row::T35,
-        Row::T36, Row::T37, Row::T38,
+        Row::T01,
+        Row::T02,
+        Row::T03,
+        Row::T04,
+        Row::T05,
+        Row::T06,
+        Row::T07,
+        Row::T08,
+        Row::T09,
+        Row::T10,
+        Row::T11,
+        Row::T12,
+        Row::T13,
+        Row::T14,
+        Row::T15,
+        Row::T16,
+        Row::T17,
+        Row::T18,
+        Row::T19,
+        Row::T20,
+        Row::T21,
+        Row::T22,
+        Row::T23,
+        Row::T24,
+        Row::T25,
+        Row::T26,
+        Row::T27,
+        Row::T28,
+        Row::T29,
+        Row::T30,
+        Row::T31,
+        Row::T32,
+        Row::T33,
+        Row::T34,
+        Row::T35,
+        Row::T36,
+        Row::T37,
+        Row::T38,
     ];
 
     /// `"T01"` … `"T38"`.
     #[must_use]
     pub fn label(self) -> &'static str {
         const LABELS: [&str; 38] = [
-            "T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09", "T10",
-            "T11", "T12", "T13", "T14", "T15", "T16", "T17", "T18", "T19", "T20",
-            "T21", "T22", "T23", "T24", "T25", "T26", "T27", "T28", "T29", "T30",
-            "T31", "T32", "T33", "T34", "T35", "T36", "T37", "T38",
+            "T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09", "T10", "T11", "T12",
+            "T13", "T14", "T15", "T16", "T17", "T18", "T19", "T20", "T21", "T22", "T23", "T24",
+            "T25", "T26", "T27", "T28", "T29", "T30", "T31", "T32", "T33", "T34", "T35", "T36",
+            "T37", "T38",
         ];
         LABELS[self as usize]
     }
@@ -150,10 +216,7 @@ impl TransitionRecord {
                             .to_owned(),
                     ),
                 )
-                .transition(
-                    self.from.connection_state(),
-                    self.to.connection_state(),
-                )
+                .transition(self.from.connection_state(), self.to.connection_state())
                 .build(),
         )
     }

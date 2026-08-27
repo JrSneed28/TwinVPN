@@ -15,7 +15,9 @@ use common::{healthy, session_id, test_env};
 use twinvpn_session::event::{LinkKind, PolicyViolationKind, QosMetric};
 use twinvpn_session::machine::Outcome;
 use twinvpn_session::state::EnforcementMode;
-use twinvpn_session::{Context, Event, Guards, Row, SessionMachine, SessionState, TimerId, Trigger};
+use twinvpn_session::{
+    Context, Event, Guards, Row, SessionMachine, SessionState, TimerId, Trigger,
+};
 use twinvpn_types::PathClass;
 
 /// Drives one trigger and asserts which row fired.
@@ -46,10 +48,7 @@ fn expect(
             r.to
         }
         Outcome::Ignored { state, trigger } => {
-            panic!(
-                "expected {} but {state:?} ignored {trigger:?}",
-                row.label()
-            )
+            panic!("expected {} but {state:?} ignored {trigger:?}", row.label())
         }
     }
 }
@@ -118,8 +117,14 @@ fn every_row_of_section_4_5_is_reachable_and_well_formed() {
 
     // --- T09, T10, T11, T12: connecting outcomes -------------------------
     for (trigger, row) in [
-        (Trigger::from(Event::HandshakeOk(PathClass::WanDirect)), Row::T09),
-        (Trigger::from(Event::HandshakeOk(PathClass::Relayed)), Row::T10),
+        (
+            Trigger::from(Event::HandshakeOk(PathClass::WanDirect)),
+            Row::T09,
+        ),
+        (
+            Trigger::from(Event::HandshakeOk(PathClass::Relayed)),
+            Row::T10,
+        ),
         (Trigger::from(Event::PeerRevoked), Row::T11),
         (Trigger::from(TimerId::Connect), Row::T12),
     ] {
@@ -269,12 +274,7 @@ fn every_row_of_section_4_5_is_reachable_and_well_formed() {
     {
         let mut m = reconnecting();
         let g = healthy();
-        let s = expect(
-            &mut m,
-            Event::HandshakeOk(PathClass::Relayed),
-            g,
-            Row::T25,
-        );
+        let s = expect(&mut m, Event::HandshakeOk(PathClass::Relayed), g, Row::T25);
         assert_eq!(s, SessionState::Steady(PathClass::Relayed));
         record(m.rows_covered());
     }

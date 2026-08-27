@@ -185,9 +185,14 @@ pub fn class_admissible(code: ReasonCode, state: crate::state::SessionState) -> 
     use twinvpn_types::ErrorClass as C;
     match state {
         S::Blocked => matches!(code.class(), C::Policy | C::Fatal | C::Persistent),
-        S::Failed => true,
-        S::Reconnecting { .. } => matches!(code.class(), C::Transient | C::Persistent),
-        S::Degraded { .. } => matches!(code.class(), C::Transient | C::Persistent),
+        // RECONNECTING and DEGRADED admit the same two classes, for different
+        // reasons: §10.2 gives RECONNECTING `TRANSIENT`/`PERSISTENT` outright,
+        // and DEGRADED reaches `PERSISTENT` only through widening 3 above.
+        S::Reconnecting { .. } | S::Degraded { .. } => {
+            matches!(code.class(), C::Transient | C::Persistent)
+        }
+        // FAILED admits every class after widening 2, and a state that carries
+        // no code at all constrains nothing — so both fall through here.
         _ => true,
     }
 }

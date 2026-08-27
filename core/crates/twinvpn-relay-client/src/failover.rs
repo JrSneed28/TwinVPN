@@ -93,9 +93,8 @@ pub fn attribute(o: Observation) -> Attribution {
     if o.capacity_rejected {
         return Attribution::Capacity;
     }
-    let leg_dead = o.missed_leg_pings >= N_LEG_DEAD_MISSED
-        || o.leg_hard_signal
-        || o.drain_deadline_reached;
+    let leg_dead =
+        o.missed_leg_pings >= N_LEG_DEAD_MISSED || o.leg_hard_signal || o.drain_deadline_reached;
     if leg_dead {
         return Attribution::RelayFailure;
     }
@@ -302,8 +301,7 @@ impl FailoverTiming {
     /// How long the cutover took, once it has.
     #[must_use]
     pub fn onset_to_traffic(&self) -> Option<Duration> {
-        self.traffic_resumed
-            .map(|t| t.duration_since(self.onset))
+        self.traffic_resumed.map(|t| t.duration_since(self.onset))
     }
 
     /// Whether the 300 ms design target was met.

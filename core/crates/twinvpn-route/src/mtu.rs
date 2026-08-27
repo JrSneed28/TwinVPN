@@ -117,7 +117,11 @@ impl Dplpmtud {
     pub const fn new(ceiling: u32) -> Self {
         Self {
             confirmed: MTU_FLOOR,
-            ceiling: if ceiling < MTU_FLOOR { MTU_FLOOR } else { ceiling },
+            ceiling: if ceiling < MTU_FLOOR {
+                MTU_FLOOR
+            } else {
+                ceiling
+            },
             probing: None,
             probes_sent: 0,
             probes_lost: 0,

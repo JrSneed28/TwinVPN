@@ -84,10 +84,7 @@ impl NatKeepalive {
     /// Resumes at a cadence learned for this network fingerprint.
     #[must_use]
     pub fn resume_at(seconds: u64) -> Self {
-        let rung = NAT_LADDER
-            .iter()
-            .position(|&s| s == seconds)
-            .unwrap_or(0);
+        let rung = NAT_LADDER.iter().position(|&s| s == seconds).unwrap_or(0);
         Self {
             rung,
             last_known_good: rung,

@@ -119,7 +119,12 @@ fn gathering_starts_both_families_and_the_relay_at_the_same_instant() {
 #[test]
 fn a_single_family_candidate_set_is_flagged_not_accepted_quietly() {
     let now = MonotonicInstant::ORIGIN;
-    let only_v4 = [cand(1, Kind::HostV4Private, ep_v4([10, 0, 0, 1], 51820), now)];
+    let only_v4 = [cand(
+        1,
+        Kind::HostV4Private,
+        ep_v4([10, 0, 0, 1], 51820),
+        now,
+    )];
     assert_eq!(
         candidate::single_family(&only_v4),
         Some(AddressFamily::V4),
@@ -328,12 +333,22 @@ fn mutant_serialized_racing_shows_up_as_non_overlapping_gather_windows() {
 
     let mut parallel = Ledger::new();
     parallel.record(cand(1, Kind::HostV6Global, ep_v6(1, 51820), t0));
-    parallel.record(cand(2, Kind::HostV4Private, ep_v4([10, 0, 0, 1], 51820), t0));
+    parallel.record(cand(
+        2,
+        Kind::HostV4Private,
+        ep_v4([10, 0, 0, 1], 51820),
+        t0,
+    ));
     assert!(parallel.gathering_was_parallel());
 
     let mut serial = Ledger::new();
     serial.record(cand(1, Kind::HostV6Global, ep_v6(1, 51820), t0));
-    serial.record(cand(2, Kind::HostV4Private, ep_v4([10, 0, 0, 1], 51820), later));
+    serial.record(cand(
+        2,
+        Kind::HostV4Private,
+        ep_v4([10, 0, 0, 1], 51820),
+        later,
+    ));
     assert!(!serial.gathering_was_parallel());
 }
 
@@ -342,7 +357,12 @@ fn the_report_is_producible_with_no_network_and_names_both_families() {
     let t0 = MonotonicInstant::ORIGIN;
     let mut l = Ledger::new();
     l.record(cand(1, Kind::HostV6Global, ep_v6(1, 51820), t0));
-    l.record(cand(2, Kind::HostV4Private, ep_v4([10, 0, 0, 1], 51820), t0));
+    l.record(cand(
+        2,
+        Kind::HostV4Private,
+        ep_v4([10, 0, 0, 1], 51820),
+        t0,
+    ));
     l.record(cand(3, Kind::Relay, ep_v4([203, 0, 113, 5], 443), t0));
     l.set_standing(CandidateId::from_array([1; 8]), Standing::Carrying);
     l.set_standing(
@@ -413,10 +433,7 @@ fn make_before_break_refuses_to_commit_early_or_release_early() {
     };
     assert!(!unvalidated.may_commit());
     assert!(!unvalidated.may_release_old());
-    assert_eq!(
-        unvalidated.disposition(),
-        TrafficDisposition::TunneledDual
-    );
+    assert_eq!(unvalidated.disposition(), TrafficDisposition::TunneledDual);
 
     let committed = Migration {
         new_validated: true,
@@ -571,9 +588,18 @@ fn probing_becomes_event_driven_but_never_stops_permanently() {
     assert!(score::timer_driven_probing(19));
     assert!(!score::timer_driven_probing(20));
     // The upgrade prober's decaying ladder, and its background floor.
-    assert_eq!(race::upgrade_probe_interval(0, false), Duration::from_secs(1));
-    assert_eq!(race::upgrade_probe_interval(2, false), Duration::from_secs(4));
-    assert_eq!(race::upgrade_probe_interval(9, false), Duration::from_secs(60));
+    assert_eq!(
+        race::upgrade_probe_interval(0, false),
+        Duration::from_secs(1)
+    );
+    assert_eq!(
+        race::upgrade_probe_interval(2, false),
+        Duration::from_secs(4)
+    );
+    assert_eq!(
+        race::upgrade_probe_interval(9, false),
+        Duration::from_secs(60)
+    );
     assert_eq!(
         race::upgrade_probe_interval(0, true),
         Duration::from_secs(300)

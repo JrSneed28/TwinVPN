@@ -135,8 +135,7 @@ pub const T_DEGRADED_MAX: TimerConstant = mono("T_DEGRADED_MAX", Duration::from_
 /// 30 s — how long `RELAYED` must persist before a standby is opened.
 pub const T_STANDBY_WARM: TimerConstant = mono("T_STANDBY_WARM", Duration::from_secs(30));
 /// 300 ms — design target for relay-to-relay failover with a warm standby.
-pub const T_FAILOVER_TARGET: TimerConstant =
-    mono("T_FAILOVER_TARGET", Duration::from_millis(300));
+pub const T_FAILOVER_TARGET: TimerConstant = mono("T_FAILOVER_TARGET", Duration::from_millis(300));
 
 // -- §5.3 constants registered on behalf of other ADRs -----------------------
 
@@ -160,12 +159,12 @@ pub const N_UPGRADE_GIVEUP: u32 = 20;
 pub const T_REGION_SPREAD: TimerConstant = mono("T_REGION_SPREAD", Duration::from_secs(20));
 
 /// 6 h — routine trust-state refresh floor. **Bounds an authority** (R-CLK-1).
-pub const T_TRUST_REFRESH: TimerConstant = authority("T_TRUST_REFRESH", Duration::from_secs(21_600));
+pub const T_TRUST_REFRESH: TimerConstant =
+    authority("T_TRUST_REFRESH", Duration::from_secs(21_600));
 /// 24 h — trust state is stale. Persistent `Diagnostic`, **no state change**.
 pub const T_TRUST_STALE: TimerConstant = authority("T_TRUST_STALE", Duration::from_secs(86_400));
 /// 30 d — granted authority suspends; baseline connectivity continues.
-pub const T_TRUST_HARD: TimerConstant =
-    authority("T_TRUST_HARD", Duration::from_secs(30 * 86_400));
+pub const T_TRUST_HARD: TimerConstant = authority("T_TRUST_HARD", Duration::from_secs(30 * 86_400));
 /// 30 d — identity-key rotation overlap.
 pub const T_IK_OVERLAP: TimerConstant = authority("T_IK_OVERLAP", Duration::from_secs(30 * 86_400));
 /// 14 d — tunnel-key rotation overlap. Rotation never tears down a `Session`.

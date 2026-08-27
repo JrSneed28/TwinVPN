@@ -254,7 +254,11 @@ impl ExemptAccounting {
 /// permitted as **link-local control traffic only**, and never as an egress path
 /// for protected traffic".
 #[must_use]
-pub const fn is_underlay_control(family: AddressFamily, port: u16, icmpv6_type: Option<u8>) -> bool {
+pub const fn is_underlay_control(
+    family: AddressFamily,
+    port: u16,
+    icmpv6_type: Option<u8>,
+) -> bool {
     match family {
         AddressFamily::V4 => matches!(port, 67 | 68),
         AddressFamily::V6 => {
@@ -284,5 +288,4 @@ pub fn is_link_local_unicast(addr: IpAddr) -> bool {
 /// Class 13's rate limits: "≤ 4 probes per interface attach, ≤ 1/s".
 pub const PORTAL_DETECTION_MAX_PROBES: u32 = 4;
 /// Minimum spacing between detection probes.
-pub const PORTAL_DETECTION_MIN_SPACING: core::time::Duration =
-    core::time::Duration::from_secs(1);
+pub const PORTAL_DETECTION_MIN_SPACING: core::time::Duration = core::time::Duration::from_secs(1);

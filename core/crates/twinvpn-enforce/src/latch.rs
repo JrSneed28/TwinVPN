@@ -151,8 +151,7 @@ impl Latch {
     /// document may initiate it."
     pub fn disarm(&mut self, authority: DisarmAuthority) -> bool {
         match authority {
-            DisarmAuthority::LocalInteractive
-            | DisarmAuthority::LocalAdminOnManagementSocket => {
+            DisarmAuthority::LocalInteractive | DisarmAuthority::LocalAdminOnManagementSocket => {
                 self.disarmed_by_owner = true;
                 true
             }

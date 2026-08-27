@@ -107,9 +107,7 @@ pub fn aggregate(sessions: &[Contribution], fail_closed: bool) -> TwinNetState {
         };
     }
 
-    let all_failed = sessions
-        .iter()
-        .all(|c| c.state == SessionState::Failed);
+    let all_failed = sessions.iter().all(|c| c.state == SessionState::Failed);
 
     let worst = worst_contributor_excluding_partial_failed(sessions, all_failed);
     let state = worst.map_or(ConnectionState::Disconnected, |c| {

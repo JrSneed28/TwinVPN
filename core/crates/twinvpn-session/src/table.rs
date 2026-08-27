@@ -120,18 +120,18 @@ fn row_applies(
             .then_some(Target::Discovering),
 
         // T02 | DISCONNECTED | EV_CONNECT_REQUESTED | credentials expired
-        Row::T02 => (state == S::Disconnected
-            && ev == Some(E::ConnectRequested)
-            && g.credentials_expired)
-            .then_some(Target::Failed {
-                reason: codes::AUTH_CRED_EXPIRED,
-            }),
+        Row::T02 => {
+            (state == S::Disconnected && ev == Some(E::ConnectRequested) && g.credentials_expired)
+                .then_some(Target::Failed {
+                    reason: codes::AUTH_CRED_EXPIRED,
+                })
+        }
 
         // T03 | DISCOVERING | EV_CANDIDATES_READY | >=1 usable candidate
-        Row::T03 => (state == S::Discovering
-            && ev == Some(E::CandidatesReady)
-            && g.usable_candidate)
-            .then_some(Target::Negotiating),
+        Row::T03 => {
+            (state == S::Discovering && ev == Some(E::CandidatesReady) && g.usable_candidate)
+                .then_some(Target::Negotiating)
+        }
 
         // T04 | DISCOVERING | EV_CANDIDATE_TIMEOUT | no candidate on either family
         Row::T04 => (state == S::Discovering
@@ -143,8 +143,9 @@ fn row_applies(
             }),
 
         // T05 | NEGOTIATING | EV_NEGOTIATION_OK | —
-        Row::T05 => (state == S::Negotiating && ev == Some(E::NegotiationOk))
-            .then_some(Target::Connecting),
+        Row::T05 => {
+            (state == S::Negotiating && ev == Some(E::NegotiationOk)).then_some(Target::Connecting)
+        }
 
         // T06 | NEGOTIATING | EV_VERSION_INCOMPATIBLE | —
         Row::T06 => (state == S::Negotiating && ev == Some(E::VersionIncompatible)).then_some(
@@ -229,9 +230,7 @@ fn row_applies(
 
         // T15 | MIGRATING | EV_PATH_VALIDATED{to} | new path committed
         Row::T15 => match state {
-            S::Migrating { to, .. }
-                if ev == Some(E::PathValidated(to)) && g.new_path_committed =>
-            {
+            S::Migrating { to, .. } if ev == Some(E::PathValidated(to)) && g.new_path_committed => {
                 Some(Target::Steady(to))
             }
             _ => None,
@@ -394,16 +393,16 @@ fn row_applies(
             )),
 
         // T31 | BLOCKED | backoff tick | retry budget available | *no state change*
-        Row::T31 => (state == S::Blocked
-            && tm == Some(TimerId::Backoff)
-            && g.retry_budget_available)
-            .then_some(Target::NoChange),
+        Row::T31 => {
+            (state == S::Blocked && tm == Some(TimerId::Backoff) && g.retry_budget_available)
+                .then_some(Target::NoChange)
+        }
 
         // T32 | BLOCKED | EV_DISCONNECT_REQUESTED | authenticated user action
-        Row::T32 => (state == S::Blocked
-            && ev == Some(E::DisconnectRequested)
-            && g.authenticated_disarm)
-            .then_some(Target::Disconnected),
+        Row::T32 => {
+            (state == S::Blocked && ev == Some(E::DisconnectRequested) && g.authenticated_disarm)
+                .then_some(Target::Disconnected)
+        }
 
         // T33 | FAILED | EV_CONNECT_REQUESTED ∨ qualifying environment event
         //     | precondition of the terminal code satisfied

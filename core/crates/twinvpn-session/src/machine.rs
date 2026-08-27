@@ -22,9 +22,7 @@
 //! here as the pre-computed `rekey_window_exceeded` guard.
 
 use twinvpn_env::Env;
-use twinvpn_types::{
-    codes, Component, Diagnostic, EvidenceValue, PathId, ReasonCode, SessionId,
-};
+use twinvpn_types::{codes, Component, Diagnostic, EvidenceValue, PathId, ReasonCode, SessionId};
 
 use crate::event::Trigger;
 use crate::guards::Guards;
@@ -230,12 +228,10 @@ impl SessionMachine {
             self.invariant_violations = self.invariant_violations.saturating_add(1);
             if record.reason_code.is_none() && record.to.requires_reason_code() {
                 record.reason_code = Some(codes::INTERNAL_MISSING_REASON);
-                record.diagnostic = Some(
-                    Diagnostic::invariant_violated(
-                        Component::TunnelEngine,
-                        "reliability.md §10.1: reason-bearing state entered without a code",
-                    ),
-                );
+                record.diagnostic = Some(Diagnostic::invariant_violated(
+                    Component::TunnelEngine,
+                    "reliability.md §10.1: reason-bearing state entered without a code",
+                ));
             }
         }
 
@@ -270,10 +266,10 @@ fn default_resume_reason(state: SessionState) -> ReasonCode {
         SessionState::Blocked => codes::POLICY_KILLSWITCH_ENGAGED,
         // PERSISTENT: nothing is carrying traffic and we cannot say more.
         SessionState::Failed => codes::NET_NO_ROUTE,
-        // TRANSIENT: §6.5's "a restarted client resumes into RECONNECTING".
-        SessionState::Reconnecting { .. } => codes::PLATFORM_PROCESS_RESTARTED,
         // TRANSIENT: the only class DEGRADED admits.
         SessionState::Degraded { .. } => codes::NET_QOS_DEGRADED_TIMEOUT,
+        // TRANSIENT: §6.5's "a restarted client resumes into RECONNECTING", and
+        // the same honest answer for any state that carries no code at all.
         _ => codes::PLATFORM_PROCESS_RESTARTED,
     }
 }

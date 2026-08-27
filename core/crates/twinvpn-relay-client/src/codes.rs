@@ -125,10 +125,7 @@ pub const fn none_reachable() -> ReasonCode {
 pub fn draining(relay: RelayId, deadline_ms: u64) -> Diagnostic {
     Diagnostic::builder(reg::RELAY_DRAINING, Component::RelayClient)
         .evidence("relay_id", EvidenceValue::Text(relay.to_hex()))
-        .evidence(
-            "drain_deadline_ms",
-            EvidenceValue::DurationMs(deadline_ms),
-        )
+        .evidence("drain_deadline_ms", EvidenceValue::DurationMs(deadline_ms))
         .build()
 }
 

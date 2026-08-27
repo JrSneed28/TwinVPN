@@ -15,7 +15,7 @@ use twinvpn_relay_client::map::{
     self, AdminState, Carriage, DeviceCapability, Excluded, HealthState, Relay, RelayMap,
 };
 use twinvpn_relay_client::select::{self, Observations, Scored, Selection};
-use twinvpn_relay_client::standby::{self, Conditions, PowerPosture, Posture, Role};
+use twinvpn_relay_client::standby::{self, Conditions, Posture, PowerPosture, Role};
 use twinvpn_types::{
     AddressFamily, DeviceId, Endpoint, IpAddr, PairTag, PathClass, PerFamily, Port, RegionId,
     RelayId, V4Addr, V6Addr,
@@ -27,7 +27,10 @@ struct CounterRng(u64);
 impl Rng for CounterRng {
     fn fill_bytes(&mut self, dst: &mut [u8]) {
         for b in dst.iter_mut() {
-            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             *b = (self.0 >> 33) as u8;
         }
     }
@@ -90,7 +93,13 @@ fn relay(id: u8, domain: &str, region: &str) -> Relay {
                 Port::new(443).unwrap(),
             )],
             vec![Endpoint::new(
-                IpAddr::V6(V6Addr::new([0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, id], None).unwrap()),
+                IpAddr::V6(
+                    V6Addr::new(
+                        [0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, id],
+                        None,
+                    )
+                    .unwrap(),
+                ),
                 Port::new(443).unwrap(),
             )],
         ),
@@ -496,10 +505,7 @@ fn a_silent_half_flow_on_a_live_leg_is_peer_loss_and_never_a_failover() {
     };
     let a = failover::attribute(o);
     assert_eq!(a, Attribution::PeerLoss);
-    assert!(
-        !a.triggers_failover(),
-        "moving a working relay cannot help"
-    );
+    assert!(!a.triggers_failover(), "moving a working relay cannot help");
 }
 
 #[test]
