@@ -3605,20 +3605,26 @@ dependencies = [
 name = "twinvpn-service-common"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "axum",
  "bytes",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "prost 0.13.5",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
  "twinvpn-schema",
+ "twinvpn-service-common",
  "twinvpn-types",
 ]
 
