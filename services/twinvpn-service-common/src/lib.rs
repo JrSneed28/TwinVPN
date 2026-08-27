@@ -21,6 +21,8 @@
 //! | Module | Question |
 //! |---|---|
 //! | [`config`] | what does the environment say, and what happens when it says nothing? |
+//! | [`tls`] | who is on the other end of this connection, provably? |
+//! | [`binding`] | may that peer speak for the subject it claims? |
 //! | [`health`] | is this process alive, and can it serve — **including its dependencies**? |
 //! | [`admin`] | how does an operator and a `HEALTHCHECK` ask? |
 //! | [`metrics`] | what does Prometheus see, and which labels may it ever see? |
@@ -49,6 +51,9 @@
 //!    [`forward::Verbatim::from_opaque`] carries ciphertext with a size bound and
 //!    no structural assumption at all; [`forward::Verbatim::from_received`] keeps
 //!    the protobuf depth guard for B1/B3 (ADR-0003 R7).
+//! 7. **A peer may only speak for itself.** TLS 1.3 mutual RFC 7250 raw-public-key
+//!    authentication with `client_auth_mandatory` ([`tls`]), and a claimed subject
+//!    made answerable to the authenticated key ([`binding`]).
 //!
 //! # What this crate deliberately does not do
 //!
@@ -115,6 +120,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod admin;
+pub mod binding;
 pub mod config;
 pub mod correlation;
 pub mod errors;
@@ -124,8 +130,10 @@ pub mod metrics;
 pub mod obs;
 pub mod redact;
 pub mod shutdown;
+pub mod tls;
 pub mod transport;
 
+pub use binding::{Binding, BindingCardinality, BindingLimits, ChannelPinned, Claim, Refusal};
 pub use config::{ConfigError, ServiceConfig};
 pub use correlation::Correlation;
 pub use errors::ServiceError;
@@ -137,6 +145,7 @@ pub use health::{
 pub use metrics::Metrics;
 pub use redact::{Secret, SecretString, Sensitive};
 pub use shutdown::{InFlight, Shutdown, ShutdownHandle, ShutdownReport};
+pub use tls::{ChannelIdentity, ServerTls, ServerTlsBuilder, TlsError};
 
 /// The channel vocabulary, re-exported so a consumer does not have to name
 /// `twinvpn-schema` to bound an input.

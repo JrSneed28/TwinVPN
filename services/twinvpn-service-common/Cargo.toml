@@ -33,12 +33,41 @@ opentelemetry-otlp    = { workspace = true }
 
 tokio  = { workspace = true }
 axum   = { workspace = true }
+
+# TLS termination, absorbed from `services/rendezvous` and `services/presence`
+# after they shipped it identically twice. ADR-0018 CD-I2 scopes the
+# crypto-dependency rule to the /core crate set; these are separate server
+# artifacts that do not link the core (ADR-0018 §11.2 rows 2.8/2.11), so they
+# terminate their own transport. Finding W-12 and the workspace manifest's own
+# comment both record that ruling.
+rustls           = { workspace = true }
+tokio-rustls     = { workspace = true }
+rustls-pemfile   = { workspace = true }
+rustls-pki-types = { workspace = true }
+
+# `test-support` only, and never shipped. rustls already links `aws-lc-rs` at
+# RUNTIME as its default provider, so this adds no crate to the lockfile and no
+# runtime cryptographic dependency -- it is named only so a test can mint an
+# ephemeral P-256 keypair rather than committing a private key to the
+# repository. NOT a workspace dependency because `services/Cargo.toml` does not
+# declare one; both consumers name the same version in their own manifests
+# today. Asked of the integration lead in README.md section 11.
+aws-lc-rs = { version = "1.18", optional = true }
 tower  = { workspace = true }
 bytes  = { workspace = true }
 prost  = { workspace = true }
 serde_json = { workspace = true }
 
+[features]
+default = []
+# The ephemeral RFC 7250 key material and TLS clients that make an
+# authentication test writable. Enabled by a consumer's dev-dependency on this
+# crate, never by its dependency.
+test-support = ["dep:aws-lc-rs"]
+
 [dev-dependencies]
 # `test-util` is not in tokio's `full`; the shutdown and log-level-expiry tests
 # drive virtual time so they assert a 120 s drain without taking 120 s.
 tokio = { workspace = true, features = ["test-util"] }
+# The crate's own authentication tests need its own test kit.
+twinvpn-service-common = { path = ".", features = ["test-support"] }

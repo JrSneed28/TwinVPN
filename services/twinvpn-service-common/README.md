@@ -575,7 +575,118 @@ RUST_LOG=twinvpn_service_common=debug cargo test -p twinvpn-service-common -- --
 
 ---
 
-## 11. Known limitations
+## 11. Authentication and channel binding
+
+Absorbed from `services/rendezvous` and `services/presence`, which shipped
+`tls.rs` and `binding.rs` **identically in both** — `relay-plane` would have been
+the third copy. The work was correct; this is generalisation, not replacement.
+
+### 11.1 What TLS proves, and what it does not
+
+`tls::ServerTlsBuilder` produces a TLS 1.3 configuration with **mutual RFC 7250
+raw-public-key** authentication (ADR-0001 §7.2's L-CONTROL block). It proves the
+peer holds the private half of the key it presented; that key becomes the
+`ChannelIdentity`.
+
+Five properties, each load-bearing:
+
+| Property | How |
+|---|---|
+| Client auth is **mandatory and not configurable** | `client_auth_mandatory() -> true`, `requires_raw_public_keys() -> true`. A peer with no key fails the handshake and **never reaches a parser** |
+| Raw public keys, **not certificates** | `verify_tls13_signature_with_raw_key` over the handshake transcript. A `device_id` is a hash of the identity key, so identity is self-certifying and there is no authority to chain to — a PKI would be ADR-0001 §6's rejected "certificate/PKI baggage" |
+| **0-RTT structurally prohibited** | `max_early_data_size` stays 0 *and* `assert_no_early_data` runs on every constructed config, so a future edit fails at startup and in a test rather than shipping |
+| **TLS 1.2 not offered, and not implemented** | `verify_tls12_signature` returns `PeerIncompatible::Tls12NotOffered`. Enabling 1.2 later therefore cannot silently acquire a weaker path. A 1.2 downgrade downgrades the *authentication*: the RFC 9266 `tls-exporter` binding ADR-0002 N-2 needs is a 1.3 property |
+| The handshake takes the **same stall deadline a partial frame does** | `tls::accept_with_deadline`. A key that will not load is a startup failure, and there is **no code path in the module to a plaintext or client-auth-optional listener** |
+
+It does **not** decide which keys may connect. No server-side artifact holds a
+trust store, and none may fetch one per connection — that is **I5**. `AcceptAny
+WellFormedKey` is the shipped `ClientKeyPolicy`; the trait exists so a future
+service with a *static* key set has a seam, and its docs carry the I5 prohibition
+on doing I/O inside a handshake.
+
+### 11.2 The three generalisation axes
+
+| Axis | How the four services differ | Answer |
+|---|---|---|
+| **Subject** | `device_id` for rendezvous and presence; a `relay_sub` for a relay | `binding::Subject` is any hashable value. `ChannelPinned<S>` is generic |
+| **Trust store** | none of them hold one, and none may fetch one per connection | `ClientKeyPolicy`, a named seam with the I5 constraint on the trait |
+| **Transport** | TCP now, QUIC later | The `rustls::ServerConfig` is TLS 1.3 only (which `quinn::crypto::rustls::QuicServerConfig` requires) and `with_alpn` supplies the ALPN QUIC makes mandatory. Only `accept_with_deadline` is TCP-shaped |
+
+### 11.3 The binding invariant
+
+> **A subject belongs to at most one channel identity, and a channel identity
+> speaks for at most one subject, for the life of the binding.**
+
+Refusal is `CONTROL.CHANNEL_BINDING_MISMATCH` — FATAL, CRITICAL,
+`trust-boundaries.md` §4's "**a security event, never a parse error**". The
+binding **outlives its connection** (`BindingLimits::ttl`, 10 min) so a reconnect
+race is lost by the attacker, and it **does lapse** so a rotated identity key is
+not locked out for ever. A **held** binding is never evicted for capacity —
+evicting one hands away the very thing it protects.
+
+`BindingCardinality` names the one place the services differ, and **only the
+non-safety half is a cardinality question**: `SubjectHeldByAnotherChannel` is
+refused under every cardinality, because that is the anti-impersonation half.
+`ManySubjectsPerChannel` relaxes only the converse, which a relay carrying several
+flows legitimately needs and a device attaching does not.
+
+A capacity refusal is a **separate variant with a separate code**
+(`CONTROL.ADMISSION_DEFERRED`): the subject is not contested, the server is, and
+answering `CHANNEL_BINDING_MISMATCH` there would tell a caller its subject was
+taken when it was not.
+
+**The refusal names no subject, structurally.** The frozen registry declares *no*
+evidence fields for `CONTROL.CHANNEL_BINDING_MISMATCH`, and `twinvpn-types`'
+builder drops an undeclared key — so no call can attach the contested subject even
+by mistake. A refusal that echoed it would be an oracle for which subjects are
+bound.
+
+### 11.4 `release` takes the subject — read this before migrating
+
+```rust
+fn release(&mut self, channel: &ChannelIdentity, subject: &S, now: Instant);
+```
+
+The signature changed from the version in the two services, and it is a **fix, not
+a refactor** — see §12.1. A connection releases exactly what it claimed, and a
+connection that was *refused* claimed nothing and calls nothing. Track the
+accepted subject on the connection:
+
+```rust
+let mut held: Option<DeviceId> = None;
+// ...
+match bindings.lock().await.claim(&channel, subject, Instant::now()) {
+    Claim::Accepted    => held = Some(subject),
+    Claim::Refused(r)  => answer(r.reason_code()),   // never r's Debug: no subject
+}
+// ...at teardown:
+if let Some(s) = held {
+    bindings.lock().await.release(&channel, &s, Instant::now());
+}
+```
+
+### 11.5 Testing authentication
+
+The `test-support` feature exposes `tls::testkit` — `TestKey::generate()`,
+`client_config`, `tls12_only_client_config`, `anonymous_client_config`,
+`write_pem`, `server_name` — the helper both services also carried twice. Enable
+it from a **dev-dependency**, never a dependency:
+
+```toml
+[dev-dependencies]
+twinvpn-service-common = { workspace = true, features = ["test-support"] }
+```
+
+Keys are minted per run rather than committed: a checked-in private key is a
+private key in the repository.
+
+`rendezvous-connectivity`'s rule is the one to keep: **an authentication test that
+only shows the good case passes with authentication removed.** Every test in
+`tests/tls_auth.rs` and `tests/channel_binding.rs` asserts a refusal.
+
+---
+
+## 12. Known limitations
 
 Stated here rather than discovered later.
 
@@ -610,3 +721,53 @@ Stated here rather than discovered later.
 8. **Capability names, if a service validates one, must be checked against 32 and
    not `limits.json`'s 24** — `ownership.md` §4.3's open contract defect.
    `twinvpn_schema::limits::CAPABILITY_MAX_NAME_BYTES` is the value to use.
+
+### 12.1 A defect the port exposed — `release` dropped a live hold
+
+The version of `binding.rs` shipped in `services/rendezvous` and
+`services/presence` had `release(&channel, now)` decrement the holder count of
+**every** entry that channel held. Both services call it at connection teardown
+unconditionally (`presence/src/server.rs:314`), so:
+
+1. a device opens connection A with key K and binds D — `holders = 1`;
+2. it opens connection B with the **same** K, claims D′, and is refused;
+3. B tears down, and `release` drops A's hold on D **while A is still live**;
+4. the channel can now speak for a second subject, and D is evictable for
+   capacity despite being held.
+
+It is self-scoped — the attacker must own K, so it is not impersonation of another
+device — but it defeats the stated invariant, and for presence it means one key
+publishing presence for two identities, which S-11 forbids. It also falsifies the
+"a held binding is never evicted" promise.
+
+Found by porting `rendezvous`'s own refusal tests against a *long-lived*
+connection; the copy in the services never exercised it because their unit tests
+release from a single synthetic channel. Fixed here by taking the subject, so a
+refused connection cannot express the bug.
+`a_refused_connection_does_not_release_a_hold_it_never_took` is the regression, and
+it was negative-controlled: reverting `release` to the old shape makes it fail.
+
+**The two services carry the defect until they migrate.** Routed to the
+integration lead.
+
+### 12.2 Further limitations of the absorbed modules
+
+9. **No QUIC endpoint has been built.** The `ServerConfig` is TLS 1.3 only and
+    takes ALPN, which is what `quinn` requires, but nothing here has handed one to
+    `quinn::crypto::rustls::QuicServerConfig`. Claimed as compatible, not
+    demonstrated.
+10. **`ClientKeyPolicy` is a seam, not a sandbox.** A policy that did I/O would
+    compile. The trait's docs carry the I5 prohibition; nothing enforces it.
+11. **`BindingCardinality::ManySubjectsPerChannel` has no consumer yet.** It is
+    tested but the relay has not adopted it, so its shape is argued from
+    `relay_sub`/`pair_tag` rather than observed.
+12. **`aws-lc-rs` is named with a version in this crate's manifest**, because
+    `services/Cargo.toml` declares no workspace entry for it and this domain may
+    not add one. Both consumers already name `aws-lc-rs = "1.18"` in their own
+    manifests, so the precedent exists and the versions agree today — but three
+    manifests can drift. **Asked of the integration lead: hoist it into
+    `[workspace.dependencies]` as an optional dev-facing entry.**
+13. **The `tls` module is unconditional**, so a consumer with no device-facing
+    surface (`relay-health`) links rustls it does not use. Gated on a feature it
+    would be one more thing for four services to get right; flagged rather than
+    guessed.
