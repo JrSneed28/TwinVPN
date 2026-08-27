@@ -25,6 +25,11 @@ twinvpn-types         = { workspace = true }
 twinvpn-env           = { workspace = true }
 thiserror             = { workspace = true }
 futures-core          = { workspace = true }
+# Memory hygiene for the secret-bearing types the seam carries - SharedSecret,
+# SecureItem. Not a cryptographic implementation, so CD-I2 does not restrict it
+# to `twinvpn-crypto`; integration-lead ruling, 2026-08-27, with the reasoning
+# recorded at the exemption in core/xtask/src/checks.rs.
+zeroize               = { workspace = true }
 
 [dev-dependencies]
 twinvpn-platform      = { path = ".", features = ["mock"] }

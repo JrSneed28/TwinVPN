@@ -10,6 +10,9 @@
 
 use core::fmt;
 
+use subtle::ConstantTimeEq;
+use zeroize::ZeroizeOnDrop;
+
 use crate::error::TypeError;
 use crate::id::{FieldClassification, IdScope, Identifier, Opacity, Reuse};
 
@@ -82,19 +85,20 @@ impl fmt::Debug for IdempotencyKey {
 ///
 /// # Comparison
 ///
-/// [`ChannelBinding::verify_against`] compares in constant time with respect to
-/// the *position* of the first differing byte. It is written by hand rather than
-/// with `subtle`, because `core/Cargo.toml` classifies `subtle` among the
-/// cryptographic dependencies that CD-I2 restricts to `twinvpn-crypto`. The
-/// residual is stated rather than hidden: without `subtle::ConstantTimeEq` there
-/// is no compiler barrier preventing LLVM from introducing an early exit, and
-/// the mitigation is the loop's data dependence on every byte. A caller with a
-/// stronger requirement should perform the comparison in `twinvpn-crypto`.
+/// [`ChannelBinding::verify_against`] uses `subtle::ConstantTimeEq`, so the
+/// comparison is constant-time with a compiler barrier rather than by
+/// convention: an optimiser cannot introduce an early exit on the first
+/// differing byte.
+///
+/// `subtle` is not a cryptographic *implementation* — it implements no cipher,
+/// hash, KDF, signature scheme or key exchange — so CD-I2 does not restrict it
+/// to `twinvpn-crypto`. See `core/xtask/src/checks.rs`.
 ///
 /// `PartialEq` is deliberately **not** implemented: `==` on this type would be a
 /// variable-time comparison somebody wrote without meaning to. Neither is
 /// `Clone`: a security value that copies itself silently is one more place the
 /// scrub in `Drop` does not reach.
+#[derive(ZeroizeOnDrop)]
 pub struct ChannelBinding([u8; 32]);
 
 impl ChannelBinding {
@@ -121,17 +125,14 @@ impl ChannelBinding {
         Ok(Self(out))
     }
 
-    /// Compares against the locally computed exporter value.
+    /// Compares against the locally computed exporter value, in constant time.
     ///
-    /// Returns `true` only on an exact match. See the type's docs for the
-    /// timing-side-channel residual.
+    /// Returns `true` only on an exact match. ADR-0002 N-2 makes a mismatch a
+    /// **security event**, never a parse error, so the comparison must not leak
+    /// how far it matched.
     #[must_use]
     pub fn verify_against(&self, local: &ChannelBinding) -> bool {
-        let mut diff = 0u8;
-        for i in 0..Self::WIDTH {
-            diff |= self.0[i] ^ local.0[i];
-        }
-        diff == 0
+        self.0.ct_eq(&local.0).into()
     }
 }
 
@@ -150,20 +151,6 @@ impl Identifier for ChannelBinding {
 impl fmt::Debug for ChannelBinding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ChannelBinding(<32 B redacted>)")
-    }
-}
-
-impl Drop for ChannelBinding {
-    /// Best-effort scrub.
-    ///
-    /// **Stated honestly:** this is not a guaranteed erase. A true scrub needs a
-    /// volatile write, which `zeroize` provides and which `#![forbid(unsafe_code)]`
-    /// forbids us to write by hand — and `zeroize` is classified among the
-    /// cryptographic dependencies CD-I2 restricts to `twinvpn-crypto`. The
-    /// compiler is free to elide this store. It is kept because it costs nothing
-    /// and removes the value in every build where it is not elided.
-    fn drop(&mut self) {
-        self.0 = [0u8; 32];
     }
 }
 

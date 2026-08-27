@@ -1461,6 +1461,7 @@ dependencies = [
  "twinvpn-env",
  "twinvpn-platform",
  "twinvpn-types",
+ "zeroize",
 ]
 
 [[package]]
@@ -1585,7 +1586,9 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "serde_json",
+ "subtle",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]
