@@ -2,6 +2,11 @@
 #
 # Owner: relay-plane. The WORKSPACE manifest at services/Cargo.toml is owned by the
 # integration lead and must not be edited from this domain.
+#
+# No `sqlx`: it is declared in services/Cargo.toml's workspace set but no member has
+# ever built it, so it is absent from services/Cargo.lock and cannot be resolved on
+# this host. S-10 is `EVENTUAL`, non-durable and recomputed, so an in-memory
+# aggregate is the correct shape anyway — see README.md §6.
 [package]
 name    = "twinvpn-relay-health"
 version.workspace      = true
@@ -11,6 +16,10 @@ license.workspace      = true
 repository.workspace   = true
 description = "relay health aggregation from self-reports (S-10; advisory, never a gate)"
 publish = false
+
+[lib]
+name = "twinvpn_relay_health"
+path = "src/lib.rs"
 
 [[bin]]
 name = "twinvpn-relay-health"
@@ -22,4 +31,6 @@ twinvpn-types  = { workspace = true }
 thiserror      = { workspace = true }
 tracing        = { workspace = true }
 twinvpn-service-common = { workspace = true }
-tokio = { workspace = true }
+tokio      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }

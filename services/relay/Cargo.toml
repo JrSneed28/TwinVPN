@@ -2,6 +2,23 @@
 #
 # Owner: relay-plane. The WORKSPACE manifest at services/Cargo.toml is owned by the
 # integration lead and must not be edited from this domain.
+#
+# Every dependency below is already declared in services/Cargo.toml's
+# [workspace.dependencies]; this manifest names no version, so no domain can
+# drift one.
+#
+# ===========================================================================
+# THERE IS NO CRYPTOGRAPHIC DEPENDENCY HERE, AND THAT IS DELIBERATE.
+# ===========================================================================
+# ADR-0018 CD-I2 makes `twinvpn-crypto` the only crate permitted a cryptographic
+# dependency. The relay needs three primitives it may not implement itself
+# (ADR-0005 C1, ownership.md §6 "do not invent cryptographic primitives"):
+# COSE_Sign1/Ed25519 verification for the RelayCapabilityToken and the
+# RelayEpochFloor, a truncated BLAKE2s frame MAC under K_leg, and a one-way
+# 16-byte digest for the daily relay_sub re-hash.
+#
+# They are therefore taken as an INJECTED SEAM (`crate::crypto::RelayCrypto`)
+# whose default provider REFUSES EVERYTHING. See src/crypto.rs and README.md §8.
 [package]
 name    = "twinvpn-relay"
 version.workspace      = true
@@ -11,6 +28,10 @@ license.workspace      = true
 repository.workspace   = true
 description = "the ciphertext-only relay data plane: BIND/BOUND, pair_tag forwarding (ADR-0005)"
 publish = false
+
+[lib]
+name = "twinvpn_relay"
+path = "src/lib.rs"
 
 [[bin]]
 name = "twinvpn-relay"
@@ -22,4 +43,7 @@ twinvpn-types  = { workspace = true }
 thiserror      = { workspace = true }
 tracing        = { workspace = true }
 twinvpn-service-common = { workspace = true }
-tokio = { workspace = true }
+tokio      = { workspace = true }
+bytes      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
