@@ -96,6 +96,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod apply;
 pub mod cache;
 pub mod client;
 pub mod commands;
@@ -110,12 +111,14 @@ pub mod octets;
 pub mod ports;
 pub mod retry;
 pub mod revocation;
+pub mod signing;
 pub mod state;
 pub mod transport;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
+pub use apply::Effect;
 pub use cache::{Band, ExpiryEffect, TrustStateBand, TrustStateThresholds, Ttl};
 pub use client::{ClientParts, ControlPlaneClient};
 pub use commands::{DesiredSet, DiscoverPeers, DiscoveryFallback, Mutation, StateDocumentPull};
@@ -135,6 +138,7 @@ pub use retry::Retry;
 pub use revocation::{
     EpochAdmission, MonotoneVersion, RevocationEffect, RotationMarks, TrustEpoch, VersionAdmission,
 };
+pub use signing::AuthMode;
 pub use state::{CachedPeer, DocumentType, PolicyMark, StoredDocumentMark};
 pub use transport::{
     AttachFamilies, ControlConnection, ControlTransport, EarlyData, EventStream, Rung,
