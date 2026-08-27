@@ -1,0 +1,62 @@
+# tests/ — integration, chaos, compatibility and end-to-end tests.
+#
+# Owner: test-engineering (docs/implementation/ownership.md §1).
+#
+# INTEGRATION-LEAD ACTION REQUESTED. This is a fifth cargo workspace. The
+# Makefile's `WORKSPACES := core services shells/linux lab` does not include it,
+# so `make lint` and `make test` do NOT run anything here today. One line closes
+# that:
+#
+#     WORKSPACES := core services shells/linux lab tests
+#
+# Until then these tests run only as `cd tests && cargo test --workspace`, which
+# is how the results in this domain's completion report were produced. A test
+# suite outside the gate is a suite that will rot, so this is the single most
+# important integration action this domain asks for.
+#
+# The alternative considered and rejected: declaring these files as `[[test]]`
+# targets of `lab/twinlab-scenarios` with `path = "../../tests/..."`. That would
+# put them inside the existing gate immediately, but it makes `tests/` a
+# directory of orphan files owned by a crate in another tree, and it gives the
+# system tests the lab's dependency graph rather than the product's. A fifth
+# workspace is the honest shape; it just needs one line of Makefile.
+[workspace]
+resolver = "2"
+members = ["system"]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.90"
+license      = "Apache-2.0"
+repository   = "https://github.com/twinvpn/twinvpn"
+
+[workspace.dependencies]
+# The core crates under test. Named by path because `tests/` is not a member of
+# the core workspace and must not become one: a test workspace that shared the
+# product's manifest could silently add a dependency to a shipped crate.
+twinvpn-types        = { path = "../core/crates/twinvpn-types" }
+twinvpn-env          = { path = "../core/crates/twinvpn-env", features = ["test-support"] }
+twinvpn-schema       = { path = "../core/crates/twinvpn-schema" }
+twinvpn-crypto       = { path = "../core/crates/twinvpn-crypto" }
+twinvpn-platform     = { path = "../core/crates/twinvpn-platform", features = ["mock"] }
+twinvpn-store        = { path = "../core/crates/twinvpn-store" }
+twinvpn-trust        = { path = "../core/crates/twinvpn-trust" }
+twinvpn-session      = { path = "../core/crates/twinvpn-session" }
+twinvpn-path         = { path = "../core/crates/twinvpn-path" }
+twinvpn-relay-client = { path = "../core/crates/twinvpn-relay-client" }
+twinvpn-tunnel       = { path = "../core/crates/twinvpn-tunnel" }
+twinvpn-route        = { path = "../core/crates/twinvpn-route" }
+twinvpn-dns          = { path = "../core/crates/twinvpn-dns" }
+twinvpn-enforce      = { path = "../core/crates/twinvpn-enforce" }
+twinvpn-gateway      = { path = "../core/crates/twinvpn-gateway" }
+twinvpn-cp-client    = { path = "../core/crates/twinvpn-cp-client" }
+twinvpn-core         = { path = "../core/crates/twinvpn-core" }
+
+# TwinLab, for the deterministic Env and the scenario catalogue.
+twinlab              = { path = "../lab/twinlab" }
+
+serde_json = "1.0"
+# The wire runtime the shipped Rust bindings use. Pinned to the same major the
+# core workspace pins, so a fixture that round-trips here round-trips there.
+prost = "0.13"

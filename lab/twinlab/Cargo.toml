@@ -1,6 +1,16 @@
 # twinlab — namespace/veth topology, NAT classes, netem impairment and the seeded scenario runtime
 #
 # Owner: test-engineering.
+#
+# INTEGRATION-LEAD ACTION REQUESTED. `lab/Cargo.toml` is the integration lead's
+# and this domain does not edit it, so the core crates this laboratory drives are
+# named here as explicit path dependencies rather than `workspace = true`. Every
+# one of them should be promoted to `[workspace.dependencies]` in `lab/Cargo.toml`
+# and this block reduced to `workspace = true`; the exact entries are listed in
+# this domain's completion report. Nothing here changes a version pin — the core
+# workspace pins them all — but until the promotion happens `lab/` has two places
+# that name a core crate, which is the condition the workspace-dependency table
+# exists to prevent.
 [package]
 name    = "twinlab"
 version.workspace      = true
@@ -15,3 +25,19 @@ publish = false
 twinvpn-types = { workspace = true }
 thiserror     = { workspace = true }
 tracing       = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+
+# `test-support` is what makes `virtual_time::VirtualTime` exist. ADR-0018 §11.3
+# calls it the third runtime binding and it is never shipped; `lab/` is the
+# `never shipped` path, so this is the one place it belongs.
+twinvpn-env    = { path = "../../core/crates/twinvpn-env", features = ["test-support"] }
+# CD-4's cryptographic half. `twinvpn-env` deliberately holds no crypto
+# dependency (finding W-1); the *binding* supplies the derivation, and TwinLab is
+# the binding. `HkdfSha256` is injected as `Arc<dyn StreamDerivation>`.
+twinvpn-crypto = { path = "../../core/crates/twinvpn-crypto" }
+# CD-5: "the mock adapter is the payoff." The `mock` feature is never shipped.
+twinvpn-platform = { path = "../../core/crates/twinvpn-platform", features = ["mock"] }
+
+[dev-dependencies]
+twinvpn-session = { path = "../../core/crates/twinvpn-session" }

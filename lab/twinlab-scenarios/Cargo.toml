@@ -1,6 +1,10 @@
 # twinlab-scenarios — the NAT-class matrix and the named scenario family of testing-strategy.md §3
 #
 # Owner: test-engineering.
+#
+# INTEGRATION-LEAD ACTION REQUESTED: see the note at the top of
+# `lab/twinlab/Cargo.toml`. The core crates named here as path dependencies
+# should be promoted to `lab/Cargo.toml`'s `[workspace.dependencies]`.
 [package]
 name    = "twinlab-scenarios"
 version.workspace      = true
@@ -15,6 +19,7 @@ publish = false
 twinvpn-types = { workspace = true }
 thiserror     = { workspace = true }
 tracing       = { workspace = true }
+tracing-subscriber = { workspace = true }
 twinlab = { workspace = true }
 clap = { workspace = true }
-tokio = { workspace = true }
+serde_json = { workspace = true }
