@@ -36,6 +36,15 @@
 //!    resolution is a pure function of `(code, evidence, locale, platform_ctx)`
 //!    and lives in `twinvpn-diag`.
 //!
+//! # Dependencies
+//!
+//! No workspace crate, and three external ones that implement no domain logic:
+//! `thiserror` for the error derive, `zeroize` for the scrub behind
+//! [`idvar::ChannelBinding`]'s `ZeroizeOnDrop`, and `subtle` for its
+//! constant-time comparison. Neither `zeroize` nor `subtle` is a cryptographic
+//! implementation, so CD-I2 does not restrict them here — see the exemption and
+//! its reasoning in `core/xtask/src/checks.rs`.
+//!
 //! # Time, randomness, and this crate
 //!
 //! There is none. ADR-0018 CD-1 puts every clock, timer and RNG behind

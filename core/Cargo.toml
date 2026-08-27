@@ -108,11 +108,32 @@ chacha20poly1305   = "0.11"
 blake2             = "0.11"
 sha2               = "0.11"
 hkdf               = "0.13"
-zeroize            = { version = "1.9", features = ["derive"] }
-subtle             = "2.6"
 rand_core          = "0.9"
 ciborium           = "0.2"
 coset              = "0.4"
+
+# -- NOT restricted by CD-I2, though they sit in this section --------------
+# CD-I2's text is "a dependency on a cryptographic IMPLEMENTATION", and
+# ADR-0018 §11.7 states its purpose: it is "P2's static half", so a reviewer
+# asking WHAT CRYPTOGRAPHY DO WE USE has exactly one crate to read.
+#
+# Neither of these two answers that question. `zeroize` is memory hygiene - a
+# volatile write and a compiler fence. `subtle` is constant-time comparison
+# primitives. Neither implements a cipher, a hash, a KDF, a signature scheme or
+# a key exchange, so neither adds a line to what that reviewer is looking for.
+#
+# Reading CD-I2 to forbid them makes the security WORSE, which cannot be what a
+# rule that exists to make cryptography auditable intends: without `zeroize` a
+# secret's scrub is an elidable `fill(0)`, and without `subtle` a channel-binding
+# comparison is data-dependent with no compiler barrier. Both were live residuals
+# in this workspace before this ruling.
+#
+# Integration-lead ruling, 2026-08-27: an interpretation of ADR-0018, not an
+# amendment to it. `cargo run -p xtask -- lint` implements the exemption in
+# `CD_I2_NOT_CRYPTO_IMPLEMENTATIONS`, and the tests beside it assert that the
+# hole did not widen - every other name above is still restricted.
+zeroize            = { version = "1.9", features = ["derive"] }
+subtle             = "2.6"
 
 # -- test-only --------------------------------------------------------------
 proptest   = "1.8"

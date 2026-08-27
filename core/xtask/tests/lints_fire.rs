@@ -192,6 +192,78 @@ fn cd_i2_exempts_only_twinvpn_crypto() {
     assert!(checks::cd_i2(&clean).is_empty());
 }
 
+/// The integration lead's 2026-08-27 ruling: `zeroize` and `subtle` are memory
+/// hygiene and constant-time comparison, not cryptographic implementations, so
+/// CD-I2 does not restrict them.
+#[test]
+fn cd_i2_permits_zeroize_and_subtle_anywhere() {
+    for exempt in checks::CD_I2_NOT_CRYPTO_IMPLEMENTATIONS {
+        let workspace = ws(vec![
+            dp("twinvpn-types", &[exempt]),
+            dp("twinvpn-platform", &[exempt]),
+            dp("twinvpn-session", &[exempt]),
+        ]);
+        assert!(
+            checks::cd_i2(&workspace).is_empty(),
+            "CD-I2 wrongly flagged the exempt crate `{exempt}`"
+        );
+    }
+    // And the exemption is exactly two names, not a category.
+    assert_eq!(
+        checks::CD_I2_NOT_CRYPTO_IMPLEMENTATIONS,
+        ["zeroize", "subtle"]
+    );
+}
+
+/// The exemption must not widen the hole: a genuine cryptographic
+/// implementation is still caught when it sits beside an exempt one, which is
+/// the shape a real regression would take.
+#[test]
+fn cd_i2_still_fires_on_a_real_crypto_crate_beside_an_exempt_one() {
+    let workspace = ws(vec![
+        dp("twinvpn-crypto", &["snow", "sha2", "zeroize", "subtle"]),
+        // A crate that legitimately takes `zeroize` and then quietly adds sha2.
+        dp("twinvpn-store", &["zeroize", "subtle", "sha2"]),
+    ]);
+    let found = checks::cd_i2(&workspace);
+    assert_eq!(
+        rules(&found),
+        vec!["CD-I2"],
+        "expected exactly one violation"
+    );
+    assert!(found[0].detail.contains("twinvpn-store"), "{:?}", found[0]);
+    assert!(found[0].detail.contains("sha2"), "{:?}", found[0]);
+    assert!(
+        !found[0].detail.contains("zeroize") && !found[0].detail.contains("subtle"),
+        "the exempt crates must not appear in the violation: {:?}",
+        found[0]
+    );
+}
+
+/// Every other name in `core/Cargo.toml`'s cryptography block stays restricted.
+#[test]
+fn cd_i2_still_restricts_the_rest_of_the_declared_crypto_block() {
+    for restricted in [
+        "snow",
+        "x25519-dalek",
+        "ed25519-dalek",
+        "p256",
+        "chacha20poly1305",
+        "blake2",
+        "sha2",
+        "hkdf",
+        "rand_core",
+        "ciborium",
+        "coset",
+    ] {
+        let workspace = ws(vec![dp("twinvpn-session", &[restricted])]);
+        assert!(
+            !checks::cd_i2(&workspace).is_empty(),
+            "CD-I2 no longer restricts `{restricted}`"
+        );
+    }
+}
+
 #[test]
 fn cd_i2_covers_the_alternatives_not_only_the_declared_block() {
     for alternative in [

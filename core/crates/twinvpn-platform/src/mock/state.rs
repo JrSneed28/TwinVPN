@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use futures_core::future::BoxFuture;
 use twinvpn_types::{DeviceId, IdentityId, PerFamily, UnderlayFamilies};
+use zeroize::Zeroizing;
 
 use crate::config::{
     ContractGeneration, Datapath, EnforcementCustody, LinkFacts, LinkState, NetworkConfig,
@@ -483,7 +484,10 @@ impl IdentityCustody for MockIdentity {
 
 /// An in-memory Tier-1 store and a caller-supplied store root.
 pub struct MockStore {
-    items: Mutex<HashMap<String, Vec<u8>>>,
+    // `Zeroizing`, so the mock's own copy of the SEK scrubs on drop. A test
+    // double that leaves plaintext behind is a test double that would pass a
+    // review the real store would fail.
+    items: Mutex<HashMap<String, Zeroizing<Vec<u8>>>>,
     root: Mutex<Option<StoreRoot>>,
     custody: RecordAeadCustody,
     unavailable: AtomicBool,
@@ -541,7 +545,7 @@ impl SecureStore for MockStore {
             // with "unavailable", which must not enrol.
             Ok(guard(&self.items)
                 .get(key.as_str())
-                .map(|v| SecureItem::new(v.clone())))
+                .map(|v| SecureItem::new(v.to_vec())))
         })
     }
 
@@ -552,7 +556,10 @@ impl SecureStore for MockStore {
     ) -> BoxFuture<'a, Result<(), PlatformError>> {
         Box::pin(async move {
             self.check()?;
-            guard(&self.items).insert(key.as_str().to_owned(), value.as_bytes().to_vec());
+            guard(&self.items).insert(
+                key.as_str().to_owned(),
+                Zeroizing::new(value.as_bytes().to_vec()),
+            );
             Ok(())
         })
     }
