@@ -191,7 +191,7 @@ impl LockedBytes {
     ///
     /// **This is the compromised path and is named so.** The bytes have already
     /// been in unlocked memory — typically because the shell unsealed them
-    /// across the platform seam ([`twinvpn_platform::SecureItem`]) — and this
+    /// across the platform seam (`twinvpn_platform::SecureItem`) — and this
     /// call protects the copy it makes, not the original. It zeroes `source`
     /// before returning, which is the most that can be done from here.
     ///

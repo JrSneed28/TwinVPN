@@ -401,8 +401,8 @@ impl VerifiedStatement {
 /// unmodified. `kind` is what the caller intends to read it as; it appears only
 /// in diagnostics and does not select a key.
 ///
-/// The order of operations is load-bearing and is asserted by
-/// [`tests::a_non_canonical_envelope_is_refused_before_any_signature_check`]:
+/// The order of operations is load-bearing and is asserted by the integration
+/// test `a_non_canonical_envelope_is_refused_before_any_signature_check`:
 ///
 /// 1. size cap, before anything;
 /// 2. RFC 8949 §4.2.1 over the **whole received envelope**;

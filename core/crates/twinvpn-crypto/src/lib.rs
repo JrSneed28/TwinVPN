@@ -78,6 +78,7 @@
 
 pub mod aead;
 pub mod binding;
+pub mod blake2s;
 pub mod cose;
 pub mod dcbor;
 pub mod deviceid;
@@ -97,6 +98,7 @@ pub mod transcript;
 
 pub use aead::{AeadOpenError, StoreKey};
 pub use binding::{verify_tunnel_key_binding, VerifiedTunnelKey};
+pub use blake2s::{frame_mac, hrw_weight_digest, verify_frame_mac};
 pub use cose::{verify_cose_sign1, PublicVerifyingKey, VerifiedStatement};
 pub use deviceid::{
     derive_device_id, derive_device_id_checked, derive_identity_id, derive_identity_id_checked,

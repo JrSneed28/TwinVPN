@@ -36,7 +36,7 @@
 //!
 //! `snow`'s default resolver reaches for the platform CSPRNG itself, which CD-3
 //! bans outside `twinvpn-env`'s binding and CD-2 bans as an ambient default.
-//! [`EnvResolver`] supplies `snow`'s `Random` from
+//! This module's private `EnvResolver` supplies `snow`'s `Random` from
 //! [`twinvpn_env::Env::entropy`], and delegates the primitives to `snow`'s own
 //! `DefaultResolver`. Handshake ephemerals draw from the **CSPRNG**, not from a
 //! seeded per-consumer stream: forward secrecy is a claim about
