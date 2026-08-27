@@ -90,7 +90,7 @@ async fn a_client_pinning_the_wrong_server_key_refuses_the_server() {
         .await
         .expect("connect");
     let connector = tokio_rustls::TlsConnector::from(client_key.client_config(&wrong.spki));
-    let outcome = common::within(connector.connect(common::keys::server_name(), tcp)).await;
+    let outcome = common::within(connector.connect(common::server_name(), tcp)).await;
     assert!(outcome.is_err(), "a mispinned server key was accepted");
     h.stop().await;
 }
@@ -100,10 +100,11 @@ async fn the_configuration_permits_no_early_data() {
     // ADR-0001 R8: 0-RTT is PROHIBITED. Asserted rather than assumed, because
     // "we left the default alone" is not a property.
     let key = common::TestKey::generate();
-    let path = key.write_pem("rz-early-data-probe");
-    let cfg = rz::tls::server_config(&path).expect("a usable key");
-    assert_eq!(cfg.max_early_data_size, 0);
-    assert!(rz::tls::assert_no_early_data(&cfg).is_ok());
+    let built = twinvpn_service_common::tls::ServerTlsBuilder::from_pkcs8_der(key.pkcs8().to_vec())
+        .build()
+        .expect("a usable key");
+    assert_eq!(built.config().max_early_data_size, 0);
+    assert!(twinvpn_service_common::tls::assert_no_early_data(&built.config()).is_ok());
 }
 
 #[tokio::test]
@@ -118,7 +119,7 @@ async fn a_tls_1_2_client_is_refused() {
         .expect("connect");
     let connector =
         tokio_rustls::TlsConnector::from(common::TestKey::tls12_only_client_config(&h.server_spki));
-    let outcome = common::within(connector.connect(common::keys::server_name(), tcp)).await;
+    let outcome = common::within(connector.connect(common::server_name(), tcp)).await;
     assert!(outcome.is_err(), "a TLS 1.2 client completed a handshake");
     h.stop().await;
 }
@@ -358,5 +359,119 @@ async fn an_authenticated_peer_is_still_not_a_trusted_one() {
         "an oversized payload was answered: {answered:?}"
     );
     assert_eq!(h.shared.router.lock().await.mailboxes.total_bytes(), 0);
+    h.stop().await;
+}
+
+/// **The `release()` regression, at the level that can see it.**
+///
+/// The shared crate's absorption found a defect both this service's and
+/// `presence`'s copies carried: `release` took only the channel and decremented
+/// **every** entry that channel held, and both services called it
+/// unconditionally at teardown. So a *refused* connection sharing a key with a
+/// live one released **that connection's** hold — after which one channel could
+/// speak for a second subject, and a held binding became evictable for capacity.
+///
+/// Neither copy's unit tests caught it because both released from a single
+/// synthetic channel. It only appears against a **long-lived** connection, which
+/// is what this harness has. That is the whole reason this test lives here and
+/// not in a unit module.
+#[tokio::test]
+async fn a_refused_sibling_connection_cannot_release_a_live_connections_hold() {
+    let h = common::start(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
+    let key = common::TestKey::generate();
+    let attacker_key = common::TestKey::generate();
+    let held = [0x61u8; 32];
+    let other = [0x62u8; 32];
+
+    // 1. A long-lived connection on key K holds `held`.
+    let mut live = h.client_as(&key).await;
+    live.write(&rz::frame::encode(rz::frame::Opcode::Attach, &held))
+        .await;
+    let ack = common::within(live.read_until(rz::frame::Opcode::Ack))
+        .await
+        .expect("the live connection attaches");
+    assert!(common::reason_code(&ack).is_none());
+
+    // 2. A sibling on the SAME key claims a second subject and is refused.
+    {
+        let mut sibling = h.client_as(&key).await;
+        sibling
+            .write(&rz::frame::encode(rz::frame::Opcode::Attach, &other))
+            .await;
+        let refusal = common::within(sibling.read_until(rz::frame::Opcode::Ack))
+            .await
+            .expect("the sibling is answered");
+        assert_eq!(
+            common::reason_code(&refusal).as_deref(),
+            Some("CONTROL.CHANNEL_BINDING_MISMATCH"),
+            "one channel must not speak for a second subject"
+        );
+        // 3. ...and tears down. Under the defect, this released the LIVE
+        //    connection's hold on `held`.
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // 4. A different key must still be unable to take `held`.
+    let mut attacker = h.client_as(&attacker_key).await;
+    attacker
+        .write(&rz::frame::encode(rz::frame::Opcode::Attach, &held))
+        .await;
+    let refusal = common::within(attacker.read_until(rz::frame::Opcode::Ack))
+        .await
+        .expect("the attacker is answered");
+    assert_eq!(
+        common::reason_code(&refusal).as_deref(),
+        Some("CONTROL.CHANNEL_BINDING_MISMATCH"),
+        "a refused sibling's teardown released a live connection's hold"
+    );
+
+    // 5. And the original channel still may not acquire a second subject.
+    let mut again = h.client_as(&key).await;
+    again
+        .write(&rz::frame::encode(rz::frame::Opcode::Attach, &other))
+        .await;
+    let refusal = common::within(again.read_until(rz::frame::Opcode::Ack))
+        .await
+        .expect("answered");
+    assert_eq!(
+        common::reason_code(&refusal).as_deref(),
+        Some("CONTROL.CHANNEL_BINDING_MISMATCH"),
+        "the invariant survived a refused sibling's teardown"
+    );
+    h.stop().await;
+}
+
+/// A full binding table answers `CONTROL.ADMISSION_DEFERRED`, not a mismatch.
+///
+/// They are different facts: the subject is not contested, the server is.
+/// Answering "held by another channel" would tell a caller its `device_id` was
+/// taken when it was not — an oracle, and a wrong one.
+#[tokio::test]
+async fn a_full_binding_table_defers_rather_than_claiming_the_subject_is_taken() {
+    let h = common::start_with(IpAddr::V6(Ipv6Addr::LOCALHOST), |mut c| {
+        c.binding.max_bindings = 1;
+        c
+    })
+    .await;
+
+    let mut first = h.client().await;
+    first
+        .write(&rz::frame::encode(rz::frame::Opcode::Attach, &[0x71u8; 32]))
+        .await;
+    common::within(first.read_until(rz::frame::Opcode::Ack)).await;
+
+    // A different key, a subject nobody holds — but no room to record it.
+    let mut second = h.client().await;
+    second
+        .write(&rz::frame::encode(rz::frame::Opcode::Attach, &[0x72u8; 32]))
+        .await;
+    let refusal = common::within(second.read_until(rz::frame::Opcode::Ack))
+        .await
+        .expect("answered, never reset — S-6");
+    assert_eq!(
+        common::reason_code(&refusal).as_deref(),
+        Some("CONTROL.ADMISSION_DEFERRED"),
+        "capacity must not be reported as a contested subject"
+    );
     h.stop().await;
 }

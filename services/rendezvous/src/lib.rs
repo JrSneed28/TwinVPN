@@ -34,7 +34,14 @@
 //!    fields, so the `CALL` body is carried as
 //!    [`twinvpn_service_common::Verbatim`] and re-emitted byte for byte. This
 //!    crate never decodes a `CALL` payload at all — not even to inspect it.
-//! 4. **Learn as little as possible.** The `CALL` frame names the target by
+//! 4. **The peer is authenticated before a byte of framing is read.** TLS 1.3
+//!    with mutual RFC 7250 raw public keys, client authentication mandatory,
+//!    0-RTT prohibited — [`twinvpn_service_common::tls`]. An `ATTACH` is then
+//!    made answerable to that authenticated key by
+//!    [`twinvpn_service_common::binding`], so a `device_id` is bound to a
+//!    channel rather than merely claimed on one. Both modules were this
+//!    domain's and now live in the shared crate; see `README.md` §4.
+//! 5. **Learn as little as possible.** The `CALL` frame names the target by
 //!    `DeviceId` and never by a caller-supplied address (ADR-0002 S-5, so this
 //!    service cannot be a reflector). A delivered `CALL` carries **no sender
 //!    field**: the blob is Rule-B signed and already names its signer, so
@@ -53,7 +60,6 @@
 
 pub mod admission;
 pub mod attach;
-pub mod binding;
 pub mod codec;
 pub mod config;
 pub mod frame;
@@ -62,7 +68,6 @@ pub mod label;
 pub mod mailbox;
 pub mod server;
 pub mod testkit;
-pub mod tls;
 
 /// The `errors.proto` component this service reports itself as.
 ///

@@ -86,8 +86,11 @@ Everything in `twinvpn-service-common`'s README §3.2 also applies.
 ## 4. Authentication, and why S-11 needs it
 
 **TLS 1.3, mutual RFC 7250 raw public keys, client authentication mandatory,
-0-RTT prohibited** (`src/tls.rs`) — ADR-0001 §7.2's L-CONTROL, identical to the
-rendezvous's and for the same reasons (`services/rendezvous/README.md` §4.1).
+0-RTT prohibited** — ADR-0001 §7.2's L-CONTROL, from
+[`twinvpn_service_common::tls`](../twinvpn-service-common/src/tls/mod.rs). This
+was `src/tls.rs` here and an identical `src/tls.rs` in the rendezvous until the
+shared crate absorbed both (RZ-8); see `services/rendezvous/README.md` §4.1 for
+the reasoning, which has not changed.
 
 The reason it matters *here* is S-11. `presence.proto`: "a device may assert
 presence **only for itself**. A `Presence` naming another `device_id` is
@@ -97,21 +100,37 @@ against another unauthenticated claim — a `BIND` saying "I am D" compared with
 proved nothing.
 
 Now `BIND` is answerable to the key that completed the handshake
-(`src/binding.rs`), with the same one-to-one invariant the rendezvous uses:
+([`twinvpn_service_common::binding`](../twinvpn-service-common/src/binding.rs)),
+with the same one-to-one invariant the rendezvous uses:
 
 > **A `device_id` belongs to at most one channel identity, and a channel
 > identity speaks for at most one `device_id`, for the life of the binding.**
 
 A mismatch is **`CONTROL.CHANNEL_BINDING_MISMATCH`** — FATAL, CRITICAL, "a
 security event, never a parse error" (`trust-boundaries.md` §4) — and the answer
-names no `device_id`. The S-11 check then runs *on top* of that: a channel
-legitimately bound to A still may not assert for B, and that is still
-`CONTROL.EVENT_WRONG_PUBLISHER`. Authentication did not replace S-11; it made it
-mean something.
+names no `device_id`, structurally: the frozen registry declares no evidence
+fields for that code and the `twinvpn-types` builder drops an undeclared key, so
+no call can attach the contested identity even by mistake. A **full table** is a
+different refusal, `CONTROL.ADMISSION_DEFERRED`, because the identity is not
+contested — the server is.
 
-The binding is **channel-pinned, not derived**, with the same limitation and the
-same blocked dependency as the rendezvous's — see `services/rendezvous/README.md`
-§4.2 and RZ-7.
+The S-11 check then runs *on top* of that: a channel legitimately bound to A
+still may not assert for B, and that is still `CONTROL.EVENT_WRONG_PUBLISHER`.
+Authentication did not replace S-11; it made it mean something.
+
+**A connection releases exactly what it claimed.** This service previously
+released by channel alone, unconditionally at teardown — so a *refused*
+connection sharing a key with a live one dropped that connection's hold, and one
+key could then publish presence for two identities. S-11 forbids exactly that.
+`release` now takes the subject and is called only on the accepted path;
+`tests/tls_binding.rs::a_refused_sibling_connection_cannot_release_a_live_connections_hold`
+is the guard, over real sockets. See RZ-11 in `services/rendezvous/README.md` §9
+for why neither service's unit tests could see it.
+
+The binding is **channel-pinned, not derived**, with the same limitation as the
+rendezvous's. The derivation is now reachable, but a derived-**only** binding
+would permanently lock out any device that has rotated its identity key — see
+`services/rendezvous/README.md` §4.2 and **RZ-10**.
 
 ---
 
@@ -242,7 +261,7 @@ nothing still connects.
 | **PR-4** | note | **`HeartbeatAck.revocation_epoch` and `pending_net_seq` are returned as 0.** Both are the control plane's to answer (ADR-0002 §11.4) and this service must not call it on this path (I5). `pending_net_seq` is described as "the main battery lever in the protocol", so a device that wants it must get it from the control plane's own C1 heartbeat, not from here. Worth a line in protocol.md §9.2 saying which endpoint answers it, since the same `Heartbeat`/`HeartbeatAck` pair is used in both places. |
 | **PR-5** | note | **`ReadinessPolicy::NoControlPlaneCalls`**, where `infra/README.md` §5 says `AnyDependency`. Same reasoning as the rendezvous's RZ-2: this service holds nothing durable, so there is no dependency whose absence could make its answer wrong, and reporting NOT READY on someone else's outage converts a latency degradation into a capability one. |
 | **PR-6** | note | **Five `TWINVPN_PRESENCE_*` ceilings added** (§3.1), all with defaults. |
-| **PR-7** | note | **`src/tls.rs` and `src/binding.rs` duplicate the rendezvous's exactly.** See RZ-8 in `services/rendezvous/README.md` §9: both should move into `twinvpn-service-common`, which I do not own. |
+| **PR-7** | **closed by the integration lead** | `src/tls.rs` and `src/binding.rs` duplicated the rendezvous's exactly; both now live in `twinvpn-service-common` and this crate's copies are deleted. Absorbing them found the `release()` defect this service carried — RZ-11 in `services/rendezvous/README.md` §9. |
 
 ---
 
@@ -250,11 +269,12 @@ nothing still connects.
 
 1. **QUIC is not bound** — same as the rendezvous's limitation 1, same cause.
    TLS 1.3 with mutual raw public keys is terminated; QUIC is a binding to add.
-2. **First-contact impersonation is open** — RZ-7 in the rendezvous README, same
-   blocked derivation. An attacker who binds a `device_id` before the real device
-   ever does can publish presence for it until the binding lapses. Presence is a
-   hint and never a gate (§1), so the blast radius is a wrong hint rather than a
-   wrong decision — but it is still wrong, and the fix is a dependency ruling.
+2. **First-contact impersonation is open** — RZ-10 in the rendezvous README. An
+   attacker who binds a `device_id` before the real device ever does can publish
+   presence for it until the binding lapses. Presence is a hint and never a gate
+   (§1), so the blast radius is a wrong hint rather than a wrong decision — but
+   it is still wrong, and the fix is the derived-preferred design RZ-10 sets out,
+   in one shared place rather than two service crates.
 3. **No container has been built or run.** Docker is absent from this host. The
    tests run a real TLS 1.3 listener on loopback over IPv4 and IPv6.
 4. **No persistence, deliberately** (PR-1). A restart empties the table; every

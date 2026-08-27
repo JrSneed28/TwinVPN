@@ -54,7 +54,7 @@ pub struct RendezvousConfig {
     /// Attachment ceilings.
     pub attach: AttachLimits,
     /// `device_id` ↔ channel-identity binding ceilings.
-    pub binding: crate::binding::BindingLimits,
+    pub binding: twinvpn_service_common::binding::BindingLimits,
     /// Per-source admission.
     pub admission: AdmissionLimits,
     /// How often the TTL sweep runs.
@@ -195,13 +195,17 @@ impl RendezvousConfig {
             ..admission_defaults
         };
 
-        let binding_defaults = crate::binding::BindingLimits::default();
-        let binding = crate::binding::BindingLimits {
+        let binding_defaults = twinvpn_service_common::binding::BindingLimits::default();
+        let binding = twinvpn_service_common::binding::BindingLimits {
             ttl: l.duration_ms(keys::BINDING_TTL_MS, binding_defaults.ttl)?,
             max_bindings: usize::try_from(
                 l.u64(keys::MAX_BINDINGS, binding_defaults.max_bindings as u64)?,
             )
             .unwrap_or(binding_defaults.max_bindings),
+            // A device attaching speaks for itself and nothing else. Not
+            // configurable: `ManySubjectsPerChannel` is the relay's shape, and
+            // it would let one key hold every mailbox it could name.
+            cardinality: twinvpn_service_common::binding::BindingCardinality::OneSubjectPerChannel,
         };
 
         Ok(Self {

@@ -57,7 +57,7 @@ pub struct PresenceConfig {
     /// How often the TTL sweep runs.
     pub sweep_interval: Duration,
     /// `device_id` ↔ channel-identity binding ceilings.
-    pub binding: crate::binding::BindingLimits,
+    pub binding: twinvpn_service_common::binding::BindingLimits,
 }
 
 /// Env keys.
@@ -122,15 +122,19 @@ impl PresenceConfig {
 
         let ttl = l.duration_ms(keys::RECORD_TTL_MS, defaults.record_ttl)?;
 
-        let binding_defaults = crate::binding::BindingLimits::default();
+        let binding_defaults = twinvpn_service_common::binding::BindingLimits::default();
 
         Ok(Self {
-            binding: crate::binding::BindingLimits {
+            binding: twinvpn_service_common::binding::BindingLimits {
                 ttl: l.duration_ms(keys::BINDING_TTL_MS, binding_defaults.ttl)?,
                 max_bindings: usize::try_from(
                     l.u64(keys::MAX_BINDINGS, binding_defaults.max_bindings as u64)?,
                 )
                 .unwrap_or(binding_defaults.max_bindings),
+                // A device binding speaks for itself and nothing else — S-11
+                // in one field. Not configurable.
+                cardinality:
+                    twinvpn_service_common::binding::BindingCardinality::OneSubjectPerChannel,
             },
             listen_tcp: l.socket_addr(keys::LISTEN_TCP, "[::]:443")?,
             listen_quic: l.socket_addr(keys::LISTEN_QUIC, "[::]:443")?,

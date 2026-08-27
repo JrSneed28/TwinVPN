@@ -122,7 +122,9 @@ Everything in `twinvpn-service-common`'s README §3.2 also applies.
 ### 4.1 The channel
 
 **TLS 1.3, mutual RFC 7250 raw public keys, client authentication mandatory,
-0-RTT prohibited.** ADR-0001 §7.2's L-CONTROL block, implemented in `src/tls.rs`:
+0-RTT prohibited.** ADR-0001 §7.2's L-CONTROL block, implemented in
+[`twinvpn_service_common::tls`](../twinvpn-service-common/src/tls/mod.rs) —
+this domain's module until the shared crate absorbed it (RZ-8, now closed):
 
 ```
 Transport     : TLS 1.3 over TCP (QUIC is §10's gap, not a substitution)
@@ -138,22 +140,25 @@ authority to chain to. A PKI here would be a second, weaker naming system over a
 self-certifying one — ADR-0001 §6's "certificate/PKI baggage", declined.
 
 **There is no certificate.** `TWINVPN_RZ_TLS_KEY_PATH` is the whole of the
-server's identity; `server_public_key()` returns the SPKI an operator publishes
-for devices to pin, which is what ADR-0001's "pinned control-plane public key
-set, shipped in the build" means in practice.
+server's identity; `ServerTls::public_key()` returns the SPKI an operator
+publishes for devices to pin, which is what ADR-0001's "pinned control-plane
+public key set, shipped in the build" means in practice.
 
 **What is authenticated, and what is not.** The handshake proves the peer holds
 the private half of the key it presented. It does **not** decide *which* keys may
 connect: this service is an untrusted courier with no trust store, the `CALL`
 bodies are Rule-B signed end to end, and asking the control plane per connection
-would put it back in the reconnect path (**I5**). Any well-formed key may
-connect — but it may only speak for itself, which is §4.2.
+would put it back in the reconnect path (**I5**). That constraint is now stated
+on `ClientKeyPolicy` itself rather than remembered, so an implementor reads it
+at the point of temptation; this service ships `AcceptAnyWellFormedKey`. Any
+well-formed key may connect — but it may only speak for itself, which is §4.2.
 
 ### 4.2 The binding — `ATTACH` is answerable to the key
 
 Before this, `ATTACH` was an unauthenticated **claim**: anyone with a socket
-could say "I am `device_id` D" and receive D's `CALL`s. `src/binding.rs` makes
-the claim answerable:
+could say "I am `device_id` D" and receive D's `CALL`s.
+[`twinvpn_service_common::binding`](../twinvpn-service-common/src/binding.rs)
+makes the claim answerable:
 
 > **A `device_id` belongs to at most one channel identity, and a channel
 > identity speaks for at most one `device_id`, for the life of the binding.**
@@ -164,20 +169,43 @@ the claim answerable:
 
 Refusal is **`CONTROL.CHANNEL_BINDING_MISMATCH`** — FATAL, CRITICAL, and
 `trust-boundaries.md` §4's words for it are "**a security event, never a parse
-error**". The answer names nothing: echoing the contested `device_id` would make
-the refusal an oracle for which devices are attached.
+error**". The answer names nothing, and that is now **structural rather than
+careful**: the frozen registry declares no evidence fields for the code and the
+`twinvpn-types` builder drops an undeclared key, so no call can attach the
+contested `device_id` even by mistake. Echoing it would make the refusal an
+oracle for which devices are attached.
+
+**A full table is a different refusal.** `CONTROL.ADMISSION_DEFERRED`, not a
+mismatch — the `device_id` is not contested, the server is, and answering "held
+by another channel" would tell a caller its subject was taken when it was not.
+S-6 makes answering mandatory there rather than resetting.
 
 The binding **outlives its connection** by `TWINVPN_RZ_BINDING_TTL_MS`, so a
 device that drops and reconnects finds its own binding and an attacker racing
 that reconnect finds it taken. It does lapse, so a device that legitimately
 rotates its identity key is not locked out for ever.
 
+**A connection releases exactly what it claimed.** `release` takes the subject
+as well as the channel, and this service calls it only on the accepted path.
+The earlier shape — channel-only, called unconditionally at teardown — let a
+*refused* connection sharing a key with a live one drop **that connection's**
+hold, after which one channel could speak for a second `device_id` and a held
+binding became evictable for capacity. Neither this service's unit tests nor
+`presence`'s caught it, because both released from a single synthetic channel;
+it needs a long-lived connection to appear. `tests/tls_binding.rs::
+a_refused_sibling_connection_cannot_release_a_live_connections_hold` is the
+service-level guard, and it runs against real sockets on both families.
+
 **What this is not.** It is channel-pinned, not derived. It closes impersonation
 of a device that is attached or has attached within the binding TTL — which is
 every device in normal operation. It does **not** close *first-contact*
 impersonation: an attacker who attaches as D before the real D ever does holds
-the binding until it lapses. Closing that needs the server to compute D from the
-presented key, and that derivation exists — see RZ-7 in §9.
+the binding until it lapses.
+
+`derive_device_id_checked` is now reachable (`twinvpn-crypto`, RZ-7 closed), so
+the derived binding the `Binding` trait was written for is buildable — but a
+**derived-only** binding would lock out every device that has ever rotated its
+identity key, permanently. RZ-10 in §9 states why and what to build instead.
 
 ---
 
@@ -353,10 +381,12 @@ what I5 forbids. `tests/…::a_fabricated_target_is_indistinguishable_from_a_det
 | **RZ-3** | **contract gap** | **`errors.proto` has no `COMPONENT_RENDEZVOUS_SERVICE`.** It has `COMPONENT_RENDEZVOUS_CLIENT` (7), the device-side component, and `COMPONENT_COORDINATION_SERVICE` (21). This service reports 21 — the closest truthful answer, since `architecture.md` §2.9 places the rendezvous in the control plane — rather than claiming to be the client. The registry is append-only, so adding one breaks nothing. |
 | **RZ-4** | gap | **Rung [2], the C3 push wake, is not implemented** (§9). No push credential store exists and a push gateway is an untrusted third party. A detached device's `CALL` falls straight to the mailbox. This costs latency, never correctness — the initiator never blocks on delivery (ADR-0002 §11.5). |
 | **RZ-5** | note | **Seven `TWINVPN_RZ_*` resource ceilings added** (§3.1), all with defaults, none in `infra/README.md` §4.3. A pre-authentication surface with no connection bound, no per-source rate bound and no partial-frame deadline is a descriptor- and memory-exhaustion primitive; these are not optional. Should be added to `infra/README.md` §4.3 when infrastructure next touches it. |
-| **RZ-7** | **blocked dependency — decision needed** | **The `device_id`↔key binding is channel-pinned, not derived, and it cannot be derived from here.** `identifiers.md` §2 fixes the derivation: `device_id = SHA-256("TwinVPN/DeviceIdentity/v1" ‖ 0x00 ‖ dCBOR(COSE_Key(IK_pub)))`. It is implemented, tested and owned — in `core/crates/twinvpn-trust::derive_device_id` — and `services/Cargo.toml` permits a service exactly one edge into `/core`, `twinvpn-schema`. **Re-deriving it here is finding W-23's mistake verbatim** ("a specified derivation is not ours to improve"), and a wrong `device_id` derivation names the wrong device. So `src/binding.rs` ships a `Binding` **trait** with `ChannelPinned` behind it; the derived implementation is a one-file change. **The ask:** either permit a `twinvpn-trust` path dependency for the services, or have `core-security` expose `derive_device_id` (and the COSE_Key encoding it needs) in a crate services may link. Until then, first-contact impersonation is open and is stated in §4.2 and §10. |
-| **RZ-8** | **duplication — should move to `service-common`** | `src/tls.rs` and `src/binding.rs` are **byte-for-byte the same design** in `services/presence`, and `relay-plane` will need a third copy the moment its legs are authenticated. That is the R-31 divergence ADR-0018 CB-2 and `twinvpn-service-common` exist to prevent, and I own two of the copies rather than the shared crate. I did not edit `twinvpn-service-common` because it is `control-plane`'s (`ownership.md` §2). **The ask:** move `tls`/`binding` into `twinvpn-service-common` under its owner, and I will delete both copies. |
-| **RZ-9** | note | **`aws-lc-rs` added as a `[dev-dependencies]` entry** of both crates, used only to mint an ephemeral P-256 keypair per test run. It is **already in the graph** — `rustls` links it as its default provider — so the service gains no runtime cryptographic dependency it did not already have transitively, and the lockfile gains no crate from this line. The alternatives were committing a private key to the repository (against `CLAUDE.md`'s unqualified rule) or requiring `openssl` on every test host. Flagged because a crypto crate named in a service manifest deserves to be seen. |
-| **RZ-6** | note | **`services/Cargo.lock` changed mechanically**, twice. First: `proptest` 1.11 as a **dev**-dependency plus 13 transitive dev-only entries — `ownership.md` §6 makes the B3 parser's "never panics, never allocates unboundedly" a **property**, and a property needs a property test. Second: the TLS work resolves `rustls`, `tokio-rustls`, `rustls-pemfile`, `rustls-pki-types`, `rustls-webpki`, `aws-lc-rs`/`aws-lc-sys` and their build-time helpers (`cc`, `cmake`, `jobserver`, `shlex`, `pkg-config`, `dunce`, `fs_extra`, `find-msvc-tools`, `getrandom`, `r-efi`, `ring`, `untrusted`, and the `windows-*` target shims). All follow from the three lines the lead added to the workspace manifest. **`aws-lc-sys` compiles C**, and it built on this host **without `cmake` installed** — worth knowing before a CI image is trimmed. No existing dependency changed version. The lockfile is the lead's to reconcile. |
+| **RZ-7** | **closed by the integration lead** | The `device_id` derivation was unreachable from a service artifact. `derive_device_id_checked` now lives in `twinvpn-crypto`, which `services/Cargo.toml` already permits, and it proves RFC 8949 §4.2.1 canonicality and ES256 **before** hashing — the right variant for a key presented on a wire. Re-deriving it here would have been W-23 verbatim, and the corpus's answer was to move the hash rather than drag a trust engine into three server artifacts. **Superseded by RZ-10**, which is what stands between a reachable derivation and a shipped one. |
+| **RZ-8** | **closed by the integration lead** | `tls.rs` and `binding.rs` were byte-for-byte the same design in both services, and `relay-plane` would have been the third. Both now live in `twinvpn-service-common`; this domain's copies are deleted and both services consume the shared modules. Absorbing them **found a defect neither copy could see** — see RZ-11. |
+| **RZ-10** | **decision needed — do not ship a derived-only binding** | **A derived-only binding would permanently lock out every device that has ever rotated its identity key.** `device_id` pins the **generation-0** key; ADR-0007 §11 (lines 372–377) is explicit that IK rotation creates a new `DeviceIdentity` at `generation+1` while *"`device_id` does not change"*, and that after a rotation `device_id` is self-certifying **only transitively** — "a verifier checks the succession chain from generation 0 to the presented generation", which the ADR itself calls "a real cost of the design". A rotated device therefore presents a generation-N key on TLS that derives to something that is **not** its `device_id`, and this service holds no `IdentitySuccession` chain and must not fetch one per connection (**I5**). Shipping derived-only trades an unbounded first-contact window for an unbounded lockout, which is the worse trade and the fleet-wide-irreversible kind. **Recommended instead — derived-preferred, channel-pinned fallback, derived wins:** a claim whose presented key derives to the claimed `device_id` is *proven* and **takes the binding from a merely pinned holder**; a claim that does not derive falls back to first-claim pinning. That closes first-contact impersonation against every generation-0 device — all of them until they rotate — because an attacker can no longer *hold* a `device_id` against its rightful owner, while a rotated device still binds. **Where it belongs:** `service-common`, beside `ChannelPinned`. It needs an SPKI→dCBOR-COSE_Key conversion (the RFC 7250 channel identity is an SPKI; `derive_device_id_checked` takes a COSE_Key), and that is a specified encoding — exactly the thing RZ-8 just proved must not exist twice. I did not build it in two service crates for that reason. |
+| **RZ-11** | **defect this domain shipped, fixed in the shared crate** | `release(&channel, now)` decremented the holder count of **every** entry the channel held, and both services called it at teardown — so a *refused* connection sharing a key with a live one dropped that connection's hold, after which one channel could speak for a second subject and a held binding became evictable for capacity. Self-scoped (the attacker must own the key) but it falsifies the invariant §4.2 states, and for `presence` it is one key publishing presence for two identities, which S-11 forbids. **The rendezvous carried a second form of it: it never called `release` at all**, so holder counts only ever went up and were reclaimed by the TTL — a slower path to the same table-at-capacity outcome. Both are fixed: `release` takes the subject, and this service calls it only on the accepted path. **Why neither copy's tests caught it, carried forward as the lesson:** both released from a single synthetic channel, so the bug needed a long-lived connection to appear. Two independent copies both passed their own tests. Service-level regression tests now exist in both. |
+| **RZ-9** | **closed** | The `aws-lc-rs` dev-dependency and `tests/common/keys.rs` are gone from both crates. Key material now comes from `twinvpn-service-common`'s `tls::testkit` behind its `test-support` feature, so there is one generator rather than two and no crypto crate named in a service manifest. |
+| **RZ-6** | note | **`services/Cargo.lock` now changes only subtractively**: migrating to the shared modules removes `rustls`, `rustls-pemfile`, `rustls-pki-types` and `aws-lc-rs` from **both** services' direct dependencies — 8 deletions, no crate added, no version moved. The earlier history, for the record: **`services/Cargo.lock` changed mechanically**, twice. First: `proptest` 1.11 as a **dev**-dependency plus 13 transitive dev-only entries — `ownership.md` §6 makes the B3 parser's "never panics, never allocates unboundedly" a **property**, and a property needs a property test. Second: the TLS work resolves `rustls`, `tokio-rustls`, `rustls-pemfile`, `rustls-pki-types`, `rustls-webpki`, `aws-lc-rs`/`aws-lc-sys` and their build-time helpers (`cc`, `cmake`, `jobserver`, `shlex`, `pkg-config`, `dunce`, `fs_extra`, `find-msvc-tools`, `getrandom`, `r-efi`, `ring`, `untrusted`, and the `windows-*` target shims). All follow from the three lines the lead added to the workspace manifest. **`aws-lc-sys` compiles C**, and it built on this host **without `cmake` installed** — worth knowing before a CI image is trimmed. No existing dependency changed version. The lockfile is the lead's to reconcile. |
 
 ---
 
@@ -371,11 +401,13 @@ Stated here rather than discovered later.
    networks re-handshakes rather than migrating. `quinn` is in the workspace
    manifest, and the `tls.rs` `ServerConfig` is the one a QUIC endpoint would
    take, so this is a binding to add rather than a design to change.
-2. **First-contact impersonation is open** — RZ-7, and §4.2 says exactly what
+2. **First-contact impersonation is open** — RZ-10, and §4.2 says exactly what
    that means. An attacker who attaches as a `device_id` *before* the real device
    ever has holds the binding until it lapses. It cannot read the `CALL`s (Rule-B
-   signed, opaque) and cannot answer them, but it can deny delivery. The fix is
-   the derived binding, and it is blocked on a dependency ruling, not on work.
+   signed, opaque) and cannot answer them, but it can deny delivery. The
+   derivation is now reachable; what is missing is the **derived-preferred**
+   design RZ-10 specifies, and one shared place to put the SPKI→COSE_Key
+   conversion it needs.
 3. **No container has been built or run.** Docker is absent from this host
    (`infra/README.md` §9). Everything in §2 involving `docker compose` is
    unexercised. The tests run a **real** TLS 1.3 listener on loopback, over both

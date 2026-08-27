@@ -3507,13 +3507,9 @@ dependencies = [
 name = "twinvpn-presence"
 version = "0.1.0"
 dependencies = [
- "aws-lc-rs",
  "bytes",
  "proptest",
  "prost 0.13.5",
- "rustls",
- "rustls-pemfile",
- "rustls-pki-types",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -3574,13 +3570,9 @@ dependencies = [
 name = "twinvpn-rendezvous"
 version = "0.1.0"
 dependencies = [
- "aws-lc-rs",
  "bytes",
  "proptest",
  "prost 0.13.5",
- "rustls",
- "rustls-pemfile",
- "rustls-pki-types",
  "thiserror",
  "tokio",
  "tokio-rustls",
