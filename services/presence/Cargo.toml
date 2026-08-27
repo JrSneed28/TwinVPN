@@ -2,6 +2,13 @@
 #
 # Owner: rendezvous-connectivity. The WORKSPACE manifest at services/Cargo.toml is owned by the
 # integration lead and must not be edited from this domain.
+#
+# NOTE THE ABSENCE OF `sqlx`. `docker-compose.yml` requires TWINVPN_PRESENCE_DATABASE_URL and
+# `infra/README.md` §5 lists this service's readiness as "Postgres reachable", but a presence
+# record is EPHEMERAL by contract (presence.proto, protocol.md §6.1) and a durable presence log
+# is "a permanent movement and IP-address history of the Owner". This service therefore has no
+# database client at all: the durable option does not exist rather than defaulting off. The
+# divergence is reported in README.md §8.
 [package]
 name    = "twinvpn-presence"
 version.workspace      = true
@@ -16,6 +23,10 @@ publish = false
 name = "twinvpn-presence"
 path = "src/main.rs"
 
+[lib]
+name = "twinvpn_presence"
+path = "src/lib.rs"
+
 [dependencies]
 twinvpn-schema = { workspace = true }
 twinvpn-types  = { workspace = true }
@@ -23,3 +34,8 @@ thiserror      = { workspace = true }
 tracing        = { workspace = true }
 twinvpn-service-common = { workspace = true }
 tokio = { workspace = true }
+bytes = { workspace = true }
+prost = { workspace = true }
+
+[dev-dependencies]
+proptest = "1.11"

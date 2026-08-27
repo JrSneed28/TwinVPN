@@ -16,6 +16,10 @@ publish = false
 name = "twinvpn-rendezvous"
 path = "src/main.rs"
 
+[lib]
+name = "twinvpn_rendezvous"
+path = "src/lib.rs"
+
 [dependencies]
 twinvpn-schema = { workspace = true }
 twinvpn-types  = { workspace = true }
@@ -23,3 +27,11 @@ thiserror      = { workspace = true }
 tracing        = { workspace = true }
 twinvpn-service-common = { workspace = true }
 tokio = { workspace = true }
+bytes = { workspace = true }
+prost = { workspace = true }
+
+[dev-dependencies]
+# The B3 parser is the most hostile surface in the system; `ownership.md` §6
+# rules 9/10 make "never panics, never allocates unboundedly" a property rather
+# than a set of examples, and a property needs a property test.
+proptest = "1.11"
