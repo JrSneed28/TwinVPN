@@ -428,6 +428,62 @@ Evidence, in `src/forward.rs`, asserts **both halves**:
 If the control ever starts passing, `prost` gained preserve-and-forward and CF-2's
 constraint on this crate can be revisited.
 
+### 7.1 Which mode belongs on which channel
+
+`Verbatim` carries a `Framing`, and **choosing the wrong one is a real defect in
+both directions**, so pick from this table rather than from the shorter name.
+
+| Constructor | `Framing` | Checks | Use on | Boundary |
+|---|---|---|---|---|
+| `Verbatim::from_received` | `ProtobufRecords` | size cap **and** depth cap | control-plane C1/C2/C7 bodies; rendezvous C4 envelopes; anything `Forwarded<M>` will decode | **B1**, **B3** |
+| `Verbatim::from_opaque` | `Opaque` | size cap **only** | a relay `DATA` payload (WireGuard L-DATA); a COSE_Sign1 `signed_payload` being *carried* rather than verified; any ciphertext leg | **B4** |
+
+`Forwarded<M>` is always `ProtobufRecords` — it holds a decoded view, so an
+opaque framing could not mean anything on it. A component carrying octets it must
+not interpret holds a bare `Verbatim` and **no view at all**, which is the
+stronger position rather than a lesser one.
+
+**Why the opaque mode exists.** The first version of this crate ran
+`twinvpn_schema::depth::check` on every `Verbatim`. That is a **protobuf record
+scan**, and a relay `DATA` payload is an unmodified WireGuard L-DATA datagram —
+AEAD ciphertext with a fixed binary header — so `Verbatim` rejected essentially
+all real relay traffic. `relay-plane` measured it and worked around it with a
+local `frame::Opaque`.
+
+The API mismatch was the smaller half. The larger half is that requiring the bytes
+to parse as protobuf had put a protobuf parser on the **B4 packet path**, which
+ADR-0003 R7 forbids outright — *"B4 MUST have zero serialization framework in the
+packet path"* — and §11's table restates as a property: *"A serialization library
+MUST NOT appear in the packet path. Relay framing is a length + opaque-bytes
+header only."* `contracts/README.md` records why that is worth a rule: B4's schema
+artifact is **absent by design**, so *"the highest-rate path is immune to
+serialization bugs by construction"*. A primitive that quietly reintroduced the
+parser removed that immunity while looking like the safe choice.
+
+**Why a named constructor and not a flag or a `Channel` variant.**
+`from_received(bytes, channel, false)` at a call site tells a reviewer nothing;
+`from_opaque(bytes, channel)` tells them everything. A `Channel` variant was the
+other reasonable shape and is not available: `Channel` lives in `twinvpn-schema`,
+is owned by `core-foundation`, and enumerates the two envelope **cap families** of
+`limits.json` — it is a bounds selector, not a framing selector, and B4 has no
+`limits.json` entry to add. `from_received` keeps its name, signature and
+behaviour so the control plane and the rendezvous cannot lose the depth guard by
+anyone's inaction.
+
+Evidence, again in both halves:
+
+- `the_failing_control_the_protobuf_mode_still_refuses_l_data` — the control.
+- `the_opaque_mode_carries_l_data_byte_for_byte` — the fix.
+- `the_two_modes_differ_in_exactly_one_respect` — on protobuf-shaped bytes both
+  accept and both carry the identical octets; only the check differs.
+- `the_opaque_mode_carries_every_byte_value` — `0x00..=0xFF`, reversed, plus NUL
+  and `0xFF` runs, byte for byte.
+- `the_opaque_mode_runs_no_structural_scan_at_all` — a tag claiming a 4 GiB field
+  is refused by the protobuf mode and carried unexamined by the opaque one.
+- `the_protobuf_mode_still_enforces_the_depth_cap` — the guard B1/B3 must not lose.
+- `both_modes_enforce_the_same_size_cap` — the bound is not what differs.
+- `an_opaque_debug_still_renders_no_octets` — length, channel and framing only.
+
 ---
 
 ## 8. Errors
