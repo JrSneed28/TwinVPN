@@ -1,0 +1,18 @@
+apiVersion: 1
+
+providers:
+  - name: twinvpn
+    orgId: 1
+    folder: TwinVPN
+    type: file
+    disableDeletion: false
+    # Dashboards are provisioned from the repository and are NOT editable in
+    # place. A dashboard that answers "did the NAT-traversal success rate
+    # regress in release N?" (ADR-0015 §5, the whole reason Tier 2 exists) is
+    # only evidence if the query that produced it is under review like any
+    # other artifact.
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

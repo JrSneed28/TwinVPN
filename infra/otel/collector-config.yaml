@@ -1,0 +1,510 @@
+# TwinVPN OpenTelemetry Collector — infrastructure side only.
+#
+# ===========================================================================
+# WHAT ADR-0015 ACTUALLY PERMITS, AND WHAT IT REJECTS
+# ===========================================================================
+# §11.1: "OpenTelemetry as an INTERNAL, INFRASTRUCTURE-SIDE instrumentation
+# library is permitted; OpenTelemetry as an END-TO-END client-to-backend
+# pipeline is REJECTED." Alternative A was rejected as *fatal on privacy*: a
+# cross-component trace correlating client, rendezvous and relay IS a peer
+# graph and a movement record, and it exists on infrastructure by construction.
+#
+# So: this collector receives telemetry from the six server-side artifacts and
+# from nothing else. There is no client-facing ingress anywhere in this file.
+# Tier-0 never leaves a device because there is no transport for it; Tier-1
+# leaves only by an explicit user act, as a signed bundle, not over OTLP.
+#
+# §11.1 also forbids trace context propagation ACROSS A RELAY and forbids any
+# per-session identifier on infrastructure (O-13). Both are enforced below as
+# pipeline behaviour, not as a convention someone has to remember.
+#
+# ===========================================================================
+# THE CONTROL THAT MATTERS: EMIT-TIME CLASSIFICATION, ENFORCED AGAIN HERE
+# ===========================================================================
+# O-14 requires redaction at EMIT time by schema-level field classification,
+# NOT at export time by pattern matching over rendered text. That is the
+# services' obligation and this file does not relieve them of it.
+#
+# What this file adds is a SECOND, STRUCTURAL barrier: a positive attribute
+# ALLOWLIST. Anything not named is deleted, so a newly added field is dropped
+# by default rather than exported by default. A denylist fails open — it only
+# catches what someone thought of — and O-12 ("MUST NEVER be written to any
+# log, metric, trace, crash artifact, or diagnostic bundle at any log level, in
+# any build, INCLUDING debug builds") is not a property a denylist can have.
+#
+# The explicit forbidden-key filter in front of the allowlist is therefore not
+# redundant with it. The allowlist would silently delete a leaked key; the
+# filter DROPS THE WHOLE RECORD and increments a counter, so a service that
+# starts emitting tunnel payload is loud rather than quietly sanitised. A
+# silently sanitised leak is a leak nobody fixes.
+
+extensions:
+  # Readiness of the collector itself. Scraped by Prometheus rather than used
+  # as a container HEALTHCHECK, because this image contains no HTTP client.
+  health_check:
+    endpoint: "[::]:13133"
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        # Bound on all interfaces WITHIN the compose network only; the compose
+        # file publishes it to host loopback and nowhere else.
+        endpoint: "[::]:4317"
+        # limits.json envelope.c1_c2_c7_max_bytes = 65536. Telemetry is C7.
+        # An untrusted-input bound is enforced BEFORE any allocation
+        # proportional to a declared length (ownership.md rule 9); 4 MiB is the
+        # batch bound, and the per-record bound is the services' own.
+        max_recv_msg_size_mib: 4
+      http:
+        endpoint: "[::]:4318"
+
+  # The collector's own pipeline telemetry, so "the exporter is silently
+  # failing" is observable. ADR-0015 §8: loss of diagnostics must itself be a
+  # diagnosable event.
+  prometheus/self:
+    config:
+      scrape_configs:
+        - job_name: otelcol-self
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["[::1]:8888"]
+
+processors:
+  # ---------------------------------------------------------------------
+  # 1. memory_limiter FIRST.
+  #
+  # ADR-0015 §8: "a full buffer, a full disk, or a stalled export MUST never
+  # block, delay, or fail a packet-path or state-machine operation." A
+  # collector that OOMs and drops its whole queue is the same failure a step
+  # further out. It refuses new data rather than dying.
+  # ---------------------------------------------------------------------
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+
+  # ---------------------------------------------------------------------
+  # 2. FORBIDDEN KEYS — drop the record, loudly.
+  #
+  # These are ADR-0015 §11.4's SECRET class plus the SENSITIVE identifiers
+  # O-13 forbids infrastructure from retaining. A SECRET-classified field is
+  # supposed to have NO RENDERING PATH AT ALL, in any build; if one of these
+  # keys ever arrives here, a code path exists that should not, and that is a
+  # defect to surface rather than a value to scrub.
+  #
+  # `otelcol_processor_filter_*_filtered` counts every drop. The
+  # "observability leak" alert in infra/prometheus/prometheus.yml fires on it.
+  # ---------------------------------------------------------------------
+  filter/forbidden:
+    error_mode: ignore
+    traces:
+      span:
+        - >-
+          attributes["twinvpn.session_id"] != nil or
+          attributes["twinvpn.path_id"] != nil or
+          attributes["twinvpn.pair_tag"] != nil or
+          attributes["twinvpn.flow_id"] != nil or
+          attributes["twinvpn.device_id"] != nil or
+          attributes["twinvpn.identity_id"] != nil or
+          attributes["twinvpn.peer_id"] != nil or
+          attributes["twinvpn.owner_id"] != nil or
+          attributes["twinvpn.pairing_id"] != nil or
+          attributes["twinvpn.twinnet_id"] != nil
+        - >-
+          attributes["twinvpn.pair_secret"] != nil or
+          attributes["twinvpn.psk"] != nil or
+          attributes["twinvpn.private_key"] != nil or
+          attributes["twinvpn.session_key"] != nil or
+          attributes["twinvpn.leg_key"] != nil or
+          attributes["twinvpn.rlk"] != nil or
+          attributes["twinvpn.auth_token"] != nil or
+          attributes["authorization"] != nil or
+          attributes["cookie"] != nil
+        - >-
+          attributes["twinvpn.payload"] != nil or
+          attributes["twinvpn.packet"] != nil or
+          attributes["twinvpn.plaintext"] != nil or
+          attributes["twinvpn.dns_query_name"] != nil or
+          attributes["twinvpn.destination"] != nil or
+          attributes["http.request.body"] != nil or
+          attributes["exception.stacktrace"] != nil
+        - >-
+          attributes["twinvpn.endpoint"] != nil or
+          attributes["twinvpn.ssid"] != nil or
+          attributes["twinvpn.interface_name"] != nil or
+          attributes["net.peer.ip"] != nil or
+          attributes["net.peer.name"] != nil or
+          attributes["client.address"] != nil or
+          attributes["server.address"] != nil or
+          attributes["url.full"] != nil
+    logs:
+      log_record:
+        - >-
+          attributes["twinvpn.session_id"] != nil or
+          attributes["twinvpn.path_id"] != nil or
+          attributes["twinvpn.pair_tag"] != nil or
+          attributes["twinvpn.flow_id"] != nil or
+          attributes["twinvpn.device_id"] != nil or
+          attributes["twinvpn.identity_id"] != nil or
+          attributes["twinvpn.peer_id"] != nil or
+          attributes["twinvpn.owner_id"] != nil or
+          attributes["twinvpn.pairing_id"] != nil or
+          attributes["twinvpn.twinnet_id"] != nil
+        - >-
+          attributes["twinvpn.pair_secret"] != nil or
+          attributes["twinvpn.psk"] != nil or
+          attributes["twinvpn.private_key"] != nil or
+          attributes["twinvpn.session_key"] != nil or
+          attributes["twinvpn.leg_key"] != nil or
+          attributes["twinvpn.rlk"] != nil or
+          attributes["twinvpn.auth_token"] != nil or
+          attributes["authorization"] != nil or
+          attributes["cookie"] != nil
+        - >-
+          attributes["twinvpn.payload"] != nil or
+          attributes["twinvpn.packet"] != nil or
+          attributes["twinvpn.plaintext"] != nil or
+          attributes["twinvpn.dns_query_name"] != nil or
+          attributes["twinvpn.destination"] != nil or
+          attributes["exception.stacktrace"] != nil
+        - >-
+          attributes["twinvpn.endpoint"] != nil or
+          attributes["twinvpn.ssid"] != nil or
+          attributes["twinvpn.interface_name"] != nil or
+          attributes["net.peer.ip"] != nil or
+          attributes["net.peer.name"] != nil or
+          attributes["client.address"] != nil or
+          attributes["server.address"] != nil
+    metrics:
+      # Per-Session, per-Device, per-peer and per-endpoint LABELS are forbidden
+      # on infrastructure metrics — for privacy first (O-13) and for
+      # cardinality second (ADR-0015 §9).
+      datapoint:
+        - >-
+          attributes["twinvpn.session_id"] != nil or
+          attributes["twinvpn.path_id"] != nil or
+          attributes["twinvpn.pair_tag"] != nil or
+          attributes["twinvpn.flow_id"] != nil or
+          attributes["twinvpn.device_id"] != nil or
+          attributes["twinvpn.peer_id"] != nil or
+          attributes["twinvpn.twinnet_id"] != nil or
+          attributes["twinvpn.endpoint"] != nil
+
+  # ---------------------------------------------------------------------
+  # 3. O-13 — the relay must not hold the peer graph.
+  #
+  # "A relay sees both ends of a RELAYED session by necessity; if it LOGS
+  # that, it holds the peer graph, defeating I1 in metadata even though it
+  # never sees plaintext." Relay per-session debugging is DELIBERATELY
+  # IMPOSSIBLE and ADR-0015 §13 records that as accepted cost.
+  #
+  # §11.1 additionally forbids propagating trace context across a relay. A
+  # relay span with a remote parent means context crossed; the link is severed
+  # here so that a mis-instrumented relay cannot stitch two peers into one
+  # trace even if it tries.
+  # ---------------------------------------------------------------------
+  transform/relay-severs-context:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          - set(parent_span_id, SpanID(0x0000000000000000)) where resource.attributes["service.name"] == "twinvpn-relay"
+          - delete_key(attributes, "twinvpn.correlation_id") where resource.attributes["service.name"] == "twinvpn-relay"
+          - delete_key(attributes, "twinvpn.causation_id") where resource.attributes["service.name"] == "twinvpn-relay"
+          - delete_key(attributes, "twinvpn.message_id") where resource.attributes["service.name"] == "twinvpn-relay"
+
+  # ---------------------------------------------------------------------
+  # 4. ADR-0018 VR-2 consequence 3 — abi_* is OMITTED from Tier-2.
+  #
+  # "An ABI pair is build-identifying and has no aggregate meaning." VR-2
+  # consequence 1 permits abi_* in a Tier-1 diagnostic bundle and in
+  # CoreBuildIdentity; consequence 3 forbids it in Tier-2 aggregate telemetry.
+  # Both are true at once, so the strip is scoped to the aggregate pipeline
+  # rather than applied globally — a global delete would break the legitimate
+  # Tier-1 use and would be the same category error VR-2's clarification was
+  # written to end.
+  # ---------------------------------------------------------------------
+  attributes/tier2-strip-abi:
+    actions:
+      - key: twinvpn.abi_major
+        action: delete
+      - key: twinvpn.abi_minor
+        action: delete
+      - key: twinvpn.core_version
+        action: delete
+      - key: twinvpn.source_commit
+        action: delete
+      - key: twinvpn.target_triple
+        action: delete
+      - key: twinvpn.schema_digest
+        action: delete
+      - key: service.instance.id
+        action: delete
+
+  # Tier 2 is "coarse, IDENTIFIER-FREE, k-anonymous counters" over exactly
+  # {reason_code, outcome, address_family, nat_class, protocol_version,
+  # platform_class, day_bucket} (§11.1). Anything finer than a day bucket is a
+  # correlation handle, so it is refused rather than rounded.
+  filter/tier2-tuple-only:
+    error_mode: ignore
+    metrics:
+      datapoint:
+        - >-
+          attributes["twinvpn.day_bucket"] == nil
+
+  # The mirror of the above, so a Tier-2 submission cannot also land in the
+  # infrastructure metrics pipeline. The two pipelines share one receiver, and
+  # a datapoint belonging to both would be counted twice AND would carry
+  # build-identifying attributes into the aggregate view.
+  filter/not-tier2:
+    error_mode: ignore
+    metrics:
+      datapoint:
+        - >-
+          attributes["twinvpn.day_bucket"] != nil
+
+  # ---------------------------------------------------------------------
+  # 5. THE ALLOWLIST. Everything not named here is deleted.
+  #
+  # `allow_all_keys: false` is the whole security property of this file. A
+  # field added to a service tomorrow, with no classification and nobody's
+  # review, does not reach a backend.
+  #
+  # `blocked_values` is a second net over the values of ALLOWED keys, for the
+  # case where a key survives the allowlist but its value is key-shaped —
+  # long base64 or long hex. It is deliberately the WEAKEST control here
+  # (pattern matching over rendered values is exactly what O-14 says must not
+  # be the primary mechanism), and it is present only as a backstop.
+  # ---------------------------------------------------------------------
+  redaction/allowlist:
+    allow_all_keys: false
+    allowed_keys:
+      # --- provenance (ADR-0018 S-46 CoreBuildIdentity) -----------------
+      - service.name
+      - service.version
+      - service.instance.id
+      - deployment.environment
+      - twinvpn.observability_tier
+      - twinvpn.component
+      - twinvpn.core_version
+      - twinvpn.protocol_epoch
+      - twinvpn.schema_digest
+      - twinvpn.reason_registry_version
+      - twinvpn.crypto_provider
+      - twinvpn.profile
+      - twinvpn.target_triple
+      - twinvpn.source_commit
+      # abi_major / abi_minor are permitted on Tier-1 bundles and in
+      # CoreBuildIdentity (VR-2 consequence 1) and stripped on the Tier-2
+      # pipeline (consequence 3). They are NOT branched on by any receiver
+      # (consequence 4) — no processor below reads them.
+      - twinvpn.abi_major
+      - twinvpn.abi_minor
+      # --- CORRELATION AND CAUSATION, PRESERVED END TO END ---------------
+      # These are the PROTOCOL correlation from MessageMetadata
+      # (contracts/proto/twinvpn/v1/common.proto): correlation_id answers
+      # "what is this a reply to", causation_id answers "what made this
+      # happen". errors.proto notes the deliberate difference from ADR-0015
+      # §11.3's LOCAL ledger correlation_id, which is SENSITIVE and never
+      # leaves the device: this is the wire linkage, which is already on the
+      # wire and therefore leaks nothing new.
+      #
+      # They are allowlisted at EVERY hop so a causal chain survives
+      # control-plane -> rendezvous -> presence -> relay-directory. The relay
+      # is the ONE exception, severed above under O-13.
+      - twinvpn.correlation_id
+      - twinvpn.causation_id
+      - twinvpn.message_id
+      - twinvpn.idempotency_key
+      # --- reason code and its registry attributes (ADR-0015 §11.2) -------
+      # Rule 5: a carrier MUST transmit the registry attributes for
+      # UNRECOGNISED codes as well as known ones, because prefix alone is
+      # insufficient to choose a correct affordance. All of them are here.
+      - twinvpn.reason_code
+      - twinvpn.reason_domain
+      - twinvpn.reason_class
+      - twinvpn.severity
+      - twinvpn.terminal
+      - twinvpn.user_actionable
+      - twinvpn.remediation_class
+      - twinvpn.scope
+      - twinvpn.doc_anchor
+      - twinvpn.evidence_key
+      # NOTE there is deliberately no `summary`, `message` or `title` key.
+      # ADR-0015 §11.2 rule 5: a carrier MUST NOT add a localized text field,
+      # because that places a second text authority outside the registry and
+      # defeats rule 4 ("the code is the contract; the human text is not").
+      # --- the §9 Prometheus label allowlist, verbatim -------------------
+      - twinvpn.relay_region
+      - twinvpn.protocol_version
+      - twinvpn.outcome
+      - twinvpn.address_family
+      # --- aggregate-only dimensions (§11.1 Tier-2 tuple) ----------------
+      - twinvpn.nat_class
+      - twinvpn.nat_class_local
+      - twinvpn.nat_class_remote
+      - twinvpn.platform_class
+      - twinvpn.day_bucket
+      # --- state machine (O-05 TransitionEvent) --------------------------
+      - twinvpn.state_from
+      - twinvpn.state_to
+      - twinvpn.trigger
+      - twinvpn.connection_state
+      # --- transport and relay shape (ADR-0002 §11.2, ADR-0005 §11.4) ----
+      - twinvpn.transport_rung
+      - twinvpn.carriage
+      - twinvpn.failure_domain
+      - twinvpn.admin_state
+      - twinvpn.load_class
+      - twinvpn.health_state
+      # --- observability self-reporting (ADR-0015 §8) --------------------
+      - twinvpn.dropped_events
+      - twinvpn.ring
+      # --- narrow semconv: status codes only, never addresses or URLs ----
+      - http.request.method
+      - http.response.status_code
+      - rpc.system
+      - rpc.method
+      - rpc.grpc.status_code
+      - error.type
+      - exception.type
+      - otel.status_code
+      # `exception.message` and `exception.stacktrace` are ABSENT on purpose:
+      # a VPN process's exception text can contain packet buffers and key
+      # material, which is why ADR-0015 §7 makes crash reporting opt-in,
+      # stacks-and-registers only, with those regions dump-excluded.
+    blocked_values:
+      # Long base64 — key material, tokens, COSE blobs.
+      - "[A-Za-z0-9+/]{40,}={0,2}"
+      # Long hex — digests, raw keys, identifiers.
+      - "(?i)\\b[0-9a-f]{64,}\\b"
+      # Bearer/Basic credentials in any surviving string.
+      - "(?i)(bearer|basic)\\s+[A-Za-z0-9._~+/-]+=*"
+      # Anything that looks like a PEM block.
+      - "-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    summary: debug
+
+  resource/environment:
+    attributes:
+      - key: deployment.environment
+        value: ${env:TWINVPN_ENVIRONMENT}
+        action: upsert
+
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+    send_batch_max_size: 1024
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 60s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 60s
+
+  prometheus:
+    endpoint: "[::]:8889"
+    # Resource attributes become a single `target_info` series rather than
+    # being copied onto every metric, which is what keeps the §9 cardinality
+    # discipline true in practice.
+    resource_to_telemetry_conversion:
+      enabled: false
+    enable_open_metrics: true
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+      encoding: json
+    metrics:
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: "::"
+                port: 8888
+  pipelines:
+
+    # -----------------------------------------------------------------
+    # Infrastructure traces. Internal spans that TERMINATE AT THE
+    # COMPONENT BOUNDARY (§11.1). No client is upstream of this pipeline.
+    # -----------------------------------------------------------------
+    traces:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - filter/forbidden
+        - transform/relay-severs-context
+        - redaction/allowlist
+        - resource/environment
+        - batch
+      exporters: [otlp/tempo]
+
+    # -----------------------------------------------------------------
+    # Infrastructure metrics. ADR-0015 §11.7: "Relays export aggregate
+    # throughput, session counts, capacity, and reason_code histograms —
+    # never a per-session or peer-pair label (O-13)."
+    # -----------------------------------------------------------------
+    metrics:
+      receivers: [otlp, prometheus/self]
+      processors:
+        - memory_limiter
+        - filter/not-tier2
+        - filter/forbidden
+        - redaction/allowlist
+        - resource/environment
+        - batch
+      exporters: [prometheus]
+
+    # -----------------------------------------------------------------
+    # Tier-2 AGGREGATE telemetry.
+    #
+    # This pipeline is here so that the aggregation service ADR-0015 §10
+    # requires is configured by THIS file rather than by a second one that
+    # drifts. It is the same allowlist plus two extra constraints:
+    # abi_*/build provenance stripped (ADR-0018 VR-2 consequence 3) and
+    # nothing finer than a day bucket admitted (§11.1).
+    #
+    # Nothing in the local compose topology feeds it — Tier 2 is a CLIENT
+    # channel, off by default, opt-in — and it is wired to the same
+    # Prometheus so that a submission arriving here is visible rather than
+    # silently accepted.
+    # -----------------------------------------------------------------
+    metrics/tier2-aggregate:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - filter/tier2-tuple-only
+        - filter/forbidden
+        - attributes/tier2-strip-abi
+        - redaction/allowlist
+        - batch
+      exporters: [prometheus]
+
+    # -----------------------------------------------------------------
+    # Structured logs. ADR-0015 §11.5: no level, in any build, may emit
+    # SECRET, and per-packet logging does not exist at any level.
+    # -----------------------------------------------------------------
+    logs:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - filter/forbidden
+        - redaction/allowlist
+        - resource/environment
+        - batch
+      exporters: [otlphttp/loki]

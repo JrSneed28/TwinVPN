@@ -14,6 +14,36 @@ name: contract gate
 # so this workflow runs on every change to the repository, not only on changes
 # under contracts/: a change elsewhere that assumes a contract shape must still
 # be checked against the frozen contract.
+#
+# ---------------------------------------------------------------------------
+# TIER MAPPING (added by `infrastructure`; no step below was changed).
+# ---------------------------------------------------------------------------
+# This workflow is TIER 1 in docs/testing-strategy.md §6.1's sense: it runs on
+# every PR push and every commit on main, it blocks MERGE, and it needs no lab
+# and no real hardware. Its 20-minute `timeout-minutes` sits inside T1's hard
+# fail at 25 min.
+#
+# Within §6.2's T1 contents it supplies LEVELS 3 AND 4:
+#
+#   level 3  protocol / golden vectors  -> `make test-contracts`
+#   level 4  contract: schema diff, producer/consumer, `reason_code` registry
+#            append-only + completeness
+#            -> `make contracts`, the staleness check, both breaking-change
+#               checks, `check_registry_append_only.py`, `make verify-bindings`
+#
+# It also carries two of §6.5's release blockers as merge blockers, which is
+# stronger than the tier table requires and is correct: B-4 (a non-append-only
+# `reason_code` registry diff, or a registered code missing a required
+# attribute) and B-5 (a breaking schema diff without the ProtocolVersion bump
+# ADR-0014 requires).
+#
+# The remaining T1 contents live in sibling workflows, so that a failure names
+# its own domain: `rust-t1.yml` (levels 1, 2, 14-short and the ADR-0018
+# architectural lints), `supply-chain-t1.yml` (ADR-0018 DP-6), and
+# `infra-t1.yml` (the compose topology and the redaction lint §6.2 names).
+#
+# NOTHING IN THIS FILE WAS WEAKENED, REORDERED OR REMOVED. It is the contract
+# freeze gate; extending it means adding a sibling lane, not editing this one.
 
 on:
   push:

@@ -1,0 +1,30 @@
+# Base image digest pins — ADR-0018 §11.10 (BM-6) and §11.11 (DP-1, DP-2).
+#
+# A tag is mutable; a digest is not. Everything below is pinned to an exact
+# version tag for readability and, once resolved, to a sha256 digest for
+# reproducibility. `docker-compose.yml` and the CI infra lane read this file and
+# pass the digest-qualified references in as build args.
+#
+# ===========================================================================
+# THE DIGEST FIELDS ARE DELIBERATELY EMPTY.
+# ===========================================================================
+# They are resolved by `build/verify/pin-base-images.sh` on a host with
+# registry access. They are NOT filled in by hand and were NOT invented here:
+# a fabricated digest is strictly worse than an honest tag, because it reads as
+# a pin, passes review as a pin, and pins nothing.
+#
+# Until they are resolved, image builds run against the tags. That is a real,
+# named reproducibility gap, not a silent one — `build/verify/check-budgets.py`
+# reports it and the infra CI lane fails when TWINVPN_REQUIRE_IMAGE_DIGESTS=1.
+#
+# Format: <key> <tag> <digest-or-empty>
+
+rust        docker.io/library/rust:1.90.0-bookworm
+runtime     gcr.io/distroless/cc-debian12:nonroot
+busybox     docker.io/library/busybox:1.37.0-musl
+postgres    docker.io/library/postgres:17.2-bookworm
+otelcol     docker.io/otel/opentelemetry-collector-contrib:0.116.1
+prometheus  docker.io/prom/prometheus:v3.1.0
+tempo       docker.io/grafana/tempo:2.7.0
+loki        docker.io/grafana/loki:3.3.2
+grafana     docker.io/grafana/grafana:11.4.0

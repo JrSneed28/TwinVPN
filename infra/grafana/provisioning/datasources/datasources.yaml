@@ -1,0 +1,78 @@
+apiVersion: 1
+
+# Provisioned datasources. No credentials appear here and none are needed:
+# every backend is reachable only on the compose network and Grafana itself is
+# published on host loopback with anonymous Viewer access and the login form
+# disabled. There is therefore no credential to leak from this file, which is
+# the point — a "temporary" admin password in a provisioning file is how a real
+# credential ends up in a repository.
+
+datasources:
+
+  - name: Prometheus
+    uid: twinvpn-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
+      exemplarTraceIdDestinations:
+        # Exemplars link a metric datapoint to an infrastructure trace. That is
+        # a WITHIN-COMPONENT link only: ADR-0015 §11.1 terminates infrastructure
+        # traces at the component boundary, so following one can never walk
+        # from a relay to a peer.
+        - name: trace_id
+          datasourceUid: twinvpn-tempo
+
+  - name: Tempo
+    uid: twinvpn-tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      # Service map is DISABLED. `serviceMap` renders the cross-component graph
+      # ADR-0015 §6 rejected Alternative A over; Tempo's generator that would
+      # feed it is also off in infra/tempo/tempo.yaml. Two places, because one
+      # of them will be the one someone re-enables.
+      tracesToLogsV2:
+        datasourceUid: twinvpn-loki
+        spanStartTimeShift: -2m
+        spanEndTimeShift: 2m
+        filterByTraceID: true
+        filterBySpanID: false
+        tags:
+          - key: service.name
+            value: service_name
+      tracesToMetrics:
+        datasourceUid: twinvpn-prometheus
+        tags:
+          - key: service.name
+            value: service_name
+      nodeGraph:
+        enabled: false
+      search:
+        hide: false
+
+  - name: Loki
+    uid: twinvpn-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      maxLines: 2000
+      derivedFields:
+        # Structured logs carry the PROTOCOL correlation from MessageMetadata.
+        # This is what makes a causal chain followable across the four service
+        # domains without any of them inventing its own linkage field — the
+        # R-31 divergence class, closed by naming the fields once.
+        - name: correlation_id
+          matcherRegex: '"twinvpn.correlation_id":"([^"]+)"'
+          url: ''
+        - name: causation_id
+          matcherRegex: '"twinvpn.causation_id":"([^"]+)"'
+          url: ''
+        - name: reason_code
+          matcherRegex: '"twinvpn.reason_code":"([^"]+)"'
+          url: ''

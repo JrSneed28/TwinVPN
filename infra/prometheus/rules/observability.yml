@@ -1,0 +1,142 @@
+# Rules that make the observability system's own failures observable.
+#
+# ADR-0015 §8: "A full buffer, a full disk, or a stalled export MUST never
+# block, delay, or fail a packet-path or state-machine operation ... with an
+# explicit drop policy and a `dropped_events` counter SO THAT LOSS IS ITSELF
+# OBSERVABLE." architecture.md §2.19 says the same from the other side: "Silent
+# loss of diagnostics is itself a diagnosable event."
+#
+# Everything here is derived from an ADR. Nothing here is a threshold someone
+# liked the look of; where a number comes from an ADR it cites it, and where
+# no ADR gives one the rule is expressed as a rate change rather than an
+# absolute, so it does not encode an invented budget.
+
+groups:
+
+  - name: twinvpn-observability-integrity
+    interval: 30s
+    rules:
+
+      # ==================================================================
+      # THE ONE THAT MATTERS MOST.
+      #
+      # The collector's `filter/forbidden` drops a record ENTIRELY when it
+      # carries a SECRET- or forbidden-SENSITIVE-classified attribute. Under
+      # ADR-0015 O-12 and §7 those fields are supposed to have NO CODE PATH AT
+      # ALL, in any build. So a non-zero rate here is not "the filter is
+      # working" — it is "a service is emitting something that should be
+      # unrepresentable", which is a security defect in that service.
+      # ==================================================================
+      - alert: TwinVPNObservabilityForbiddenAttributeObserved
+        expr: |
+          sum by (job) (
+            rate(otelcol_processor_filter_spans_filtered_total{processor="filter/forbidden"}[5m])
+          ) > 0
+          or
+          sum by (job) (
+            rate(otelcol_processor_filter_logs_filtered_total{processor="filter/forbidden"}[5m])
+          ) > 0
+          or
+          sum by (job) (
+            rate(otelcol_processor_filter_datapoints_filtered_total{processor="filter/forbidden"}[5m])
+          ) > 0
+        for: 1m
+        labels:
+          severity: critical
+          twinvpn_invariant: I1
+        annotations:
+          summary: "A service emitted an attribute ADR-0015 O-12 says cannot exist"
+          description: >-
+            The collector's forbidden-key filter dropped a record. O-12 makes
+            tunnel plaintext, key material, pairing secrets and peer-pair
+            identifiers unrepresentable in any tier, in any build. This firing
+            means a code path exists that emits one. Find the emitting service
+            from `service.name` in the collector's debug summary and treat it
+            as a security defect, not as a telemetry configuration problem.
+
+      # ==================================================================
+      # ADR-0015 §8: a full ring drops events, and the drop must be visible.
+      # ==================================================================
+      - alert: TwinVPNObservabilityEventsDropped
+        expr: sum by (twinvpn_service) (rate(twinvpn_observability_dropped_events_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tier-0 ring is dropping events on {{ $labels.twinvpn_service }}"
+          description: >-
+            An incident whose root cause scrolled out of the buffer is
+            undiagnosable (ADR-0015 §8). The significant-events ring should
+            still hold the skeleton; if it is also dropping, forensic reach is
+            gone and the ring sizing is wrong for this load.
+
+      # ==================================================================
+      # A stalled exporter is the "telemetry outage looks like a network
+      # outage" failure ADR-0015 §8 warns about. It must never influence
+      # recovery decisions, so it is surfaced separately and loudly.
+      # ==================================================================
+      - alert: TwinVPNTelemetryExportFailing
+        expr: |
+          sum by (exporter) (rate(otelcol_exporter_send_failed_spans_total[5m])) > 0
+          or
+          sum by (exporter) (rate(otelcol_exporter_send_failed_metric_points_total[5m])) > 0
+          or
+          sum by (exporter) (rate(otelcol_exporter_send_failed_log_records_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Collector exporter {{ $labels.exporter }} is failing"
+          description: >-
+            Observability is a strict dependency-inverted consumer (ADR-0015
+            §8). This must not affect any Session; if it correlates with a
+            service degradation, the causation is the other way round.
+
+  - name: twinvpn-service-availability
+    interval: 30s
+    rules:
+
+      - alert: TwinVPNServiceDown
+        expr: up{job="twinvpn-services"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.twinvpn_service }} is not scrapeable"
+          description: >-
+            Note what this does and does not mean. architecture.md §2.8 makes
+            a control-plane outage A SUPPORTED OPERATING MODE: established
+            Sessions continue (I5), and only new pairings, policy changes,
+            revocations and first contact degrade. A relay being down is a
+            MIGRATING transition for its peers, not a Session teardown (R-10).
+            Neither is a user-visible outage on its own.
+
+      # ==================================================================
+      # ADR-0006 §11.1 rule 3 and architecture.md A-13: a region must publish
+      # >=2 ACTIVE relays in >=2 failure domains. A cached set of size 1 is
+      # named a DESIGN ERROR in architecture.md §2.12.
+      # ==================================================================
+      - alert: TwinVPNRelayAlternatesInsufficient
+        expr: count by (relay_region) (up{twinvpn_service="relay"} == 1) < 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Region {{ $labels.relay_region }} is below the 2-alternate floor"
+          description: >-
+            ADR-0006 §11.1 rule 3 refuses a RelayMap that drops a region with
+            live sessions below 2 ACTIVE relays in >=2 failure_domains, and
+            devices emit RELAY.SELECT.ALTERNATES_INSUFFICIENT and keep the
+            prior map. Failover in this region is not currently possible.
+
+      - alert: TwinVPNRelayFailureDomainsInsufficient
+        expr: count by (relay_region) (count by (relay_region, failure_domain) (up{twinvpn_service="relay"} == 1)) < 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Region {{ $labels.relay_region }} has fewer than 2 live failure domains"
+          description: >-
+            RELAY_STANDBY_READY (ADR-0005 §11.6) requires a bound half-flow on
+            a relay in a DIFFERENT failure domain. With one domain live, the
+            warm standby is not a standby.

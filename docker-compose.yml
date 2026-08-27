@@ -1,0 +1,791 @@
+# TwinVPN — local development orchestration for the control and relay planes.
+#
+# Owner: `infrastructure` (docs/implementation/ownership.md §2).
+#
+# ===========================================================================
+# WHAT THIS IS
+# ===========================================================================
+# The six server-side artifacts in /services, their backing store, and the
+# observability stack ADR-0015 §11.1 permits on the infrastructure side —
+# brought up as the topology the ADRs actually specify, so that the moment a
+# service gains behaviour it has somewhere real to run.
+#
+# ===========================================================================
+# WHAT IT IS NOT
+# ===========================================================================
+# It is not a production deployment and it is not a topology decision. Every
+# port, dependency edge and default below cites the ADR it comes from. Where a
+# value is an infrastructure-lead choice rather than an ADR one — the admin
+# listener port, the host-side published ports, the compose network prefixes —
+# it says so, in the same way docs/implementation/ownership.md §1 records
+# `services/` as a decision rather than an ADR.
+#
+# ===========================================================================
+# ADDRESS FAMILIES
+# ===========================================================================
+# ADR-0010 R1 is one story covering IPv4 and IPv6, and a v4-only compose file
+# makes every v6 defect invisible until production. The default network is
+# therefore DUAL STACK. Two overrides exist and are part of the deliverable,
+# not an afterthought:
+#
+#   docker compose -f docker-compose.yml -f infra/compose/ipv6-only.yml up
+#   docker compose -f docker-compose.yml -f infra/compose/ipv4-only.yml up
+#
+# The v4-only override exists as the CONTROL for the v6-only run, not as a
+# supported operating mode — see infra/README.md.
+#
+# ===========================================================================
+# CURRENT REALITY, STATED PLAINLY
+# ===========================================================================
+# The six service binaries are skeletons: they print a line and exit 1. Their
+# containers will therefore start, exit 1, and — because `restart` is "no" —
+# stay exited rather than crash-looping. Anything with a
+# `condition: service_healthy` edge onto them will not start at all. That is
+# correct and visible, and it is what this file is for: the environment is
+# ready before the behaviour is.
+#
+# The stores and the observability stack come up fully today:
+#   docker compose up -d postgres otel-collector prometheus tempo loki grafana
+
+name: twinvpn
+
+# ---------------------------------------------------------------------------
+# Shared fragments.
+#
+# One definition per decision. Six copies of a logging block is the same
+# divergence class `twinvpn-service-common` exists to prevent (ADR-0018 CB-2).
+# ---------------------------------------------------------------------------
+x-service-defaults: &service-defaults
+  build:
+    context: .
+    dockerfile: infra/docker/Dockerfile.service
+    args:
+      RUST_IMAGE: ${TWINVPN_RUST_IMAGE:-docker.io/library/rust:1.90.0-bookworm}
+      RUNTIME_IMAGE: ${TWINVPN_RUNTIME_IMAGE:-gcr.io/distroless/cc-debian12:nonroot}
+      BUSYBOX_IMAGE: ${TWINVPN_BUSYBOX_IMAGE:-docker.io/library/busybox:1.37.0-musl}
+      SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-1756252800}
+      SOURCE_COMMIT: ${TWINVPN_SOURCE_COMMIT:-unknown}
+  # A skeleton that exits 1 must stay exited and visible. A restart policy here
+  # would convert "not implemented" into a crash loop that fills the log with
+  # the same line and hides the next failure.
+  restart: "no"
+  init: false
+  stop_signal: SIGTERM
+  # ADR-0002 §11.7 rule 1 makes a planned control-plane restart a 120 s DRAIN.
+  # The container grace period must exceed the drain deadline or Docker will
+  # SIGKILL a service in the middle of its own graceful shutdown, which is
+  # precisely the ungraceful shutdown the drain exists to avoid.
+  stop_grace_period: 130s
+  # No new privileges, all capabilities dropped, read-only root. The service
+  # writes nothing to disk: Tier-0 is an in-memory ring (ADR-0015 C-6) and the
+  # durable state is Postgres.
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  cap_add:
+    # The ADRs bind the device-facing surfaces to 443 (ADR-0002 §11.2) and
+    # 41641 (ADR-0005 §11.4). Each service has its own network namespace, so
+    # each binds the ADR port on its own address and no port is invented here.
+    # Binding <1024 needs this one capability; the process still runs as
+    # uid 65532 and never as root.
+    - NET_BIND_SERVICE
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=16m
+  networks:
+    - twinvpn
+  environment: &service-env
+    # --- identity and environment ---------------------------------------
+    TWINVPN_ENVIRONMENT: ${TWINVPN_ENVIRONMENT:-local}
+    # --- logging (ADR-0015 §11.5) ---------------------------------------
+    # DEBUG and TRACE are auto-expiring by design; TWINVPN_LOG_LEVEL_EXPIRY_MS
+    # is the bound. No level, in any build, may emit SECRET (§11.4).
+    TWINVPN_LOG_LEVEL: ${TWINVPN_LOG_LEVEL:-info}
+    TWINVPN_LOG_FORMAT: ${TWINVPN_LOG_FORMAT:-json}
+    TWINVPN_LOG_LEVEL_EXPIRY_MS: ${TWINVPN_LOG_LEVEL_EXPIRY_MS:-3600000}
+    # --- admin listener --------------------------------------------------
+    TWINVPN_ADMIN_ADDR: ${TWINVPN_ADMIN_ADDR:-[::]:9090}
+    TWINVPN_HEALTHCHECK_URL: http://127.0.0.1:9090/readyz
+    # --- shutdown (ownership.md rule 7) ----------------------------------
+    TWINVPN_SHUTDOWN_GRACE_MS: ${TWINVPN_SHUTDOWN_GRACE_MS:-120000}
+    TWINVPN_SHUTDOWN_DRAIN_DEADLINE_MS: ${TWINVPN_SHUTDOWN_DRAIN_DEADLINE_MS:-120000}
+    # --- address families (ADR-0010 R1) ----------------------------------
+    TWINVPN_ADDRESS_FAMILIES: ${TWINVPN_ADDRESS_FAMILIES:-dual}
+    TWINVPN_HAPPY_EYEBALLS_V6_BIAS_MS: ${TWINVPN_HAPPY_EYEBALLS_V6_BIAS_MS:-250}
+    # --- OpenTelemetry ---------------------------------------------------
+    # ADR-0015 §11.1: OTel as an INTERNAL, INFRASTRUCTURE-SIDE instrumentation
+    # library is permitted; OTel as an end-to-end client-to-backend pipeline is
+    # rejected. Nothing here receives client telemetry.
+    TWINVPN_OTEL_ENABLED: ${TWINVPN_OTEL_ENABLED:-true}
+    OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+    OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+    OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}
+    OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
+    OTEL_RESOURCE_ATTRIBUTES: >-
+      deployment.environment=${TWINVPN_ENVIRONMENT:-local},twinvpn.observability_tier=infrastructure
+    # --- untrusted-input bounds (contracts/registry/limits.json) ---------
+    # Named here so a service reads its bound from configuration rather than a
+    # constant nobody can find. ownership.md rule 9.
+    TWINVPN_LIMITS_PATH: /contracts/registry/limits.json
+    TWINVPN_REASON_CODES_PATH: /contracts/registry/reason_codes.json
+  volumes:
+    # The frozen registries, read-only. Validation of untrusted input is against
+    # limits.json (ownership.md rule 9) and every emitted reason_code must exist
+    # in reason_codes.json (ownership.md rule 12).
+    - type: bind
+      source: ./contracts/registry
+      target: /contracts/registry
+      read_only: true
+  logging: &service-logging
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+x-observability-defaults: &observability-defaults
+  restart: unless-stopped
+  networks:
+    - twinvpn
+  security_opt:
+    - no-new-privileges:true
+  logging: *service-logging
+
+# The two relays differ by exactly three facts — relay_id, failure_domain, and
+# which host ports they publish. Everything else is one definition, so the
+# fleet cannot drift apart by editing one and forgetting the other.
+x-relay-defaults: &relay-defaults
+  <<: *service-defaults
+  build:
+    context: .
+    dockerfile: infra/docker/Dockerfile.service
+    args:
+      SERVICE: relay
+      RUST_IMAGE: ${TWINVPN_RUST_IMAGE:-docker.io/library/rust:1.90.0-bookworm}
+      RUNTIME_IMAGE: ${TWINVPN_RUNTIME_IMAGE:-gcr.io/distroless/cc-debian12:nonroot}
+      BUSYBOX_IMAGE: ${TWINVPN_BUSYBOX_IMAGE:-docker.io/library/busybox:1.37.0-musl}
+      SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-1756252800}
+      SOURCE_COMMIT: ${TWINVPN_SOURCE_COMMIT:-unknown}
+  depends_on:
+    otel-collector:
+      condition: service_started
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  twinvpn:
+    name: twinvpn
+    driver: bridge
+    enable_ipv6: true
+    driver_opts:
+      com.docker.network.bridge.name: br-twinvpn
+    ipam:
+      driver: default
+      config:
+        # Infrastructure-lead choices, both deliberately outside the ranges the
+        # product owns. ADR-0010 §11 fixes the TwinNet OVERLAY plan at
+        # 100.64.0.0/10 (v4) and fd7c:9e5d:2a10::/48 (the product ULA); the
+        # compose network is UNDERLAY and must not collide with either, or a
+        # local run would silently exercise an address plan the product forbids.
+        - subnet: 172.31.240.0/24
+          gateway: 172.31.240.1
+        - subnet: fd00:7717:1::/64
+          gateway: fd00:7717:1::1
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  tempo-data:
+  loki-data:
+  grafana-data:
+
+services:
+
+  # =========================================================================
+  # BACKING STORE
+  # =========================================================================
+  # ADR-0002 B-3: "the log is a table" — the per-TwinNet append-only `event`
+  # relation lives in the SAME transactional store as control-plane state, and
+  # `net_seq` is allocated inside the mutating transaction (N-3). There is
+  # therefore no broker in this topology, and N-7 forbids exposing one to a
+  # device even if there were.
+  #
+  # The internal fan-out bus (N-6) carries only {twinnet_id, net_seq,
+  # revocation_epoch} watermarks. It is Postgres LISTEN/NOTIFY here: it is the
+  # smallest thing that satisfies N-6, it adds no component to breach, and
+  # adding a broker would be inventing topology the ADR did not ask for.
+  postgres:
+    image: ${TWINVPN_POSTGRES_IMAGE:-docker.io/library/postgres:17.2-bookworm}
+    <<: *observability-defaults
+    environment:
+      # NO SECRET HAS A DEFAULT. `:?` makes an unset password a startup error
+      # with a readable message, never a silent fallback to a known value.
+      POSTGRES_PASSWORD: ${TWINVPN_PG_PASSWORD:?TWINVPN_PG_PASSWORD must be set - copy infra/.env.example to .env and choose a value}
+      POSTGRES_USER: ${TWINVPN_PG_USER:-twinvpn}
+      POSTGRES_DB: ${TWINVPN_PG_DATABASE:-twinvpn_control}
+      # Deterministic collation so a local run and CI sort identically.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      TWINVPN_PG_EXTRA_DATABASES: twinvpn_presence,twinvpn_relay_directory
+    command:
+      - postgres
+      # LISTEN/NOTIFY needs no tuning; these are the two that matter for the
+      # single-writer-per-TwinNet lease (ADR-0002 N-4).
+      - -c
+      - max_connections=200
+      - -c
+      - listen_addresses=*
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - type: bind
+        source: ./infra/postgres/initdb
+        target: /docker-entrypoint-initdb.d
+        read_only: true
+    ports:
+      # Host publication is DEVELOPMENT ONLY and is bound to loopback in both
+      # families so the store is never reachable from the LAN.
+      - "127.0.0.1:15432:5432"
+      - "[::1]:15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TWINVPN_PG_USER:-twinvpn} -d ${TWINVPN_PG_DATABASE:-twinvpn_control} -q"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # =========================================================================
+  # CONTROL PLANE — architecture.md §2.8, ADR-0002
+  # =========================================================================
+  control-plane:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.service
+      args:
+        SERVICE: control-plane
+        RUST_IMAGE: ${TWINVPN_RUST_IMAGE:-docker.io/library/rust:1.90.0-bookworm}
+        RUNTIME_IMAGE: ${TWINVPN_RUNTIME_IMAGE:-gcr.io/distroless/cc-debian12:nonroot}
+        BUSYBOX_IMAGE: ${TWINVPN_BUSYBOX_IMAGE:-docker.io/library/busybox:1.37.0-musl}
+        SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-1756252800}
+        SOURCE_COMMIT: ${TWINVPN_SOURCE_COMMIT:-unknown}
+    hostname: control-plane
+    environment:
+      <<: *service-env
+      TWINVPN_SERVICE_NAME: control-plane
+      OTEL_SERVICE_NAME: twinvpn-control-plane
+      # --- the transport ladder, ADR-0002 §11.2 -------------------------
+      # Rung 1 QUIC+HTTP/3 on UDP:443; rungs 2-4 TLS on TCP:443. Both bind ::
+      # so the one listener serves both families (v4-mapped), which is what
+      # makes "one story covering both" true at the socket rather than
+      # asserted in a comment.
+      TWINVPN_CP_LISTEN_QUIC: ${TWINVPN_CP_LISTEN_QUIC:-[::]:443}
+      TWINVPN_CP_LISTEN_TCP: ${TWINVPN_CP_LISTEN_TCP:-[::]:443}
+      # 0-RTT is PROHIBITED (ownership.md §6, ADR-0001 L-CONTROL). Named as
+      # configuration so that enabling it is a visible, reviewable act.
+      TWINVPN_CP_QUIC_ZERO_RTT: "false"
+      TWINVPN_CP_TLS_CERT_PATH: /run/secrets/control-plane/tls.crt
+      TWINVPN_CP_TLS_KEY_PATH: /run/secrets/control-plane/tls.key
+      # --- durable store and event log, ADR-0002 §11.3 -------------------
+      TWINVPN_DATABASE_URL: ${TWINVPN_CP_DATABASE_URL:?TWINVPN_CP_DATABASE_URL must be set - it carries a credential and has no default}
+      TWINVPN_DB_MAX_CONNECTIONS: ${TWINVPN_DB_MAX_CONNECTIONS:-16}
+      TWINVPN_CP_EVENT_BUS: ${TWINVPN_CP_EVENT_BUS:-postgres-notify}
+      TWINVPN_CP_WRITE_LEASE_TTL_MS: ${TWINVPN_CP_WRITE_LEASE_TTL_MS:-15000}
+      # limits.json control_plane.* — the frozen values, restated as config so
+      # a deployment can only ever narrow them.
+      TWINVPN_CP_RETENTION_FLOOR_DAYS: "30"
+      TWINVPN_CP_RETENTION_FLOOR_EVENTS: "1000000"
+      TWINVPN_CP_EVENT_RATE_SUSTAINED: "1"
+      TWINVPN_CP_EVENT_RATE_BURST: "20"
+      TWINVPN_CP_C2_WATERMARK_BYTES: "262144"
+      TWINVPN_CP_C2_WATERMARK_EVENTS: "512"
+      TWINVPN_CP_IDEMPOTENCY_WINDOW_MS: "86400000"
+      # --- admission control, ADR-0002 §11.7 rule 3 ----------------------
+      TWINVPN_CP_ATTACH_RATE_SUSTAINED: ${TWINVPN_CP_ATTACH_RATE_SUSTAINED:-200}
+      TWINVPN_CP_ATTACH_RATE_BURST: ${TWINVPN_CP_ATTACH_RATE_BURST:-1000}
+      TWINVPN_CP_DRAIN_DEADLINE_MS: ${TWINVPN_CP_DRAIN_DEADLINE_MS:-120000}
+      TWINVPN_CP_READ_STALENESS_WAIT_MS: "250"
+    volumes:
+      - type: bind
+        source: ./contracts/registry
+        target: /contracts/registry
+        read_only: true
+      - type: bind
+        source: ./infra/secrets/control-plane
+        target: /run/secrets/control-plane
+        read_only: true
+    ports:
+      - "127.0.0.1:8443:443/tcp"
+      - "127.0.0.1:8443:443/udp"
+      - "[::1]:8443:443/tcp"
+      - "[::1]:8443:443/udp"
+      - "127.0.0.1:19001:9090/tcp"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  # =========================================================================
+  # RENDEZVOUS — architecture.md §2.9, ADR-0002 §11.5, ADR-0004
+  # =========================================================================
+  rendezvous:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.service
+      args:
+        SERVICE: rendezvous
+        RUST_IMAGE: ${TWINVPN_RUST_IMAGE:-docker.io/library/rust:1.90.0-bookworm}
+        RUNTIME_IMAGE: ${TWINVPN_RUNTIME_IMAGE:-gcr.io/distroless/cc-debian12:nonroot}
+        BUSYBOX_IMAGE: ${TWINVPN_BUSYBOX_IMAGE:-docker.io/library/busybox:1.37.0-musl}
+        SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-1756252800}
+        SOURCE_COMMIT: ${TWINVPN_SOURCE_COMMIT:-unknown}
+    hostname: rendezvous
+    environment:
+      <<: *service-env
+      TWINVPN_SERVICE_NAME: rendezvous
+      OTEL_SERVICE_NAME: twinvpn-rendezvous
+      TWINVPN_RZ_LISTEN_QUIC: ${TWINVPN_RZ_LISTEN_QUIC:-[::]:443}
+      TWINVPN_RZ_LISTEN_TCP: ${TWINVPN_RZ_LISTEN_TCP:-[::]:443}
+      TWINVPN_RZ_TLS_CERT_PATH: /run/secrets/rendezvous/tls.crt
+      TWINVPN_RZ_TLS_KEY_PATH: /run/secrets/rendezvous/tls.key
+      # architecture.md §2.9: rendezvous depends on the control plane for
+      # AUTHORIZATION only. It holds nothing durable.
+      TWINVPN_RZ_CONTROL_PLANE_URL: ${TWINVPN_RZ_CONTROL_PLANE_URL:-https://control-plane:443}
+      # ADR-0002 §11.5 / N-9: the mailbox is a bounded, TTL'd jitter buffer and
+      # is NOT durability. These three values are the whole of its contract.
+      TWINVPN_RZ_MAILBOX_TTL_MS: "30000"
+      TWINVPN_RZ_MAILBOX_CAPACITY_PER_TARGET: "8"
+      TWINVPN_RZ_MAILBOX_OVERFLOW_POLICY: drop-oldest
+      TWINVPN_RZ_CALL_DELIVERY_P50_BUDGET_MS: "150"
+      # limits.json candidates.* — C4 envelope is the hostile boundary (B3).
+      TWINVPN_RZ_C4_MAX_BYTES: "1200"
+      TWINVPN_RZ_C4_MAX_DEPTH: "4"
+      TWINVPN_RZ_MAX_CANDIDATES_PER_SET: "32"
+      TWINVPN_RZ_CANDIDATE_EXPIRY_MS: "30000"
+    volumes:
+      - type: bind
+        source: ./contracts/registry
+        target: /contracts/registry
+        read_only: true
+      - type: bind
+        source: ./infra/secrets/rendezvous
+        target: /run/secrets/rendezvous
+        read_only: true
+    ports:
+      - "127.0.0.1:8444:443/tcp"
+      - "127.0.0.1:8444:443/udp"
+      - "[::1]:8444:443/tcp"
+      - "[::1]:8444:443/udp"
+      - "127.0.0.1:19002:9090/tcp"
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  # =========================================================================
+  # PRESENCE — architecture.md §2.13
+  # =========================================================================
+  # A HINT service, never an authority. Its unavailability degrades reconnect
+  # LATENCY, not reconnect CAPABILITY, so nothing depends on it being healthy.
+  presence:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.service
+      args:
+        SERVICE: presence
+        RUST_IMAGE: ${TWINVPN_RUST_IMAGE:-docker.io/library/rust:1.90.0-bookworm}
+        RUNTIME_IMAGE: ${TWINVPN_RUNTIME_IMAGE:-gcr.io/distroless/cc-debian12:nonroot}
+        BUSYBOX_IMAGE: ${TWINVPN_BUSYBOX_IMAGE:-docker.io/library/busybox:1.37.0-musl}
+        SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-1756252800}
+        SOURCE_COMMIT: ${TWINVPN_SOURCE_COMMIT:-unknown}
+    hostname: presence
+    environment:
+      <<: *service-env
+      TWINVPN_SERVICE_NAME: presence
+      OTEL_SERVICE_NAME: twinvpn-presence
+      TWINVPN_PRESENCE_LISTEN_QUIC: ${TWINVPN_PRESENCE_LISTEN_QUIC:-[::]:443}
+      TWINVPN_PRESENCE_LISTEN_TCP: ${TWINVPN_PRESENCE_LISTEN_TCP:-[::]:443}
+      TWINVPN_PRESENCE_TLS_CERT_PATH: /run/secrets/presence/tls.crt
+      TWINVPN_PRESENCE_TLS_KEY_PATH: /run/secrets/presence/tls.key
+      TWINVPN_DATABASE_URL: ${TWINVPN_PRESENCE_DATABASE_URL:?TWINVPN_PRESENCE_DATABASE_URL must be set - it carries a credential and has no default}
+      TWINVPN_PRESENCE_CONTROL_PLANE_URL: ${TWINVPN_PRESENCE_CONTROL_PLANE_URL:-https://control-plane:443}
+      TWINVPN_PRESENCE_HEARTBEAT_INTERVAL_MS: ${TWINVPN_PRESENCE_HEARTBEAT_INTERVAL_MS:-30000}
+      TWINVPN_PRESENCE_RECORD_TTL_MS: ${TWINVPN_PRESENCE_RECORD_TTL_MS:-180000}
+    volumes:
+      - type: bind
+        source: ./contracts/registry
+        target: /contracts/registry
+        read_only: true
+      - type: bind
+        source: ./infra/secrets/presence
+        target: /run/secrets/presence
+        read_only: true
+    ports:
+      - "127.0.0.1:8445:443/tcp"
+      - "127.0.0.1:8445:443/udp"
+      - "[::1]:8445:443/tcp"
+      - "[::1]:8445:443/udp"
+      - "127.0.0.1:19003:9090/tcp"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      control-plane:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  # =========================================================================
+  # RELAY FLEET — architecture.md §2.11, ADR-0005
+  # =========================================================================
+  # TWO relays, in TWO failure domains, in ONE region. ADR-0006 §11.1 rule 3
+  # refuses a map that drops a region with live sessions below 2 ACTIVE relays
+  # in >=2 failure_domains, and architecture.md A-13 makes ">=2 alternates" a
+  # floor rather than a nicety. A one-relay local topology would make every
+  # failover path — the thing R-10 is about — untestable, so the second relay
+  # is part of the topology, not an optional extra.
+  #
+  # NEITHER RELAY HAS ANY CONTROL-PLANE DEPENDENCY. ADR-0005 §11.3 and
+  # architecture.md A-12: relay admission verifies an Owner-rooted token
+  # offline against a signed issuer key set, so a relay must come up and stay
+  # up with the whole control plane down. That is expressed here by the ABSENCE
+  # of a depends_on edge, and it is load-bearing: adding one would silently
+  # make I5 untrue in the local topology.
+  relay-a:
+    <<: *relay-defaults
+    hostname: relay-a
+    environment: &relay-env
+      <<: *service-env
+      TWINVPN_SERVICE_NAME: relay
+      OTEL_SERVICE_NAME: twinvpn-relay
+      # RelayMap identity fields, ADR-0006 §11.1. relay_id is 8 bytes
+      # (limits.json identifiers.relay_id_bytes) => 16 hex characters.
+      TWINVPN_RELAY_ID: "0000000000000a01"
+      TWINVPN_RELAY_REGION: ${TWINVPN_RELAY_REGION:-local-1}
+      TWINVPN_RELAY_FAILURE_DOMAIN: fd-a
+      TWINVPN_RELAY_OPERATOR_GROUP_ID: ${TWINVPN_RELAY_OPERATOR_GROUP_ID:-local-operator}
+      TWINVPN_RELAY_ADMIN_STATE: ACTIVE
+      TWINVPN_RELAY_SELF_HOSTED: "true"
+      # --- carriage ladder, ADR-0005 §11.4 -------------------------------
+      # R-UDP on 41641 AND 443; R-QUIC on UDP/443; R-TLS on TCP/443. All are
+      # RACED with a staggered start, never tried in sequence.
+      TWINVPN_RELAY_CARRIAGES: "R-UDP,R-QUIC,R-TLS"
+      TWINVPN_RELAY_LISTEN_UDP: "[::]:41641"
+      TWINVPN_RELAY_LISTEN_UDP_443: "[::]:443"
+      TWINVPN_RELAY_LISTEN_QUIC: "[::]:443"
+      TWINVPN_RELAY_LISTEN_TLS: "[::]:443"
+      # --- offline admission, ADR-0005 §11.3 -----------------------------
+      # PUBLIC issuer keys only. The relay verifies; it never signs, and it
+      # never holds a key that could decrypt anything (I1).
+      TWINVPN_RELAY_ISSUER_KEYS_PATH: /run/secrets/relay/issuer-keys.json
+      TWINVPN_RELAY_STATIC_KEY_PATH: /run/secrets/relay/static-noise.key
+      TWINVPN_RELAY_TOKEN_LIFETIME_MS: "86400000"
+      TWINVPN_RELAY_TOKEN_CLOCK_SKEW_MS: "300000"
+      TWINVPN_RELAY_TOKEN_GRACE_MS: "21600000"
+      # --- pair_tag rendezvous, ADR-0005 §11.1(3) ------------------------
+      TWINVPN_RELAY_PAIR_TAG_BUCKET_SECONDS: "600"
+      TWINVPN_RELAY_PAIR_TAG_ACCEPTED_SKEW: "1"
+      # --- resource control, ADR-0005 §11.5 ------------------------------
+      TWINVPN_RELAY_MAX_FLOWS_PER_SUBJECT: "64"
+      TWINVPN_RELAY_RATE_PER_SUBJECT_MBPS: "20"
+      TWINVPN_RELAY_RATE_PER_FLOW_MBPS: "10"
+      TWINVPN_RELAY_QUOTA_BYTES_PER_HOUR: "21474836480"
+      TWINVPN_RELAY_BIND_PER_MINUTE_PER_SUBJECT: "30"
+      TWINVPN_RELAY_COOKIE_THRESHOLD_HANDSHAKES_PER_S: "20"
+      TWINVPN_RELAY_PENDING_SLOT_TTL_MS: "30000"
+      TWINVPN_RELAY_IDLE_FLOW_TIMEOUT_MS: "900000"
+      TWINVPN_RELAY_FLOW_QUEUE_MAX_BYTES: "65536"
+      # --- O-13, the sharpest privacy risk in the whole system -----------
+      # A relay sees BOTH ENDS of a RELAYED session by necessity. If it logged
+      # that, it would hold the peer graph and defeat I1 in metadata even
+      # though it never sees plaintext. Per-session relay debugging is
+      # DELIBERATELY IMPOSSIBLE and this flag cannot be turned on.
+      TWINVPN_RELAY_RETAIN_PEER_PAIR: "false"
+      TWINVPN_RELAY_METRICS_LABEL_ALLOWLIST: "relay_region,protocol_version,reason_code,outcome,address_family"
+    volumes:
+      - type: bind
+        source: ./contracts/registry
+        target: /contracts/registry
+        read_only: true
+      - type: bind
+        source: ./infra/secrets/relay-a
+        target: /run/secrets/relay
+        read_only: true
+    ports:
+      - "127.0.0.1:41641:41641/udp"
+      - "[::1]:41641:41641/udp"
+      - "127.0.0.1:8446:443/udp"
+      - "127.0.0.1:8446:443/tcp"
+      - "[::1]:8446:443/udp"
+      - "[::1]:8446:443/tcp"
+      - "127.0.0.1:19004:9090/tcp"
+
+  relay-b:
+    <<: *relay-defaults
+    hostname: relay-b
+    environment:
+      <<: *relay-env
+      TWINVPN_RELAY_ID: "0000000000000b01"
+      # Same region, DIFFERENT failure domain — this is what makes
+      # RELAY_STANDBY_READY (ADR-0005 §11.6) reachable locally.
+      TWINVPN_RELAY_FAILURE_DOMAIN: fd-b
+    volumes:
+      - type: bind
+        source: ./contracts/registry
+        target: /contracts/registry
+        read_only: true
+      - type: bind
+        source: ./infra/secrets/relay-b
+        target: /run/secrets/relay
+        read_only: true
+    ports:
+      - "127.0.0.1:41642:41641/udp"
+      - "[::1]:41642:41641/udp"
+      - "127.0.0.1:8447:443/udp"
+      - "127.0.0.1:8447:443/tcp"
+      - "[::1]:8447:443/udp"
+      - "[::1]:8447:443/tcp"
+      - "127.0.0.1:19005:9090/tcp"
+
+  # =========================================================================
+  # RELAY DIRECTORY — architecture.md §2.12 (Relay-Selection Service), ADR-0006
+  # =========================================================================
+  # Publishes the signed RelayMap. NOT a per-connection call: the ranked set is
+  # CACHED STATE, which is what lets relay failover work during a control-plane
+  # outage (I5).
+  relay-directory:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.service
+      args:
+        SERVICE: relay-directory
+        RUST_IMAGE: ${TWINVPN_RUST_IMAGE:-docker.io/library/rust:1.90.0-bookworm}
+        RUNTIME_IMAGE: ${TWINVPN_RUNTIME_IMAGE:-gcr.io/distroless/cc-debian12:nonroot}
+        BUSYBOX_IMAGE: ${TWINVPN_BUSYBOX_IMAGE:-docker.io/library/busybox:1.37.0-musl}
+        SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-1756252800}
+        SOURCE_COMMIT: ${TWINVPN_SOURCE_COMMIT:-unknown}
+    hostname: relay-directory
+    environment:
+      <<: *service-env
+      TWINVPN_SERVICE_NAME: relay-directory
+      OTEL_SERVICE_NAME: twinvpn-relay-directory
+      TWINVPN_RELAYDIR_LISTEN_TCP: ${TWINVPN_RELAYDIR_LISTEN_TCP:-[::]:443}
+      TWINVPN_RELAYDIR_LISTEN_QUIC: ${TWINVPN_RELAYDIR_LISTEN_QUIC:-[::]:443}
+      TWINVPN_RELAYDIR_TLS_CERT_PATH: /run/secrets/relay-directory/tls.crt
+      TWINVPN_RELAYDIR_TLS_KEY_PATH: /run/secrets/relay-directory/tls.key
+      TWINVPN_DATABASE_URL: ${TWINVPN_RELAYDIR_DATABASE_URL:?TWINVPN_RELAYDIR_DATABASE_URL must be set - it carries a credential and has no default}
+      # The RelayMap is a COSE_Sign1 document signed by the operator group's
+      # issuer key. SECRET, no default, mounted read-only.
+      TWINVPN_RELAYDIR_MAP_SIGNING_KEY_PATH: /run/secrets/relay-directory/map-signing.key
+      TWINVPN_RELAYDIR_OPERATOR_GROUP_ID: ${TWINVPN_RELAY_OPERATOR_GROUP_ID:-local-operator}
+      # ADR-0006 §11.1 rule 3 and architecture.md A-13. A map that would drop a
+      # region below these floors MUST NOT be applied; the device keeps the
+      # prior entries and emits RELAY.SELECT.ALTERNATES_INSUFFICIENT.
+      TWINVPN_RELAYDIR_MIN_ALTERNATES_PER_REGION: "2"
+      TWINVPN_RELAYDIR_MIN_FAILURE_DOMAINS_PER_REGION: "2"
+      # Rule 1: endpoints are LITERALS, never hostnames. Relay reachability
+      # MUST NOT depend on DNS. Rule 2: every region publishes relays reachable
+      # over BOTH families.
+      TWINVPN_RELAYDIR_REQUIRE_LITERAL_ENDPOINTS: "true"
+      TWINVPN_RELAYDIR_REQUIRE_BOTH_FAMILIES: "true"
+      # Rule 4: the map is stale-but-usable WITHOUT LIMIT. not_after_ms is soft
+      # freshness only and has no enforcement effect (ADR-0009 §11.4).
+      TWINVPN_RELAYDIR_MAP_TTL_MS: ${TWINVPN_RELAYDIR_MAP_TTL_MS:-3600000}
+      TWINVPN_RELAYDIR_MAP_EXPIRY_ENFORCED: "false"
+      TWINVPN_RELAYDIR_REGION_SPREAD_MS: "20000"
+    volumes:
+      - type: bind
+        source: ./contracts/registry
+        target: /contracts/registry
+        read_only: true
+      - type: bind
+        source: ./infra/secrets/relay-directory
+        target: /run/secrets/relay-directory
+        read_only: true
+    ports:
+      - "127.0.0.1:8448:443/tcp"
+      - "127.0.0.1:8448:443/udp"
+      - "[::1]:8448:443/tcp"
+      - "[::1]:8448:443/udp"
+      - "127.0.0.1:19006:9090/tcp"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      control-plane:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  # =========================================================================
+  # RELAY HEALTH — ADR-0006 §11.4 health aggregation
+  # =========================================================================
+  # Aggregates per-Relay HealthState for relay-directory to rank on. It has NO
+  # device-facing wire surface and is therefore the one service with no
+  # published wire port: the admin listener is all it exposes. ADR-0015 §11.7:
+  # "the observability system REPORTS health; the reliability layer DECIDES."
+  relay-health:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.service
+      args:
+        SERVICE: relay-health
+        RUST_IMAGE: ${TWINVPN_RUST_IMAGE:-docker.io/library/rust:1.90.0-bookworm}
+        RUNTIME_IMAGE: ${TWINVPN_RUNTIME_IMAGE:-gcr.io/distroless/cc-debian12:nonroot}
+        BUSYBOX_IMAGE: ${TWINVPN_BUSYBOX_IMAGE:-docker.io/library/busybox:1.37.0-musl}
+        SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-1756252800}
+        SOURCE_COMMIT: ${TWINVPN_SOURCE_COMMIT:-unknown}
+    hostname: relay-health
+    environment:
+      <<: *service-env
+      TWINVPN_SERVICE_NAME: relay-health
+      OTEL_SERVICE_NAME: twinvpn-relay-health
+      TWINVPN_DATABASE_URL: ${TWINVPN_RELAYDIR_DATABASE_URL:?TWINVPN_RELAYDIR_DATABASE_URL must be set - it carries a credential and has no default}
+      # Probe targets are the relays' ADMIN listeners, not their data ports: a
+      # health prober that opened a relay flow would be indistinguishable from
+      # a peer and would consume the fleet's own quota.
+      TWINVPN_RELAYHEALTH_TARGETS: ${TWINVPN_RELAYHEALTH_TARGETS:-relay-a:9090,relay-b:9090}
+      TWINVPN_RELAYHEALTH_PROBE_INTERVAL_MS: ${TWINVPN_RELAYHEALTH_PROBE_INTERVAL_MS:-10000}
+      TWINVPN_RELAYHEALTH_PROBE_TIMEOUT_MS: ${TWINVPN_RELAYHEALTH_PROBE_TIMEOUT_MS:-3000}
+      # HealthState members, docs/reliability.md via testing-strategy A-03.
+      TWINVPN_RELAYHEALTH_STATES: "HEALTHY,DEGRADED,UNHEALTHY,UNKNOWN"
+      TWINVPN_RELAYHEALTH_DEGRADED_RTT_MS: "250"
+    ports:
+      - "127.0.0.1:19007:9090/tcp"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  # =========================================================================
+  # OBSERVABILITY — ADR-0015 §11.1, infrastructure side only
+  # =========================================================================
+  # "OpenTelemetry as an INTERNAL, INFRASTRUCTURE-SIDE instrumentation library
+  # is permitted; OpenTelemetry as an END-TO-END client-to-backend pipeline is
+  # REJECTED." Nothing in this stack has a client-facing ingress, and the
+  # collector's OTLP receivers bind only to the compose network.
+  otel-collector:
+    image: ${TWINVPN_OTELCOL_IMAGE:-docker.io/otel/opentelemetry-collector-contrib:0.116.1}
+    <<: *observability-defaults
+    hostname: otel-collector
+    user: "10001:10001"
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - type: bind
+        source: ./infra/otel/collector-config.yaml
+        target: /etc/otelcol/config.yaml
+        read_only: true
+    environment:
+      TWINVPN_ENVIRONMENT: ${TWINVPN_ENVIRONMENT:-local}
+    ports:
+      # Development only, loopback only. In a real deployment the collector is
+      # reachable from the service network and from nowhere else.
+      - "127.0.0.1:14317:4317/tcp"
+      - "127.0.0.1:14318:4318/tcp"
+      - "127.0.0.1:18888:8888/tcp"
+    # No container HEALTHCHECK: the collector image contains no HTTP client, so
+    # any check expressible here would be a process-liveness or TCP probe, and
+    # a TCP probe is not a health check. Its readiness is instead observed the
+    # honest way — the `health_check` extension on :13133 is scraped by
+    # Prometheus (infra/prometheus/prometheus.yml), and the collector's own
+    # `otelcol_*` self-telemetry on :8888 shows whether the pipelines are
+    # actually moving data. Dependents therefore use `service_started`, and
+    # infra/README.md says so rather than implying an ordering guarantee that
+    # does not exist.
+
+  prometheus:
+    image: ${TWINVPN_PROMETHEUS_IMAGE:-docker.io/prom/prometheus:v3.1.0}
+    <<: *observability-defaults
+    hostname: prometheus
+    user: "65534:65534"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=72h
+      - --web.enable-lifecycle
+      - --web.listen-address=[::]:9090
+    volumes:
+      - type: bind
+        source: ./infra/prometheus/prometheus.yml
+        target: /etc/prometheus/prometheus.yml
+        read_only: true
+      - type: bind
+        source: ./infra/prometheus/rules
+        target: /etc/prometheus/rules
+        read_only: true
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:19090:9090/tcp"
+
+  tempo:
+    image: ${TWINVPN_TEMPO_IMAGE:-docker.io/grafana/tempo:2.7.0}
+    <<: *observability-defaults
+    hostname: tempo
+    user: "10001:10001"
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - type: bind
+        source: ./infra/tempo/tempo.yaml
+        target: /etc/tempo/tempo.yaml
+        read_only: true
+      - tempo-data:/var/tempo
+    ports:
+      - "127.0.0.1:13200:3200/tcp"
+
+  loki:
+    image: ${TWINVPN_LOKI_IMAGE:-docker.io/grafana/loki:3.3.2}
+    <<: *observability-defaults
+    hostname: loki
+    user: "10001:10001"
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - type: bind
+        source: ./infra/loki/loki.yaml
+        target: /etc/loki/loki.yaml
+        read_only: true
+      - loki-data:/loki
+    ports:
+      - "127.0.0.1:13100:3100/tcp"
+
+  grafana:
+    image: ${TWINVPN_GRAFANA_IMAGE:-docker.io/grafana/grafana:11.4.0}
+    <<: *observability-defaults
+    hostname: grafana
+    user: "472:472"
+    environment:
+      # A local dashboard host, not an authentication surface. Anonymous
+      # VIEWER access with sign-up and the admin login disabled is safer than a
+      # default password, because there is no credential to leak and none to
+      # accidentally reuse. It listens on loopback only.
+      GF_SERVER_HTTP_ADDR: "::"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - type: bind
+        source: ./infra/grafana/provisioning
+        target: /etc/grafana/provisioning
+        read_only: true
+      - type: bind
+        source: ./infra/grafana/dashboards
+        target: /var/lib/grafana/dashboards
+        read_only: true
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:13000:3000/tcp"
+    depends_on:
+      prometheus:
+        condition: service_started
+      tempo:
+        condition: service_started
+      loki:
+        condition: service_started

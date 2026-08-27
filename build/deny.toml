@@ -1,0 +1,125 @@
+# cargo-deny configuration — ADR-0018 §11.11.
+#
+# One configuration for all four workspaces, referenced by
+# .github/workflows/supply-chain-t1.yml. DP-6: "Advisory, licence and
+# duplicate-version checks run at T1."
+#
+# ===========================================================================
+# WHAT THIS FILE CAN AND CANNOT DO
+# ===========================================================================
+# It mechanises DP-6's three automatable checks. It does NOT implement the
+# dependency LEDGER, which records per direct dependency "why it is present,
+# who reviewed the last bump, whether it reaches a shipped artifact or only dev
+# tooling, whether it contains `unsafe`, and whether it has a published audit".
+# Four of those five are human judgements. Generating a file that looked like
+# the ledger would be worse than not having one, because it would satisfy the
+# check without satisfying the requirement.
+#
+# It also does NOT enforce DP-3's crypto seam ("twinvpn-crypto is the ONLY
+# crate permitted a cryptographic dependency"). That is a graph property over
+# the workspace, and ADR-0018 CD-I2 assigns it to `cargo run -p xtask -- lint`,
+# which is core-foundation's. Implementing a second, weaker version of it here
+# would create two answers to one question - the R-31 divergence class.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ===========================================================================
+# ADVISORIES — DP-6.
+# ===========================================================================
+[advisories]
+version = 2
+# `deny` on both. DP-9: "A malicious dependency or compromised pipeline defeats
+# every invariant simultaneously." There is no severity threshold below which
+# that stops being true, so there is no severity threshold here.
+yanked = "deny"
+ignore = [
+  # Every entry here MUST carry: the advisory ID, why it does not apply, who
+  # decided that, and when it is re-reviewed. An unexplained ignore is how an
+  # advisory list becomes a list of advisories nobody reads.
+  #
+  # Format:
+  #   { id = "RUSTSEC-YYYY-NNNN", reason = "why it does not apply | reviewer | re-review date" }
+]
+
+# ===========================================================================
+# LICENCES.
+# ===========================================================================
+# The workspace manifests declare Apache-2.0. ADR-0018 states no licence
+# policy, so this list is an INFRASTRUCTURE-LEAD CHOICE, recorded as one:
+# permissive licences compatible with Apache-2.0 redistribution, and nothing
+# copyleft, because ADR-0021 ships the core statically linked into per-platform
+# artifacts (§11.9 rows 1, 4, 5, 6, 7, 8, 9) and a copyleft dependency in a
+# statically linked artifact is a distribution obligation nobody has agreed to.
+#
+# If the project wants a different policy that is a decision to record, not a
+# line to edit here quietly.
+[licenses]
+version = 2
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "CC0-1.0",
+  "BSL-1.0",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+# ===========================================================================
+# BANS — duplicate versions, DP-6's third check.
+# ===========================================================================
+[bans]
+# DP-1: "One committed lockfile for the whole workspace. NO UNBOUNDED VERSION
+# RANGES." A duplicate version is the symptom of a diamond that DP-1 is meant
+# to collapse, and on the router-class targets it is also a size problem: rows
+# 8 and 9 gate at 4 MB STRIPPED against 16 MB of flash, so a duplicated
+# dependency is a real fraction of the budget.
+#
+# `warn` rather than `deny`, deliberately: a duplicate is usually caused by a
+# transitive dependency the workspace does not control, and denying it would
+# make an unrelated upstream release block every merge. DP-6 asks for the
+# CHECK; making it a hard gate is a stricter policy than the ADR states and
+# would be this file inventing one.
+multiple-versions = "warn"
+wildcards = "deny"          # DP-1's "no unbounded version ranges", mechanised
+allow-wildcard-paths = true # path deps inside the workspace are not a range
+highlight = "all"
+
+deny = [
+  # DP-8: AT MOST TWO CRYPTO PROVIDERS FLEET-WIDE. "Two implementations of the
+  # same specified algorithm do not violate I2 - I2 forbids NOVEL cryptography,
+  # not a second implementation - but they double the assurance surface."
+  #
+  # This list is empty because naming providers here would pre-empt ADR-0001
+  # and ADR-0007, which already chose the primitives, and ADR-0018 DP-3 is
+  # explicit that "this ADR does not choose the primitives". The COUNT
+  # constraint is enforced by CD-I2 in core/xtask, which can see the graph.
+]
+
+skip = []
+skip-tree = []
+
+# ===========================================================================
+# SOURCES — where crates may come from.
+# ===========================================================================
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# DP-2: "MIRROR, DO NOT SOURCE-VENDOR." A git dependency is neither: it is an
+# unpinned pointer into someone else's history. DP-7's ladder for "no build for
+# this target" ends at `[patch]` with the patch IN-TREE, reviewed, carrying an
+# upstream reference - not at a git URL.
+allow-git = []
