@@ -51,6 +51,21 @@
 //! forbids. The choice is documented as a decision taken here and reported to
 //! the integration lead as an ADR-0001 §7.3.1 / contract-set inconsistency, not
 //! presented as a reading of the ADR.
+//!
+//! ## The contraction belongs here and **only** here
+//!
+//! There are two places in the corpus where a `twinnet_id` is mixed into a
+//! cryptographic input, and they need opposite treatment:
+//!
+//! | Use | Shape | Contract? |
+//! |---|---|---|
+//! | §7.3.1's `identity_binding_hash` — **this module** | one field in a SHA-256 preimage of **concatenated fixed-width fields**, declared `twinnet_id(16)` | **Yes.** A variable-length value here would make the preimage's field boundaries ambiguous, and the ADR fixes the width at sixteen |
+//! | ADR-0007 §7.7's `TwinNetPSK` salt — [`crate::psk::psk_salt`] | `salt = twinnet_id \|\| e (u64 BE)`, and HKDF's salt is **variable-length by construction** (RFC 5869 §2.2) | **No.** The raw UTF-8 bytes go in. Contracting would be a deviation from a fully specified derivation |
+//!
+//! The same identifier, two encodings, because the two contexts impose
+//! different constraints. Applying this module's answer to the PSK salt would
+//! break interoperability with a conforming implementation; applying the PSK
+//! salt's answer here would break the prologue's field alignment.
 
 use crate::kdf::{sha256, sha256_parts};
 
@@ -323,6 +338,34 @@ mod tests {
         // And it is the digest prefix, not the text prefix.
         let tag = TwinnetTag::from_twinnet_id("tn-example");
         assert_ne!(&tag.as_bytes()[..2], b"tn");
+    }
+
+    /// The `twinnet_id` gets **two** encodings, and mixing them up breaks
+    /// interoperability in one direction or field alignment in the other.
+    ///
+    /// The prologue needs the sixteen-byte contraction, because §7.3.1's
+    /// preimage is a concatenation of fixed-width fields. ADR-0007 §7.7's PSK
+    /// salt needs the raw bytes, because HKDF's salt is variable-length. This
+    /// test pins the distinction so neither answer migrates to the other site.
+    #[test]
+    fn the_twinnet_contraction_is_for_the_prologue_and_not_for_the_psk_salt() {
+        let id = "tn-example";
+        // The prologue: exactly sixteen bytes, whatever the id's length.
+        assert_eq!(TwinnetTag::from_twinnet_id(id).as_bytes().len(), 16);
+        assert_eq!(
+            TwinnetTag::from_twinnet_id(&"a".repeat(64))
+                .as_bytes()
+                .len(),
+            16
+        );
+        // The PSK salt: the raw id, then the epoch. Not contracted.
+        let salt = crate::psk::psk_salt(id, 7);
+        assert_eq!(&salt[..id.len()], id.as_bytes());
+        assert_eq!(salt.len(), id.len() + 8);
+        // And the two are genuinely different values, so a call site that used
+        // one where the other belongs would produce different key material
+        // rather than accidentally agreeing.
+        assert_ne!(&salt[..16], TwinnetTag::from_twinnet_id(id).as_bytes());
     }
 
     #[test]
