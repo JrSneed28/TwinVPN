@@ -426,3 +426,177 @@ impl CryptoError {
 
 /// The crate's result alias.
 pub type Result<T> = core::result::Result<T, CryptoError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every variant maps to a code the frozen registry contains.
+    ///
+    /// `ReasonCode` has no constructor from a string, so this cannot fail by
+    /// naming an unregistered code — what it catches is a mapping changed to a
+    /// code that means something else, which a reviewer reads here in one place.
+    #[test]
+    // A table, not logic: one line per variant is the point, and splitting it
+    // would put half the mapping somewhere a reviewer has to go looking for.
+    #[allow(clippy::too_many_lines)]
+    fn every_variant_carries_a_registered_code() {
+        let cases: Vec<(CryptoError, &str)> = vec![
+            (
+                CryptoError::NonCanonicalCbor {
+                    kind: StatementKind::PolicyBundle,
+                    step: "s",
+                },
+                "PROTO.NON_CANONICAL_CBOR",
+            ),
+            (
+                CryptoError::UnknownCriticalField {
+                    kind: StatementKind::PolicyBundle,
+                    field: "f".to_owned(),
+                },
+                "PROTO.UNKNOWN_CRITICAL_FIELD",
+            ),
+            (
+                CryptoError::MissingCriticalField {
+                    kind: StatementKind::PolicyBundle,
+                    field: "f",
+                },
+                "PROTO.UNKNOWN_CRITICAL_FIELD",
+            ),
+            (
+                CryptoError::MalformedCose {
+                    kind: StatementKind::LogHead,
+                    step: "s",
+                },
+                "PROTO.MALFORMED_MESSAGE",
+            ),
+            (
+                CryptoError::SignatureInvalid {
+                    kind: StatementKind::LogHead,
+                },
+                "AUTH.PEER_UNTRUSTED",
+            ),
+            (
+                CryptoError::BindingInvalid { step: "s" },
+                "AUTH.BINDING_INVALID",
+            ),
+            (
+                CryptoError::StatementExpired {
+                    kind: StatementKind::LogHead,
+                    not_after_ms: 1,
+                    skew_allowance_ms: 2,
+                },
+                "AUTH.STATEMENT_EXPIRED",
+            ),
+            (CryptoError::ClockUnusable, "AUTH.CLOCK_IMPLAUSIBLE"),
+            (
+                CryptoError::MonotoneRollback {
+                    offered: 1,
+                    high_water: 2,
+                },
+                "AUTH.TRUST_EPOCH_ROLLBACK",
+            ),
+            (
+                CryptoError::HandshakeRejected { step: "s" },
+                "CRYPTO.HANDSHAKE_REJECTED",
+            ),
+            (
+                CryptoError::ReplayDetected { counter: 1 },
+                "CRYPTO.REPLAY_DETECTED",
+            ),
+            (
+                CryptoError::RekeyFailed { step: "s" },
+                "CRYPTO.REKEY_FAILED",
+            ),
+            (
+                CryptoError::TranscriptMismatch { phase: "p" },
+                "PROTO.TRANSCRIPT_MISMATCH",
+            ),
+            (
+                CryptoError::DowngradeRefused {
+                    offered_epoch: 1,
+                    recorded_floor: 2,
+                },
+                "PROTO.DOWNGRADE_REFUSED",
+            ),
+            (
+                CryptoError::KeyLength {
+                    expected: 1,
+                    observed: 2,
+                },
+                "CRYPTO.PEER_KEY_UNKNOWN",
+            ),
+            (
+                CryptoError::IdentityAlgUnsupported { algorithm: "a" },
+                "AUTH.IDENTITY_ALG_UNSUPPORTED",
+            ),
+            (
+                CryptoError::DerivationFailed { invariant: "i" },
+                "INTERNAL.INVARIANT_VIOLATED",
+            ),
+            (
+                CryptoError::LockedAllocationUnavailable { mechanism: "m" },
+                "INTERNAL.INVARIANT_VIOLATED",
+            ),
+        ];
+        for (err, code) in cases {
+            assert_eq!(err.reason_code().as_str(), code, "for {err:?}");
+        }
+    }
+
+    /// The evidence a diagnostic carries is the evidence the registry declares.
+    ///
+    /// `DiagnosticBuilder::evidence` **silently drops** an undeclared key, so a
+    /// mapping that named a key the registry does not have would produce an
+    /// evidence-free diagnostic and no error anywhere. This asserts the fields
+    /// actually arrive.
+    #[test]
+    fn the_declared_evidence_actually_reaches_the_diagnostic() {
+        let d = CryptoError::MonotoneRollback {
+            offered: 4,
+            high_water: 9,
+        }
+        .diagnostic(Component::Store);
+        assert!(d.evidence().get("offered_epoch").is_some());
+        assert!(d.evidence().get("high_water_epoch").is_some());
+
+        let d = CryptoError::NonCanonicalCbor {
+            kind: StatementKind::PolicyBundle,
+            step: "trailing bytes",
+        }
+        .diagnostic(Component::ControlPlaneClient);
+        assert!(d.evidence().get("parser_id").is_some());
+        assert!(d.evidence().get("statement_type").is_some());
+
+        let d = CryptoError::UnknownCriticalField {
+            kind: StatementKind::PolicyBundle,
+            field: "future_restriction".to_owned(),
+        }
+        .diagnostic(Component::PolicyEngine);
+        assert!(d.evidence().get("field").is_some());
+
+        let d = CryptoError::DowngradeRefused {
+            offered_epoch: 1,
+            recorded_floor: 3,
+        }
+        .diagnostic(Component::TunnelEngine);
+        assert!(d.evidence().get("offered_epoch").is_some());
+        assert!(d.evidence().get("recorded_floor").is_some());
+    }
+
+    /// A `Debug` of any variant is safe to log: no variant carries key
+    /// material, plaintext, or a secret length. Every field is a `&'static str`,
+    /// a `StatementKind`, a counter, or the one bounded `crit` field name.
+    #[test]
+    fn no_variant_can_carry_content() {
+        let rendered = format!(
+            "{:?}",
+            CryptoError::UnknownCriticalField {
+                kind: StatementKind::PolicyBundle,
+                field: "policy_version".to_owned(),
+            }
+        );
+        assert!(rendered.contains("policy_version"));
+        assert!(rendered.len() < 200);
+    }
+}
