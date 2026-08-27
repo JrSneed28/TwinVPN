@@ -1,0 +1,178 @@
+//! `PutPolicy` — the **only** policy mutation in the contract set.
+//!
+//! **Authority:** `docs/protocol.md` §13.4; `control_commands.proto`
+//! ("THIS IS THE ONLY POLICY MUTATION COMMAND IN THE CONTRACT SET");
+//! `policy.proto` ("AUTHORED by the Owner authority … the control plane
+//! WAREHOUSES AND DISTRIBUTES; IT CANNOT AUTHOR"); `architecture.md` §5 rows
+//! S-06/S-07; ADR-0009 §11.3 R-2…R-5; ADR-0002 §11.3 (E-1-class, quorum before
+//! responding).
+//!
+//! # Four things must all hold, and each has its own failure
+//!
+//! | Requirement | Where | Failure if dropped |
+//! |---|---|---|
+//! | `Owner` signature over the received octets | [`verify::admit`] | this service could author policy |
+//! | `if_version` precondition | [`check_precondition`] | lost update: two Owners' edits, one survives silently |
+//! | monotone version, fork-detected | [`crate::NetTx::put_document`] | policy rollback attack — "a silent authorization hole" |
+//! | quorum before responding | [`require_quorum`] | a forked policy history, which E-1 forbids |
+//!
+//! # Peer permissions, route policy and DNS policy travel inside this bundle
+//!
+//! There is no `UpdatePeerPermissions`, no `UpdateRoutePolicy` and no
+//! `UpdateDNSPolicy`, "and adding one would create a second policy author — the
+//! exact capability Rule B removes from the infrastructure".
+//! [`crate::command::Command`] has no variant for any of them and
+//! `put_policy_is_the_only_policy_mutation` asserts it.
+
+use twinvpn_schema::v1;
+use twinvpn_service_common::ServiceError;
+
+use crate::codes;
+use crate::event::DurableEvent;
+use crate::model::{DocumentRecord, DocumentType};
+use crate::verify::{self, SignedOctets, StatementKind};
+use crate::wire;
+use crate::{Command, NetTx};
+use twinvpn_schema::v1::control_event::Event as EventBody;
+
+use super::device::check_precondition;
+use super::{mutation_result, record, require_quorum, Ctx, Outcome};
+
+/// `PutPolicy` — `CEREMONY` + `if_version`, linearizable, quorum-committed.
+///
+/// # Errors
+///
+/// `CONTROL.QUORUM_UNAVAILABLE`; `AUTH.KEY_UNAVAILABLE` with no anchor bound;
+/// `AUTH.UNEXPECTED_DELEGATION` when the bundle verified against a device key
+/// rather than the `Owner` chain; the interim precondition code on a version
+/// mismatch or a rollback; `AUTH.TRUST_HISTORY_FORKED` on an equal version with
+/// different content.
+pub fn put(
+    tx: &mut NetTx,
+    ctx: &Ctx<'_>,
+    req: &v1::PutPolicyRequest,
+) -> Result<Outcome, ServiceError> {
+    require_quorum(ctx, Command::PutPolicy)?;
+
+    let bundle = req
+        .bundle
+        .as_ref()
+        .ok_or_else(|| codes::bare(codes::SIGNATURE_INVALID))?;
+
+    // The Owner signs. A bundle that verified against anything else is not a
+    // policy bundle, however well-formed it is.
+    let statement = bundle
+        .signed
+        .as_ref()
+        .ok_or_else(|| codes::bare(codes::SIGNATURE_INVALID))?;
+    let octets = SignedOctets::from_received(bytes::Bytes::from(statement.cose_sign1.clone()))
+        .map_err(|r| ServiceError::from_reject(&r, crate::COMPONENT))?;
+    let verified = verify::admit(
+        ctx.verifier,
+        &octets,
+        StatementKind::PolicyBundle,
+        ctx.now_ms,
+    )?;
+
+    // N-2. The current version is 0 before the first bundle, which is what
+    // `if_absent` matches.
+    check_precondition(req.precondition.as_ref(), tx.state().policy_version)?;
+
+    let digest = content_digest(verified.octets.as_bytes());
+    let net_seq_slot = tx.state().next_net_seq;
+    tx.put_document(
+        DocumentType::PolicyBundle,
+        DocumentRecord {
+            version: bundle.policy_version,
+            content_digest: digest,
+            octets: verified.octets.as_bytes().to_vec(),
+            net_seq: net_seq_slot,
+            trust_epoch: tx.state().trust_epoch,
+            issued_at_ms: ctx.now_ms,
+        },
+    )?;
+    tx.advance_policy_version(bundle.policy_version);
+
+    // ADR-0002 §11.4: inline below the 16 KiB cap, by reference above it. The
+    // reference form is what makes a large bundle unable to monopolise a stream,
+    // and pull is always sufficient either way.
+    let inline = wire::fits_inline(verified.octets.as_bytes());
+    let reference = v1::StateDocumentRef {
+        doc_type: DocumentType::PolicyBundle.to_wire(),
+        version: bundle.policy_version,
+        size_bytes: verified.octets.len() as u64,
+        digest: digest.to_vec(),
+    };
+
+    let net_seq = tx.append(&DurableEvent::new(EventBody::PolicyBundleUpdated(
+        v1::PolicyBundleUpdated {
+            policy_version: bundle.policy_version,
+            bundle: inline.then(|| bundle.clone()),
+            reference: Some(reference),
+        },
+    ))?)?;
+
+    let resp = v1::PutPolicyResponse {
+        policy_version: bundle.policy_version,
+        result: Some(mutation_result(net_seq, tx.state().trust_epoch)),
+        error: None,
+    };
+    Ok(record(&resp, net_seq, |m| {
+        if let Some(r) = m.result.as_mut() {
+            r.idempotent_replay = true;
+        }
+    }))
+}
+
+/// A content digest over the **verified octets**.
+///
+/// Not a cryptographic hash: `services/Cargo.toml` declares no digest crate and
+/// CD-I2 puts one in `twinvpn-crypto`, which this artifact does not link. This
+/// is a 256-bit FNV-1a fold, used **only** for ADR-0009 R-4's equal-version fork
+/// detection *inside this service's own store*, where both sides of the
+/// comparison are values this service wrote.
+///
+/// It is **not** the `content_hash` of ADR-0009 §11.3's `DocumentHeader` and is
+/// never put on a wire: the header's hash lives inside the `Owner`-signed
+/// payload, which this service forwards verbatim and cannot compute. Reported as
+/// an integration item — see `README.md` §8.
+#[must_use]
+pub fn content_digest(octets: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (lane, chunk) in out.chunks_mut(8).enumerate() {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (lane as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        for b in octets {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h ^= octets.len() as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        chunk.copy_from_slice(&h.to_be_bytes());
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::content_digest;
+
+    #[test]
+    fn the_fork_detector_separates_different_content() {
+        // ADR-0009 R-4 only needs "same version, different bytes" to be
+        // detectable within this store. That is what this asserts, and the
+        // module docs say plainly what it is not.
+        assert_eq!(content_digest(b"a"), content_digest(b"a"));
+        assert_ne!(content_digest(b"a"), content_digest(b"b"));
+        assert_ne!(content_digest(b"ab"), content_digest(b"ba"));
+        assert_ne!(content_digest(b""), content_digest(b"\0"));
+        assert_ne!(content_digest(b"a"), content_digest(b"aa"));
+    }
+
+    #[test]
+    fn every_lane_of_the_digest_is_used() {
+        // A fold that left half the output zero would halve the space a
+        // collision has to find.
+        let d = content_digest(b"twinvpn");
+        assert!(d.chunks(8).all(|c| c != [0u8; 8]));
+    }
+}
