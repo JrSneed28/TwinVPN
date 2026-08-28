@@ -33,8 +33,10 @@
 //! be holding a branch on a domain fact, which CB-2 forbids and the falsification
 //! test in `tests/falsification.rs` is what proves it does not.
 
-use twinvpn_env::{Env, MonotonicInstant};
-use twinvpn_platform::iface::{InterfaceFacts, LinkClass, NetworkChange};
+use core::time::Duration;
+
+use twinvpn_env::{BootId, Env, MonotonicInstant};
+use twinvpn_platform::iface::{InterfaceFacts, LinkClass, NetworkChange, ResumeFacts};
 use twinvpn_session::event::{Event, LinkKind, TimerId, Trigger};
 use twinvpn_session::state::SessionState;
 use twinvpn_session::timers::{self, ClockClass, TimerConstant};
@@ -365,6 +367,12 @@ pub fn event_for_change(change: &NetworkChange, facts: Option<&InterfaceFacts>) 
         NetworkChange::DefaultRouteChanged { .. } | NetworkChange::Nat64PrefixChanged(_) => {
             Some(Event::AddrChanged)
         }
+        // The host came back. §4.3 has an event for exactly this and
+        // `host.lifecycle` also carries it, which is not a duplication: that
+        // command carries a one-byte PHASE and this carries the MEASUREMENT, and
+        // the machine needs both — T35's guards are read from
+        // `ResumeVerdict` below.
+        NetworkChange::SystemResumed(_) => Some(Event::Resume),
         // These three carry no §4.3 event. They are facts other components read —
         // the resolver set, the metering posture, and the adapter's own dropped-
         // event report — and inventing a transition for them would move the
@@ -376,6 +384,94 @@ pub fn event_for_change(change: &NetworkChange, facts: Option<&InterfaceFacts>) 
         // know is NOT mapped to a plausible event: guessing would move the state
         // machine on a fact we cannot read. The caller records it instead.
         _ => None,
+    }
+}
+
+/// What the core decides a resume means.
+///
+/// **Authority:** ADR-0022 LC-24 step 1 (classify the resume), LC-8's finding F2
+/// (long-horizon deadlines read the elapsed clock), `docs/reliability.md` §11.3
+/// (compare the gap against the rekey window).
+///
+/// # This is the decision, and it is here
+///
+/// [`ResumeFacts`] is a *fact*: how long the host was away, which boot session
+/// it came back in, and whether the OS said so or the adapter inferred it. What
+/// that means — cold start or resume, rekey or resume the session, trust the
+/// assertion we are holding or not — is the core's, and CB-2's falsification
+/// test is what keeps it here rather than in three shells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumeVerdict {
+    /// **This was not a resume at all.** LC-24 step 1: a changed boot identity
+    /// means the machine rebooted, and the whole of LC-4 runs as a cold start.
+    pub cold_start: bool,
+    /// The gap exceeded the rekey window, so a full handshake is forced.
+    ///
+    /// `docs/reliability.md` §11.3, measured on the **elapsed** clock. LC-8's
+    /// finding F3 is explicit that the wall clock is the wrong measure: a
+    /// wall-clock jump across a suspend is also a timezone change, an NTP step,
+    /// or a user setting the clock.
+    pub rekey_window_exceeded: bool,
+    /// Whether the gap is **unknown** rather than short.
+    ///
+    /// Kept separate from `rekey_window_exceeded` because the two have the same
+    /// consequence and different causes, and a support case needs to tell them
+    /// apart: "we were asleep for nine hours" and "we cannot say how long we
+    /// were asleep" are not the same sentence.
+    pub gap_unknown: bool,
+}
+
+impl ResumeVerdict {
+    /// Decides what a resume means.
+    ///
+    /// `held_boot_id` is the identity the core was holding before the gap;
+    /// `rekey_window` is `docs/reliability.md` §11.3's constant.
+    ///
+    /// # The safe direction, and why it is the safe one
+    ///
+    /// **An unmeasured gap counts as exceeded.** `suspended_for: None` says the
+    /// adapter could not measure how long the host was away — a wake with no
+    /// announced sleep behind it, a process that started mid-suspend, a platform
+    /// with no clock to offer. Treating that as "no time passed" is precisely
+    /// the confident stale green ADR-0022 forbids: the session would resume on a
+    /// key that may be older than the rekey window, and the
+    /// `ProtectionAssertion` the UI renders would be one nobody re-checked. The
+    /// cost of the safe reading is one unnecessary handshake.
+    #[must_use]
+    pub fn decide(
+        facts: &ResumeFacts,
+        held_boot_id: Option<BootId>,
+        rekey_window: Duration,
+    ) -> Self {
+        // LC-24 step 1. Only a KNOWN mismatch is a cold start: if either side is
+        // absent we cannot tell, and inventing a cold start would tear down a
+        // healthy session on every resume on a platform with no boot identity.
+        let cold_start = match (facts.boot_id, held_boot_id) {
+            (Some(now), Some(held)) => now != held,
+            _ => false,
+        };
+        let gap_unknown = facts.suspended_for.is_none();
+        let rekey_window_exceeded = facts.suspended_for.is_none_or(|gap| gap > rekey_window);
+        Self {
+            cold_start,
+            rekey_window_exceeded,
+            gap_unknown,
+        }
+    }
+
+    /// Whether the `ProtectionAssertion` the core is holding may still be
+    /// rendered as-is.
+    ///
+    /// Always `false`. It is a function rather than a constant because the
+    /// *reason* is the point and a reader should meet it here: ADR-0022 LC-24
+    /// step 2 puts the enforcement query **before** any packet and before the
+    /// wake ladder, and LC-22 makes a re-attaching surface render `UNKNOWN`
+    /// rather than the last value it remembers. A resume is the same situation
+    /// one level down — the core's picture is as old as the gap — so the
+    /// assertion is stale by construction, whatever the gap turned out to be.
+    #[must_use]
+    pub const fn assertion_is_still_fresh(self) -> bool {
+        false
     }
 }
 
@@ -394,6 +490,116 @@ const fn link_kind(class: LinkClass) -> LinkKind {
 
 #[cfg(test)]
 mod tests {
+
+    fn resume(suspended_for: Option<Duration>, boot_id: Option<BootId>) -> ResumeFacts {
+        ResumeFacts {
+            suspended_for,
+            boot_id,
+            announced_by_os: true,
+            hibernated: None,
+        }
+    }
+
+    #[test]
+    fn a_resume_is_an_ev_resume_and_the_gap_is_read_separately() {
+        // The variant maps to §4.3's event; the MEASUREMENT it carries is what
+        // `ResumeVerdict` reads. `EventsLost` still maps to nothing, because a
+        // hole in the stream is not a transition.
+        assert_eq!(
+            event_for_change(
+                &NetworkChange::SystemResumed(resume(Some(Duration::from_secs(60)), None)),
+                None
+            ),
+            Some(E::Resume)
+        );
+        assert_eq!(
+            event_for_change(&NetworkChange::EventsLost { count: None }, None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_gap_past_the_rekey_window_forces_a_handshake_and_a_short_one_does_not() {
+        let window = Duration::from_secs(120);
+        let long = ResumeVerdict::decide(
+            &resume(Some(Duration::from_secs(9 * 3600)), None),
+            None,
+            window,
+        );
+        assert!(long.rekey_window_exceeded);
+        assert!(!long.gap_unknown);
+        assert!(!long.cold_start);
+
+        let short =
+            ResumeVerdict::decide(&resume(Some(Duration::from_secs(5)), None), None, window);
+        assert!(!short.rekey_window_exceeded);
+    }
+
+    /// **An unmeasured gap is not a short gap.**
+    ///
+    /// This is the whole point of `suspended_for` being an `Option`. Reading
+    /// `None` as "no time passed" would resume a session on a key that may be
+    /// older than the rekey window and render an assertion nobody re-checked —
+    /// the confident stale green ADR-0022 forbids.
+    #[test]
+    fn an_unknown_gap_is_treated_as_exceeding_the_window() {
+        let v = ResumeVerdict::decide(&resume(None, None), None, Duration::from_secs(120));
+        assert!(v.rekey_window_exceeded);
+        assert!(v.gap_unknown, "and the two reasons stay distinguishable");
+    }
+
+    #[test]
+    fn a_changed_boot_identity_is_a_cold_start_and_not_a_resume() {
+        // LC-24 step 1: after a reboot both monotonic clocks restart at zero,
+        // which is indistinguishable from "no time passed". `boot_id` is the
+        // discriminator, and it is compared HERE rather than in the adapter.
+        let held = BootId::from_array([1u8; 16]);
+        let same = ResumeVerdict::decide(
+            &resume(Some(Duration::from_secs(30)), Some(held)),
+            Some(held),
+            Duration::from_secs(120),
+        );
+        assert!(!same.cold_start);
+
+        let other = BootId::from_array([2u8; 16]);
+        let rebooted = ResumeVerdict::decide(
+            &resume(Some(Duration::from_secs(30)), Some(other)),
+            Some(held),
+            Duration::from_secs(120),
+        );
+        assert!(rebooted.cold_start);
+    }
+
+    #[test]
+    fn an_absent_boot_identity_is_never_read_as_a_reboot() {
+        // Inventing a cold start on a platform that reports no boot identity
+        // would tear down a healthy session on every single resume.
+        let held = BootId::from_array([1u8; 16]);
+        let w = Duration::from_secs(120);
+        assert!(
+            !ResumeVerdict::decide(&resume(Some(Duration::ZERO), None), Some(held), w).cold_start
+        );
+        assert!(
+            !ResumeVerdict::decide(&resume(Some(Duration::ZERO), Some(held)), None, w).cold_start
+        );
+    }
+
+    #[test]
+    fn a_resume_never_leaves_the_assertion_fresh() {
+        // LC-24 step 2 puts the enforcement query before any packet; LC-22 makes
+        // a surface with a stale picture render UNKNOWN rather than its last
+        // value. A one-second nap is still a gap the core did not watch.
+        let v = ResumeVerdict::decide(
+            &resume(Some(Duration::from_secs(1)), None),
+            None,
+            Duration::from_secs(3600),
+        );
+        assert!(!v.rekey_window_exceeded, "a one-second nap needs no rekey");
+        assert!(
+            !v.assertion_is_still_fresh(),
+            "and it still must not render a confident green"
+        );
+    }
     use super::*;
     use twinvpn_session::event::Event as E;
     use twinvpn_types::SessionId;

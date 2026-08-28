@@ -57,7 +57,12 @@
 use std::fs;
 use std::sync::Arc;
 
-use twinvpn_env::{BootId, BootIdSource, ElapsedClock, ElapsedInstant, Entropy, EnvError};
+use core::time::Duration;
+
+use twinvpn_env::{
+    BootId, BootIdSource, ElapsedClock, ElapsedInstant, Entropy, EnvError, MonotonicInstant,
+};
+use twinvpn_platform::ResumeFacts;
 
 /// The `clockid_t` this clock reads, named so a test can pin it.
 ///
@@ -143,6 +148,121 @@ impl ElapsedClock for BootTimeElapsedClock {
         // is wrong in the safe direction: every interval measures as zero, so
         // nothing expires early.
         ElapsedInstant::from_micros(Self::read_micros().unwrap_or(0))
+    }
+}
+
+/// Detects a suspend **after the fact**, from the divergence of the two clocks.
+///
+/// **Authority:** ADR-0022 LC-8 (the two clocks and why they are not
+/// interchangeable), LC-23a (Linux's `EV_SUSPEND`/`EV_RESUME` sources), LC-24
+/// step 1.
+///
+/// # Why Linux infers where the other two desktops are told
+///
+/// LC-23a's table gives Linux desktop `logind`'s `PrepareForSleep(true|false)`
+/// as the suspend source — and gives **Linux server, OpenWrt and headless
+/// "none, by design"**. This crate has no D-Bus dependency and TwinVPN's Linux
+/// authority is a system daemon that must work on all three, so the honest
+/// mechanism is the one that needs no notifier at all:
+///
+/// > `CLOCK_MONOTONIC` does not advance while the host is suspended and
+/// > `CLOCK_BOOTTIME` does. Sample both; if the boottime delta exceeds the
+/// > monotonic delta by more than the sampling tolerance, that excess **is** the
+/// > suspend gap.
+///
+/// This is why the seam carries [`ResumeFacts::announced_by_os`]. An inferred
+/// resume and an announced one are different facts: a container freeze, a live
+/// migration or a VM snapshot restore all produce this divergence and none of
+/// them is a user closing a lid, and a core told "the OS announced a resume"
+/// when nobody did would be believing something no one said.
+///
+/// # It reports; it does not decide
+///
+/// The boot identity is **carried, not compared**. LC-24 step 1 makes "the boot
+/// id changed, so this is a cold start and not a resume" a core decision, and an
+/// adapter that made it would be holding one (CB-2).
+#[derive(Debug, Clone, Copy)]
+pub struct SuspendDetector {
+    monotonic: MonotonicInstant,
+    elapsed: ElapsedInstant,
+    tolerance: Duration,
+}
+
+impl SuspendDetector {
+    /// The default sampling tolerance.
+    ///
+    /// The two readings cannot be taken at the same instant, and neither clock
+    /// is quantised identically, so a small divergence is measurement noise
+    /// rather than a suspend. One second is far above the noise floor of two
+    /// vDSO calls and far below any suspend worth reporting — and erring high is
+    /// the safe direction here, because a **fabricated** resume would make the
+    /// core discard a healthy session.
+    pub const DEFAULT_TOLERANCE: Duration = Duration::from_secs(1);
+
+    /// Starts a detector from a pair of readings taken together.
+    #[must_use]
+    pub const fn new(monotonic: MonotonicInstant, elapsed: ElapsedInstant) -> Self {
+        Self {
+            monotonic,
+            elapsed,
+            tolerance: Self::DEFAULT_TOLERANCE,
+        }
+    }
+
+    /// The same, with an explicit tolerance.
+    #[must_use]
+    pub const fn with_tolerance(
+        monotonic: MonotonicInstant,
+        elapsed: ElapsedInstant,
+        tolerance: Duration,
+    ) -> Self {
+        Self {
+            monotonic,
+            elapsed,
+            tolerance,
+        }
+    }
+
+    /// Samples both clocks again and reports a resume if the two diverged.
+    ///
+    /// Returns `None` when nothing happened — which is the overwhelmingly common
+    /// case, and is why this is cheap enough to call on every netlink wakeup.
+    #[must_use]
+    pub fn sample(
+        &mut self,
+        monotonic: MonotonicInstant,
+        elapsed: ElapsedInstant,
+        boot_id: Option<BootId>,
+    ) -> Option<ResumeFacts> {
+        let ran = monotonic.duration_since(self.monotonic);
+        let wall = elapsed.duration_since(self.elapsed);
+        self.monotonic = monotonic;
+        self.elapsed = elapsed;
+
+        let gap = wall.checked_sub(ran)?;
+        if gap <= self.tolerance {
+            return None;
+        }
+        Some(ResumeFacts {
+            // The excess IS the gap: every microsecond `CLOCK_BOOTTIME` counted
+            // that `CLOCK_MONOTONIC` did not is time the host was suspended.
+            suspended_for: Some(gap),
+            boot_id,
+            // Inferred, not announced. See the type's own doc for why the core
+            // is entitled to know the difference.
+            announced_by_os: false,
+            // `CLOCK_BOOTTIME` counts suspend and hibernate identically and
+            // nothing else here names S4, so LC-24 step 5's
+            // `PLATFORM.LIFECYCLE.HIBERNATE_RESUMED` is not answerable. `None`,
+            // never a guessed `false`.
+            hibernated: None,
+        })
+    }
+
+    /// The readings the detector currently holds.
+    #[must_use]
+    pub const fn readings(&self) -> (MonotonicInstant, ElapsedInstant) {
+        (self.monotonic, self.elapsed)
     }
 }
 
@@ -318,6 +438,97 @@ fn parse_uuid(text: &str) -> Option<[u8; 16]> {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The nine-hour sleep the monotonic clock cannot see.**
+    ///
+    /// Nine hours of `CLOCK_BOOTTIME` against one second of `CLOCK_MONOTONIC` is
+    /// a host that was suspended for nine hours, and the excess is the gap.
+    #[test]
+    fn a_divergence_between_the_two_clocks_is_the_suspend_gap() {
+        let mono = MonotonicInstant::from_micros(1_000_000);
+        let boot = ElapsedInstant::from_micros(1_000_000);
+        let mut detector = SuspendDetector::new(mono, boot);
+
+        let gap = Duration::from_secs(9 * 3600);
+        let facts = detector
+            .sample(
+                mono.saturating_add(Duration::from_secs(1)),
+                boot.saturating_add(gap + Duration::from_secs(1)),
+                Some(BootId::from_array([1u8; 16])),
+            )
+            .expect("a nine-hour divergence is a resume");
+        assert_eq!(facts.suspended_for, Some(gap));
+        assert!(
+            !facts.announced_by_os,
+            "nothing told us; we read it off two clocks, and a container freeze \
+             looks identical"
+        );
+        assert_eq!(facts.hibernated, None);
+    }
+
+    /// **Nothing is fabricated when nothing happened.**
+    ///
+    /// The two clocks cannot be read at the same instant, so a small divergence
+    /// is measurement noise. A fabricated resume would make the core discard a
+    /// healthy session, so the tolerance errs high.
+    #[test]
+    fn ordinary_running_time_is_not_a_resume() {
+        let mono = MonotonicInstant::from_micros(0);
+        let boot = ElapsedInstant::from_micros(0);
+        let mut detector = SuspendDetector::new(mono, boot);
+        // Both advanced together: no suspend.
+        assert!(detector
+            .sample(
+                mono.saturating_add(Duration::from_secs(60)),
+                boot.saturating_add(Duration::from_secs(60)),
+                None
+            )
+            .is_none());
+        // A few milliseconds of sampling skew: still no suspend.
+        let (m, b) = detector.readings();
+        assert!(detector
+            .sample(
+                m.saturating_add(Duration::from_secs(60)),
+                b.saturating_add(Duration::from_millis(60_400)),
+                None
+            )
+            .is_none());
+    }
+
+    /// A boottime reading that is somehow *behind* the monotonic delta is a
+    /// binding defect, not a negative suspend.
+    #[test]
+    fn a_non_monotone_pair_is_not_reported_as_a_resume() {
+        let mono = MonotonicInstant::from_micros(0);
+        let boot = ElapsedInstant::from_micros(0);
+        let mut detector = SuspendDetector::new(mono, boot);
+        assert!(detector
+            .sample(
+                mono.saturating_add(Duration::from_secs(100)),
+                boot.saturating_add(Duration::from_secs(10)),
+                None
+            )
+            .is_none());
+    }
+
+    /// Each sample re-bases the detector, so one suspend is reported once.
+    #[test]
+    fn a_gap_is_reported_once_and_the_detector_re_bases() {
+        let mono = MonotonicInstant::from_micros(0);
+        let boot = ElapsedInstant::from_micros(0);
+        let mut detector = SuspendDetector::new(mono, boot);
+        let after_mono = mono.saturating_add(Duration::from_secs(1));
+        let after_boot = boot.saturating_add(Duration::from_secs(301));
+        assert!(detector.sample(after_mono, after_boot, None).is_some());
+        // The next sample advances both together: nothing to report.
+        assert!(detector
+            .sample(
+                after_mono.saturating_add(Duration::from_secs(5)),
+                after_boot.saturating_add(Duration::from_secs(5)),
+                None
+            )
+            .is_none());
+    }
     use super::*;
     use twinvpn_env::binding::system::SystemMonotonicClock;
     use twinvpn_env::MonotonicClock;

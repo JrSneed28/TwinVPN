@@ -14,31 +14,30 @@
 //! turns one IOKit message into the [`NetworkChange`] events the core must see,
 //! and the core's own reconciler does the rest.
 //!
-//! # A reported gap: the seam has no "the system resumed" fact
+//! # The gap this module reported is closed
 //!
-//! [`NetworkChange`] is `#[non_exhaustive]` and has variants for interfaces,
-//! addresses, default routes, resolvers, NAT64 and link posture — and **none for
-//! a suspend/resume boundary**. The nearest true statement the seam can carry is
-//! [`NetworkChange::EventsLost`], whose documented meaning is "the stream dropped
-//! events because the core was not draining" and whose documented consequence is
-//! exactly right here: *"an adapter that reports the gap lets the core
-//! re-enumerate and recover."*
+//! Wave 2 reported that [`NetworkChange`] had variants for interfaces,
+//! addresses, default routes, resolvers, NAT64 and link posture and **none for a
+//! suspend/resume boundary**. [`NetworkChange::EventsLost`] was true and
+//! sufficient for the stream — while the machine is asleep the `PF_ROUTE` socket
+//! is not being read and Darwin's routing socket has a finite kernel buffer, so
+//! events genuinely **are** lost across a sleep — but it could not say *"the
+//! machine was off for nine hours"*, which is a different fact with different
+//! consequences for `T_TRUST_HARD` and for NAT binding lifetime.
 //!
-//! While the machine is asleep the `PF_ROUTE` socket is not being read, and
-//! Darwin's routing socket has a finite kernel buffer, so events **are** lost
-//! across a sleep — this is not a metaphor for the resume, it is a literal
-//! description of it. Emitting `EventsLost` on wake is therefore both true and
-//! sufficient: it forces the re-enumeration that stops a stale green.
+//! The seam now carries [`NetworkChange::SystemResumed`] with
+//! [`twinvpn_platform::ResumeFacts`], and this journal fills it. Both events are
+//! emitted on a wake, in that order, because they are **two facts and not one**:
+//! the stream has a hole, *and* wall time passed that no monotonic clock saw.
 //!
-//! It is still less than the core deserves. A `SystemResumed { slept_for }`
-//! variant would let the core distinguish "we missed some events" from "the
-//! machine was off for nine hours", which are different facts with different
-//! consequences for `T_TRUST_HARD` and for NAT binding lifetime. The seam is
-//! frozen, so this is **reported to the integration lead, not patched**, and
-//! [`PowerJournal::slept_across_last_wake`] carries the extra fact for a shell to
-//! log until the seam can carry it.
+//! The gap is measured on the **suspend-inclusive** clock
+//! ([`crate::clock::ContinuousElapsedClock`], `mach_continuous_time`), which is
+//! LC-8's `ElapsedClock` row and the only clock that advances while the machine
+//! is asleep. Measuring it on `MonotonicClock` would report zero — which is
+//! precisely the stale green this module exists to prevent.
 
-use twinvpn_platform::NetworkChange;
+use twinvpn_env::{BootId, ElapsedInstant};
+use twinvpn_platform::{NetworkChange, ResumeFacts};
 
 /// `<IOKit/IOMessage.h>`: the system-power messages this adapter reacts to.
 ///
@@ -145,6 +144,11 @@ pub struct PowerJournal {
     /// `WillPowerOn` with no preceding `WillSleep` — which happens on a cold boot
     /// and on a dark wake.
     slept_across_last_wake: bool,
+    /// The suspend-inclusive clock reading taken when sleep was committed.
+    ///
+    /// `None` until a `WillSleep` is observed with a clock, and cleared on each
+    /// wake so a second wake cannot re-report the first sleep's gap.
+    slept_at: Option<ElapsedInstant>,
 }
 
 impl PowerJournal {
@@ -156,6 +160,7 @@ impl PowerJournal {
             sleeps: 0,
             wakes: 0,
             slept_across_last_wake: false,
+            slept_at: None,
         }
     }
 
@@ -179,11 +184,18 @@ impl PowerJournal {
 
     /// Whether the last wake followed a committed sleep.
     ///
-    /// The fact the seam cannot carry — see the module documentation. A shell logs
-    /// it; nothing branches on it.
+    /// Kept as a counter-style fact for a diagnostic bundle. The load-bearing
+    /// version of it now crosses the seam inside
+    /// [`NetworkChange::SystemResumed`], where the core can act on it.
     #[must_use]
     pub const fn slept_across_last_wake(&self) -> bool {
         self.slept_across_last_wake
+    }
+
+    /// The suspend-inclusive reading taken when sleep was committed, if any.
+    #[must_use]
+    pub const fn slept_at(&self) -> Option<ElapsedInstant> {
+        self.slept_at
     }
 
     /// Observes one event and reports the changes the core must see.
@@ -196,7 +208,7 @@ impl PowerJournal {
     /// | `WillSleep` | `LinkPostureChanged { low_power: true }` | the one true fact available before the stack stops. **No teardown**: CB-6 puts the ruleset in the OS's custody and a sleep must not drop protection |
     /// | `WillNotSleep` | `LinkPostureChanged { low_power: false }` | the posture the previous message announced did not happen |
     /// | `WillPowerOn` | nothing | drivers are not up; every network fact readable here is stale by construction |
-    /// | `HasPoweredOn` | `EventsLost`, then `LinkPostureChanged { low_power: false }` | the routing socket was not drained while asleep, so events **were** lost; reporting the gap is what makes the core re-enumerate instead of trusting what it last saw |
+    /// | `HasPoweredOn` | `EventsLost`, then `SystemResumed`, then `LinkPostureChanged { low_power: false }` | the routing socket was not drained while asleep, so events **were** lost; and wall time passed that no monotonic clock saw. Two facts, both reported |
     /// | `WillPowerOff` / `WillRestart` | nothing | the process is about to end; an event nobody will drain is not a report |
     ///
     /// **`EventsLost` comes first, deliberately.** A core that processed the
@@ -207,13 +219,43 @@ impl PowerJournal {
     // written out rather than merged: they report nothing for three DIFFERENT
     // reasons, named in the table above, and merging them would hide it when one
     // of them changes.
+    ///
+    /// This form reports [`ResumeFacts`] with **no measured gap**, because it has
+    /// no clock. [`PowerJournal::observe_at`] is the one that measures, and a
+    /// caller that has a [`crate::clock::ContinuousElapsedClock`] should use it —
+    /// `suspended_for: None` is honest ("we do not know how long") and is not the
+    /// same answer as `Some(ZERO)`, but it tells the core less than it could.
     #[allow(clippy::match_same_arms)]
     pub fn observe(&mut self, event: PowerEvent) -> Vec<NetworkChange> {
+        self.observe_at(event, None, None)
+    }
+
+    /// Observes one event with a **suspend-inclusive** clock reading and, on a
+    /// wake, the boot identity.
+    ///
+    /// `now` must come from `mach_continuous_time` — LC-8's `ElapsedClock` row —
+    /// and never from `mach_absolute_time`, which does not advance while the
+    /// machine is asleep and would report every nine-hour sleep as zero.
+    ///
+    /// `boot_id` is carried, not compared: LC-24 step 1 makes "the boot identity
+    /// changed, so this is a cold start and not a resume" a **core** decision,
+    /// and an adapter that decided it would be holding one (CB-2).
+    #[allow(clippy::match_same_arms)]
+    pub fn observe_at(
+        &mut self,
+        event: PowerEvent,
+        now: Option<ElapsedInstant>,
+        boot_id: Option<BootId>,
+    ) -> Vec<NetworkChange> {
         match event {
             PowerEvent::MaySleep => Vec::new(),
             PowerEvent::WillSleep => {
                 self.phase = PowerPhase::Sleeping;
                 self.sleeps = self.sleeps.saturating_add(1);
+                // The reading is taken HERE, in the bounded pre-sleep window
+                // LC-25 describes, because it is the last moment at which a
+                // clock can be read before the gap begins.
+                self.slept_at = now;
                 vec![NetworkChange::LinkPostureChanged {
                     metered: false,
                     low_power: true,
@@ -234,12 +276,35 @@ impl PowerJournal {
                 self.slept_across_last_wake = !matches!(self.phase, PowerPhase::Awake);
                 self.phase = PowerPhase::Awake;
                 self.wakes = self.wakes.saturating_add(1);
+                let suspended_for = match (self.slept_at.take(), now) {
+                    (Some(went), Some(back)) => Some(back.duration_since(went)),
+                    // Either end of the measurement is missing: a wake with no
+                    // preceding sleep (a dark wake, a cold boot), or a caller
+                    // with no clock. `None` says "we do not know how long",
+                    // which is a different answer from `Some(ZERO)` and the one
+                    // that keeps the core from treating a nine-hour sleep as an
+                    // instant.
+                    _ => None,
+                };
                 vec![
                     // The count is genuinely unknown: Darwin's routing socket
                     // drops silently when its buffer fills and does not say how
                     // many. `None` is the honest answer, and the seam has a
                     // spelling for it.
                     NetworkChange::EventsLost { count: None },
+                    NetworkChange::SystemResumed(ResumeFacts {
+                        suspended_for,
+                        boot_id,
+                        // IOKit told us. This is not an inference from a clock
+                        // divergence, and the core is entitled to know which.
+                        announced_by_os: true,
+                        // Darwin's power messages do not distinguish S3 from S4:
+                        // `kIOMessageSystemHasPoweredOn` is the same message for
+                        // a sleep and for a hibernate, so LC-24 step 5's
+                        // `PLATFORM.LIFECYCLE.HIBERNATE_RESUMED` is not
+                        // answerable here. `None`, never a guess.
+                        hibernated: None,
+                    }),
                     NetworkChange::LinkPostureChanged {
                         metered: false,
                         low_power: false,
@@ -257,16 +322,44 @@ impl PowerJournal {
     /// the first contains** — a VPN that stalled a sleep for thirty seconds and
     /// then let it happen anyway would be worse than one that never registered.
     pub fn observe_message(&mut self, message: u32) -> (Vec<NetworkChange>, bool) {
+        self.observe_message_at(message, None, None)
+    }
+
+    /// The same, with a suspend-inclusive clock reading and the boot identity.
+    pub fn observe_message_at(
+        &mut self,
+        message: u32,
+        now: Option<ElapsedInstant>,
+        boot_id: Option<BootId>,
+    ) -> (Vec<NetworkChange>, bool) {
         match PowerEvent::from_message(message) {
-            Some(event) => (self.observe(event), event.needs_acknowledgement()),
+            Some(event) => (
+                self.observe_at(event, now, boot_id),
+                event.needs_acknowledgement(),
+            ),
             None => (Vec::new(), false),
         }
+    }
+}
+
+/// The `ResumeFacts` a wake with no measurement can report.
+///
+/// Named rather than written inline so that "we could not measure it" is one
+/// value with one meaning, and a reader can grep for every place that admits it.
+#[must_use]
+pub const fn unmeasured_resume() -> ResumeFacts {
+    ResumeFacts {
+        suspended_for: None,
+        boot_id: None,
+        announced_by_os: true,
+        hibernated: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::time::Duration;
 
     #[test]
     fn the_iokit_message_numbers_are_the_common_msg_encoding() {
@@ -311,12 +404,92 @@ mod tests {
         journal.observe(PowerEvent::WillPowerOn);
         let events = journal.observe(PowerEvent::HasPoweredOn);
         assert_eq!(events[0], NetworkChange::EventsLost { count: None });
+        assert!(matches!(events[1], NetworkChange::SystemResumed(_)));
         assert_eq!(
-            events[1],
+            events[2],
             NetworkChange::LinkPostureChanged {
                 metered: false,
                 low_power: false,
             }
+        );
+    }
+
+    /// **"The machine was off for nine hours" — the fact `EventsLost` could not
+    /// carry.**
+    ///
+    /// Measured on `mach_continuous_time`, which is LC-8's `ElapsedClock` row and
+    /// the only clock that advances while the machine is asleep. The same nine
+    /// hours read from `mach_absolute_time` would be zero.
+    #[test]
+    fn a_measured_resume_carries_the_gap_the_monotonic_clock_cannot_see() {
+        let mut journal = PowerJournal::new();
+        let asleep_at = ElapsedInstant::from_micros(1_000_000);
+        let awake_at = asleep_at.saturating_add(Duration::from_secs(9 * 3600));
+
+        journal.observe_at(PowerEvent::WillSleep, Some(asleep_at), None);
+        journal.observe_at(PowerEvent::WillPowerOn, None, None);
+        let boot = BootId::from_array([7u8; 16]);
+        let events = journal.observe_at(PowerEvent::HasPoweredOn, Some(awake_at), Some(boot));
+
+        let NetworkChange::SystemResumed(facts) = events[1] else {
+            panic!("a wake reports a resume");
+        };
+        assert_eq!(facts.suspended_for, Some(Duration::from_secs(9 * 3600)));
+        assert_eq!(facts.boot_id, Some(boot));
+        assert!(facts.announced_by_os, "IOKit told us; we did not infer it");
+        assert_eq!(
+            facts.hibernated, None,
+            "Darwin's power messages do not distinguish S3 from S4"
+        );
+    }
+
+    /// **`None` is not `Some(ZERO)`.**
+    ///
+    /// A wake with no preceding sleep — a dark wake, or a process that started
+    /// after the sleep began — cannot measure the gap. Reporting zero would tell
+    /// the core no time had passed, which is exactly the confident stale green.
+    #[test]
+    fn an_unmeasurable_gap_is_none_and_never_zero() {
+        let mut journal = PowerJournal::new();
+        let events = journal.observe_at(
+            PowerEvent::HasPoweredOn,
+            Some(ElapsedInstant::from_micros(5_000_000)),
+            None,
+        );
+        let NetworkChange::SystemResumed(facts) = events[1] else {
+            panic!("a wake reports a resume");
+        };
+        assert_eq!(facts.suspended_for, None);
+        assert_ne!(facts.suspended_for, Some(Duration::ZERO));
+    }
+
+    /// A second wake must not re-report the first sleep's gap.
+    #[test]
+    fn the_measurement_is_consumed_by_the_wake_that_reports_it() {
+        let mut journal = PowerJournal::new();
+        let asleep_at = ElapsedInstant::from_micros(1_000_000);
+        journal.observe_at(PowerEvent::WillSleep, Some(asleep_at), None);
+        let first = journal.observe_at(
+            PowerEvent::HasPoweredOn,
+            Some(asleep_at.saturating_add(Duration::from_secs(60))),
+            None,
+        );
+        let NetworkChange::SystemResumed(a) = first[1] else {
+            panic!("resume");
+        };
+        assert_eq!(a.suspended_for, Some(Duration::from_secs(60)));
+
+        let second = journal.observe_at(
+            PowerEvent::HasPoweredOn,
+            Some(asleep_at.saturating_add(Duration::from_secs(600))),
+            None,
+        );
+        let NetworkChange::SystemResumed(b) = second[1] else {
+            panic!("resume");
+        };
+        assert_eq!(
+            b.suspended_for, None,
+            "a wake with no sleep behind it has nothing to measure"
         );
     }
 

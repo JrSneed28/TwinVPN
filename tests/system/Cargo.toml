@@ -25,12 +25,14 @@ twinvpn-schema       = { workspace = true }
 twinvpn-crypto       = { workspace = true }
 twinvpn-platform     = { workspace = true }
 twinvpn-session      = { workspace = true }
+twinvpn-trust        = { workspace = true }
 twinvpn-path         = { workspace = true }
 twinvpn-relay-client = { workspace = true }
 twinvpn-tunnel       = { workspace = true }
 twinvpn-route        = { workspace = true }
 twinvpn-dns          = { workspace = true }
 twinvpn-enforce      = { workspace = true }
+twinvpn-gateway      = { workspace = true }
 twinvpn-core         = { workspace = true }
 twinvpn-mgmt         = { workspace = true }
 twinvpn-diag         = { workspace = true }
@@ -43,6 +45,14 @@ twinlab              = { workspace = true }
 serde_json = { workspace = true }
 prost      = { workspace = true }
 bytes      = "1"
+# The control-plane client, for the C2 event decoder's fuzz target. A
+# dev-dependency: no shipped crate gains it, and CD-I5 is untouched because
+# nothing here is a data-plane crate.
+twinvpn-cp-client = { workspace = true }
+# The Linux platform adapter, for the netlink / nft / restore-point fuzz targets.
+# A dev-dependency: it is a `twinvpn-platform-*` crate and nothing shipped here
+# gains it.
+twinvpn-platform-linux = { workspace = true }
 
 # ---------------------------------------------------------------------------
 # The four test levels ownership.md §1 assigns to `tests/`, kept as four
@@ -76,6 +86,10 @@ path = "../compatibility/golden_vectors.rs"
 
 
 [[test]]
+name = "e2e_scenario_matrix"
+path = "../e2e/scenario_matrix.rs"
+
+[[test]]
 name = "e2e_composed_core"
 path = "../e2e/composed_core.rs"
 
@@ -86,3 +100,23 @@ path = "../chaos/journal_write_behind.rs"
 [[test]]
 name = "integration_tunnel_wire_agreement"
 path = "../integration/tunnel_wire_agreement.rs"
+
+# ---------------------------------------------------------------------------
+# The fuzz level. Every decoder that reads bytes this device did not write.
+# ---------------------------------------------------------------------------
+
+[[test]]
+name = "fuzz_wire_decoders"
+path = "../fuzz/wire_decoders.rs"
+
+[[test]]
+name = "fuzz_statement_decoders"
+path = "../fuzz/statement_decoders.rs"
+
+[[test]]
+name = "fuzz_persistence_decoders"
+path = "../fuzz/persistence_decoders.rs"
+
+[[test]]
+name = "fuzz_handshake_and_platform_decoders"
+path = "../fuzz/handshake_and_platform_decoders.rs"

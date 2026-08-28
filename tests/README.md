@@ -15,7 +15,7 @@ cross-domain defects turned out to be.
 ```bash
 source build/toolchain/env.sh
 cd tests
-cargo test --workspace          # 121 tests, ~1 s after the first build
+cargo test --workspace          # 189 tests, ~12 s after the first build
 ```
 
 `tests/` is a fifth cargo workspace and is in the `Makefile`'s `WORKSPACES`, so
@@ -41,7 +41,12 @@ kind of reason — see §7.
 | `chaos/outage_and_failover.rs` | 15 — chaos | 11 |
 | `chaos/journal_write_behind.rs` | 15 — chaos, **W-28** measured | 7 |
 | `compatibility/golden_vectors.rs` | 3 + 19 — protocol, compatibility | 8 |
-| `system/` | the shared rigs (`Rig`, `ComposedRig`, `AdapterStore`, `block_on`) | — |
+| `e2e/scenario_matrix.rs` | 7 — the named scenario matrix (§8) | 24 |
+| `fuzz/wire_decoders.rs` | 13 — fuzzing, network-supplied decoders (§9) | 13 |
+| `fuzz/statement_decoders.rs` | 13 — fuzzing, peer-authored signed statements | 6 |
+| `fuzz/persistence_decoders.rs` | 13 — fuzzing, decoders that read local storage | 11 |
+| `fuzz/handshake_and_platform_decoders.rs` | 13 — fuzzing, the pre-auth handshake reader and the platform parsers | 7 |
+| `system/` | the shared rigs (`Rig`, `ComposedRig`, `AdapterStore`, `block_on`) and the fuzz engine | 7 |
 | `vectors/crypto-kat/` | §2.3's `crypto-kat/` corpus | 7 vectors |
 
 `system/Cargo.toml` declares each file as a `[[test]]` target with an explicit
@@ -222,11 +227,19 @@ is finding **W-4**, and the test says so in its assertion message.
 | **T1** | `integration/*`, `compatibility/golden_vectors.rs` — pure, no I/O, no privilege | **< 0.1 s** |
 | **T2** | `e2e/*`, `chaos/outage_and_failover.rs` — real components against `MockAdapter` | **< 0.1 s** |
 | **T2** | `chaos/journal_write_behind.rs` — a real vault under `target/`, so it touches the filesystem | **≈ 0.05 s** |
+| **T1** | `e2e/scenario_matrix.rs` — pure, the state machine driven trigger by trigger | **< 0.01 s** |
+| **T1** | `fuzz/wire_decoders.rs`, `fuzz/persistence_decoders.rs` — pure decoders over ~6 000 inputs each | **≈ 0.35 s** |
+| **T1** | `fuzz/statement_decoders.rs` — pure, but every input costs a real ES256 verification | **≈ 5.7 s** |
+| **T1** | `fuzz/handshake_and_platform_decoders.rs` — pure, but every input costs a fresh `Noise_IKpsk2` responder | **≈ 5.6 s** |
 | **T3** | nothing yet — the levels that need TwinLab's namespace rig live in `lab/`, and nothing here needs a network | — |
 | **T4** | nothing yet | — |
 
-The whole suite is **≈ 1 s** including compilation of the composed core, which
-is deliberate: everything here is a decision the core makes, and CD-5's mock is
+The whole suite is **≈ 12 s** — of which about eleven are the two
+cryptographic fuzz targets (ECDSA verifications, and one fresh `Noise_IKpsk2`
+responder per input), and everything else is under a second. Both are capped by
+a per-file iteration count chosen against that measurement, because a fuzz
+target that dominated the suite would be the first one somebody disabled. The
+rest is deliberate: everything here is a decision the core makes, and CD-5's mock is
 what keeps that affordable. Nothing in this directory opens a socket or needs a
 privilege, and the only filesystem it touches is
 `target/system-test-vaults/`, cleared per test.
@@ -259,3 +272,153 @@ privilege, and the only filesystem it touches is
   traversal. `integration/cross_component_agreement.rs` §6 asserts both absences
   against `twinvpn.h`, so the day the vtable gains either, the test says which
   refusal to delete.
+
+---
+
+## 8. The named scenario matrix
+
+`e2e/scenario_matrix.rs` exists for a reason that is worth stating, because
+otherwise it looks like duplication: **every scenario in it was already covered,
+and none of them was findable.**
+
+The wave-1 objective lists seventeen scenarios by name. The coverage for them
+was real but scattered — a `Row::T13` assertion in `twinvpn-session`'s
+transition table, a relay-death test in `chaos/outage_and_failover.rs`, a latch
+test in `e2e/fail_closed_leak.rs`. A reviewer asking *"is relay-to-direct upgrade
+tested?"* had to know that the answer was spelled `T13`, and a `grep` for
+`upgrade` across every test name in the repository returned **nothing**.
+
+So this file is a **traceability surface**, named in the objective's own
+vocabulary. Where a scenario is tested more deeply elsewhere, the test here says
+where and does not duplicate that depth.
+
+| Objective's scenario | Test |
+|---|---|
+| direct connection | `scenario_direct_connection` |
+| local direct connection | `scenario_local_direct_connection` |
+| relayed connection | `scenario_relayed_connection` |
+| direct-to-relay fallback | `scenario_direct_to_relay_fallback` |
+| relay-to-direct upgrade where supported | `scenario_relay_to_direct_upgrade_where_supported`, and its negative half |
+| path migration | `scenario_path_migration_commits_and_rolls_back` |
+| network loss | `scenario_network_loss_with_no_alternate_reconnects_with_a_named_code` |
+| reconnect | `scenario_reconnect_returns_to_a_steady_carrier_on_every_family` |
+| stale session | `scenario_stale_session_past_the_rekey_window_rediscovers_rather_than_resuming` (+ the path-only case) |
+| duplicate messages | `scenario_duplicate_messages_are_refused_exactly_once_each` |
+| reordered messages | `scenario_reordered_messages_are_accepted_within_the_window_and_still_deduplicated` |
+| unsupported capability | `scenario_an_unsupported_capability_*` (3 tests: selection, name shape, S-37 floor) |
+| incompatible protocol version | `scenario_an_incompatible_protocol_version_fails_with_the_registered_code` |
+| peer revocation | `scenario_peer_revocation_is_terminal_and_never_retried_into` |
+| kill-switch state transitions | `scenario_kill_switch_*` (3 tests: entry, the two exits, T29's precedence) |
+| cancellation | `scenario_cancellation_is_accepted_from_every_state_except_blocked` |
+| concurrent clients | `scenario_concurrent_clients_are_admitted_attributed_and_isolated` (+ the collision case) |
+
+Two rules the file holds to, both of which are §3's rules applied here:
+
+- **Every scenario with an address family loops over `HostFamily::ALL`.** A
+  matrix that quietly covered only the v4 arm would make the objective's "no v6
+  later" rule untestable, which is the exact failure ADR-0010 **R1** exists to
+  forbid.
+- **Every guard has a negative.** `where supported` in "relay-to-direct upgrade
+  where supported" is a *guard*, so the file asserts that an unvalidated path, a
+  path that is not better, and a path the anti-flap suppressor is holding all
+  **fail** to upgrade. A guard nobody has seen refuse is not a guard.
+
+---
+
+## 9. Fuzzing the protocol decoders
+
+`fuzz/` covers **every decoder in the core that reads bytes this device did not
+write**. `ownership.md` §6 rules 9 and 10 — validate before allocating, bound
+every allocation an untrusted input can drive — are properties under
+*adversarial* input, and an example-based test cannot measure them: the examples
+are the ones the author thought of.
+
+### Why this is not `cargo fuzz`
+
+`cargo fuzz` needs libFuzzer, which needs nightly. `rust-toolchain.toml` pins one
+exact stable version and ADR-0018 §11.3 makes advancing it a reviewed commit that
+re-runs the whole §11.9 matrix. **A fuzz harness that cannot run in the gate is a
+fuzz harness nobody runs**, so this one runs under `cargo test` on the pinned
+toolchain.
+
+The trade is stated rather than hidden. There is **no coverage feedback**, so
+this does not find what a coverage-guided fuzzer finds; if libFuzzer becomes
+available, these targets are the corpus to point it at. What it gives that
+libFuzzer does not is that every input is a pure function of a `u64` seed, so a
+failure reproduces exactly, in the gate, a year later — the same property CD-4
+gives the product's own random draws. The corpus compensates for the missing
+feedback by seeding from *valid* encodings and mutating them, which is where a
+structure-aware fuzzer spends its time anyway.
+
+### The three properties every target asserts
+
+1. **Totality.** No input panics — not a slice index, not an `unwrap`, not a
+   debug-build overflow, not a recursion that overflows the stack. A panic in a
+   decoder that reads an attacker's bytes is a remote denial of service.
+2. **Determinism.** The same bytes decode to the same outcome twice.
+3. **No partial accept.** A rejection yields no value, held structurally by
+   every decoder returning `Result` or `Option`.
+
+Two more are asserted per target where they apply: that the run **reached the
+accepting path at all** — a fuzz run that only ever rejected tested the first
+length check and nothing else, which is the failure mode a fuzz suite is most
+likely to have and least likely to notice — and that declared lengths past the
+cap are refused rather than allocated.
+
+### The three files, and why the split is by adversary
+
+| File | The bytes come from | The adversary |
+|---|---|---|
+| `wire_decoders.rs` | C1/C2/C7, C4, the relay leg, a DNS query name | anyone who can send a datagram |
+| `statement_decoders.rs` | COSE_Sign1 signed statements, COSE keys | a legitimate peer, or a stolen key |
+| `persistence_decoders.rs` | the vault, the anchor, the session journal, the peer cache | anyone with disk access, or a torn write |
+| `handshake_and_platform_decoders.rs` | the `Noise_IKpsk2` initiation, netlink, `nft --json`, the resolver restore point, a peer's `reason_code` text | anyone who can send a datagram to the tunnel port; the kernel; the disk |
+
+`statement_decoders.rs` is the one worth reading. The naive fuzz — flip a bit in
+a signed envelope — tests almost nothing, because every mutation fails the
+signature and the payload decoder is never reached. The adversary that matters
+holds a key and can therefore sign **whatever payload it likes**, so those
+targets generate random CBOR trees, sign them with a real ES256 key, verify them
+through the real `verify_cose_sign1`, and only then hand them to the decoder.
+That is the exact path a hostile peer's statement takes.
+
+`persistence_decoders.rs` exists because it is tempting to treat local storage as
+trusted. ST-15's whole rung ladder is built on the premise that what comes back
+may not be what went in, and the kill switch, the revocation floors and the trust
+epoch are all restored from those bytes.
+
+`handshake_and_platform_decoders.rs` covers the two surfaces the other three
+cannot reach. `Handshake::read_message` on a **responder** is the decoder an
+unsolicited datagram to the tunnel port hits before any key has authorised
+anything — ADR-0001 A1's "silence on unauthenticated input" is what a caller
+does with a *failure*, and a panic is neither silence nor a failure. Its target
+asserts `accepted == 0`: a responder accepting a forged initiation would be the
+defect, not the coverage. And the platform half fuzzes the three things
+`twinvpn-platform-linux` parses that this process did not write. The kernel is
+trusted; a declared length arriving from a socket is still a declared length,
+and the restore point is read by `twinvpn-unblock` with the agent absent, so a
+panic there is a machine that will not restore its resolver.
+
+One exclusion is stated rather than left as an unexplained gap:
+`TransportSession::open` is not fuzzed, because reaching it needs a completed
+handshake, which needs a `VerifiedTunnelKey`, which is only constructible
+through a signed and verified `TunnelKeyBinding`. Its replay behaviour is
+covered by `integration/tunnel_wire_agreement.rs` and by §8's matrix; its AEAD
+is `snow`'s.
+
+### The engine is itself tested
+
+`system/src/fuzz.rs` carries seven tests that plant a decoder with a known defect
+— one that panics, one that is not deterministic — and assert the engine reports
+it, names it, and prints the input in a form that can be pasted back. This is
+`core/README.md` §6's principle applied here: *a lint nobody has seen fail is not
+a lint*, and the same is true of a fuzz harness. A refactor that turned `fuzz`
+into a no-op fails there rather than passing everything for the rest of the
+project's life.
+
+### Adding a decoder
+
+A decoder with no entry in `fuzz/` is a decoder nobody has fuzzed. Add a target
+beside its neighbours: build a corpus with `fuzz::corpus(seed, iterations,
+max_len, &valid_seeds)`, call `fuzz::fuzz(name, &corpus, |b| ...)`, and assert
+the report reached both paths.

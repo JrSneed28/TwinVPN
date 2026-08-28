@@ -13,7 +13,7 @@ use twinvpn_platform::{
     SecureItemKey, SocketFamily, SocketOptions, SupportedFamilies, UdpBindSpec,
 };
 use twinvpn_types::{
-    codes, AddressFamily, Endpoint, IpAddr, IpPrefix, PerFamily, Port, V4Addr, V6Addr,
+    codes, AddressFamily, Endpoint, InterfaceAddress, IpAddr, PerFamily, Port, V4Addr, V6Addr,
 };
 
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -61,8 +61,11 @@ fn contract(generation: u64, ruleset: Ruleset) -> NetworkContract {
         // ADR-0010 R1: both families, always. `PerFamily` makes the v6 half a
         // compile error to omit.
         addresses: PerFamily::new(
-            vec![IpPrefix::new(IpAddr::V4(V4Addr::from_octets([100, 64, 0, 1])), 32).unwrap()],
-            vec![IpPrefix::new(
+            vec![
+                InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets([100, 64, 0, 1])), 32)
+                    .unwrap(),
+            ],
+            vec![InterfaceAddress::new(
                 IpAddr::V6(
                     V6Addr::new(
                         [
@@ -85,6 +88,7 @@ fn contract(generation: u64, ruleset: Ruleset) -> NetworkContract {
         },
         ruleset,
         mtu: 1280,
+        tunnel_remote_address: None,
     }
 }
 

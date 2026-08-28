@@ -23,11 +23,12 @@ use std::path::Path;
 
 use tokio::net::UnixStream;
 
+use super::codec::TransportError;
 use super::codec::{read_frame, write_frame};
 use super::scope::Scopes;
 use super::wire::{
-    Body, Diagnostic, FrameError, Hello, HelloAck, MgmtEnvelope, PlatformCtx, Request, Response,
-    MI_VERSION, MI_VERSION_MIN,
+    Body, Diagnostic, Hello, HelloAck, MgmtEnvelope, PlatformCtx, Request, Response, MI_VERSION,
+    MI_VERSION_MIN,
 };
 
 /// Why a client call did not produce a response.
@@ -38,7 +39,7 @@ pub enum ClientError {
     /// ADR-0017 §11.12 gives this its own exit code (**3**), "distinct from 1",
     /// so a script can tell "the agent is not running" from "the agent said no".
     #[error("the management interface is unavailable")]
-    Unavailable(#[source] FrameError),
+    Unavailable(#[source] TransportError),
     /// The agent refused the attach and said why. §11.7 forbids a silent close.
     #[error("the agent refused the connection")]
     Rejected(Box<Diagnostic>),
@@ -60,7 +61,7 @@ impl ClientError {
     #[must_use]
     pub fn reason_code(&self) -> &str {
         match self {
-            ClientError::Unavailable(e) => e.reason_code(),
+            ClientError::Unavailable(e) => e.reason_code().as_str(),
             ClientError::Rejected(d) | ClientError::Failed(d) => &d.reason_code,
             ClientError::Protocol => "PROTO.UNPARSEABLE_ENVELOPE",
         }
@@ -102,7 +103,7 @@ impl Client {
     ) -> Result<Self, ClientError> {
         let mut stream = UnixStream::connect(path)
             .await
-            .map_err(|e| ClientError::Unavailable(FrameError::Transport(e)))?;
+            .map_err(|e| ClientError::Unavailable(TransportError::Transport(e)))?;
 
         let hello = MgmtEnvelope {
             mi_version: MI_VERSION,
@@ -239,7 +240,7 @@ impl Client {
                 // failing is what makes a subscribed client able to also make
                 // ordinary calls.
                 Body::Event(_) | Body::Compacted(_) => {}
-                Body::Goodbye => return Err(ClientError::Unavailable(FrameError::Closed)),
+                Body::Goodbye => return Err(ClientError::Unavailable(TransportError::Closed)),
                 Body::Reject(d) => return Err(ClientError::Rejected(Box::new(d))),
                 // MI-3: the agent MUST NOT initiate a request. Receiving one is
                 // a protocol violation, not something to answer.
@@ -276,21 +277,15 @@ mod tests {
 
     #[test]
     fn the_error_carries_a_registered_code_and_never_a_bare_message() {
-        let unavailable = ClientError::Unavailable(FrameError::Closed);
+        let unavailable = ClientError::Unavailable(TransportError::Closed);
         assert_eq!(unavailable.reason_code(), "MGMT.UNAVAILABLE");
         // EM-37: the class is what a script switches on, and it is absent for a
         // transport failure because the agent never got to name one.
         assert_eq!(unavailable.class(), None);
 
-        let failed = ClientError::Failed(Box::new(Diagnostic {
-            reason_code: "POLICY.POLICY_DENIED".to_owned(),
-            class: "POLICY".to_owned(),
-            severity: "ERROR".to_owned(),
-            user_actionable: true,
-            summary_key: None,
-            next_action_key: None,
-            evidence: Vec::new(),
-        }));
+        let failed = ClientError::Failed(Box::new(Diagnostic::of(
+            twinvpn_types::codes::POLICY_POLICY_DENIED,
+        )));
         assert_eq!(failed.reason_code(), "POLICY.POLICY_DENIED");
         assert_eq!(failed.class(), Some("POLICY"));
     }
@@ -299,16 +294,10 @@ mod tests {
     fn a_missing_endpoint_is_a_different_condition_from_a_refusal() {
         // ADR-0017 §11.12 gives them different exit codes so a script can tell
         // "re-run with privilege" from "this will never work".
-        let unavailable = ClientError::Unavailable(FrameError::Closed);
-        let rejected = ClientError::Rejected(Box::new(Diagnostic {
-            reason_code: "MGMT.PRINCIPAL_UNVERIFIABLE".to_owned(),
-            class: "PERSISTENT".to_owned(),
-            severity: "ERROR".to_owned(),
-            user_actionable: true,
-            summary_key: None,
-            next_action_key: None,
-            evidence: Vec::new(),
-        }));
+        let unavailable = ClientError::Unavailable(TransportError::Closed);
+        let rejected = ClientError::Rejected(Box::new(Diagnostic::of(
+            twinvpn_types::codes::MGMT_PRINCIPAL_UNVERIFIABLE,
+        )));
         assert_ne!(unavailable.reason_code(), rejected.reason_code());
     }
 }

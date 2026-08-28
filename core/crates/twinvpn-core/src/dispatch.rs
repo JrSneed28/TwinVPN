@@ -76,7 +76,14 @@ pub const fn disposition(op: CoreCommand) -> Disposition {
         | C::EventSubscribe
         | C::EventUnsubscribe
         | C::HostNetworkChanged
-        | C::HostLifecycle => Disposition::Executes,
+        | C::HostLifecycle
+        // ADR-0023 EM-35's `gateway` noun, reaching `twinvpn-gateway`. The three
+        // READS execute: `twinvpn-core` owns the live `GatewayState` and the
+        // gateway crate decides everything it reports, so there is nothing
+        // absent for them to be refused for.
+        | C::GatewayGet
+        | C::GatewayPeerList
+        | C::GatewayGrantList => Disposition::Executes,
 
         // -- refused: the control-plane client has no transport (W-12) --------
         C::PeerList | C::PeerGet => Disposition::NotWired {
@@ -162,6 +169,26 @@ pub const fn disposition(op: CoreCommand) -> Disposition {
         C::AutostartSet => Disposition::NotWired {
             code: codes::STORE_CUSTODY_DEGRADED,
             why: "autostart is a durable local preference; see settings.set",
+        },
+
+        // -- refused: the gateway's CONFIGURATION is durable ------------------
+        //
+        // The reads above execute; this one does not, and for a reason that is
+        // ADR-0013's own. MG-15 requires a gateway to "refuse a configuration
+        // whose worst-case reservation exceeds its measured available memory,
+        // AT CONFIGURATION TIME" — which needs both a durable place to put the
+        // configuration and a measurement of available memory, and this build
+        // has neither. Accepting it into memory would be worse than refusing:
+        // the ceiling would be forgotten on restart, and MG-15's refusal would
+        // move to "the moment the last peer connects", which is exactly what the
+        // rule exists to prevent.
+        C::GatewaySet => Disposition::NotWired {
+            code: codes::STORE_CUSTODY_DEGRADED,
+            why: "ADR-0013 MG-15 refuses an over-committed configuration AT CONFIGURATION \
+                  TIME, which needs a durable store for the ceiling and a measurement of \
+                  available memory; Core::open_store must have run and no memory probe \
+                  exists at the seam. Accepting it in memory would move MG-15's refusal to \
+                  the moment the last peer connects",
         },
 
         // -- refused: ADR-0021 owns delivery ------------------------------------

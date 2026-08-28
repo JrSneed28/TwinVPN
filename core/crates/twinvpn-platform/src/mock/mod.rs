@@ -45,7 +45,7 @@ pub use state::{MockConfig, MockIdentity, MockStore, MockTunnel};
 use crate::config::{NetworkConfig, TunnelDevice};
 use crate::custody::{IdentityCustody, SecureStore};
 use crate::iface::InterfaceProvider;
-use crate::socket::{SocketProvider, SupportedFamilies};
+use crate::socket::{SocketCapabilities, SocketProvider, SupportedFamilies};
 use crate::PlatformAdapter;
 
 /// A complete in-memory platform.
@@ -109,6 +109,13 @@ impl MockAdapter {
                 supported: options.supported_families,
                 shutting_down: Arc::clone(&shutting_down),
                 opened: AtomicU64::new(0),
+                // The most capable target's answer, so a scenario that does not
+                // care reads `true`. `MockSockets::set_socket_capabilities` is
+                // how one that does care asks for Windows' or Darwin's.
+                capabilities: std::sync::Mutex::new(SocketCapabilities {
+                    reuse_port: true,
+                    firewall_mark: true,
+                }),
             },
             tunnel: MockTunnel::new(options.datapath),
             config: MockConfig::new(

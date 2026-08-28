@@ -29,33 +29,82 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::wire::{self, FrameError, MgmtEnvelope, LENGTH_PREFIX_BYTES};
 
+/// Why a frame could not be read **or written** on this transport.
+///
+/// # The transport's half, beside `twinvpn_mgmt::FrameError`'s
+///
+/// The codec's errors — over-cap, empty, malformed, truncated — are judgements
+/// about **bytes**, and `ownership.md` §9.6 X-4 is why they now live once, in
+/// [`twinvpn_mgmt::envelope`], instead of three times. What is left here is
+/// genuinely this transport's: a peer closing the socket is not a framing fault,
+/// and what a clean close *means* differs by carriage — this shell answers
+/// [`TransportError::Closed`] and `shells/macos` answers `Ok(None)`. Neither is
+/// a judgement about bytes, which is why the shared codec has no variant for it.
+#[derive(Debug, thiserror::Error)]
+pub enum TransportError {
+    /// The bytes did not frame. The shared codec decided this.
+    #[error("the frame did not decode: {0}")]
+    Frame(#[from] FrameError),
+    /// The peer closed the connection.
+    #[error("the peer closed the connection")]
+    Closed,
+    /// The local transport failed.
+    #[error("the local transport failed")]
+    Transport(#[from] std::io::Error),
+}
+
+impl TransportError {
+    /// The registered `reason_code`.
+    ///
+    /// The framing half defers to [`FrameError::reason_code`], so the
+    /// substitution table stays in one place — two shells used to hard-code the
+    /// string literals beside it, which is how a substitution's cost stops being
+    /// recorded.
+    #[must_use]
+    pub fn reason_code(&self) -> twinvpn_types::ReasonCode {
+        match self {
+            TransportError::Frame(e) => e.reason_code(),
+            // `MGMT.UNAVAILABLE` is one of the four MGMT codes that IS
+            // registered.
+            TransportError::Closed | TransportError::Transport(_) => {
+                twinvpn_types::codes::MGMT_UNAVAILABLE
+            }
+        }
+    }
+}
+
 /// Reads one frame.
 ///
 /// # Errors
 ///
-/// [`FrameError::Closed`] on a clean EOF, [`FrameError::TooLarge`] on an
+/// [`TransportError::Closed`] on a clean EOF, [`FrameError::TooLarge`] on an
 /// over-cap declared length — **before** the body is read — and
 /// [`FrameError::Malformed`] on bytes that do not decode.
-pub async fn read_frame<R>(reader: &mut R) -> Result<MgmtEnvelope, FrameError>
+pub async fn read_frame<R>(reader: &mut R) -> Result<MgmtEnvelope, TransportError>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut prefix = [0u8; LENGTH_PREFIX_BYTES];
     match reader.read_exact(&mut prefix).await {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(FrameError::Closed),
-        Err(e) => return Err(FrameError::Transport(e)),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Err(TransportError::Closed)
+        }
+        Err(e) => return Err(TransportError::Transport(e)),
     }
     // The check that makes the allocation below bounded. It happens here, on
-    // four bytes, and not after a read.
+    // four bytes, and not after a read — and it is `twinvpn-mgmt`'s check now,
+    // so all three carriages enforce the same cap the same way.
     let declared = wire::declared_length(prefix)?;
     let mut body = vec![0u8; declared];
     match reader.read_exact(&mut body).await {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(FrameError::Closed),
-        Err(e) => return Err(FrameError::Transport(e)),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Err(TransportError::Closed)
+        }
+        Err(e) => return Err(TransportError::Transport(e)),
     }
-    wire::decode_body(&body)
+    Ok(wire::decode_body(&body)?)
 }
 
 /// Writes one frame.
@@ -64,7 +113,7 @@ where
 ///
 /// [`FrameError::TooLarge`] if this side would emit a frame it would itself
 /// refuse, or the transport's error.
-pub async fn write_frame<W>(writer: &mut W, envelope: &MgmtEnvelope) -> Result<(), FrameError>
+pub async fn write_frame<W>(writer: &mut W, envelope: &MgmtEnvelope) -> Result<(), TransportError>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -116,7 +165,7 @@ mod tests {
         assert_eq!(read_frame(&mut cursor).await.expect("second"), envelope());
         assert!(matches!(
             read_frame(&mut cursor).await.expect_err("eof"),
-            FrameError::Closed
+            TransportError::Closed
         ));
     }
 
@@ -128,7 +177,7 @@ mod tests {
         let mut cursor = std::io::Cursor::new(huge.to_vec());
         let err = read_frame(&mut cursor).await.expect_err("refused");
         match err {
-            FrameError::TooLarge { declared } => {
+            TransportError::Frame(FrameError::TooLarge { declared }) => {
                 assert_eq!(declared, u32::MAX as usize);
             }
             other => panic!("expected TooLarge, got {other:?}"),
@@ -144,16 +193,23 @@ mod tests {
         let mut cursor = std::io::Cursor::new(frame);
         assert!(matches!(
             read_frame(&mut cursor).await.expect_err("truncated"),
-            FrameError::Closed
+            TransportError::Closed
         ));
     }
 
+    /// **A zero-length frame is a typed reject, and it now says which one.**
+    ///
+    /// This shell used to read zero bytes and report the empty body as
+    /// `Malformed`. `shells/macos` named it at the prefix, and that reading is
+    /// the one the shared codec adopted: a declared length of zero is a
+    /// **desynchronised stream**, not a keepalive and not a body that failed to
+    /// parse, and the remediation differs.
     #[tokio::test]
     async fn a_zero_length_frame_decodes_to_a_typed_reject() {
         let mut cursor = std::io::Cursor::new(0u32.to_be_bytes().to_vec());
         assert!(matches!(
             read_frame(&mut cursor).await.expect_err("empty body"),
-            FrameError::Malformed
+            TransportError::Frame(FrameError::Empty)
         ));
     }
 }

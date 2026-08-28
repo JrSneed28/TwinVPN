@@ -297,7 +297,7 @@ fn connect_and_converse(
         let attached = {
             let _ = &requested;
             Err::<Client<tokio::io::DuplexStream>, ClientError>(ClientError::Unavailable(
-                mi::FrameError::Closed,
+                mi::TransportError::Closed,
             ))
         };
 
@@ -415,14 +415,22 @@ fn report(
 
     let diagnostic = match error {
         ClientError::Rejected(d) | ClientError::Failed(d) => (**d).clone(),
+        // A transport failure: the agent never named a diagnostic, so this
+        // client builds the honest minimum. `Diagnostic::of` is not used here
+        // because the code came off the transport error rather than out of the
+        // agent's registry, and MI-14's attributes are the AGENT's to resolve.
         _ => mi::Diagnostic {
             reason_code: code.clone(),
             class: "TRANSIENT".to_owned(),
             severity: "ERROR".to_owned(),
+            terminal: false,
             user_actionable: true,
+            remediation_class: String::new(),
+            scope: String::new(),
+            doc_anchor: String::new(),
             summary_key: None,
             next_action_key: None,
-            evidence: Vec::new(),
+            evidence: serde_json::Value::Null,
         },
     };
 
@@ -573,7 +581,7 @@ mod tests {
             build_profile: "test".to_owned(),
             granted_scopes: vec!["mgmt.status".to_owned()],
             withheld_scopes: Vec::new(),
-            catalogue_digest: twinvpn_mgmt::catalogue_digest().to_string(),
+            catalogue_digest: twinvpn_mgmt::catalogue_digest_text(),
             event_cursor: 0,
             protocol_epoch_range: [1, 1],
             platform_ctx: PlatformCtx {
@@ -640,15 +648,9 @@ mod tests {
         Body::Response(Response {
             ok: false,
             result: Vec::new(),
-            diagnostic: Some(mi::Diagnostic {
-                reason_code: "POLICY.POLICY_DENIED".to_owned(),
-                class: "POLICY".to_owned(),
-                severity: "ERROR".to_owned(),
-                user_actionable: true,
-                summary_key: None,
-                next_action_key: None,
-                evidence: Vec::new(),
-            }),
+            diagnostic: Some(mi::Diagnostic::of(
+                twinvpn_types::codes::POLICY_POLICY_DENIED,
+            )),
             committed_at_net_seq: None,
         })
     }
@@ -678,7 +680,7 @@ mod tests {
             assert_eq!(client.platform_ctx().platform, "WINDOWS");
             assert_eq!(
                 client.catalogue_digest(),
-                twinvpn_mgmt::catalogue_digest().to_string()
+                twinvpn_mgmt::catalogue_digest_text()
             );
 
             let code = converse(
@@ -733,15 +735,9 @@ mod tests {
                 let _ = read_frame(&mut agent_side).await.expect("a Hello");
                 write_frame(
                     &mut agent_side,
-                    &envelope(Body::Reject(mi::Diagnostic {
-                        reason_code: "MGMT.PRINCIPAL_UNVERIFIABLE".to_owned(),
-                        class: "PERSISTENT".to_owned(),
-                        severity: "ERROR".to_owned(),
-                        user_actionable: true,
-                        summary_key: None,
-                        next_action_key: None,
-                        evidence: Vec::new(),
-                    })),
+                    &envelope(Body::Reject(mi::Diagnostic::of(
+                        twinvpn_types::codes::MGMT_PRINCIPAL_UNVERIFIABLE,
+                    ))),
                 )
                 .await
                 .expect("Reject");

@@ -270,9 +270,12 @@ fn a_target_whose_rules_die_with_the_process_reports_that_rather_than_hiding_it(
         enforcement_survives_core_exit: false,
         ..MockOptions::default()
     });
+    // `boot_enforcement_available` is no longer a field: it is DERIVED from the
+    // custody's `boot_enforcement`, which is four-valued so that Windows'
+    // "the OS holds it from power-on" and macOS' "Recovery and safe boot do not
+    // load the LaunchDaemon" stop collapsing onto one bool.
     let posture = twinvpn_enforce::latch::DurabilityPosture {
         custody: weak.network_config().enforcement_custody(),
-        boot_enforcement_available: true,
     };
     assert!(
         !posture.survives_core_exit(),

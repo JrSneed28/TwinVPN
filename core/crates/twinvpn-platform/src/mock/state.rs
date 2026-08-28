@@ -9,8 +9,8 @@ use twinvpn_types::{DeviceId, IdentityId, PerFamily, UnderlayFamilies};
 use zeroize::Zeroizing;
 
 use crate::config::{
-    ContractGeneration, Datapath, EnforcementCustody, LinkFacts, LinkState, NetworkConfig,
-    NetworkContract, Ruleset, TunnelDevice, TunnelHandle,
+    BootEnforcement, ContractGeneration, Datapath, EnforcementCustody, LinkFacts, LinkState,
+    NetworkConfig, NetworkContract, RouteCapabilities, Ruleset, TunnelDevice, TunnelHandle,
 };
 use crate::custody::{
     IdentityAttestation, IdentityCustody, IdentityKeyRef, IdentityPublic, PeerPublicKey,
@@ -195,11 +195,9 @@ impl TunnelDevice for MockTunnel {
 /// An in-memory transactional configuration surface.
 pub struct MockConfig {
     state: Mutex<ConfigState>,
-    custody: EnforcementCustody,
     shutting_down: Arc<AtomicBool>,
 }
 
-#[derive(Default)]
 struct ConfigState {
     /// Every generation ever applied, so `rollback` can restore one exactly.
     history: BTreeMap<u64, NetworkContract>,
@@ -208,18 +206,59 @@ struct ConfigState {
     apply_calls: u64,
     fail_next_apply: Option<PlatformError>,
     link_facts: Option<LinkFacts>,
+    /// The declared capability. Held in the state rather than as a `const` so a
+    /// scenario can bind a mock that declares a *weaker* target — CD-5's payoff
+    /// is that the core's branch on a capability is exercised on a CI runner,
+    /// which needs both answers to be reachable.
+    custody: EnforcementCustody,
+    route_capabilities: RouteCapabilities,
+}
+
+impl Default for ConfigState {
+    fn default() -> Self {
+        Self {
+            history: BTreeMap::new(),
+            current: None,
+            installed_ruleset: None,
+            apply_calls: 0,
+            fail_next_apply: None,
+            link_facts: None,
+            custody: EnforcementCustody {
+                survives_core_exit: true,
+                swap_is_atomic: true,
+                boot_enforcement: BootEnforcement::OsHeldFromBoot,
+            },
+            route_capabilities: RouteCapabilities { metric: true },
+        }
+    }
 }
 
 impl MockConfig {
     pub(super) fn new(survives_core_exit: bool, shutting_down: Arc<AtomicBool>) -> Self {
+        let mut state = ConfigState::default();
+        state.custody.survives_core_exit = survives_core_exit;
         Self {
-            state: Mutex::new(ConfigState::default()),
-            custody: EnforcementCustody {
-                survives_core_exit,
-                swap_is_atomic: true,
-            },
+            state: Mutex::new(state),
             shutting_down,
         }
+    }
+
+    /// Declares what covers KS-19's boot window on this mock target.
+    ///
+    /// Present so a core test can exercise **both** sides of a
+    /// [`BootEnforcement`] branch without a VM: `ExemptBootModes` is macOS's
+    /// answer and `OsHeldFromBoot` is Windows', and a core that renders the same
+    /// `ProtectionAssertion` for both has a defect a Linux CI runner should be
+    /// able to catch.
+    pub fn set_boot_enforcement(&self, boot_enforcement: BootEnforcement) {
+        guard(&self.state).custody.boot_enforcement = boot_enforcement;
+    }
+
+    /// Declares whether this mock target has a route metric.
+    ///
+    /// `false` is Darwin's answer.
+    pub fn set_route_capabilities(&self, capabilities: RouteCapabilities) {
+        guard(&self.state).route_capabilities = capabilities;
     }
 
     /// How many times `apply` was called, including the idempotent repeats — so
@@ -321,7 +360,11 @@ impl NetworkConfig for MockConfig {
     }
 
     fn enforcement_custody(&self) -> EnforcementCustody {
-        self.custody
+        guard(&self.state).custody
+    }
+
+    fn route_capabilities(&self) -> RouteCapabilities {
+        guard(&self.state).route_capabilities
     }
 
     fn query_link_facts(&self) -> BoxFuture<'_, Result<LinkFacts, PlatformError>> {

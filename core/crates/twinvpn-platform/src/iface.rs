@@ -17,11 +17,14 @@
 //! ABI, it is a [`futures_core::Stream`] — the same fact in the shape a Rust
 //! caller can select on.
 
+use core::time::Duration;
+
 use futures_core::future::BoxFuture;
 use futures_core::Stream;
 use std::pin::Pin;
 
-use twinvpn_types::{AddressFamily, IpAddr, IpPrefix, Nat64Prefix};
+use twinvpn_env::BootId;
+use twinvpn_types::{AddressFamily, InterfaceAddress, IpAddr, Nat64Prefix};
 
 use crate::error::PlatformError;
 
@@ -95,27 +98,31 @@ pub struct InterfaceFacts {
     pub index: InterfaceIndex,
     /// The OS name.
     pub name: InterfaceName,
-    /// Every address on it, with its prefix.
+    /// Every address on it, exactly as the OS reported it, with its prefix
+    /// length beside it.
     ///
-    /// # Known defect: this cannot express an interface's own address
+    /// # This was a `Vec<IpPrefix>`, and that was the defect
     ///
-    /// [`IpPrefix`] requires every host bit to be zero, so an adapter holding
-    /// `192.0.2.10/24` has no representation for it and must mask to
-    /// `192.0.2.0/24`, losing the address the core actually needs — the one to
-    /// bind and to offer as a host candidate. A network address offered as a
-    /// candidate probes where nothing answers and reads as a NAT fault, which is
-    /// why `twinvpn-core`'s `establish::host_address` accepts only `/32` and
-    /// `/128` and reports `AddressNotReportable` otherwise. The same conjunction
-    /// drops link-local addresses: [`twinvpn_types::V6Addr`] requires a zone on
-    /// `fe80::/10` and [`IpPrefix`] rejects any zone.
+    /// [`twinvpn_types::IpPrefix`] names a *range* and requires every host bit
+    /// to be zero, so an adapter holding `10.0.0.7/24` had no representation for
+    /// it and masked to `10.0.0.0/24`, losing the address the core actually
+    /// needs — the one to bind and to offer as a host candidate. A network
+    /// address offered as a candidate probes where nothing answers and reads as
+    /// a NAT fault, which is why `twinvpn-core`'s `establish::host_address` once
+    /// accepted only `/32` and `/128` and reported `AddressNotReportable`
+    /// otherwise. The same conjunction dropped every link-local address:
+    /// [`twinvpn_types::V6Addr`] requires a zone on `fe80::/10` and `IpPrefix`
+    /// rejects any zone, so `twinvpn-platform-linux` dropped `fe80::/64` while
+    /// `twinvpn-platform-windows` stripped the zone and kept it — **the core saw
+    /// a different address set for one host depending on which adapter was
+    /// bound** (`shells/windows/README.md` §7 gap 16).
     ///
-    /// **The replacement is ready and additive:**
-    /// [`twinvpn_types::InterfaceAddress`] keeps the host bits and the scope
-    /// zone, and derives the route with `network()`. Flipping this field to
-    /// `Vec<InterfaceAddress>` is a one-line change at each of six call sites in
-    /// `twinvpn-core` and `twinvpn-platform-linux`, so it lands as a coordinated
-    /// commit across those domains rather than as a red build from this one.
-    pub addresses: Vec<IpPrefix>,
+    /// [`InterfaceAddress`] is the type for this kind of value: it keeps the
+    /// host bits *and* the scope zone, and derives the on-link prefix with
+    /// [`InterfaceAddress::network`] where a route is what is wanted. Three
+    /// domains reported this defect independently; it is fixed here rather than
+    /// worked around a fourth time.
+    pub addresses: Vec<InterfaceAddress>,
     /// Whether a v4 default route points through it.
     pub has_default_route_v4: bool,
     /// Whether a v6 default route points through it.
@@ -166,6 +173,67 @@ pub enum LinkClass {
     Tunnel,
     /// The OS does not say.
     Unknown,
+}
+
+/// What an adapter can say about a suspend the host has just come back from.
+///
+/// **Authority:** ADR-0022 LC-8 (the clock table and its finding F2), LC-24
+/// (the resume sequence); `docs/reliability.md` §11.3 (the rekey window).
+///
+/// # Why this is not derivable from anything already at the seam
+///
+/// [`NetworkChange::EventsLost`] is true and sufficient for the *stream* — the
+/// routing socket genuinely drops while the machine is asleep — and it cannot
+/// say *"the machine was off for nine hours"*. Nothing else can either:
+/// `MonotonicClock` does not advance across a suspend, which is the entire
+/// reason LC-8 makes it and `ElapsedClock` non-interchangeable types with no
+/// conversion. So a core reading only monotonic time sees a resume as *no time
+/// having passed* — and every long-horizon deadline LC-8's F2 moves onto the
+/// elapsed clock (`T_TRUST_HARD`, `T_TRUST_STALE`, `T_IK_OVERLAP`, credential
+/// expiry) and every NAT binding lifetime is measured across exactly this gap.
+///
+/// The rule this exists to preserve is ADR-0022's: **a resume must not render a
+/// confident, stale green.** The adapter reports the gap; the core decides what
+/// is still trustworthy. Nothing here is a decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// NOT `#[non_exhaustive]`: BOTH sides of the seam construct this, for the same
+// reason `InterfaceFacts` is not. Adding a field SHOULD break every implementor.
+pub struct ResumeFacts {
+    /// How long the host was away, measured on the **suspend-inclusive** clock
+    /// (`CLOCK_BOOTTIME`, `mach_continuous_time`, the unbiased interrupt time).
+    ///
+    /// `None` where the platform cannot say. **Not zero** — "the machine was
+    /// asleep for no measurable time" and "we do not know how long the machine
+    /// was asleep" are different facts, and a core that read the second as the
+    /// first would keep a nine-hour-old assertion green.
+    pub suspended_for: Option<Duration>,
+    /// The boot identity observed at resume, where the platform has one.
+    ///
+    /// LC-8's *third discriminator, which is not a clock*: after a reboot both
+    /// monotonic clocks restart at zero, which is indistinguishable from "no
+    /// time passed". Carried rather than compared, because comparing it against
+    /// the identity the core is holding is the core's decision — a hibernate
+    /// that actually became a cold boot is a different fact from a resume, and
+    /// LC-24 step 1 reads it as a cold start.
+    pub boot_id: Option<BootId>,
+    /// Whether the OS announced the suspend, or the adapter inferred it.
+    ///
+    /// `true` on a platform that delivers a power notification —
+    /// `SERVICE_CONTROL_POWEREVENT` / `PBT_APMRESUMESUSPEND` on Windows,
+    /// `kIOMessageSystemHasPoweredOn` on Darwin. `false` where the adapter
+    /// noticed after the fact that the suspend-inclusive clock had advanced and
+    /// the monotonic one had not, which is Linux's only honest answer. A core
+    /// treating an inferred resume as an announced one would attribute a
+    /// container freeze or a live migration to a user closing a lid.
+    pub announced_by_os: bool,
+    /// Whether this was a resume from **hibernation** (S4), where the platform
+    /// distinguishes it from a suspend (S3).
+    ///
+    /// LC-24 step 5 emits `PLATFORM.LIFECYCLE.HIBERNATE_RESUMED` *"where the
+    /// platform distinguishes S4"* and `PLATFORM.RESUMED` otherwise, so which of
+    /// the two is honest is exactly this fact. `None` is the platform that cannot
+    /// tell them apart, and it is not the same answer as `Some(false)`.
+    pub hibernated: Option<bool>,
 }
 
 /// A change the core must react to.
@@ -224,6 +292,21 @@ pub enum NetworkChange {
         /// Whether the host is in a low-power state.
         low_power: bool,
     },
+    /// The host came back from a suspend, and this is what it can say about the
+    /// gap.
+    ///
+    /// **Not derivable from [`NetworkChange::EventsLost`].** That variant is
+    /// true and sufficient for the *stream* — the routing socket genuinely drops
+    /// while the machine is asleep — and it cannot say how long the machine was
+    /// away, which is what ADR-0022 LC-24 step 1 classifies the resume on and
+    /// what LC-8's F2 measures every long-horizon policy deadline across. An
+    /// adapter that emits both is correct and expected: they are different facts.
+    ///
+    /// It rides this stream rather than the `host.lifecycle` command because
+    /// `host.lifecycle` carries a **one-byte phase selector** and has nowhere to
+    /// put a duration; `EV_RESUME` still travels there, and this is the
+    /// measurement beside it.
+    SystemResumed(ResumeFacts),
     /// The stream dropped `count` events because the core was not draining.
     ///
     /// ADR-0018 §11.6: "a dropped event is itself recorded". An adapter that

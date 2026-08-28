@@ -38,7 +38,7 @@ use twinvpn_platform::{
     ContractGeneration, DnsConfig, InterfaceIndex, NetworkConfig, NetworkContract, PlatformError,
     RouteEntry, Ruleset,
 };
-use twinvpn_types::{AddressFamily, IpAddr, IpPrefix, PerFamily, V4Addr, V6Addr};
+use twinvpn_types::{AddressFamily, InterfaceAddress, IpAddr, IpPrefix, PerFamily, V4Addr, V6Addr};
 
 use twinvpn_platform_windows::dns::{NrptRule, StubAddresses, RULE_PREFIX};
 use twinvpn_platform_windows::netcfg::{Compensation, NetworkConfigParts, WindowsNetworkConfig};
@@ -76,11 +76,11 @@ fn v6(first: u8, second: u8, len: u32) -> IpPrefix {
     IpPrefix::new(IpAddr::V6(V6Addr::prefix_base(octets).expect("base")), len).expect("prefix")
 }
 
-fn host_v4() -> IpPrefix {
-    v4([100, 64, 0, 5], 32)
+fn host_v4() -> InterfaceAddress {
+    InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets([100, 64, 0, 5])), 32).expect("address")
 }
 
-fn host_v6() -> IpPrefix {
+fn host_v6() -> InterfaceAddress {
     let mut octets = [0u8; 16];
     octets[0] = 0xfd;
     octets[1] = 0x7c;
@@ -89,7 +89,8 @@ fn host_v6() -> IpPrefix {
     octets[4] = 0x2a;
     octets[5] = 0x10;
     octets[15] = 5;
-    IpPrefix::new(IpAddr::V6(V6Addr::new(octets, None).expect("address")), 128).expect("prefix")
+    InterfaceAddress::new(IpAddr::V6(V6Addr::new(octets, None).expect("address")), 128)
+        .expect("address")
 }
 
 fn route(destination: IpPrefix) -> RouteEntry {
@@ -153,6 +154,7 @@ fn contract(generation: u64, ruleset: Ruleset) -> NetworkContract {
         },
         ruleset,
         mtu: 1420,
+        tunnel_remote_address: None,
     }
 }
 

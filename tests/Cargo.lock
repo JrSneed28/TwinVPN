@@ -991,6 +991,7 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
+ "bytes",
  "libc",
  "mio",
  "pin-project-lite",
@@ -1225,6 +1226,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "twinvpn-platform-linux"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "libc",
+ "serde_json",
+ "socket2",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "twinvpn-env",
+ "twinvpn-platform",
+ "twinvpn-types",
+ "zeroize",
+]
+
+[[package]]
 name = "twinvpn-relay-client"
 version = "0.1.0"
 dependencies = [
@@ -1303,20 +1321,24 @@ dependencies = [
  "serde_json",
  "twinlab",
  "twinvpn-core",
+ "twinvpn-cp-client",
  "twinvpn-crypto",
  "twinvpn-diag",
  "twinvpn-dns",
  "twinvpn-enforce",
  "twinvpn-env",
  "twinvpn-ffi",
+ "twinvpn-gateway",
  "twinvpn-mgmt",
  "twinvpn-path",
  "twinvpn-platform",
+ "twinvpn-platform-linux",
  "twinvpn-relay-client",
  "twinvpn-route",
  "twinvpn-schema",
  "twinvpn-session",
  "twinvpn-store",
+ "twinvpn-trust",
  "twinvpn-tunnel",
  "twinvpn-types",
 ]

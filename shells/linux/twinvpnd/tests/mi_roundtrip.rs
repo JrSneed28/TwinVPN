@@ -244,7 +244,7 @@ async fn a_client_attaches_and_the_agent_answers_from_the_one_vocabulary() {
     assert!(!client.catalogue_digest().is_empty());
     assert_eq!(
         client.catalogue_digest(),
-        format!("{:016x}", twinvpn_mgmt::catalogue_digest())
+        twinvpn_mgmt::catalogue_digest_text()
     );
     // MI-C3: the agent supplied `platform_ctx`, and the client uses it verbatim.
     assert_eq!(client.platform_ctx().platform, "linux");
@@ -421,11 +421,31 @@ fn every_c1_mapping_operation_needs_a_cursor_this_build_cannot_produce() {
 fn a_new_core_command_must_be_classified_against_mi6() {
     assert_eq!(
         twinvpn_mgmt::CoreCommand::ALL.len(),
-        47,
+        51,
         "the core command set changed. Classify the new operation in \
          `server::C1_MAPPING` — does it map to a mutating C1 request? — and \
          update this count."
     );
+    // The four that moved the count are ADR-0023 EM-35's `gateway` noun, and
+    // the classification is the point of this test rather than the number.
+    // **None of them maps to a mutating C1 request.** The three reads are local
+    // reads of the gateway's own peer table, capacity and grant set (S-36 is
+    // explicitly non-durable and reconstructible), and `gateway.set` is local
+    // configuration that reaches no control-plane request either — so none has
+    // a `net_seq` and reporting one would tell a client it had read-your-writes
+    // when it had not (MI-6).
+    for op in [
+        twinvpn_mgmt::CoreCommand::GatewayGet,
+        twinvpn_mgmt::CoreCommand::GatewayPeerList,
+        twinvpn_mgmt::CoreCommand::GatewayGrantList,
+        twinvpn_mgmt::CoreCommand::GatewaySet,
+    ] {
+        assert!(
+            !server::maps_to_mutating_c1(op),
+            "{} reaches no C1 request",
+            op.name()
+        );
+    }
 }
 
 #[tokio::test]

@@ -32,6 +32,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod fuzz;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -272,6 +274,12 @@ impl Rig {
                 dns_policy: dns,
                 stub_addresses: stub,
                 ruleset,
+                // The seam gained this so macOS can build a
+                // NEPacketTunnelNetworkSettings, which requires it. `None` is a
+                // real answer here: this helper assembles a contract for tests
+                // that validate no path, and an adapter refuses rather than
+                // substituting.
+                tunnel_remote_address: None,
             },
             plan.generation,
         )

@@ -30,7 +30,7 @@
 use core::time::Duration;
 
 use futures_core::future::BoxFuture;
-use twinvpn_types::{IpAddr, IpPrefix, PerFamily, UnderlayFamilies};
+use twinvpn_types::{InterfaceAddress, IpAddr, IpPrefix, PerFamily, UnderlayFamilies};
 
 use crate::error::PlatformError;
 use crate::iface::{InterfaceIndex, InterfaceName};
@@ -67,6 +67,91 @@ pub enum Ruleset {
     Protected,
 }
 
+/// What holds the host between power-on and the authority starting.
+///
+/// **Authority:** ADR-0012 KS-19 (*"the rule set that covers the interval
+/// between the network stack coming up and the agent starting MUST be installed
+/// by an artifact the **OS itself applies**, never by the agent. This is where
+/// real products leak."*), §11.6's per-platform durability table; ADR-0016 PS-7
+/// and PS-7a.
+///
+/// # Why this is a three-valued capability and not a `bool`
+///
+/// `twinvpn-enforce`'s `DurabilityPosture` carried this as
+/// `boot_enforcement_available: bool`, which cannot tell the two facts wave 2
+/// reported apart — and they were reported from opposite sides:
+///
+/// - `desktop-windows`: BOOTTIME + `FWPM_FILTER_FLAG_PERSISTENT` filters hold
+///   the host **closed** with no process of ours running. ADR-0012 §11.6 records
+///   the residual as *"an availability gap, not a leak. Deliberate: the boot
+///   window fails closed"* — because a BOOTTIME filter cannot carry an ALE
+///   app-id, so TwinVPN itself cannot reach the control plane until the service
+///   starts.
+/// - `desktop-macos`: ADR-0012 §11.6's own macOS residual — *"Recovery and safe
+///   boot do not load the LaunchDaemon. Residual exposure: a device booted to
+///   Recovery is unprotected."* That is a **hole**, not an availability gap, and
+///   a `true` here would have claimed the Windows guarantee for it.
+///
+/// The honest `ProtectionAssertion` differs between those two, so the capability
+/// has to be able to say which one a platform is in (CB-3: the core branches on
+/// a declared capability, never on which OS it is).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BootEnforcement {
+    /// The **OS itself** holds an enforcement artifact from power-on, in every
+    /// boot mode, with no process of ours running.
+    ///
+    /// Windows: BOOTTIME plus `FWPM_FILTER_FLAG_PERSISTENT` WFP filters, applied
+    /// by the Base Filtering Engine. The residual is availability, not exposure.
+    OsHeldFromBoot,
+    /// A **package-owned** boot artifact is loaded by the platform's supervisor
+    /// on every boot mode it starts in, and there is no boot mode that skips it.
+    ///
+    /// Linux/OpenWrt: the KS-19 nftables artifact the unit loads before the
+    /// authority runs.
+    PackageArtifactLoadedAtBoot,
+    /// A boot artifact exists, and there is at least one **named boot mode in
+    /// which the platform does not load it**, leaving the host unprotected for
+    /// the whole of that boot.
+    ///
+    /// macOS: Recovery and safe boot do not load the `LaunchDaemon`. This is a
+    /// leak, and it must reach the diagnostic bundle as one rather than being
+    /// folded into the two values above.
+    ExemptBootModes,
+    /// Nothing enforces until the authority installs the ruleset.
+    ///
+    /// KS-19's *"this is where real products leak"*, as a declared value.
+    None,
+}
+
+impl BootEnforcement {
+    /// Whether **something** the OS applies covers KS-19's window on every boot.
+    ///
+    /// The `bool` `twinvpn-enforce`'s `DurabilityPosture` used to take as a
+    /// separate field, now derived from the richer value so the fact has one
+    /// home. [`BootEnforcement::ExemptBootModes`] is deliberately `false`: a
+    /// platform with a boot mode that loads nothing does not cover the window.
+    #[must_use]
+    pub const fn covers_the_boot_window(self) -> bool {
+        matches!(
+            self,
+            BootEnforcement::OsHeldFromBoot | BootEnforcement::PackageArtifactLoadedAtBoot
+        )
+    }
+
+    /// Whether the residual is **exposure** rather than availability.
+    ///
+    /// The distinction ADR-0012 §11.6 draws between the Windows row (closed, and
+    /// TwinVPN itself is what cannot get out) and the macOS row (open).
+    #[must_use]
+    pub const fn leaves_the_host_open(self) -> bool {
+        matches!(
+            self,
+            BootEnforcement::ExemptBootModes | BootEnforcement::None
+        )
+    }
+}
+
 /// Who holds the installed enforcement rules, declared per target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnforcementCustody {
@@ -82,6 +167,14 @@ pub struct EnforcementCustody {
     /// `false` means there is a window with no rules, which is KS-17's forbidden
     /// state — reported so it can be a known residual rather than an invisible one.
     pub swap_is_atomic: bool,
+    /// What covers KS-19's window, between power-on and the authority starting.
+    ///
+    /// The two facts above are about a *running* system; this one is about the
+    /// interval before there is one, which KS-19 calls *"where real products
+    /// leak"*. It lives here, on the capability the adapter declares, so that
+    /// `twinvpn-enforce`'s `DurabilityPosture` **derives** it rather than taking
+    /// it as a second field — one fact, one home.
+    pub boot_enforcement: BootEnforcement,
 }
 
 /// The desired system state for one generation.
@@ -104,7 +197,16 @@ pub struct NetworkContract {
     /// A `PerFamily` of lists, so the v6 half cannot be forgotten: ADR-0010 R1
     /// requires **both** families on the overlay interface at all times,
     /// regardless of what the underlay offers.
-    pub addresses: PerFamily<Vec<IpPrefix>>,
+    ///
+    /// [`InterfaceAddress`] and not [`IpPrefix`], for the same reason
+    /// [`crate::iface::InterfaceFacts::addresses`] is: this is an interface's
+    /// *own* address, whose host bits are the whole point. `IpPrefix` requires
+    /// every host bit to be zero, so `100.64.0.2/24` could not be represented
+    /// and arrived as `100.64.0.0/24` — and
+    /// `NEIPv4Settings(addresses:subnetMasks:)` wants the host address, which is
+    /// where `desktop-macos` hit this defect for the second time. Where a route
+    /// is what is wanted, [`InterfaceAddress::network`] derives it.
+    pub addresses: PerFamily<Vec<InterfaceAddress>>,
     /// Routes to install into the overlay.
     pub routes: PerFamily<Vec<RouteEntry>>,
     /// Resolver configuration.
@@ -113,6 +215,26 @@ pub struct NetworkContract {
     pub ruleset: Ruleset,
     /// The overlay interface's MTU.
     pub mtu: u32,
+    /// The underlay remote this generation's tunnel rides, where there is one.
+    ///
+    /// # Why the seam has to carry it
+    ///
+    /// `NEPacketTunnelNetworkSettings` is constructed with
+    /// `init(tunnelRemoteAddress:)` and **requires** it — so before this field
+    /// existed, `twinvpn-platform-macos` could not build a settings document
+    /// from the contract alone and took it as a separate parameter the shell
+    /// supplied. A value the shell holds and the core does not is a fact the two
+    /// sides can disagree about, which is the whole reason the contract is one
+    /// struct (`docs/networking.md` §2.3).
+    ///
+    /// `None` is a real answer and not an absence to paper over: in
+    /// [`Ruleset::Blocked`] no path is validated, so there is no remote the
+    /// tunnel is riding, and an adapter that needs one must **refuse by name**
+    /// rather than substitute a placeholder. `twinvpn-platform-linux` and
+    /// `twinvpn-platform-windows` do not need it to program anything — their
+    /// datapaths take the peer endpoint by another route — and record it for the
+    /// diagnostic bundle instead of inventing a use for it.
+    pub tunnel_remote_address: Option<IpAddr>,
 }
 
 /// One route to install.
@@ -128,7 +250,39 @@ pub struct RouteEntry {
     ///
     /// `docs/networking.md` §7.2 installs a default route "without destroying the
     /// host's default route", which on several targets is a metric question.
+    ///
+    /// **Set this only when [`RouteCapabilities::metric`] is `true`.** Darwin has
+    /// no route metric at all — preference comes from prefix length and network
+    /// service order — so `twinvpn-platform-macos` can only refuse a metric it is
+    /// handed. The capability exists so the core plans for what the platform
+    /// *can* do instead of issuing an instruction that will be refused.
     pub metric: Option<u32>,
+}
+
+/// Which route attributes this platform can actually install.
+///
+/// **A declared capability (CB-3)**, not an OS branch. Two domains reported the
+/// same shape from opposite sides and both refused rather than silently
+/// dropping, which was right and left the core no way to know:
+///
+/// - `desktop-macos`: *"`RouteEntry::metric` is dropped. macOS `route(8)` has no
+///   metric; preference comes from prefix length and network service order."*
+///   Reported per operation as `RouteOp::metric_unrepresentable`.
+/// - `desktop-windows`: `InterfaceMetric` / `RouteMetric` exist and are used, so
+///   the same instruction is honoured there.
+///
+/// A refusal a caller cannot anticipate is indistinguishable from a fault. This
+/// makes the refusal **expressible in advance**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteCapabilities {
+    /// Whether [`RouteEntry::metric`] means anything on this platform.
+    ///
+    /// `false` means the platform has no metric concept at all, and a route's
+    /// preference is decided some other way. A core that has read `false`
+    /// expresses precedence through the prefixes it installs — §7.2's split
+    /// default (`0.0.0.0/1` + `128.0.0.0/1`) is exactly that technique — rather
+    /// than through a number the platform will discard.
+    pub metric: bool,
 }
 
 /// Resolver configuration for one generation.
@@ -229,6 +383,12 @@ pub trait NetworkConfig: Send + Sync {
 
     /// Who holds the rules on this target.
     fn enforcement_custody(&self) -> EnforcementCustody;
+
+    /// Which route attributes this platform can install.
+    ///
+    /// Read **before** a contract is assembled, so a route carries a metric only
+    /// where a metric is a thing.
+    fn route_capabilities(&self) -> RouteCapabilities;
 
     /// The underlay's current facts.
     fn query_link_facts(&self) -> BoxFuture<'_, Result<LinkFacts, PlatformError>>;

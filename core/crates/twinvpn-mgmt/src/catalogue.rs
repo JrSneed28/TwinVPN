@@ -130,6 +130,14 @@ pub const fn entry(op: CoreCommand) -> Entry {
         | C::PeerList
         | C::PeerGet
         | C::PathList
+        // The gateway READS sit with the other reads: ADR-0013 §11.11's `gw_*`
+        // metrics are Tier-0 observability and ADR-0023 EM-35 requires the noun
+        // to be reachable on a host that has no GUI, so requiring `mgmt.admin`
+        // to ask "how many peers are admitted" would make the profile's own
+        // monitoring privileged.
+        | C::GatewayGet
+        | C::GatewayPeerList
+        | C::GatewayGrantList
         | C::PolicyGet
         | C::KillswitchGet
         | C::KillswitchExemptGet
@@ -208,7 +216,12 @@ pub const fn entry(op: CoreCommand) -> Entry {
         | C::DnsPreferenceSet
         | C::RouteAcceptSet
         | C::ExitnodeSelect
-        | C::AutostartSet => (
+        | C::AutostartSet
+        // `gateway.set` is `ver` and not `key`: MG-15 refuses a configuration
+        // whose worst-case reservation exceeds available memory AT
+        // CONFIGURATION TIME, so a stale writer must lose rather than retry into
+        // a ceiling somebody else already raised.
+        | C::GatewaySet => (
             Scope::Settings,
             true,
             Idempotency::Version,
@@ -338,6 +351,37 @@ pub fn catalogue_digest() -> u64 {
     h
 }
 
+/// The **one** rendering of [`catalogue_digest`] that crosses a wire.
+///
+/// **Authority:** ADR-0017 §11.7 (*"The catalogue, not the version, is the
+/// capability contract"*), MI-21 (the digest is one of the four transport-layer
+/// facts), MI-5's reconnect rule.
+///
+/// # Why a `u64` needed a pinned spelling
+///
+/// [`catalogue_digest`] returns a `u64` and `HelloAck.catalogue_digest` is a
+/// **string**, so every carriage had to choose an encoding — and they did not
+/// all choose the same one. `shells/windows`' `twinvpnctl` rendered it with
+/// `to_string()` (decimal) while `shells/windows`' service rendered it as
+/// `{:016x}` (hex), so a client and an agent from one build compared two
+/// spellings of one number and could conclude the catalogue had changed.
+///
+/// §11.7 makes the digest *the capability contract*, and MI-5 requires a client
+/// to re-fetch the catalogue when it changes. An unpinned rendering is therefore
+/// how a client and an agent come to disagree about the contract **silently**,
+/// which is the failure MI-20 exists to prevent one level up.
+///
+/// The encoding is **lowercase hexadecimal, zero-padded to exactly 16 digits**.
+/// The fixed width matters on its own: a digest that happened to be small would
+/// otherwise render short, and a length-sensitive consumer would see the width
+/// move between builds.
+///
+/// This is the only function that renders it. There is no second one.
+#[must_use]
+pub fn catalogue_digest_text() -> String {
+    format!("{:016x}", catalogue_digest())
+}
+
 /// Looks up a row by wire name.
 ///
 /// `None` is the `MGMT.OP_UNKNOWN` case: a **typed** rejection naming the
@@ -444,6 +488,131 @@ mod tests {
         assert_ne!(d, 0);
         // Stability within one build: two calls agree.
         assert_eq!(d, catalogue_digest());
+    }
+
+    /// **The wire spelling is pinned, because an unpinned one is how two halves
+    /// of one build disagree about the capability contract.**
+    ///
+    /// `shells/windows` rendered it decimal in its CLI and hex in its service.
+    /// Both were "correct"; together they were a client that could never match
+    /// the digest it was sent.
+    #[test]
+    fn the_wire_rendering_is_sixteen_lowercase_hex_digits_and_nothing_else() {
+        let text = catalogue_digest_text();
+        assert_eq!(
+            text.len(),
+            16,
+            "fixed width, so a small digest does not render short"
+        );
+        assert!(
+            text.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "lowercase hex only, got {text}"
+        );
+        assert_eq!(text, format!("{:016x}", catalogue_digest()));
+        // And it is NOT the decimal rendering, which is the spelling that
+        // actually shipped in one place.
+        assert_ne!(text, catalogue_digest().to_string());
+    }
+
+    #[test]
+    fn the_rendering_round_trips_back_to_the_digest() {
+        // A client that parses it must recover the same number, so the encoding
+        // is a bijection and not merely a display form.
+        let text = catalogue_digest_text();
+        assert_eq!(
+            u64::from_str_radix(&text, 16).expect("parses"),
+            catalogue_digest()
+        );
+    }
+
+    #[test]
+    fn a_small_digest_still_renders_at_full_width() {
+        // A property of the FORMAT, not of today's table, asserted directly so
+        // it cannot regress when the table changes.
+        assert_eq!(format!("{:016x}", 1u64), "0000000000000001");
+        assert_eq!(format!("{:016x}", u64::MAX), "ffffffffffffffff");
+    }
+
+    /// **ADR-0023 EM-35's noun list, asserted against the catalogue.**
+    ///
+    /// > "Stated as a requirement on ADR-0017's catalogue, not as a CLI design:
+    /// > `status`, `session`, `peer`, `pair`, `route`, `policy`, `killswitch`,
+    /// > `diag`, `identity`, `gateway`, `event`, `version`, and — owned here —
+    /// > `config` … A capability with no catalogue entry is unreachable on this
+    /// > profile, which is what makes R-21's 'same control contract as the GUI'
+    /// > load-bearing rather than decorative."
+    ///
+    /// `gateway` was **absent** until this wave, which is `ownership.md` §9.6
+    /// X-3: `twinvpn-gateway` was complete, had no caller, and had no way to be
+    /// reached from the only interface a headless host has.
+    ///
+    /// Three of EM-35's nouns are still absent and are named here rather than
+    /// left to a reader to notice — `identity`, `config` and the `route` noun as
+    /// a *noun* (`route.accept.set` supplies the verb but the catalogue has no
+    /// `route.list`). This test asserts what IS present and lists what is not,
+    /// so the gap is a fact in the code rather than a paragraph in a README.
+    #[test]
+    fn em35s_gateway_noun_exists_and_the_still_missing_nouns_are_named() {
+        let nouns: std::collections::BTreeSet<&str> = catalogue()
+            .iter()
+            .map(|e| e.op.name().split('.').next().unwrap_or_default())
+            .collect();
+
+        for required in [
+            "status",
+            "session",
+            "peer",
+            "pair",
+            "policy",
+            "killswitch",
+            "diag",
+            "gateway",
+            "event",
+            "version",
+        ] {
+            assert!(
+                nouns.contains(required),
+                "ADR-0023 EM-35 requires the `{required}` noun and the catalogue has none"
+            );
+        }
+
+        // Reported, not silently tolerated. Each of these is a capability EM-35
+        // says must be reachable on H-EMB and H-SRV, and none is.
+        for still_missing in ["identity", "config"] {
+            assert!(
+                !nouns.contains(still_missing),
+                "`{still_missing}` now exists — delete it from this list and from the \
+                 completion report's findings"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gateway_reads_are_reachable_without_admin_and_the_setter_is_not() {
+        // EM-35's point is reachability on a host with no GUI. Requiring
+        // `mgmt.admin` to ask "how many peers are admitted" would make the
+        // profile's own monitoring privileged, which is the opposite of what a
+        // screenless host needs. Configuring one is a different question.
+        for op in [
+            CoreCommand::GatewayGet,
+            CoreCommand::GatewayPeerList,
+            CoreCommand::GatewayGrantList,
+        ] {
+            let e = entry(op);
+            assert_eq!(e.scope, Scope::Status);
+            assert!(!e.mutating);
+            assert_eq!(e.idempotency, Idempotency::ReadOnly);
+            assert!(!e.administer);
+        }
+
+        // MG-15 refuses an over-committed configuration at CONFIGURATION time,
+        // so a stale writer must lose rather than retry into a ceiling somebody
+        // else already raised — which is what `ver` means.
+        let set = entry(CoreCommand::GatewaySet);
+        assert_eq!(set.scope, Scope::Settings);
+        assert!(set.mutating);
+        assert_eq!(set.idempotency, Idempotency::Version);
     }
 
     #[test]

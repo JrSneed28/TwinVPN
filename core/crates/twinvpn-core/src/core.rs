@@ -40,6 +40,8 @@ use crate::build_identity::CoreBuildIdentity;
 use crate::dispatch::{self, Disposition, Lifecycle};
 use crate::events::{CoreEvent, CoreEventKind, EventStream};
 #[cfg(feature = "full")]
+use crate::gateway::GatewayState;
+#[cfg(feature = "full")]
 use crate::journal::CoreSessionJournal;
 use crate::planes::{new_shared, ControlPlanePort, DataPlaneView, Shared};
 #[cfg(feature = "full")]
@@ -98,6 +100,19 @@ pub struct Core {
     /// so there is no `SessionMachine` to hold.
     #[cfg(feature = "full")]
     sessions: Mutex<SessionMap>,
+    /// ADR-0013's gateway role: the peer table, the capacity reservation and
+    /// S-36's live grant set.
+    ///
+    /// Absent under `core-lite` for the same reason as `sessions`:
+    /// `twinvpn-gateway` is a data-plane crate.
+    ///
+    /// Held here, in the composition root, because ADR-0018 §11.7 puts
+    /// `twinvpn-gateway` **below** it — see `crate::gateway`. Until this field
+    /// existed, `twinvpn-gateway` had no caller anywhere in the workspace
+    /// (`ownership.md` §9.6 X-3) and ADR-0013's G1 was unaddressable rather than
+    /// merely unimplemented.
+    #[cfg(feature = "full")]
+    gateway: Mutex<GatewayState>,
     /// The durable half, once a host has called [`Core::open_store`].
     ///
     /// `None` until then, and [`Core::vault_state`] says so rather than letting
@@ -214,6 +229,15 @@ impl Core {
             generation: AtomicU64::new(0),
             #[cfg(feature = "full")]
             sessions: Mutex::new(SessionMap::new()),
+            // **Unconfigured**, not "an idle gateway". `max_peers = 0` fails
+            // ADR-0013 MG-14's sixteen-peer floor, which is exactly what
+            // `gateway.get` should report on a host nobody has set up as one:
+            // "this is not a conforming gateway" rather than "this gateway has
+            // no peers". `gateway.set` is what would configure it, and it is
+            // refused by name until there is a durable store to hold the
+            // ceiling — see `dispatch::disposition`.
+            #[cfg(feature = "full")]
+            gateway: Mutex::new(GatewayState::unconfigured()),
             bridge: Mutex::new(None),
             #[cfg(feature = "full")]
             journal: CoreSessionJournal::new(Arc::clone(&shared), Vec::new()),
@@ -416,6 +440,14 @@ impl Core {
     #[cfg(feature = "full")]
     pub(crate) fn sessions(&self) -> MutexGuard<'_, SessionMap> {
         self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The gateway role's live state (ADR-0013).
+    #[cfg(feature = "full")]
+    pub(crate) fn gateway(&self) -> MutexGuard<'_, GatewayState> {
+        self.gateway
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }

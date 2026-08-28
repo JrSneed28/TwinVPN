@@ -20,6 +20,7 @@ pub mod scope;
 pub mod wire;
 
 pub use client::{Client, ClientError};
+pub use codec::TransportError;
 pub use dacl::{pipe_sddl, PrincipalSids};
 pub use scope::{Scopes, CLI_REQUESTED_SCOPES, GRANTABLE};
 pub use wire::{

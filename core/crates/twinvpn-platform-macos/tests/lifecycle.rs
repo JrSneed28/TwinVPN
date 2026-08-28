@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use core::time::Duration;
 use twinvpn_platform::mock::{MockAdapter, MockOptions};
 use twinvpn_platform::{
     InterfaceIndex, InterfaceName, InterfaceProvider, LinkClass, NetworkChange, PlatformAdapter,
@@ -15,6 +16,7 @@ use twinvpn_platform::{
 };
 use twinvpn_platform_macos::custody::{AbsentElement, Accessibility, KeychainItemSpec};
 use twinvpn_platform_macos::iface::{classify, sc_type, MacosInterfaceProvider, RawInterface};
+
 use twinvpn_platform_macos::power::{msg, PowerJournal, PowerPhase};
 use twinvpn_platform_macos::utun::{
     decode_frame, encode_frame, family_of_packet, FrameError, QueuePort, FRAME_HEADER_LEN,
@@ -393,7 +395,13 @@ async fn a_resume_forces_a_re_enumeration_before_anything_can_look_green() {
     let mut stream = provider.subscribe().expect("subscribes");
     let mut journal = PowerJournal::new();
 
-    provider.publish_all(journal.observe_message(msg::SYSTEM_WILL_SLEEP).0);
+    let asleep_at = twinvpn_env::ElapsedInstant::from_micros(1_000_000);
+    let awake_at = asleep_at.saturating_add(Duration::from_secs(9 * 3600));
+    provider.publish_all(
+        journal
+            .observe_message_at(msg::SYSTEM_WILL_SLEEP, Some(asleep_at), None)
+            .0,
+    );
     assert_eq!(journal.phase(), PowerPhase::Sleeping);
     assert_eq!(
         next(&mut stream).await,
@@ -403,12 +411,26 @@ async fn a_resume_forces_a_re_enumeration_before_anything_can_look_green() {
         })
     );
 
-    provider.publish_all(journal.observe_message(msg::SYSTEM_HAS_POWERED_ON).0);
+    provider.publish_all(
+        journal
+            .observe_message_at(msg::SYSTEM_HAS_POWERED_ON, Some(awake_at), None)
+            .0,
+    );
     assert_eq!(
         next(&mut stream).await,
         Some(NetworkChange::EventsLost { count: None }),
-        "the gap is reported before anything else"
+        "the stream's hole is reported before anything else"
     );
+    // Then the SECOND fact: how long the machine was away. `EventsLost` says the
+    // picture is incomplete; only this says the picture is nine hours old, and
+    // no monotonic clock could have told the core either.
+    match next(&mut stream).await {
+        Some(NetworkChange::SystemResumed(facts)) => {
+            assert_eq!(facts.suspended_for, Some(Duration::from_secs(9 * 3600)));
+            assert!(facts.announced_by_os);
+        }
+        other => panic!("expected a measured resume, got {other:?}"),
+    }
     assert_eq!(
         next(&mut stream).await,
         Some(NetworkChange::LinkPostureChanged {

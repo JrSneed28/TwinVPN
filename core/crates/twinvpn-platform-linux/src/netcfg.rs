@@ -47,7 +47,7 @@ use std::sync::Mutex;
 use futures_core::future::BoxFuture;
 use twinvpn_platform::{
     ContractGeneration, EnforcementCustody, LinkFacts, NetworkConfig, NetworkContract,
-    PlatformError, Ruleset,
+    PlatformError, RouteCapabilities, Ruleset,
 };
 use twinvpn_types::{AddressFamily, PerFamily, UnderlayFamilies};
 
@@ -463,6 +463,15 @@ impl NetworkConfig for LinuxNetworkConfig {
         nft::custody()
     }
 
+    /// Linux has route metrics, so the instruction is honoured rather than
+    /// refused.
+    ///
+    /// `RTA_PRIORITY` on an `RTM_NEWROUTE`, which is what lets §7.2 install a
+    /// default route "without destroying the host's default route".
+    fn route_capabilities(&self) -> RouteCapabilities {
+        RouteCapabilities { metric: true }
+    }
+
     fn query_link_facts(&self) -> BoxFuture<'_, Result<LinkFacts, PlatformError>> {
         Box::pin(async move {
             self.shutdown.check()?;
@@ -612,6 +621,9 @@ fn baseline_contract(generation: ContractGeneration, ruleset: Ruleset) -> Networ
         },
         ruleset,
         mtu: crate::tun::MTU_FLOOR,
+        // No path is validated before the first `apply`, so there is no remote
+        // the tunnel is riding. `None` is the fact, not a placeholder.
+        tunnel_remote_address: None,
     }
 }
 

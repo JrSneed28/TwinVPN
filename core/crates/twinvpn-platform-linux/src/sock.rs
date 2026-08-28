@@ -47,8 +47,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
 use twinvpn_platform::{
-    Datagram, InterfaceIndex, MulticastOptions, PlatformError, SocketFamily, SocketOptions,
-    SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
+    Datagram, InterfaceIndex, MulticastOptions, PlatformError, SocketCapabilities, SocketFamily,
+    SocketOptions, SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
 };
 use twinvpn_types::{Endpoint, IpAddr};
 
@@ -152,6 +152,20 @@ impl LinuxSocketProvider {
 }
 
 impl SocketProvider for LinuxSocketProvider {
+    /// Linux has both, and both are load-bearing here.
+    ///
+    /// `SO_REUSEPORT` is what makes `docs/networking.md` §3.6's birthday-paradox
+    /// port prediction possible at all, and `SO_MARK` carries §5.2's `fwmark`
+    /// policy rule **and** half of ADR-0012 KS-9(1)'s exemption predicate — which
+    /// KS-9b records as the only one of the three desktops that expresses the
+    /// predicate exactly.
+    fn socket_capabilities(&self) -> SocketCapabilities {
+        SocketCapabilities {
+            reuse_port: true,
+            firewall_mark: true,
+        }
+    }
+
     fn bind_udp<'a>(
         &'a self,
         spec: &'a UdpBindSpec,

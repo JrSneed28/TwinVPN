@@ -73,6 +73,8 @@ pub mod establish;
 #[cfg(feature = "full")]
 pub(crate) mod execute;
 #[cfg(feature = "full")]
+pub mod gateway;
+#[cfg(feature = "full")]
 pub mod session_table;
 
 #[cfg(feature = "full")]

@@ -20,7 +20,9 @@ use twinvpn_enforce::reconciler::{
 };
 use twinvpn_enforce::scope::{LocalNetworkAccess, Tier1, Tier2};
 use twinvpn_env::{ElapsedInstant, MonotonicInstant};
-use twinvpn_platform::{ContractGeneration, EnforcementCustody, InterfaceIndex, Ruleset};
+use twinvpn_platform::{
+    BootEnforcement, ContractGeneration, EnforcementCustody, InterfaceIndex, Ruleset,
+};
 use twinvpn_route::RoutingMode;
 use twinvpn_types::{
     AddressFamily, Endpoint, IpAddr, IpPrefix, PerFamily, Port, TrafficDisposition, V4Addr, V6Addr,
@@ -329,28 +331,81 @@ fn a_target_whose_rules_die_with_the_process_must_disclose_it() {
         custody: EnforcementCustody {
             survives_core_exit: true,
             swap_is_atomic: true,
+            boot_enforcement: BootEnforcement::OsHeldFromBoot,
         },
-        boot_enforcement_available: true,
     };
     assert!(!good.requires_disclosure());
+    assert!(good.boot_enforcement_available());
 
     // E4 (userspace-only) is rejected precisely because it fails K3.
     let bad = DurabilityPosture {
         custody: EnforcementCustody {
             survives_core_exit: false,
             swap_is_atomic: true,
+            boot_enforcement: BootEnforcement::OsHeldFromBoot,
         },
-        boot_enforcement_available: true,
     };
     assert!(bad.requires_disclosure());
     assert!(!bad.survives_core_exit());
 
     // iOS: no pre-network boot ruleset is possible; the window is named.
     let ios = DurabilityPosture {
-        boot_enforcement_available: false,
-        ..good
+        custody: EnforcementCustody {
+            boot_enforcement: BootEnforcement::None,
+            ..good.custody
+        },
     };
     assert!(ios.requires_disclosure());
+    assert!(!ios.boot_enforcement_available());
+}
+
+/// **The two boot-time residuals `desktop-windows` and `desktop-macos` reported
+/// from opposite sides are different facts, and the posture can now say so.**
+///
+/// The field this replaced was a `bool`, and under it these two were equal.
+/// ADR-0012 §11.6 does not treat them as equal: the Windows row is "an
+/// *availability* gap, not a leak. Deliberate: the boot window fails **closed**",
+/// and the macOS row is "a device booted to Recovery is unprotected".
+#[test]
+fn an_availability_gap_at_boot_is_not_the_same_fact_as_an_unprotected_boot() {
+    let windows = DurabilityPosture {
+        custody: EnforcementCustody {
+            survives_core_exit: true,
+            swap_is_atomic: true,
+            boot_enforcement: BootEnforcement::OsHeldFromBoot,
+        },
+    };
+    let macos = DurabilityPosture {
+        custody: EnforcementCustody {
+            boot_enforcement: BootEnforcement::ExemptBootModes,
+            ..windows.custody
+        },
+    };
+
+    // Windows: covered, and nothing is exposed.
+    assert!(windows.boot_enforcement_available());
+    assert!(!windows.boot_window_leaves_the_host_open());
+    assert!(!windows.requires_disclosure());
+
+    // macOS: NOT covered, and the residual is exposure.
+    assert!(!macos.boot_enforcement_available());
+    assert!(macos.boot_window_leaves_the_host_open());
+    assert!(macos.requires_disclosure());
+
+    // Linux's package-owned artifact covers the window without being
+    // kernel-held from power-on, and is not an exposure either.
+    let linux = DurabilityPosture {
+        custody: EnforcementCustody {
+            boot_enforcement: BootEnforcement::PackageArtifactLoadedAtBoot,
+            ..windows.custody
+        },
+    };
+    assert!(linux.boot_enforcement_available());
+    assert!(!linux.boot_window_leaves_the_host_open());
+
+    // And the three are genuinely distinguishable, which the `bool` was not.
+    assert_ne!(windows.custody, macos.custody);
+    assert_ne!(windows.custody, linux.custody);
 }
 
 // ---------------------------------------------------------------------------

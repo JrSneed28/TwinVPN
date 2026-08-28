@@ -26,8 +26,8 @@
 
 use twinvpn_platform::{ContractGeneration, InterfaceIndex, RouteEntry};
 use twinvpn_types::{
-    codes, AddressFamily, Component, Diagnostic, EvidenceValue, IpAddr, IpPrefix, OverlayAddresses,
-    PerFamily, V4Addr, V6Addr,
+    codes, AddressFamily, Component, Diagnostic, EvidenceValue, InterfaceAddress, IpAddr, IpPrefix,
+    OverlayAddresses, PerFamily, V4Addr, V6Addr,
 };
 
 use crate::conflict::{self, Candidate, Resolution, Source};
@@ -91,7 +91,11 @@ pub struct RoutePlan {
     /// The generation this describes. Monotone, allocated by the core.
     pub generation: ContractGeneration,
     /// The overlay interface's addresses, both families (R1).
-    pub addresses: PerFamily<Vec<IpPrefix>>,
+    ///
+    /// `InterfaceAddress` and not `IpPrefix`: these are an interface's *own*
+    /// addresses, whose host bits are the point. See
+    /// `twinvpn_platform::NetworkContract::addresses`, which this is cloned into.
+    pub addresses: PerFamily<Vec<InterfaceAddress>>,
     /// Routes to install, both families, in **one** transaction (§11.3).
     pub routes: PerFamily<Vec<RouteEntry>>,
     /// The overlay MTU.
@@ -295,12 +299,12 @@ pub fn compute(
     // R1: both overlay addresses are present at all times, whatever the underlay
     // offers. `OverlayAddresses` has two non-optional fields, so this cannot
     // populate one half.
-    addresses
-        .get_mut(AddressFamily::V4)
-        .push(IpPrefix::new(IpAddr::V4(inputs.overlay.v4), 32).map_err(RouteError::Address)?);
-    addresses
-        .get_mut(AddressFamily::V6)
-        .push(IpPrefix::new(IpAddr::V6(inputs.overlay.v6), 128).map_err(RouteError::Address)?);
+    addresses.get_mut(AddressFamily::V4).push(
+        InterfaceAddress::new(IpAddr::V4(inputs.overlay.v4), 32).map_err(RouteError::Address)?,
+    );
+    addresses.get_mut(AddressFamily::V6).push(
+        InterfaceAddress::new(IpAddr::V6(inputs.overlay.v6), 128).map_err(RouteError::Address)?,
+    );
 
     for c in installed {
         // An on-link physical prefix is the host's, not ours: it participates in

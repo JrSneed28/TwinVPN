@@ -13,8 +13,8 @@ use twinvpn_types::{Endpoint, IpAddr, Port, V4Addr, V6Addr};
 use crate::error::PlatformError;
 use crate::iface::{InterfaceFacts, InterfaceIndex, InterfaceProvider, NetworkChange};
 use crate::socket::{
-    Datagram, MulticastOptions, SocketFamily, SocketProvider, SupportedFamilies, UdpBindSpec,
-    UdpSocket,
+    Datagram, MulticastOptions, SocketCapabilities, SocketFamily, SocketProvider,
+    SupportedFamilies, UdpBindSpec, UdpSocket,
 };
 
 /// A deterministic in-memory network several mock adapters share.
@@ -308,6 +308,8 @@ pub struct MockSockets {
     pub(super) supported: SupportedFamilies,
     pub(super) shutting_down: Arc<AtomicBool>,
     pub(super) opened: AtomicU64,
+    /// Which platform-conditional socket options this mock target declares.
+    pub(super) capabilities: Mutex<SocketCapabilities>,
 }
 
 impl MockSockets {
@@ -318,9 +320,35 @@ impl MockSockets {
     pub fn opened(&self) -> u64 {
         self.opened.load(Ordering::Relaxed)
     }
+
+    /// Declares which platform-conditional socket options this mock target has.
+    ///
+    /// Present so a core test can exercise **both** sides of the branch without
+    /// a Windows or a Darwin host: `reuse_port: false` is Windows' answer and
+    /// `firewall_mark: false` is both Windows' and Darwin's, and a core that
+    /// plans §3.6's port prediction identically either way has a defect a Linux
+    /// CI runner should be able to catch.
+    pub fn set_socket_capabilities(&self, capabilities: SocketCapabilities) {
+        *self
+            .capabilities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = capabilities;
+    }
 }
 
 impl SocketProvider for MockSockets {
+    fn socket_capabilities(&self) -> SocketCapabilities {
+        // Both `true`: an in-memory fabric has no kernel to refuse either, so the
+        // mock declares the shape the most capable target has. A scenario that
+        // wants the Windows or Darwin answer sets it with
+        // `MockSockets::set_socket_capabilities` — CD-5's payoff is that BOTH
+        // sides of the core's branch are reachable on a CI runner.
+        *self
+            .capabilities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn bind_udp<'a>(
         &'a self,
         spec: &'a UdpBindSpec,

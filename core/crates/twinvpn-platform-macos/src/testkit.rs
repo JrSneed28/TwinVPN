@@ -21,7 +21,7 @@
 use twinvpn_platform::{
     ContractGeneration, DnsConfig, InterfaceIndex, NetworkContract, RouteEntry, Ruleset,
 };
-use twinvpn_types::{IpAddr, IpPrefix, PerFamily, V4Addr, V6Addr};
+use twinvpn_types::{InterfaceAddress, IpAddr, IpPrefix, PerFamily, V4Addr, V6Addr};
 
 /// A canonical IPv4 prefix. Panics on a non-canonical one, which is a test bug.
 #[must_use]
@@ -42,6 +42,26 @@ pub fn v6(first: u8, second: u8, len: u32) -> IpPrefix {
     .expect("canonical v6 prefix")
 }
 
+/// An interface address with its host bits, for the overlay's own addresses.
+#[must_use]
+pub fn iface_v4(octets: [u8; 4], len: u32) -> InterfaceAddress {
+    InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets(octets)), len)
+        .expect("valid v4 interface address")
+}
+
+/// The same for IPv6, from its first two octets.
+#[must_use]
+pub fn iface_v6(first: u8, second: u8, len: u32) -> InterfaceAddress {
+    let mut octets = [0u8; 16];
+    octets[0] = first;
+    octets[1] = second;
+    InterfaceAddress::new(
+        IpAddr::V6(V6Addr::new(octets, None).expect("valid v6 address")),
+        len,
+    )
+    .expect("valid v6 interface address")
+}
+
 /// A one-route-per-family contract at `generation`, in `Ruleset::Protected`.
 #[must_use]
 pub fn contract(generation: u64) -> NetworkContract {
@@ -53,7 +73,10 @@ pub fn contract(generation: u64) -> NetworkContract {
 pub fn contract_with(generation: u64, ruleset: Ruleset) -> NetworkContract {
     NetworkContract {
         generation: ContractGeneration(generation),
-        addresses: PerFamily::new(vec![v4([100, 64, 0, 0], 32)], vec![v6(0xfd, 0x7c, 128)]),
+        addresses: PerFamily::new(
+            vec![iface_v4([100, 64, 0, 2], 32)],
+            vec![iface_v6(0xfd, 0x7c, 128)],
+        ),
         routes: PerFamily::new(
             vec![RouteEntry {
                 destination: v4([100, 64, 0, 0], 10),
@@ -76,6 +99,9 @@ pub fn contract_with(generation: u64, ruleset: Ruleset) -> NetworkContract {
         },
         ruleset,
         mtu: 1280,
+        // A fixture contract rides a fixed remote, so
+        // `nesettings::render` has the `tunnelRemoteAddress` NE requires.
+        tunnel_remote_address: Some(IpAddr::V4(V4Addr::from_octets([198, 51, 100, 7]))),
     }
 }
 

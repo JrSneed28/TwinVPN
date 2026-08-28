@@ -31,6 +31,15 @@ pub struct ContractInputs<'a> {
     pub stub_addresses: PerFamily<Vec<IpAddr>>,
     /// The ruleset the latch currently wants.
     pub ruleset: Ruleset,
+    /// The underlay remote the tunnel is currently riding, where there is one.
+    ///
+    /// `None` in `RULESET_BLOCKED`: no path is validated in that posture, so
+    /// there is no remote. `twinvpn_platform::NetworkContract` needs it because
+    /// `NEPacketTunnelNetworkSettings` is constructed with
+    /// `init(tunnelRemoteAddress:)` and requires one; carrying it here rather
+    /// than letting the macOS shell supply it is what keeps the two sides from
+    /// holding different answers.
+    pub tunnel_remote_address: Option<IpAddr>,
 }
 
 /// Assembles one generation.
@@ -86,19 +95,30 @@ pub fn assemble(
         dns,
         ruleset: inputs.ruleset,
         mtu: inputs.route_plan.mtu,
+        tunnel_remote_address: inputs.tunnel_remote_address,
     })
 }
 
 /// §11.8's arm sequence, as an explicit order.
 ///
 /// ```text
-/// arm: RULESET_BLOCKED live -> create iface (DOWN) -> apply(contract_gen)
-///      -> link up -> path validated + assertion OK -> atomic swap -> PROTECTED
+/// arm: RULESET_BLOCKED live -> create iface (DOWN) -> assign addresses
+///      -> link up -> program routes -> path validated + assertion OK
+///      -> atomic swap -> PROTECTED
 /// ```
 ///
 /// The interface is created **DOWN** because "an interface that comes up before
 /// its addresses, routes and rules are installed is the partial-application leak
 /// window".
+///
+/// **ADR-0012 KS-17a** is why the link comes up in the middle rather than after
+/// the whole contract: the superseded sequence read `create iface (DOWN) ->
+/// apply(contract_gen) -> link up`, and that is not implementable. An address
+/// *can* be added to a down interface; a route **cannot** — `RTM_NEWROUTE`
+/// answers `ENETDOWN` — which `desktop-linux` found against a kernel rather than
+/// by reading. No guarantee moves: `RULESET_BLOCKED` is live across the whole
+/// interval either way, and it is the *routes* that carry traffic, so nothing is
+/// carried before the contract is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ArmStep {
     /// `RULESET_BLOCKED` is live before anything else exists.

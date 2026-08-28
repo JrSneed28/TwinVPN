@@ -37,8 +37,8 @@ use std::net::SocketAddr;
 use futures_core::future::BoxFuture;
 use socket2::{Domain, Protocol, Socket, Type};
 use twinvpn_platform::{
-    Datagram, FragmentPolicy, MulticastOptions, PlatformError, SocketFamily, SocketOptions,
-    SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
+    Datagram, FragmentPolicy, MulticastOptions, PlatformError, SocketCapabilities, SocketFamily,
+    SocketOptions, SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
 };
 use twinvpn_types::{Endpoint, IpAddr};
 
@@ -237,6 +237,21 @@ fn apply_darwin(_socket: &Socket, _plan: &SocketOptionPlan) -> Result<(), Platfo
 }
 
 impl SocketProvider for MacosSocketProvider {
+    /// Darwin has `SO_REUSEPORT` and **no `SO_MARK`**.
+    ///
+    /// `SO_REUSEPORT` is BSD's own and is applied at open, so §3.6's port
+    /// prediction works here. There is no firewall mark and no policy-routing
+    /// table: the function §5.2 uses `fwmark` for is served by `IP_BOUND_IF`,
+    /// which is a different mechanism with a different failure mode, so it is
+    /// reported in `SocketOptionPlan::unsupported` rather than quietly mapped —
+    /// and now declared in advance rather than only refused.
+    fn socket_capabilities(&self) -> SocketCapabilities {
+        SocketCapabilities {
+            reuse_port: true,
+            firewall_mark: false,
+        }
+    }
+
     fn bind_udp<'a>(
         &'a self,
         spec: &'a UdpBindSpec,

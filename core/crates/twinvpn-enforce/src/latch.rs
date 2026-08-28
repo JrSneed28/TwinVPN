@@ -212,9 +212,14 @@ impl DisarmAuthority {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DurabilityPosture {
     /// What the adapter declares.
+    ///
+    /// **All three facts, including the boot one.** This used to carry a
+    /// separate `boot_enforcement_available: bool` beside the custody value,
+    /// which put one fact in two places and could not tell Windows' *availability
+    /// gap* apart from macOS's *hole* — see
+    /// [`twinvpn_platform::BootEnforcement`], which the adapter now declares and
+    /// [`DurabilityPosture::boot_enforcement_available`] derives.
     pub custody: EnforcementCustody,
-    /// Whether an OS-applied boot artifact covers KS-19's window.
-    pub boot_enforcement_available: bool,
 }
 
 impl DurabilityPosture {
@@ -233,9 +238,31 @@ impl DurabilityPosture {
         self.custody.swap_is_atomic
     }
 
+    /// Whether an OS-applied boot artifact covers KS-19's window on every boot.
+    ///
+    /// **Derived**, not stored: the adapter declares
+    /// [`twinvpn_platform::BootEnforcement`] and this is the yes/no reading of
+    /// it. A caller that needs to tell an availability gap from an exposure asks
+    /// the richer value instead.
+    #[must_use]
+    pub const fn boot_enforcement_available(self) -> bool {
+        self.custody.boot_enforcement.covers_the_boot_window()
+    }
+
+    /// Whether the boot-time residual is **exposure** rather than availability.
+    ///
+    /// ADR-0012 §11.6 draws this line and the old `bool` could not: Windows'
+    /// BOOTTIME + PERSISTENT pair holds the host closed and only stops *TwinVPN*
+    /// getting out, while macOS's Recovery boot loads nothing at all. The honest
+    /// `ProtectionAssertion` differs between the two.
+    #[must_use]
+    pub const fn boot_window_leaves_the_host_open(self) -> bool {
+        self.custody.boot_enforcement.leaves_the_host_open()
+    }
+
     /// Whether the posture must be disclosed rather than silently accepted.
     #[must_use]
     pub const fn requires_disclosure(self) -> bool {
-        !self.survives_core_exit() || !self.swap_is_atomic() || !self.boot_enforcement_available
+        !self.survives_core_exit() || !self.swap_is_atomic() || !self.boot_enforcement_available()
     }
 }

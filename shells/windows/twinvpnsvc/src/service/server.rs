@@ -60,12 +60,13 @@ use twinvpn_core::Core;
 use twinvpn_env::Env;
 use twinvpn_mgmt::{catalogue, CoreCommand, Scope, Submission, TransportOp};
 
+use crate::mi::codec::TransportError;
 use crate::mi::codec::{read_frame, write_frame};
 use crate::mi::dacl::PrincipalSids;
 use crate::mi::scope::Scopes;
 use crate::mi::wire::{
-    Body, Diagnostic, FrameError, Hello, HelloAck, MgmtEnvelope, PlatformCtx, Request, Response,
-    MI_VERSION, MI_VERSION_MIN,
+    Body, Diagnostic, Hello, HelloAck, MgmtEnvelope, PlatformCtx, Request, Response, MI_VERSION,
+    MI_VERSION_MIN,
 };
 
 use super::peer::Principal;
@@ -113,7 +114,7 @@ impl ServerContext {
 ///
 /// # Errors
 ///
-/// The frame error that ended it. A clean [`FrameError::Closed`] is the normal
+/// The frame error that ended it. A clean [`TransportError::Closed`] is the normal
 /// case: **PS-3** — "Loss of the last management client MUST NOT change
 /// `session_intent`, enforcement mode, the installed rule set, or any
 /// `ConnectionState`." Nothing in this function touches any of them on the way
@@ -122,7 +123,7 @@ pub async fn serve<S>(
     context: Arc<ServerContext>,
     principal: Principal,
     stream: &mut S,
-) -> Result<(), FrameError>
+) -> Result<(), TransportError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -146,7 +147,7 @@ where
     loop {
         let request = match read_frame(stream).await {
             Ok(envelope) => envelope,
-            Err(FrameError::Closed) => {
+            Err(TransportError::Closed) => {
                 // PS-3 and LC-20, made visible: the client going away is an
                 // INFO, and nothing else happens.
                 tracing::info!(
@@ -161,7 +162,7 @@ where
                 let reject = envelope(
                     context.as_of_ms(),
                     Body::Reject(diagnostic(
-                        error.reason_code(),
+                        error.reason_code().as_str(),
                         "PERSISTENT",
                         "ERROR",
                         false,
@@ -211,7 +212,7 @@ async fn negotiate<S>(
     context: &ServerContext,
     stream: &mut S,
     held: &Scopes,
-) -> Result<Option<Scopes>, FrameError>
+) -> Result<Option<Scopes>, TransportError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -269,7 +270,7 @@ where
         granted_scopes: granted.names(),
         withheld_scopes: withheld,
         // §11.7: "The catalogue, not the version, is the capability contract."
-        catalogue_digest: format!("{:016x}", twinvpn_mgmt::catalogue_digest()),
+        catalogue_digest: twinvpn_mgmt::catalogue_digest_text(),
         event_cursor: context.core.generation(),
         protocol_epoch_range: epoch_range(),
         platform_ctx: context.platform_ctx.clone(),
@@ -461,16 +462,34 @@ fn envelope(as_of_ms: u64, body: Body) -> MgmtEnvelope {
 
 /// **MI-14.** The resolved attributes travel with the code, so a receiver never
 /// looks one up in a registry that may be older than this build.
+///
+/// This used to carry FOUR of MI-14's eight attributes, taken from the caller's
+/// arguments rather than resolved. `Diagnostic::of` resolves all eight from this
+/// agent's own registry, which is what the rule actually asks for; the caller's
+/// arguments remain the fallback for a code the registry does not have (X-1: the
+/// registry carries 201 codes and the ADRs name roughly 490).
 fn diagnostic(reason_code: &str, class: &str, severity: &str, user_actionable: bool) -> Diagnostic {
-    Diagnostic {
-        reason_code: reason_code.to_owned(),
-        class: class.to_owned(),
-        severity: severity.to_owned(),
-        user_actionable,
-        // MI-15: the registry's i18n KEY, never a sentence.
-        summary_key: None,
-        next_action_key: None,
-        evidence: Vec::new(),
+    match twinvpn_types::ReasonCode::lookup(reason_code) {
+        Some(code) => Diagnostic {
+            // MI-15: the registry's i18n KEY, never a sentence.
+            summary_key: Some(code.summary_key().to_owned()),
+            ..Diagnostic::of(code)
+        },
+        None => Diagnostic {
+            reason_code: reason_code.to_owned(),
+            class: class.to_owned(),
+            severity: severity.to_owned(),
+            terminal: false,
+            user_actionable,
+            // Left empty rather than guessed: an unregistered code has no
+            // resolved attributes, and inventing them is what MI-14 forbids.
+            remediation_class: String::new(),
+            scope: String::new(),
+            doc_anchor: String::new(),
+            summary_key: None,
+            next_action_key: None,
+            evidence: serde_json::Value::Null,
+        },
     }
 }
 
@@ -487,13 +506,8 @@ fn failure(reason_code: &str, class: &str, severity: &str, user_actionable: bool
 /// and does not render it (MI-15).
 fn from_core(source: &twinvpn_types::Diagnostic) -> Diagnostic {
     Diagnostic {
-        reason_code: source.code().as_str().to_owned(),
-        class: format!("{:?}", source.code().class()).to_uppercase(),
-        severity: format!("{:?}", source.code().severity()).to_uppercase(),
-        user_actionable: source.code().user_actionable(),
-        summary_key: None,
-        next_action_key: None,
-        evidence: Vec::new(),
+        summary_key: Some(source.code().summary_key().to_owned()),
+        ..Diagnostic::of(source.code())
     }
 }
 

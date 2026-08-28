@@ -33,7 +33,7 @@ repository   = "https://github.com/twinvpn/twinvpn"
 twinvpn-types        = { path = "../core/crates/twinvpn-types" }
 twinvpn-env          = { path = "../core/crates/twinvpn-env", features = ["test-support"] }
 twinvpn-schema       = { path = "../core/crates/twinvpn-schema" }
-twinvpn-crypto       = { path = "../core/crates/twinvpn-crypto" }
+twinvpn-crypto       = { path = "../core/crates/twinvpn-crypto", features = ["test-support"] }
 twinvpn-platform     = { path = "../core/crates/twinvpn-platform", features = ["mock"] }
 twinvpn-store        = { path = "../core/crates/twinvpn-store" }
 twinvpn-trust        = { path = "../core/crates/twinvpn-trust" }

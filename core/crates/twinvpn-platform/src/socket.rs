@@ -95,6 +95,12 @@ pub struct SocketOptions {
     ///
     /// The birthday-paradox port prediction of `docs/networking.md` §3.6 opens
     /// many sockets at once, and on Linux that needs this.
+    ///
+    /// **Set this only when [`SocketCapabilities::reuse_port`] is `true`.**
+    /// Windows has no equivalent — `SO_REUSEADDR` is not one, because it lets a
+    /// *different process* bind the identical address and port and take over
+    /// delivery — so `twinvpn-platform-windows` refuses the bind with
+    /// `PLATFORM.OS_UNSUPPORTED` rather than quietly downgrading.
     pub reuse_port: bool,
     /// The don't-fragment policy.
     pub fragment_policy: FragmentPolicy,
@@ -120,7 +126,16 @@ pub struct SocketOptions {
     ///
     /// Linux `SO_MARK`. `docs/networking.md` §5.2 routes TwinVPN's own traffic
     /// through policy table 52 by `fwmark`; without it the tunnel's own packets
-    /// would match the default route it just installed.
+    /// would match the default route it just installed. It is also half of
+    /// KS-9(1)'s Linux predicate, so on that target it is load-bearing twice.
+    ///
+    /// **Set this only when [`SocketCapabilities::firewall_mark`] is `true`.**
+    /// Neither Darwin nor Windows has it: `desktop-macos` reports it in
+    /// `SocketOptionPlan::unsupported` (the function it serves is served by
+    /// `IP_BOUND_IF`, a different mechanism with a different failure mode) and
+    /// `desktop-windows` refuses it at bind (the predicate there is app-id plus
+    /// SID, and there is no routing mark). Both refused rather than substituting,
+    /// which was right; the capability is what lets the core know in advance.
     pub firewall_mark: Option<u32>,
     /// Join these multicast groups at open.
     pub multicast: Option<MulticastOptions>,
@@ -279,6 +294,52 @@ pub trait SocketProvider: Send + Sync {
     /// OS (CB-3). Reported per family so "this host has no v6 stack" and "this
     /// host has no dual-stack sockets" are different answers.
     fn supported_families(&self) -> BoxFuture<'_, Result<SupportedFamilies, PlatformError>>;
+
+    /// Which of [`SocketOptions`]' platform-conditional options mean anything
+    /// here.
+    ///
+    /// Read **before** a socket is opened, so the core asks for what this
+    /// platform can do rather than issuing an instruction that will be refused.
+    fn socket_capabilities(&self) -> SocketCapabilities;
+}
+
+/// Which platform-conditional socket options a host actually has.
+///
+/// **A declared capability (CB-3)**, not an OS branch, and the counterpart of
+/// [`SupportedFamilies`]: that one says which socket *shapes* exist, this one
+/// says which *options* do. Every field here names a [`SocketOptions`] field
+/// that at least one supported target refuses outright.
+///
+/// # Why refusal alone was not enough
+///
+/// [`SocketProvider::bind_udp`]'s contract already says a refusal is *"a **fact
+/// about the host**, reported so the core can decide, not a reason for the
+/// adapter to substitute another"*, and both wave-2 adapters that hit this
+/// refused correctly — `desktop-windows` refuses `reuse_port` and
+/// `firewall_mark` at bind, `desktop-macos` reports `firewall_mark` in
+/// `SocketOptionPlan::unsupported`. But a refusal only arrives **after** the
+/// core has committed to a plan built on the option: `docs/networking.md`
+/// §3.6's birthday-paradox port prediction opens many sockets on one port at
+/// once and is pointless without `SO_REUSEPORT`, and §5.2's policy-routing rule
+/// is pointless without `SO_MARK`. Reading the capability first is what lets the
+/// core choose a different strategy rather than discover mid-gather that this
+/// one cannot work here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SocketCapabilities {
+    /// Whether [`SocketOptions::reuse_port`] can be honoured.
+    ///
+    /// `false` on Windows, which has no equivalent: `SO_REUSEADDR` is **not**
+    /// one, because it lets a *different process* bind the identical address and
+    /// port and take over delivery, and the adapter does not offer it as a
+    /// substitute.
+    pub reuse_port: bool,
+    /// Whether [`SocketOptions::firewall_mark`] can be honoured.
+    ///
+    /// `false` on Darwin and Windows. On Linux it is load-bearing twice — for
+    /// `docs/networking.md` §5.2's `fwmark` policy rule and for ADR-0012
+    /// KS-9(1)'s exemption predicate — and ADR-0012 KS-9b records what each
+    /// platform without it satisfies KS-9 with instead, and what that loses.
+    pub firewall_mark: bool,
 }
 
 /// Which socket shapes a host offers.

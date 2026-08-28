@@ -495,6 +495,42 @@ fn protected_kid(sign1: &CoseSign1) -> Option<Vec<u8>> {
     }
 }
 
+/// Encodes an OKP/X25519 public value as a deterministic-CBOR COSE_Key.
+///
+/// The inverse of [`cose_key_x25519`], and the encoder **both** ends of an
+/// ADR-0005 §11.3 `cnf` check must use.
+///
+/// # Why this is a shared function and not two encoders
+///
+/// The relay's `cnf` check is an equality over *octets*: `claims.confirmation_key`
+/// comes out of a verified token and `presented_leg_key` is built by the relay
+/// from the static the device proved possession of in the leg handshake. Two
+/// canonical-CBOR encoders that disagree about map order or integer width make
+/// every legitimate token fail proof-of-possession, with both sides looking
+/// correct — the same failure shape W-33 found in the frame-MAC vector, and the
+/// same remedy: one definition, imported.
+///
+/// # Panics
+///
+/// Never for this input. The map's three keys are `const` and distinct, so the
+/// only error `encode` can return — a duplicate key — is unreachable, and a
+/// `Result` here would push an impossible branch onto every caller.
+#[must_use]
+pub fn x25519_cose_key(pubkey: &[u8; 32]) -> Vec<u8> {
+    crate::emit::encode(&crate::emit::Item::Map(vec![
+        (crate::emit::Item::Uint(1), crate::emit::Item::Uint(KTY_OKP)),
+        (
+            crate::emit::int_item(KEY_CRV),
+            crate::emit::Item::Uint(CRV_X25519),
+        ),
+        (
+            crate::emit::int_item(KEY_X),
+            crate::emit::Item::Bytes(pubkey.to_vec()),
+        ),
+    ]))
+    .expect("an OKP COSE_Key of fixed shape always encodes")
+}
+
 /// Parses an OKP/X25519 COSE_Key and returns the 32-byte public value.
 ///
 /// Separate from [`PublicVerifyingKey::from_cose_key`] **on purpose**: an

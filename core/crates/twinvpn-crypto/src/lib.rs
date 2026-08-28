@@ -89,6 +89,7 @@ pub mod locked;
 pub mod noise;
 pub mod prologue;
 pub mod psk;
+pub mod relay_leg;
 pub mod replay;
 pub mod statements;
 
@@ -99,7 +100,7 @@ pub mod transcript;
 pub use aead::{AeadOpenError, StoreKey};
 pub use binding::{verify_tunnel_key_binding, VerifiedTunnelKey};
 pub use blake2s::{frame_mac, hrw_weight_digest, verify_frame_mac};
-pub use cose::{verify_cose_sign1, PublicVerifyingKey, VerifiedStatement};
+pub use cose::{verify_cose_sign1, x25519_cose_key, PublicVerifyingKey, VerifiedStatement};
 pub use deviceid::{
     derive_device_id, derive_device_id_checked, derive_identity_id, derive_identity_id_checked,
 };
@@ -108,4 +109,5 @@ pub use kdf::{hkdf_expand_label, hkdf_sha256, sha256, HkdfSha256};
 pub use locked::{LockedBytes, LockedMemoryReport};
 pub use prologue::{IdentityBinding, NegotiationBinding, Prologue, TwinnetTag};
 pub use psk::TwinNetPsk;
+pub use relay_leg::{CompletedLeg, LegInitiator, LegResponder};
 pub use replay::{ReplayWindow, SendCounter};

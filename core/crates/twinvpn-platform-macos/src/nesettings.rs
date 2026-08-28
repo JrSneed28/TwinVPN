@@ -52,7 +52,7 @@
 use serde_json::{json, Map, Value};
 
 use twinvpn_platform::{DnsConfig, NetworkContract, PlatformError};
-use twinvpn_types::{AddressFamily, IpPrefix};
+use twinvpn_types::{AddressFamily, InterfaceAddress, IpPrefix};
 
 use crate::addr::{addr_text, v4_netmask_text};
 
@@ -254,10 +254,16 @@ pub fn prefix_families(prefixes: &[IpPrefix]) -> Vec<AddressFamily> {
     prefixes.iter().map(|p| p.family()).collect()
 }
 
+/// The families a list of **interface addresses** names, in order.
+#[must_use]
+pub fn address_families(addresses: &[InterfaceAddress]) -> Vec<AddressFamily> {
+    addresses.iter().map(|a| a.family()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{contract, full_tunnel_contract, v4 as p4};
+    use crate::testkit::{contract, full_tunnel_contract, iface_v4};
     use twinvpn_platform::Ruleset;
     use twinvpn_types::{IpAddr, PerFamily, V4Addr, V6Addr};
 
@@ -300,7 +306,9 @@ mod tests {
     #[test]
     fn the_netmask_is_computed_here_so_swift_never_computes_one() {
         let mut c = contract(1);
-        c.addresses.v4 = vec![p4([100, 64, 0, 0], 10)];
+        // A /10 with host bits set — the exact shape `IpPrefix` could not carry
+        // and `NEIPv4Settings(addresses:subnetMasks:)` needs.
+        c.addresses.v4 = vec![iface_v4([100, 64, 0, 2], 10)];
         let doc = render(&c, "203.0.113.7").expect("renders");
         assert_eq!(doc["ipv4"]["subnet_masks"][0], "255.192.0.0");
         assert_eq!(
@@ -394,7 +402,7 @@ mod tests {
         let a = render_json(&c, "203.0.113.7").expect("renders");
         let b = render_json(&c, "203.0.113.7").expect("renders");
         assert_eq!(a, b);
-        assert_eq!(prefix_families(&c.addresses.v4), vec![AddressFamily::V4]);
+        assert_eq!(address_families(&c.addresses.v4), vec![AddressFamily::V4]);
     }
 
     #[test]

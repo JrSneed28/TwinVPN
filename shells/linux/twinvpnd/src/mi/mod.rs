@@ -14,6 +14,7 @@ pub mod scope;
 pub mod wire;
 
 pub use client::{Client, ClientError};
+pub use codec::TransportError;
 pub use scope::{Scopes, CLI_REQUESTED_SCOPES};
 pub use wire::{
     Body, Compacted, Diagnostic, Event, FrameError, Hello, HelloAck, MgmtEnvelope, PlatformCtx,

@@ -652,6 +652,7 @@ pub(crate) mod tests_support {
             },
             ruleset: Ruleset::Blocked,
             mtu: 1420,
+            tunnel_remote_address: None,
         }
     }
 }
@@ -710,6 +711,7 @@ mod tests {
             },
             ruleset: Ruleset::Blocked,
             mtu: 1420,
+            tunnel_remote_address: None,
         }
     }
 

@@ -565,7 +565,7 @@ async fn serve_forever(
                             if let Err(error) = conn::serve(context, stream).await {
                                 tracing::debug!(
                                     target: "twinvpn.mi",
-                                    reason_code = error.reason_code(),
+                                    reason_code = error.reason_code().as_str(),
                                     "a management connection ended"
                                 );
                             }

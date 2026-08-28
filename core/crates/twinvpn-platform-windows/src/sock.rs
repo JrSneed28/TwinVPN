@@ -62,8 +62,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_core::future::BoxFuture;
 use twinvpn_platform::{
-    Datagram, FragmentPolicy, InterfaceIndex, MulticastOptions, PlatformError, SocketFamily,
-    SocketOptions, SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
+    Datagram, FragmentPolicy, InterfaceIndex, MulticastOptions, PlatformError, SocketCapabilities,
+    SocketFamily, SocketOptions, SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
 };
 use twinvpn_types::{Endpoint, IpAddr, Port, V4Addr, V6Addr, ZoneIndex};
 
@@ -875,6 +875,27 @@ impl WindowsSocketProvider {
 }
 
 impl SocketProvider for WindowsSocketProvider {
+    /// **Windows has neither**, and this adapter substitutes nothing for either.
+    ///
+    /// - `SO_REUSEPORT`: no equivalent. `SO_REUSEADDR` is **not** one, because it
+    ///   lets a *different process* bind the identical address and port and take
+    ///   over delivery — a security difference, not a spelling one. So
+    ///   `docs/networking.md` §3.6's gathering strategy needs a Windows-specific
+    ///   answer that is not in the corpus, and this is where the core learns it
+    ///   must find one rather than discovering it at the first refused bind.
+    /// - `SO_MARK`: no routing mark exists. KS-9(1)'s predicate here is app-id
+    ///   plus SID (ADR-0012 KS-9b), which is a different mechanism satisfying the
+    ///   same rule at process granularity.
+    ///
+    /// `bind_udp` below still refuses either option by name if one is set — the
+    /// capability is the advance notice, not a replacement for the refusal.
+    fn socket_capabilities(&self) -> SocketCapabilities {
+        SocketCapabilities {
+            reuse_port: false,
+            firewall_mark: false,
+        }
+    }
+
     fn bind_udp<'a>(
         &'a self,
         spec: &'a UdpBindSpec,
