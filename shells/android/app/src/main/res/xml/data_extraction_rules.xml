@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ADR-0020 §11's Android backup row, in full:
+
+    `android:allowBackup="false"`, or `dataExtractionRules` excluding the store
+    path in **both** `<cloud-backup>` and `<device-transfer>` (API 31+) and
+    `fullBackupContent` below that.
+
+  Both are done. `allowBackup="false"` is set in the manifest AND both sections
+  here exclude everything, because the two mechanisms cover different API levels
+  and an exclusion present in only one is an exclusion that lapses on half the
+  fleet.
+
+  Excluding the vault is not the whole story and the ADR says so: Keystore keys
+  never leave the device, so a restored backup would find the vault unopenable
+  and the identity absent (`AUTH.IDENTITY_MISSING`) — re-enrolment either way.
+  What the exclusion prevents is a *ciphertext* copy of the vault travelling to
+  a device that cannot open it, which is a needless disclosure of its size,
+  shape and existence.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+        <exclude domain="device_root" />
+        <exclude domain="device_file" />
+        <exclude domain="device_database" />
+        <exclude domain="device_sharedpref" />
+    </cloud-backup>
+
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+        <exclude domain="device_root" />
+        <exclude domain="device_file" />
+        <exclude domain="device_database" />
+        <exclude domain="device_sharedpref" />
+    </device-transfer>
+</data-extraction-rules>

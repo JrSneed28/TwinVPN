@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  TwinVPN — Android manifest.
+
+  Authority: docs/networking.md §5.2 (API 26 min / API 29 target behaviour),
+  ADR-0022 §11.3's Android row (BOOT_COMPLETED, always-on), LC-33 (the
+  foreground service and its ongoing notification), ADR-0019 §11's permission
+  table, ADR-0020 §11 (backup and device-transfer exclusion), ADR-0012 §11.6.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ADR-0022 §11.3: BOOT_COMPLETED is one of the exemptions to the Android
+         12+ restriction on starting a foreground service from the background,
+         and it is the only OS-owned start trigger a non-DPC app has besides
+         always-on VPN itself. LC-9 requires at least one. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Required from API 34. The type is `specialUse` because Android has no
+         VPN foreground-service type; the justification below is what Play
+         review reads. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- ADR-0019 §11's Android 13+ row: without this the ongoing notification
+         cannot be posted, so the ANTI-SILENCE SURFACE IS GONE. The app states
+         that plainly rather than degrading quietly; see ServiceNotification. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- ConnectivityManager.NetworkCallback for a specific transport does not
+         need location; nothing here requests SSID or scan results, because
+         ADR-0022 TN-1 refuses to let a network NAME be a decision. -->
+
+    <!-- The pairing foundation (ADR-0018 §11.2 row 2.7): camera to SCAN a QR,
+         and nothing else. Optional, so a camera-less device still installs and
+         still pairs through the other C-B channels ADR-0023 EM-22 names. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+
+    <!-- StrongBox where present; ADR-0020's ladder falls back to the TEE and
+         then to a software keymaster, and reports which it reached. -->
+    <uses-feature
+        android:name="android.hardware.strongbox_keystore"
+        android:required="false" />
+
+    <application
+        android:name=".TwinVpnApplication"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.TwinVPN"
+        android:enableOnBackInvokedCallback="true"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density|fontScale">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          The VpnService. `BIND_VPN_SERVICE` is what makes the system the only
+          thing that can bind it, which is ADR-0016 H2's "exactly one privileged
+          process per device (per Android user)" as the platform expresses it.
+
+          `foregroundServiceType="specialUse"`: Android defines no VPN type, and
+          ADR-0021 owns the declaration as a packaging concern (ADR-0022 LC-33).
+        -->
+        <service
+            android:name=".vpn.TwinVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Maintains an authenticated peer-to-peer VPN tunnel while the
+                    app is in the background. The ongoing notification is the only surface on
+                    which a user learns that protection has stopped." />
+        </service>
+
+        <!--
+          ADR-0022 §11.3's Android row. If the user FORCE-STOPS the app this
+          receiver is disabled until the next manual launch and there is nothing
+          the app can do about it: the outcome is
+          `PLATFORM.LIFECYCLE.AUTOSTART_BLOCKED_BY_OS` (substituted — see
+          `twinvpn-platform-android::codes`), user-actionable, with the
+          always-on guidance flow.
+        -->
+        <receiver
+            android:name=".vpn.BootReceiver"
+            android:exported="true"
+            android:directBootAware="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Quick-settings tile. ADR-0019 §11's Android row lists it beside the
+             foreground-service notification as a first-class surface. -->
+        <service
+            android:name=".ui.TwinVpnTile"
+            android:exported="true"
+            android:icon="@drawable/ic_tile"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

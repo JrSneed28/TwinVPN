@@ -1537,6 +1537,7 @@ dependencies = [
  "tracing",
  "twinvpn-env",
  "twinvpn-platform",
+ "twinvpn-session",
  "twinvpn-types",
  "zeroize",
 ]

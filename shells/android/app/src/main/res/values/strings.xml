@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  CHROME ONLY.
+
+  ADR-0018 CB-4: the core resolves, the shell presents. Every string here is a
+  button label, a heading, or a statement about a PLATFORM permission — never a
+  connection state, never a failure, never a remediation for a `reason_code`.
+  Those come from `tw_render_diagnostic` (F-10), resolved from
+  `contracts/registry/reason_codes.json` in the caller's locale with the
+  next-action variant selected by `(platform, os_version)` (ADR-0019 LT-3).
+
+  A string in this file that described a TwinVPN condition would be a second
+  message catalogue outside the registry, which is R-31's defect class and the
+  reason `twinvpnctl` rendered catalogue keys (R-15).
+-->
+<resources>
+    <string name="app_name">TwinVPN</string>
+
+    <string name="nav_status">Status</string>
+    <string name="nav_peers">Devices</string>
+    <string name="nav_pairing">Pair</string>
+    <string name="nav_diagnostics">Diagnostics</string>
+
+    <string name="action_connect">Connect</string>
+    <string name="action_disconnect">Disconnect</string>
+    <string name="action_open_settings">Open VPN settings</string>
+
+    <!-- Said before the core has produced its first ProtectionAssertion.
+         ADR-0015 O-18: never "protected" before there is an assertion. -->
+    <string name="status_starting">Starting…</string>
+
+    <string name="protection_protected">Protected</string>
+    <string name="protection_unprotected">Not protected</string>
+    <!-- O-18's third value. Distinct wording, because "unknown" and
+         "not protected" are different facts even though both are not green. -->
+    <string name="protection_unknown">Protection status unknown</string>
+
+    <!-- ADR-0019 §11's Android VPN-consent row. About the PLATFORM permission,
+         which is this shell's to describe; the `reason_code` that accompanies a
+         refusal is still the core's. -->
+    <string name="consent_title">TwinVPN needs your permission to create a VPN connection.</string>
+    <string name="consent_action">Grant permission</string>
+
+    <!-- ADR-0019 §11's Android 13+ row, in the ADR's own terms. -->
+    <string name="notifications_lost_title">Notifications are turned off.</string>
+    <string name="notifications_lost_body">TwinVPN will not be able to tell you when
+        protection stops while the app is in the background.</string>
+
+    <!-- ADR-0022 LC-40 / docs/networking.md §5.4's three-valued posture.
+         `UNVERIFIED` is presented as not protected by lockdown. -->
+    <string name="lockdown_title">Always-on VPN</string>
+    <string name="lockdown_confirmed">Your device is configured to block connections
+        without VPN.</string>
+    <string name="lockdown_absent">Your device is not configured to block connections
+        without VPN. Traffic can leave this device untunnelled if TwinVPN stops.</string>
+    <string name="lockdown_unverified">TwinVPN cannot tell whether this device is
+        configured to block connections without VPN, so it assumes it is not.
+        Traffic can leave this device untunnelled if TwinVPN stops.</string>
+
+    <string name="peers_title">Paired devices</string>
+    <string name="peers_empty">No devices yet.</string>
+
+    <string name="pairing_title">Pair a device</string>
+    <string name="pairing_body">Show this code to the other device, or scan the code it
+        is showing. The code is only valid for a short time and is not saved.</string>
+    <string name="pairing_qr_description">Pairing code</string>
+
+    <string name="diagnostics_title">Diagnostics</string>
+    <string name="diagnostics_empty">Nothing to report.</string>
+
+    <string name="channel_status">Connection status</string>
+    <string name="channel_status_description">Shows whether TwinVPN is protecting this
+        device. Turning this off means TwinVPN cannot tell you when protection stops.</string>
+</resources>

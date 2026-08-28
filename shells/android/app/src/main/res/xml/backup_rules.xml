@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The pre-API-31 half of ADR-0020 §11's backup row. `fullBackupContent` is what
+  API 26–30 honours; `data_extraction_rules.xml` covers 31+.
+
+  `<exclude domain="root" path="."/>` excludes the whole app data directory.
+  Naming the vault path specifically would be narrower and worse: a future file
+  added outside it would be backed up by default, and "we forgot to add it to
+  the exclusion" is not a failure mode a security boundary should have.
+-->
+<full-backup-content>
+    <exclude domain="root" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="external" path="." />
+</full-backup-content>

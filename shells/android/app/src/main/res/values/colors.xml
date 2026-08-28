@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The notification's accent colours. The Compose surfaces read the same values
+  from `StatusPalette` in `ui/TwinVpnTheme.kt`; they are duplicated here because
+  `NotificationCompat.setColor` takes a resource, and the two must agree.
+
+  ADR-0015 O-18: `status_unknown` is a distinct neutral, not a dimmed green. A
+  dimmed green reads as "mostly fine" at a glance, and no assertion is not that.
+-->
+<resources>
+    <color name="status_ok">#FF1B7F4B</color>
+    <color name="status_degraded">#FFB26A00</color>
+    <color name="status_blocked">#FFB3261E</color>
+    <color name="status_unknown">#FF5F6368</color>
+</resources>
