@@ -112,6 +112,176 @@ pub fn build_env() -> Result<(Env, Arc<TokioRuntime>), EnvError> {
     Ok((env, runtime))
 }
 
+/// Whether the injected runtime can register a file descriptor.
+///
+/// # W-43: `twinvpn-env`'s production runtime has no I/O driver
+///
+/// `twinvpn_env::binding::tokio_rt::TokioRuntime`'s two constructors both build
+/// with `.enable_time()` and **not** `.enable_io()`. `tokio` then panics —
+/// *"A Tokio 1.x context was found, but IO is disabled"* — the first time
+/// anything registers an fd on that runtime.
+///
+/// Every socket this adapter opens goes through `tokio::io::unix::AsyncFd`: the
+/// UDP sockets the NAT ladder needs, the `rtnetlink` sockets that enumerate
+/// interfaces and program routes, and the tun device itself. So on a production
+/// `Env` **none of them can be opened**, and `twinvpnd` panics the first time a
+/// command reaches the adapter. Measured, not inferred: the panic reproduces
+/// through `SocketProvider::bind_udp` on an `Env` built by [`build_env`].
+///
+/// `twinvpn-env` is `core-foundation`'s and the fix is one line there
+/// (`.enable_io()`, or `.enable_all()`). **This shell does not supply a second
+/// runtime binding to work around it** — ADR-0018 §11.3 fixes the two bindings
+/// that ship, and a shell-local third would be exactly the duplicate the rule
+/// exists to prevent.
+///
+/// What the shell owes instead is PS-18's shape: *"The authority MUST NOT start
+/// in a mode that cannot arm enforcement while reporting itself as running."* A
+/// runtime that cannot open a socket cannot do anything, so this turns a
+/// mid-flight panic on a client's first command into a **refusal at startup**,
+/// which is the difference between a diagnosable failure and a mystery.
+///
+/// The panic is caught rather than predicted: `catch_unwind` here is the same
+/// containment F-7 uses at the ABI boundary, and it means this probe keeps
+/// working if the failure mode ever changes shape.
+#[must_use]
+pub fn runtime_can_drive_io(env: &Env) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut opened = false;
+        twinvpn_env::Runtime::block_on(
+            env.runtime().as_ref(),
+            Box::pin(async {
+                let provider = twinvpn_platform_linux::sock::LinuxSocketProvider::new(
+                    twinvpn_platform_linux::ShutdownLatch::new(),
+                );
+                opened = twinvpn_platform::SocketProvider::bind_udp(
+                    &provider,
+                    &twinvpn_platform::UdpBindSpec {
+                        family: twinvpn_platform::SocketFamily::V4,
+                        local: None,
+                        options: twinvpn_platform::SocketOptions::default(),
+                    },
+                )
+                .await
+                .is_ok();
+            }),
+        );
+        opened
+    }))
+    .unwrap_or(false)
+}
+
+/// Why the owner-tagged ruleset could not be armed.
+#[derive(Debug, thiserror::Error)]
+pub enum ArmError {
+    /// The install was refused.
+    #[error("the enforcement ruleset could not be armed: {0}")]
+    Install(twinvpn_platform::PlatformError),
+    /// The install reported success and the kernel holds no TwinVPN table.
+    #[error("the ruleset install reported success and the kernel holds no TwinVPN table")]
+    NotInstalled,
+    /// The installed ruleset could not be read back.
+    ///
+    /// O-18's fail-safe direction: an assertion that cannot be produced is not
+    /// an assertion that protection holds.
+    #[error("the installed ruleset could not be read back: {0}")]
+    Unreadable(twinvpn_platform::PlatformError),
+}
+
+impl ArmError {
+    /// The registered code.
+    ///
+    /// ADR-0012 §11.12 contributes `POLICY.KILLSWITCH.ARM_FAILED`, which **is**
+    /// registered (FATAL / CRITICAL) — so it is emitted directly rather than
+    /// substituted.
+    #[must_use]
+    pub const fn reason_code(&self) -> &'static str {
+        "POLICY.KILLSWITCH.ARM_FAILED"
+    }
+}
+
+/// §11.6 step (2): reclaim or re-assert the owner-tagged ruleset, and **verify
+/// it took**.
+///
+/// # Review finding R-7
+///
+/// This step used to set a flag to `true` and do nothing, on the reasoning that
+/// "the core's own first `apply` installs the rules". `apply` had **no caller
+/// anywhere in the product**, so on a Linux host the KS-19 boot table was the
+/// only enforcement that ever existed — and its scope is the overlay space
+/// alone. On a full-tunnel host that means all Internet traffic egressed
+/// untunneled, from boot, indefinitely. **I3 did not hold for the composed
+/// product.**
+///
+/// §11.6 step (2) is unambiguous that this is the AUTHORITY's job and not the
+/// core's: "the owner-tagged rule set is **reclaimed or re-asserted** (KS-20,
+/// PS-8)" is listed among the things that must happen *before* it accepts
+/// management connections.
+///
+/// # Three things happen, and the third is the one that matters
+///
+/// 1. `set_ruleset(generation 0, BLOCKED)` — an atomic swap into the posture
+///    ADR-0012 §11.8's boot row fixes. **Reclamation rather than creation**: the
+///    script's `add table` / `delete table` / `table {` replaces whatever this
+///    host already had under our owner tag, including a table a crashed
+///    predecessor left (KS-20).
+/// 2. `installed_ruleset()` — the **W-24 query**, read from the kernel's own
+///    answer rather than from the fact that step 1 returned `Ok`.
+/// 3. The read-back must report a posture. Review finding **R-6** is why that is
+///    checked separately: a table can hold `posture_blocked` and drop nothing,
+///    and step 1 would return `Ok` for it.
+///
+/// Arming `RULESET_BLOCKED` is **not a decision** (CB-2): ADR-0012 §11.8's boot
+/// row fixes the posture a host starts in, and the scope comes from
+/// `nft::baseline_protected`, which is the product's own address space and the
+/// same pair the boot artifact carries.
+///
+/// # Errors
+///
+/// [`ArmError`], which the caller makes **fatal**. ADR-0012 §8: if the ruleset
+/// cannot be installed the client refuses to enter a protected state, and PS-18
+/// forbids starting "in a mode that cannot arm enforcement while reporting
+/// itself as running". Continuing would report a running agent on an unprotected
+/// host, which is the single worst outcome available.
+pub fn arm_owner_tagged_ruleset(
+    runtime: &Arc<TokioRuntime>,
+    adapter: &Arc<LinuxPlatformAdapter>,
+) -> Result<(), ArmError> {
+    use twinvpn_platform::{ContractGeneration, Ruleset};
+
+    let mut outcome: Result<(), ArmError> = Ok(());
+    {
+        let slot = &mut outcome;
+        let adapter = Arc::clone(adapter);
+        twinvpn_env::Runtime::block_on(
+            runtime.as_ref(),
+            Box::pin(async move {
+                let network = twinvpn_platform::PlatformAdapter::network_config(adapter.as_ref());
+                // Generation 0: no contract has been applied.
+                if let Err(error) = twinvpn_platform::NetworkConfig::set_ruleset(
+                    network,
+                    ContractGeneration(0),
+                    Ruleset::Blocked,
+                )
+                .await
+                {
+                    *slot = Err(ArmError::Install(error));
+                    return;
+                }
+                match twinvpn_platform::NetworkConfig::installed_ruleset(network).await {
+                    Ok(Some(posture)) => tracing::info!(
+                        target: "twinvpn.enforce",
+                        ?posture,
+                        "the owner-tagged ruleset is armed, and was read back from the kernel"
+                    ),
+                    Ok(None) => *slot = Err(ArmError::NotInstalled),
+                    Err(error) => *slot = Err(ArmError::Unreadable(error)),
+                }
+            }),
+        );
+    }
+    outcome
+}
+
 /// The running agent: one `Env`, one adapter, one core.
 ///
 /// **S-47**: "exactly **one process** [holds] a mutating core handle at a time",
@@ -205,6 +375,53 @@ mod tests {
         rng.fill_bytes(&mut a);
         rng.fill_bytes(&mut b);
         assert_ne!(a, b);
+    }
+
+    /// **R-7.** The arm is a real call whose failure is fatal, not a flag.
+    ///
+    /// On this host `nft(8)` is absent, so the install fails — which is the
+    /// assertion: arming reports a **named** failure rather than the `true` the
+    /// old code returned unconditionally. On a host with `nft` the same call
+    /// installs the table and reads it back.
+    #[test]
+    fn arming_is_a_real_call_and_its_failure_is_named() {
+        let (env, tokio_runtime) = build_env().expect("binds");
+        let _ = env;
+        let adapter = Arc::new(LinuxPlatformAdapter::new(
+            twinvpn_platform_linux::LinuxAdapterParts {
+                enforcement: twinvpn_platform_linux::EnforcementConfig {
+                    overlay_interface: "twin0".to_owned(),
+                    firewall_mark: twinvpn_platform_linux::DEFAULT_FWMARK,
+                    cgroup_path: None,
+                    local_network_access: true,
+                    on_link_prefixes: Vec::new(),
+                },
+                store_root: std::env::temp_dir().join("twinvpn-arm-test"),
+                resolver_restore_point: std::env::temp_dir().join("twinvpn-arm-test.restore"),
+                identity_element: Arc::new(twinvpn_platform_linux::AbsentElement),
+            },
+        ));
+
+        match arm_owner_tagged_ruleset(&tokio_runtime, &adapter) {
+            Ok(()) => {
+                // `nft(8)` is present and the table installed AND read back.
+                assert!(adapter.posture().nft_present);
+            }
+            Err(error) => {
+                // ADR-0012 §11.12's code, which IS registered — emitted directly
+                // rather than substituted.
+                assert_eq!(error.reason_code(), "POLICY.KILLSWITCH.ARM_FAILED");
+                assert!(
+                    twinvpn_types::ReasonCode::lookup(error.reason_code()).is_some(),
+                    "the arm failure must name a registered code"
+                );
+                // And it is FATAL/CRITICAL, which is what makes the caller's
+                // refusal to start the right response (PS-18).
+                let code =
+                    twinvpn_types::ReasonCode::lookup(error.reason_code()).expect("registered");
+                assert_eq!(code.class(), twinvpn_types::ErrorClass::Fatal);
+            }
+        }
     }
 
     #[test]

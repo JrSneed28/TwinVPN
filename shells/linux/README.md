@@ -120,7 +120,9 @@ value the diagnostic bundle can carry.
 | 1. the KS-19 boot artifact is installed | `PLATFORM.SERVICE.BOOT_ARTIFACT_UNREGISTERED` at CRITICAL — **and the agent starts anyway.** PS-7 makes the artifact package-owned and says the authority "MUST NOT be a prerequisite for it to apply"; refusing would leave the host with neither the boot ruleset *nor* an agent |
 | 2. the privilege posture | **Fatal** on: still root; holding `CAP_SYS_MODULE`/`CAP_SYS_ADMIN`/`CAP_DAC_OVERRIDE`/`CAP_SYS_PTRACE` **in the effective set**; or missing `CAP_NET_ADMIN`. §11.2: "the authority MUST NOT continue as root 'just this once'". A wide **bounding** set is a §11.9 hardening directive that did not apply, which PS-17 makes a named `PLATFORM.PRIV.SANDBOX_DEGRADED` warning rather than a refusal |
 | 3. the three clocks and the runtime | fatal; the CSPRNG is **probed at startup**, not on first use |
+| 3b. the runtime's I/O driver (**W-43**) | **Fatal.** `twinvpn-env`'s `TokioRuntime` builds with `enable_time()` and *not* `enable_io()`, so no socket, netlink channel or tun device can be opened at all and the agent would panic on a client's first command. PS-18: refuse at startup rather than report a running agent that can do nothing |
 | 4. the adapter's capability probe | fatal if `nft(8)` is absent — ADR-0012 §8: arming must never fail open, and PS-18 forbids starting "in a mode that cannot arm enforcement while reporting itself as running" |
+| 4b. reclaim the owner-tagged ruleset (**R-7**) | **Fatal.** §11.6 step (2): the ruleset is *reclaimed or re-asserted* (KS-20, PS-8) and then **read back from the kernel** — the W-24 query, not the fact that the install returned `Ok`. This step used to be a flag set to `true`; see §7 |
 | 5. the core | `INTERNAL.ABI_VERSION_MISMATCH` (VR-4), checked before any capability is touched |
 | 6. the MI endpoint | `MGMT.UNAVAILABLE`. MI-A3: the agent verifies `/run/twinvpn`'s ownership and mode **before** binding, and binds a temporary name then `rename`s it — `unlink()`-then-`bind()` is prohibited |
 | 7. accept connections | only now (§11.6) |
@@ -165,8 +167,8 @@ TWINVPN_LOG_LEVEL=trace TWINVPN_LOG_FORMAT=text ./target/debug/twinvpnd
 ### Running the tests
 
 ```sh
-cd shells/linux && cargo test --workspace                 # 105 tests, unprivileged
-cd ../../core   && cargo test -p twinvpn-platform-linux   # 114 tests, unprivileged
+cd shells/linux && cargo test --workspace                 # 111 tests, unprivileged
+cd ../../core   && cargo test -p twinvpn-platform-linux   # 120 tests, unprivileged
 ```
 
 Both suites run unprivileged, and the adapter's `tests/netns.rs` **asserts the
@@ -244,6 +246,30 @@ Each of these is a gap this wave did not close, with the reason.
    refuses rather than returning an empty snapshot a client would read as
    current truth (MI-9a's whole point). ADR-0017 §11.10's compaction and
    eviction ladder is therefore unexercised.
+
+   A visible consequence: `Core::submit` returns `Ok(())` and publishes the
+   operation's **body** as a `CommandCompleted` event, so a read's result is
+   currently unreachable by an MI client. The MI `Response.result` is empty for
+   that reason and not because the operation produced nothing.
+
+2a. **`committed_at_net_seq` is always absent, and correctly so.** MI-6 applies
+   to operations that map to a mutating **C1** request — the five in
+   `server::C1_MAPPING` — and every one of those needs a control-plane
+   transport this build does not have (W-12), so each is refused by name before
+   a response exists. A locally-mutating operation such as `session.connect`
+   reaches no C1 request and has no `net_seq`: `docs/protocol.md` §5.1 makes the
+   cursor "a real, monotone position in the same log" the C2 stream replays.
+   This shell previously reported **S-47's generation** there — a per-process
+   counter that "must not survive process exit" — which would have told a client
+   it had read-your-writes when it had not.
+
+2b. **W-43: the injected runtime has no I/O driver**, so no adapter call can
+   open a socket. Everything that touches the network is therefore unreachable
+   at runtime, and the daemon refuses to start rather than panicking on the
+   first command. The fix is one line in `twinvpn-env`
+   (`core-foundation`'s): `.enable_io()` on both `TokioRuntime` constructors.
+   The MI integration tests branch on a probe, so they start asserting the
+   stronger behaviour with no edit the day it lands.
 3. **No ADMINISTER ceremony.** Every ADMINISTER operation is **refused**, not
    performed on a scope alone — which is §11.5's third consequence and the safe
    direction. Wiring it needs a polkit client, i.e. a D-Bus dependency

@@ -97,6 +97,7 @@ fn harness() -> (Harness, Arc<server::ServerContext>) {
             platform: "linux".to_owned(),
             os_version: "test".to_owned(),
         },
+        submission: Arc::new(tokio::sync::Mutex::new(())),
     });
     (Harness { path, dir }, context)
 }
@@ -150,6 +151,33 @@ fn current_account_name() -> String {
     panic!("this runner's uid {uid} has no /etc/passwd entry");
 }
 
+/// Whether the injected runtime can register a file descriptor (**W-43**).
+///
+/// `twinvpn-env`'s production runtime builds with `enable_time()` and not
+/// `enable_io()`, so on a production `Env` no socket, netlink channel or tun
+/// device can be opened at all. Every adapter-touching operation is unreachable
+/// until `core-foundation` adds the missing line.
+///
+/// The tests below branch on this rather than being deleted or ignored: with the
+/// driver absent they assert the operation is **refused by name** — never a hang,
+/// never a silent success — and with it present they assert the real behaviour.
+/// The day the one-line fix lands, they start asserting the stronger thing with
+/// no edit.
+fn runtime_drives_io() -> bool {
+    static PROBED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PROBED.get_or_init(|| {
+        // On a PLAIN thread, never on a runtime worker: the probe itself calls
+        // `block_on`, and `block_on` inside an async context is tokio's
+        // "Cannot start a runtime from within a runtime".
+        std::thread::spawn(|| {
+            let (env, _rt) = runtime::build_env().expect("binds");
+            runtime::runtime_can_drive_io(&env)
+        })
+        .join()
+        .unwrap_or(false)
+    })
+}
+
 fn requested() -> Vec<String> {
     twinvpnd::mi::CLI_REQUESTED_SCOPES
         .iter()
@@ -190,23 +218,192 @@ async fn a_client_attaches_and_the_agent_answers_from_the_one_vocabulary() {
     assert_eq!(response.committed_at_net_seq, None);
 }
 
+/// A peer, as `session.connect` now requires it.
+///
+/// `dispatch::peer_from_params` takes the raw 32-byte `device_id` —
+/// `limits.json`'s frozen width — because the MI has no request schema
+/// (`contracts/docs/phase1-conflicts.md` OQ-2 deliberately excluded one).
+/// Anything else is refused rather than truncated or padded.
+fn peer_params() -> Vec<u8> {
+    vec![0xab; 32]
+}
+
 #[tokio::test]
-async fn a_mutating_operation_carries_the_cursor_mi6_requires() {
+async fn session_connect_executes_real_work_and_advances_the_s47_generation() {
+    // `session.connect` no longer reports a hollow `Ok`: it gathers on the
+    // platform, drives T01→T03/T04 through the §4.5 table, admits into the
+    // candidate ledger, schedules a race and persists to the journal. The core
+    // refuses an operation that declared EXECUTES and produced no observable
+    // effect, so a successful response is itself the assertion that work happened.
+    let (harness, context) = harness();
+    let core = Arc::clone(&context.core);
+    spawn(&harness.path, context).await;
+    let mut client = Client::connect(&harness.path, "cli", "0.1.0", &requested())
+        .await
+        .expect("attaches");
+
+    let before = core.generation();
+    let result = client
+        .call("session.connect", peer_params(), None, Vec::new())
+        .await;
+
+    if runtime_drives_io() {
+        let response = result.expect("session.connect executes");
+        assert!(response.ok);
+        // S-47's generation advances for a mutating command — a LOCAL fact, and
+        // the one the shell must not confuse with MI-6's cursor.
+        assert_eq!(core.generation(), before + 1);
+    } else {
+        // **W-43.** The runtime has no I/O driver, so the adapter call inside
+        // `session.connect` cannot open a socket. What matters here is that the
+        // agent turns that into a NAMED refusal rather than a hang or a
+        // fabricated success — the connection survives and the client is told.
+        match result {
+            Err(error) => {
+                assert_eq!(error.reason_code(), "INTERNAL.UNEXPECTED_STATE");
+                assert_eq!(
+                    core.generation(),
+                    before,
+                    "a command that could not execute must not advance the generation"
+                );
+            }
+            Ok(_) => panic!(
+                "session.connect reported success on a runtime that cannot open \
+                 a socket — a false success is the one outcome worse than the panic"
+            ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_malformed_session_connect_is_refused_before_any_work() {
+    // The core checks the parameter before dispatching, "so a command can never
+    // be partially applied". An empty payload is a typed reject, not a partial
+    // connect.
+    let (harness, context) = harness();
+    let core = Arc::clone(&context.core);
+    spawn(&harness.path, context).await;
+    let mut client = Client::connect(&harness.path, "cli", "0.1.0", &requested())
+        .await
+        .expect("attaches");
+
+    let before = core.generation();
+    match client
+        .call("session.connect", Vec::new(), None, Vec::new())
+        .await
+    {
+        Err(error) => assert_eq!(error.reason_code(), "PROTO.MALFORMED_MESSAGE"),
+        Ok(_) => panic!("a session.connect with no peer must be refused"),
+    }
+    assert_eq!(
+        core.generation(),
+        before,
+        "a refused command must not advance the generation"
+    );
+}
+
+/// **MI-6, as it actually reads.**
+///
+/// > Every MI response to an operation that maps to a **mutating C1 request**
+/// > MUST carry `committed_at_net_seq`.
+///
+/// `session.connect` is not one. `docs/protocol.md` §5.1 makes the cursor "a
+/// real, monotone position in the same log" the C2 stream replays — the
+/// coordination service's — and ADR-0017 §11.8 classifies `session.connect`
+/// "naturally idempotent … the state machine already absorbs a repeat", beside
+/// `net.up` and `net.down`. It sends no C1 request, so it has no `net_seq`.
+///
+/// The shell used to report **S-47's generation** here, which S-47 requires
+/// "must not survive process exit" — a per-process counter offered as a durable
+/// log position. A client that waited for an event at or past it would believe
+/// it had discharged E-2's read-your-writes when it had not.
+#[tokio::test]
+async fn mi6_applies_to_c1_mapping_operations_and_session_connect_is_not_one() {
     let (harness, context) = harness();
     spawn(&harness.path, context).await;
     let mut client = Client::connect(&harness.path, "cli", "0.1.0", &requested())
         .await
         .expect("attaches");
 
+    // The predicate itself is pure and is asserted unconditionally: whatever the
+    // runtime can or cannot do, `session.connect` reaches no C1 request.
+    assert!(!server::maps_to_mutating_c1(
+        twinvpn_mgmt::CoreCommand::SessionConnect
+    ));
+
+    // A local mutation carries NO cursor. (W-43: only observable end to end when
+    // the runtime can open a socket.)
+    if runtime_drives_io() {
+        let response = client
+            .call("session.connect", peer_params(), None, Vec::new())
+            .await
+            .expect("executes");
+        assert!(response.ok);
+        assert_eq!(
+            response.committed_at_net_seq, None,
+            "session.connect reaches no C1 request, so MI-6 does not apply and a \
+             cursor here would be a falsehood a client cannot detect"
+        );
+    }
+
+    // ...and a read carries none either.
     let response = client
-        .call("session.connect", Vec::new(), None, Vec::new())
+        .call("status.get", Vec::new(), None, Vec::new())
         .await
-        .expect("implemented");
-    assert!(response.ok);
-    assert!(
-        response.committed_at_net_seq.is_some(),
-        "MI-6: a client must not report a mutating operation complete until it \
-         has observed an event at or past this cursor"
+        .expect("executes");
+    assert_eq!(response.committed_at_net_seq, None);
+}
+
+/// The five operations MI-6 **does** apply to, and why none can produce a
+/// cursor in this build.
+#[test]
+fn every_c1_mapping_operation_needs_a_cursor_this_build_cannot_produce() {
+    for op in server::C1_MAPPING {
+        assert!(server::maps_to_mutating_c1(op), "{}", op.name());
+        // Every one is refused before it reaches a response, because each needs
+        // a control-plane transport this build does not have (W-12). So the
+        // absent cursor is never observed by a client as a missing guarantee —
+        // the operation is refused by name first.
+        assert!(
+            !twinvpn_core::core::executes(op),
+            "{} executes but has no C2 log to report a cursor from",
+            op.name()
+        );
+    }
+    // And the local mutations are NOT in the set.
+    for op in [
+        twinvpn_mgmt::CoreCommand::SessionConnect,
+        twinvpn_mgmt::CoreCommand::SessionDisconnect,
+        twinvpn_mgmt::CoreCommand::NetUp,
+        twinvpn_mgmt::CoreCommand::NetDown,
+        twinvpn_mgmt::CoreCommand::SettingsSet,
+    ] {
+        assert!(
+            !server::maps_to_mutating_c1(op),
+            "{} is a local mutation and reaches no C1 request",
+            op.name()
+        );
+        // Each IS `mutating` in the catalogue — which is exactly why reading
+        // that field as MI-6's predicate was wrong.
+        assert!(twinvpn_mgmt::catalogue::entry(op).mutating);
+    }
+}
+
+/// The tripwire that replaces the compile error a `#[non_exhaustive]` enum
+/// denies this crate.
+///
+/// The core gets a build failure when a new `CoreCommand` is added without a
+/// stated disposition. A shell cannot match `CoreCommand` exhaustively, so this
+/// pins the catalogue's size instead: a command added upstream fails here until
+/// someone states which side of MI-6 it falls on.
+#[test]
+fn a_new_core_command_must_be_classified_against_mi6() {
+    assert_eq!(
+        twinvpn_mgmt::CoreCommand::ALL.len(),
+        47,
+        "the core command set changed. Classify the new operation in \
+         `server::C1_MAPPING` — does it map to a mutating C1 request? — and \
+         update this count."
     );
 }
 
@@ -226,7 +423,9 @@ async fn an_unimplemented_operation_is_surfaced_as_unimplemented_not_as_a_failur
     // refused by this build, so the refusal is the *unimplemented* one and not an
     // authorization one. That ordering matters: a scope refusal would tell the
     // operator to change their groups, which would not help.
-    assert!(!twinvpn_core::core::executes(twinvpn_mgmt::CoreCommand::UpdateStatus));
+    assert!(!twinvpn_core::core::executes(
+        twinvpn_mgmt::CoreCommand::UpdateStatus
+    ));
     let error = client
         .call("update.status", Vec::new(), None, Vec::new())
         .await
@@ -281,7 +480,10 @@ async fn the_catalogue_the_agent_serves_says_which_operations_this_build_execute
         .filter(|r| !r.implemented)
         .map(|r| r.operation.as_str())
         .collect();
-    assert_eq!(unimplemented.len(), twinvpn_core::core::unimplemented().len());
+    assert_eq!(
+        unimplemented.len(),
+        twinvpn_core::core::unimplemented().len()
+    );
     assert!(unimplemented.contains(&"pair.begin"));
     assert!(unimplemented.contains(&"exitnode.select"));
     assert!(unimplemented.contains(&"killswitch.disarm.begin"));
@@ -641,7 +843,9 @@ fn cb2_every_fact_the_shell_serves_comes_from_the_core() {
         let implemented = twinvpn_core::core::executes(*op);
         assert_eq!(
             implemented,
-            !twinvpn_core::core::unimplemented().iter().any(|(c, _, _)| c == op)
+            !twinvpn_core::core::unimplemented()
+                .iter()
+                .any(|(c, _, _)| c == op)
         );
     }
     // And the transport set is closed at four, which the shell cannot widen.

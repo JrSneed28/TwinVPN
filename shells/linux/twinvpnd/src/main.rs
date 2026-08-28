@@ -7,14 +7,22 @@
 //! # The start order is §11.6's, and it is not rearranged for convenience
 //!
 //! ```text
-//! 1. verify the KS-19 boot artifact         (PS-7; CRITICAL, never fatal)
-//! 2. verify the privilege posture           (§11.2; FATAL when wrong)
-//! 3. bind the three clocks and the runtime  (CD-1, CD-2)
-//! 4. build the adapter and probe it         (the capability probe)
-//! 5. create the core                        (VR-4 checks abi_major FIRST)
-//! 6. bind the management endpoint           (MI-A3, bind-and-rename)
-//! 7. accept connections                     (only now — §11.6)
+//! 1.  verify the KS-19 boot artifact        (PS-7; CRITICAL, never fatal)
+//! 2.  verify the privilege posture          (§11.2; FATAL when wrong)
+//! 3.  bind the three clocks and the runtime (CD-1, CD-2)
+//! 3b. verify the runtime can drive I/O      (W-43; FATAL — PS-18)
+//! 4.  build the adapter and probe it        (the capability probe)
+//! 4b. reclaim/re-assert the owner-tagged
+//!     ruleset, and READ IT BACK             (§11.6 step 2; KS-20, PS-8; FATAL)
+//! 5.  create the core                       (VR-4 checks abi_major FIRST)
+//! 6.  bind the management endpoint          (MI-A3, bind-and-rename)
+//! 7.  accept connections                    (only now — §11.6)
 //! ```
+//!
+//! Steps **3b** and **4b** are review findings W-43 and R-7. 4b in particular
+//! used to be a flag set to `true`: `apply` had no caller anywhere in the
+//! product, so the KS-19 boot table was the only enforcement that existed, and
+//! on a full-tunnel host all Internet traffic egressed untunneled from boot.
 //!
 //! # PS-1: this process is the only authority
 //!
@@ -137,6 +145,25 @@ fn start() -> Result<(), StartupRefusal> {
         exit: 71,
     })?;
 
+    // ---- 3b. the runtime's I/O driver (W-43) ------------------------------
+    //
+    // PS-18: "The authority MUST NOT start in a mode that cannot arm enforcement
+    // while reporting itself as running." A runtime with no I/O driver cannot
+    // open a socket, so it cannot arm anything, gather anything or program
+    // anything — it panics on the first command instead. Refusing here turns
+    // that into a diagnosable startup failure.
+    if !runtime::runtime_can_drive_io(&env) {
+        return Err(StartupRefusal {
+            code: "PLATFORM.ADAPTER_UNAVAILABLE",
+            specified: "PLATFORM.ADAPTER_UNAVAILABLE",
+            detail: "the injected runtime has no I/O driver, so no socket, netlink \
+                     channel or tun device can be opened (W-43: twinvpn-env's \
+                     TokioRuntime builds with enable_time() and not enable_io())"
+                .to_owned(),
+            exit: 71,
+        });
+    }
+
     // ---- 4. the adapter, and the capability probe -------------------------
     let adapter = Arc::new(build_adapter());
     let adapter_posture = adapter.posture();
@@ -169,10 +196,29 @@ fn start() -> Result<(), StartupRefusal> {
         );
     }
     sequence.capabilities_probed = true;
-    // The ruleset is reclaimed rather than recreated (KS-20, PS-8) as part of
-    // the core's own first `apply`; nothing here writes rules, which is CB-6's
-    // direction: the core computes, the adapter installs.
-    sequence.ruleset_reclaimed = true;
+
+    // ---- 4b. reclaim or re-assert the owner-tagged ruleset ----------------
+    //
+    // **Review finding R-7.** This step used to set its flag to `true` and do
+    // nothing, on the reasoning that "the core's own first `apply` installs the
+    // rules". `apply` had no caller anywhere in the product, so on a Linux host
+    // the KS-19 boot table was the *only* enforcement that ever existed — and
+    // its scope is the overlay space alone. On a full-tunnel host that means all
+    // Internet traffic egressed untunneled, from boot, indefinitely. **I3 did
+    // not hold for the composed product.**
+    //
+    // §11.6 step (2) is unambiguous that this is the AUTHORITY's job and not the
+    // core's: "the owner-tagged rule set is **reclaimed or re-asserted** (KS-20,
+    // PS-8)" is listed among the things that must happen *before* it accepts
+    // management connections. KS-20: "all rule state is owner-tagged and
+    // reclaimable by a fresh process after an unclean exit. A crash must leave
+    // the host blocked, never open."
+    //
+    // Arming `RULESET_BLOCKED` is not a decision (CB-2): ADR-0012 §11.8's boot
+    // row fixes the posture a host starts in, and the scope comes from
+    // `nft::baseline_protected`, which is the product's own address space and
+    // the same pair the boot artifact carries.
+    sequence.ruleset_reclaimed = arm_at_startup(&tokio_runtime, &adapter)?;
     sequence.state_rehydrated = true;
 
     // ---- 5. the core (VR-4 first) -----------------------------------------
@@ -208,6 +254,8 @@ fn start() -> Result<(), StartupRefusal> {
         env,
         groups,
         platform_ctx: platform_ctx(),
+        // F-6 / S-47: exactly one thread holds the core for mutation at a time.
+        submission: Arc::new(tokio::sync::Mutex::new(())),
     });
 
     // The daemon's `main` is the one place `block_on` is legitimate:
@@ -226,6 +274,20 @@ fn start() -> Result<(), StartupRefusal> {
         );
     }
     outcome
+}
+/// §11.6 step (2), delegated to the library so it is testable.
+fn arm_at_startup(
+    runtime: &Arc<twinvpn_env::binding::tokio_rt::TokioRuntime>,
+    adapter: &Arc<twinvpn_platform_linux::LinuxPlatformAdapter>,
+) -> Result<bool, StartupRefusal> {
+    runtime::arm_owner_tagged_ruleset(runtime, adapter)
+        .map(|()| true)
+        .map_err(|error| StartupRefusal {
+            code: error.reason_code(),
+            specified: "POLICY.KILLSWITCH.ARM_FAILED",
+            detail: error.to_string(),
+            exit: 71,
+        })
 }
 
 /// Builds the adapter from injected configuration. **Nothing is discovered.**

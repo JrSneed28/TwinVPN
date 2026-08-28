@@ -121,47 +121,89 @@ pub struct Rendered {
 impl Rendered {
     /// Builds the four-line form from a diagnostic and a state.
     ///
-    /// # The unknown-code degradation is §11.12's, verbatim in shape
+    /// # R-15: the resolver renders this, not a table in this file
     ///
-    /// > MUST render the **domain-level** explanation from its own registry,
-    /// > with the raw code as detail, never the raw code alone as the primary
-    /// > line, never silence.
+    /// An earlier version returned the registry's `summary_key` **verbatim**, so
+    /// a diagnostic read `reason.proto_unparseable_envelope.summary` and
+    /// `Next: reason.…next_action`. Its stated excuse — that
+    /// `tw_render_diagnostic`'s catalogue "is not linked into this binary" — was
+    /// simply wrong: `twinvpnctl` depends on `twinvpn-diag`, whose
+    /// [`twinvpn_diag::render`] is the very function `tw_render_diagnostic`
+    /// wraps.
+    ///
+    /// The tell that it was a defect rather than a degradation was sharp: an
+    /// **unknown** code rendered better than a known one, because the unknown
+    /// path fell through to a real English sentence and the known path did not.
+    ///
+    /// ADR-0019 **R-36** requires the GUI and the CLI to render identically from
+    /// **one** resolver. Calling it is what makes that true; the local fallback
+    /// was a second renderer that happened to be worse.
+    ///
+    /// # The resolver's own guarantees, which this no longer duplicates
+    ///
+    /// [`twinvpn_diag::Resolved::summary`] is "never empty, never an i18n key,
+    /// never the raw code (PC-3)", and it handles §11.12's unknown-code
+    /// degradation itself — an unregistered code resolves on its **domain**,
+    /// with the real attributes where they exist and a conservative set where
+    /// they do not. So there is no unknown-code branch in this function.
+    ///
+    /// # `locale` and `platform` are parameters, never ambient
+    ///
+    /// CD-2, and LT-3b for the platform: an empty `platform` resolves to the
+    /// **neutral** variant and MUST NOT fall back to the host's own. The
+    /// platform comes from the agent's `HelloAck` (MI-C3, used verbatim), not
+    /// from this process's build constants.
     #[must_use]
-    pub fn from_diagnostic(state: &str, diagnostic: &Diagnostic) -> Self {
+    pub fn from_diagnostic(
+        state: &str,
+        diagnostic: &Diagnostic,
+        locale: &str,
+        platform: &twinvpn_diag::PlatformContext,
+    ) -> Self {
         let token = severity_token(&diagnostic.severity);
-        let registered = twinvpn_types::ReasonCode::lookup(&diagnostic.reason_code);
 
-        // Line 3. The summary comes from the code's registered attributes, never
-        // from a table in this file (MI-15). Where the code is unknown to THIS
-        // client, §11.12's domain-level line is the specified fallback.
-        let summary = match registered {
-            Some(_) => summary_from_registry(&diagnostic.reason_code),
-            None => domain_degradation(&diagnostic.reason_code),
+        // The typed evidence the agent sent, bound for substitution into the
+        // catalogue pattern's named placeholders.
+        let evidence: Vec<twinvpn_diag::Binding> = diagnostic
+            .evidence
+            .iter()
+            .map(|(key, value)| twinvpn_diag::Binding {
+                key: key.clone(),
+                value: twinvpn_types::EvidenceValue::Text(value.clone()),
+            })
+            .collect();
+
+        let resolved = twinvpn_diag::render(&diagnostic.reason_code, &evidence, locale, platform);
+
+        // Line 4, "present whenever `user_actionable` is true". The resolver's
+        // own actionability is preferred over the wire's: MI-14 has the agent
+        // resolve at emission, and the two agree unless the client's registry is
+        // older — in which case the resolver is the one that knows what THIS
+        // build can render.
+        // The AGENT's value, not this client's registry. MI-14 makes the agent
+        // resolve at emission and the resolved attributes travel with the code,
+        // and the agent is the one that saw the condition. A client that
+        // overrode it with its own registry would disagree with the GUI beside
+        // it the moment the two were built at different times — the exact
+        // divergence R-36 exists to prevent.
+        let actionable = diagnostic.user_actionable;
+        let next_action = match (&resolved.next_action, actionable) {
+            (Some(action), true) => Some(format!("Next: {action}")),
+            // Actionable with no registered next action: naming the code and its
+            // documentation anchor is a next action; inventing a sentence for
+            // the condition is not.
+            (None, true) => Some(format!(
+                "Next: see {} for {}.",
+                resolved.attributes.doc_anchor, diagnostic.reason_code
+            )),
+            (_, false) => None,
         };
-
-        // Line 4, "present whenever `user_actionable` is true".
-        let next_action = diagnostic.user_actionable.then(|| {
-            registered
-                .and_then(twinvpn_types::ReasonCode::next_action_key)
-                .map_or_else(
-                    || {
-                        // No registered next-action key. Naming the code and the
-                        // documentation anchor is a next action; inventing a
-                        // sentence for the condition is not.
-                        format!(
-                            "Next: see the TwinVPN documentation for {}.",
-                            diagnostic.reason_code
-                        )
-                    },
-                    |key| format!("Next: {key}"),
-                )
-        });
 
         Self {
             state_line: format!("{token} {state}"),
             // "line 2 is the code, **verbatim and never translated**".
             code_line: diagnostic.reason_code.clone(),
-            summary_line: summary,
+            summary_line: resolved.summary,
             next_action_line: next_action,
         }
     }
@@ -188,34 +230,6 @@ impl Rendered {
         }
         out
     }
-}
-
-/// The registry's own summary key, rendered as the human line.
-///
-/// The key **is** the rendering here, because `tw_render_diagnostic`'s catalogue
-/// is not linked into this binary and inventing a sentence in its place is what
-/// MI-15 forbids. ADR-0019 R-36 requires the GUI and the CLI to render
-/// identically from one resolver; showing the key rather than a locally-invented
-/// sentence is the honest degradation, and it is **reported**: the resolver
-/// belongs here and is not in this wave.
-fn summary_from_registry(code: &str) -> String {
-    twinvpn_types::ReasonCode::lookup(code).map_or_else(
-        || domain_degradation(code),
-        |registered| registered.summary_key().to_owned(),
-    )
-}
-
-/// §11.12's unknown-code degradation: the **domain** line, with the code as
-/// detail.
-///
-/// "never the raw code alone as the primary line, never silence".
-#[must_use]
-pub fn domain_degradation(code: &str) -> String {
-    let domain = code.split('.').next().unwrap_or("INTERNAL");
-    format!(
-        "{domain}: TwinVPN reported a condition this version of the command-line client does \
-         not recognise ({code})."
-    )
 }
 
 /// Wraps text to `width`, on whitespace, without hyphenation.
@@ -250,6 +264,10 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn neutral() -> twinvpn_diag::PlatformContext {
+        twinvpn_diag::PlatformContext::neutral()
+    }
 
     fn diagnostic(code: &str, severity: &str, actionable: bool) -> Diagnostic {
         Diagnostic {
@@ -321,6 +339,8 @@ mod tests {
         let rendered = Rendered::from_diagnostic(
             "BLOCKED",
             &diagnostic("POLICY.KILLSWITCH.ENGAGED", "CRITICAL", true),
+            "en",
+            &neutral(),
         );
         assert_eq!(rendered.code_line, "POLICY.KILLSWITCH.ENGAGED");
         assert!(rendered.state_line.starts_with("[CRIT] "));
@@ -333,6 +353,8 @@ mod tests {
         let rendered = Rendered::from_diagnostic(
             "CONNECTED",
             &diagnostic("POLICY.KILLSWITCH.ENGAGED", "INFO", false),
+            "en",
+            &neutral(),
         );
         assert!(rendered.next_action_line.is_none());
     }
@@ -340,12 +362,69 @@ mod tests {
     #[test]
     fn an_unknown_code_degrades_on_its_domain_and_is_never_silent() {
         // §11.12: "never the raw code alone as the primary line, never silence".
-        let rendered =
-            Rendered::from_diagnostic("UNKNOWN", &diagnostic("MGMT.SOMETHING_NEW", "WARN", false));
+        let rendered = Rendered::from_diagnostic(
+            "UNKNOWN",
+            &diagnostic("MGMT.SOMETHING_NEW", "WARN", false),
+            "en",
+            &neutral(),
+        );
         assert_eq!(rendered.code_line, "MGMT.SOMETHING_NEW");
-        assert!(rendered.summary_line.starts_with("MGMT:"));
-        assert!(rendered.summary_line.contains("MGMT.SOMETHING_NEW"));
+        // The resolver's own domain rung produces the sentence — this client no
+        // longer has a second degradation of its own (R-36: one resolver).
+        assert!(is_a_sentence(&rendered.summary_line));
         assert_ne!(rendered.summary_line, "MGMT.SOMETHING_NEW");
+    }
+
+    /// **R-15, as the assertion that would have caught it.**
+    ///
+    /// The tell was that an **unknown** code rendered better than a known one:
+    /// the unknown path fell through to a real sentence and the known path
+    /// returned `reason.….summary` verbatim. So the test is the comparison.
+    #[test]
+    fn a_known_code_renders_at_least_as_well_as_an_unknown_one() {
+        let known = Rendered::from_diagnostic(
+            "BLOCKED",
+            &diagnostic("PROTO.UNPARSEABLE_ENVELOPE", "ERROR", true),
+            "en",
+            &neutral(),
+        );
+        let unknown = Rendered::from_diagnostic(
+            "BLOCKED",
+            &diagnostic("PROTO.SOMETHING_NOBODY_SHIPPED", "ERROR", true),
+            "en",
+            &neutral(),
+        );
+        assert!(is_a_sentence(&known.summary_line), "{known:?}");
+        assert!(is_a_sentence(&unknown.summary_line), "{unknown:?}");
+        // And the next action is prose too, on both paths.
+        for rendered in [&known, &unknown] {
+            let action = rendered
+                .next_action_line
+                .as_ref()
+                .expect("user_actionable, so EM-42 line 4 is present");
+            assert!(action.starts_with("Next: "));
+            assert!(
+                is_a_sentence(action.trim_start_matches("Next: ")),
+                "{action:?}"
+            );
+        }
+    }
+
+    /// Whether a line is prose a human can read, rather than an identifier.
+    ///
+    /// `twinvpn_diag::render`'s own contract for `summary` is "never empty,
+    /// never an i18n key, never the raw code (PC-3)" — this is that, checked.
+    fn is_a_sentence(line: &str) -> bool {
+        // Prose has spaces. An i18n key (`reason.foo.summary`) and a reason code
+        // (`PROTO.UNPARSEABLE_ENVELOPE`) are both single tokens, so the space
+        // test excludes them both and the further checks below are what tell a
+        // reviewer WHICH two shapes are being excluded.
+        let has_spaces = line.contains(' ');
+        let is_an_i18n_key = line.contains('.') && !has_spaces;
+        let is_a_reason_code = line
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '.' || c == '_');
+        !line.is_empty() && has_spaces && !is_an_i18n_key && !is_a_reason_code
     }
 
     #[test]
@@ -353,8 +432,18 @@ mod tests {
         // MI-15's mechanism: the renderer works from the code's REGISTERED
         // attributes. Two unrelated unknown codes in one domain render the same
         // shape, which is only possible if nothing here is keyed to either.
-        let a = Rendered::from_diagnostic("X", &diagnostic("DNS.SOMETHING_A", "WARN", false));
-        let b = Rendered::from_diagnostic("X", &diagnostic("DNS.SOMETHING_B", "WARN", false));
+        let a = Rendered::from_diagnostic(
+            "X",
+            &diagnostic("DNS.SOMETHING_A", "WARN", false),
+            "en",
+            &neutral(),
+        );
+        let b = Rendered::from_diagnostic(
+            "X",
+            &diagnostic("DNS.SOMETHING_B", "WARN", false),
+            "en",
+            &neutral(),
+        );
         assert_eq!(
             a.summary_line.replace("DNS.SOMETHING_A", "@"),
             b.summary_line.replace("DNS.SOMETHING_B", "@")
@@ -366,6 +455,8 @@ mod tests {
         let rendered = Rendered::from_diagnostic(
             "BLOCKED  (peer: nas-attic)",
             &diagnostic("POLICY.KILLSWITCH.ENGAGED", "CRITICAL", true),
+            "en",
+            &neutral(),
         );
         let lines = rendered.to_lines(80);
         assert!(lines.len() >= 4);

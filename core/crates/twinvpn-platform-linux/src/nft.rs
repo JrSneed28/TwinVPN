@@ -59,7 +59,7 @@ use std::fmt::Write as _;
 use twinvpn_platform::{
     ContractGeneration, EnforcementCustody, NetworkContract, PlatformError, Ruleset,
 };
-use twinvpn_types::{AddressFamily, IpPrefix};
+use twinvpn_types::{AddressFamily, IpPrefix, PerFamily};
 
 use crate::addr::prefix_text;
 
@@ -149,6 +149,70 @@ pub struct EnforcementConfig {
     pub on_link_prefixes: Vec<IpPrefix>,
 }
 
+/// The prefix of the scope-cardinality counters: `scope_v4_<n>`, `scope_v6_<n>`.
+///
+/// **R-6's detector.** The posture counter says which ruleset was *intended*;
+/// these say how many prefixes the Tier-2 drop actually covers. Without them a
+/// table holding `posture_blocked` and **zero drop rules** reads back as
+/// `Blocked` and the reconciler is satisfied — which is exactly the failure
+/// review finding R-6 names. With them, "BLOCKED over nothing" is a value
+/// [`parse_installed`] returns and a caller can refuse.
+pub const SCOPE_PREFIX: [(&str, AddressFamily); 2] = [
+    ("scope_v4_", AddressFamily::V4),
+    ("scope_v6_", AddressFamily::V6),
+];
+
+/// The Tier-1 protected set that is true of **every** TwinVPN host, whatever
+/// contract is in force: the overlay address space itself.
+///
+/// ADR-0010 §11.1 and AP-1 fix both — IPv4 `100.64.0.0/10` (RFC 6598) and the
+/// pinned product ULA `fd7c:9e5d:2a10::/48`, "a pinned constant, identical in
+/// every build". These are the same two prefixes `packaging/killswitch.nft`
+/// carries, and they are a **constant of the product**, not a policy this
+/// adapter chose (CB-2).
+///
+/// # Why a baseline exists at all
+///
+/// Review finding **R-6**: `set_ruleset(_, Blocked)` used to render a contract
+/// with an empty route set, and [`emit_scope_drop`] is two loops over that set —
+/// so it emitted **zero rules**, under `policy accept`, and the script's
+/// `delete table` then replaced the real drops a previous `apply` had installed.
+/// A "fail-closed" swap that opened the host.
+///
+/// The baseline makes an empty-scope ruleset **unrepresentable**: every rendered
+/// table drops at least the overlay space, in both families.
+///
+/// **A stated limit, referred rather than resolved.** KS-3a makes the Tier-1
+/// protected set *mode-dependent*, and this baseline is only complete for
+/// TwinNet-only mode. On a full-tunnel host the protected set is everything, and
+/// a baseline of two prefixes under-covers it — which is why the baseline is a
+/// **floor beneath a real contract's scope, never a substitute for it**, and why
+/// `set_ruleset` re-renders the applied contract rather than this. Referred to
+/// ADR-0012's owner as R-7's second half.
+#[must_use]
+pub fn baseline_protected() -> Vec<IpPrefix> {
+    let mut out = Vec::new();
+    if let Ok(v4) = IpPrefix::new(
+        twinvpn_types::IpAddr::V4(twinvpn_types::V4Addr::from_octets([100, 64, 0, 0])),
+        10,
+    ) {
+        out.push(v4);
+    }
+    let mut ula = [0u8; 16];
+    ula[0] = 0xfd;
+    ula[1] = 0x7c;
+    ula[2] = 0x9e;
+    ula[3] = 0x5d;
+    ula[4] = 0x2a;
+    ula[5] = 0x10;
+    if let Ok(address) = twinvpn_types::V6Addr::new(ula, None) {
+        if let Ok(v6) = IpPrefix::new(twinvpn_types::IpAddr::V6(address), 48) {
+            out.push(v6);
+        }
+    }
+    out
+}
+
 /// This adapter's `fwmark`, chosen because the corpus pins none.
 ///
 /// `0x7677` is ASCII `vw` — a value outside the ranges systemd-networkd,
@@ -204,6 +268,26 @@ pub fn render(contract: &NetworkContract, ruleset: Ruleset, config: &Enforcement
     for route in &contract.routes.v6 {
         scope_v6.insert(prefix_text(route.destination));
     }
+
+    // **R-6.** A rendered table never drops nothing. An empty family's scope
+    // falls back to the product's own address space, so `emit_scope_drop`'s
+    // loops always have something to emit and a swap can never replace real
+    // drops with none. This is a FLOOR: where the contract names a scope, the
+    // contract's scope is what is installed, and the baseline adds nothing.
+    for prefix in baseline_protected() {
+        match prefix.family() {
+            AddressFamily::V4 => {
+                if scope_v4.is_empty() {
+                    scope_v4.insert(prefix_text(prefix));
+                }
+            }
+            AddressFamily::V6 => {
+                if scope_v6.is_empty() {
+                    scope_v6.insert(prefix_text(prefix));
+                }
+            }
+        }
+    }
     let mut on_link_v4: BTreeSet<String> = BTreeSet::new();
     let mut on_link_v6: BTreeSet<String> = BTreeSet::new();
     for prefix in &config.on_link_prefixes {
@@ -234,6 +318,10 @@ pub fn render(contract: &NetworkContract, ruleset: Ruleset, config: &Enforcement
         let _ = writeln!(s, "  counter {name} {{ }}");
     }
     let _ = writeln!(s, "  counter {DNS_DENY_COUNTER} {{ }}");
+    // The scope's cardinality, held by the kernel beside the posture — so a
+    // read-back can tell `BLOCKED over 4 prefixes` from `BLOCKED over nothing`.
+    let _ = writeln!(s, "  counter {}{} {{ }}", SCOPE_PREFIX[0].0, scope_v4.len());
+    let _ = writeln!(s, "  counter {}{} {{ }}", SCOPE_PREFIX[1].0, scope_v6.len());
 
     // ---- the output hook: locally originated traffic -----------------------
     // Priority `filter` (0) rather than `raw`, so a host firewall's own rules
@@ -415,6 +503,27 @@ pub struct Installed {
     pub ruleset: Ruleset,
     /// The generation the kernel is holding.
     pub generation: Option<ContractGeneration>,
+    /// How many prefixes the Tier-2 drop covers, per family.
+    ///
+    /// **R-6.** A posture counter records what was *intended*; this records what
+    /// the rules actually cover. `PerFamily::new(0, 0)` alongside
+    /// `Ruleset::Blocked` is a table that claims to be fail-closed and drops
+    /// nothing — the exact state review finding R-6 named, now a **value** a
+    /// caller can see rather than an invisible one.
+    pub scope: PerFamily<usize>,
+}
+
+impl Installed {
+    /// Whether the installed rules actually cover anything, in **both**
+    /// families.
+    ///
+    /// KS-5: "an implementation that can install the Tier-2 rule set for one
+    /// family without the other is **non-conforming**, not degraded". So this is
+    /// an `&&`, not an `||` — one family covered and the other not is `false`.
+    #[must_use]
+    pub const fn covers_a_scope(&self) -> bool {
+        self.scope.v4 > 0 && self.scope.v6 > 0
+    }
 }
 
 /// Reads the posture and generation out of `nft --json list table inet twinvpn`.
@@ -433,6 +542,7 @@ pub fn parse_installed(json: &str) -> Option<Installed> {
 
     let mut ruleset = None;
     let mut generation = None;
+    let mut scope = PerFamily::new(0usize, 0usize);
     for item in items {
         let Some(counter) = item.get("counter") else {
             continue;
@@ -458,12 +568,20 @@ pub fn parse_installed(json: &str) -> Option<Installed> {
                         generation = Some(ContractGeneration(n));
                     }
                 }
+                for (prefix, family) in SCOPE_PREFIX {
+                    if let Some(digits) = other.strip_prefix(prefix) {
+                        if let Ok(n) = digits.parse::<usize>() {
+                            *scope.get_mut(family) = n;
+                        }
+                    }
+                }
             }
         }
     }
     ruleset.map(|ruleset| Installed {
         ruleset,
         generation,
+        scope,
     })
 }
 
@@ -788,6 +906,95 @@ mod tests {
         let blocked = NFT_JSON.replace("posture_protected", "posture_blocked");
         let installed = parse_installed(&blocked).expect("reads back");
         assert_eq!(installed.ruleset, Ruleset::Blocked);
+    }
+
+    /// **R-6, at the renderer.** No contract, in any posture, renders a table
+    /// that drops nothing.
+    #[test]
+    fn no_rendered_table_ever_drops_nothing() {
+        let empty = NetworkContract {
+            routes: PerFamily::new(Vec::new(), Vec::new()),
+            ..contract(1, Ruleset::Blocked)
+        };
+        for ruleset in [Ruleset::Blocked, Ruleset::Protected] {
+            let script = render(&empty, ruleset, &config());
+            assert!(
+                script.contains("counter name \"deny_v4\" drop"),
+                "an empty v4 scope rendered zero drop rules under `policy accept` \
+                 — and the script's `delete table` would replace the real ones"
+            );
+            assert!(script.contains("counter name \"deny_v6\" drop"));
+            // The baseline is the product's own address space, both families.
+            assert!(script.contains("ip daddr 100.64.0.0/10"));
+            assert!(script.contains("ip6 daddr fd7c:9e5d:2a10::/48"));
+        }
+    }
+
+    #[test]
+    fn the_baseline_is_a_floor_and_never_replaces_a_real_scope() {
+        // Where the contract names a scope, the CONTRACT's scope is installed
+        // and the baseline adds nothing — otherwise a full-tunnel host would be
+        // silently narrowed to the overlay space.
+        let script = render(&contract(1, Ruleset::Blocked), Ruleset::Blocked, &config());
+        assert!(script.contains("ip daddr 100.64.0.0/12 counter name \"deny_v4\" drop"));
+        assert!(
+            !script.contains("ip daddr 100.64.0.0/10"),
+            "the baseline must not be added beside a real scope"
+        );
+        assert!(script.contains("counter scope_v4_1 { }"));
+    }
+
+    #[test]
+    fn the_baseline_is_the_same_pair_the_boot_artifact_carries() {
+        // `packaging/killswitch.nft` drops exactly these two, and a divergence
+        // between the boot table and the first arm would be a window.
+        let text: Vec<String> = baseline_protected()
+            .into_iter()
+            .map(crate::addr::prefix_text)
+            .collect();
+        assert_eq!(
+            text,
+            vec!["100.64.0.0/10".to_owned(), "fd7c:9e5d:2a10::/48".to_owned()]
+        );
+    }
+
+    /// **R-6's detector.** `BLOCKED` over nothing is now a value, not silence.
+    #[test]
+    fn a_read_back_reports_the_scope_cardinality_so_blocked_over_nothing_is_visible() {
+        let hollow = r#"{"nftables":[
+          {"counter":{"family":"inet","name":"posture_blocked","table":"twinvpn","handle":1}},
+          {"counter":{"family":"inet","name":"scope_v4_0","table":"twinvpn","handle":2}},
+          {"counter":{"family":"inet","name":"scope_v6_0","table":"twinvpn","handle":3}}
+        ]}"#;
+        let installed = parse_installed(hollow).expect("a posture is reported");
+        assert_eq!(installed.ruleset, Ruleset::Blocked);
+        assert_eq!(installed.scope, PerFamily::new(0, 0));
+        assert!(
+            !installed.covers_a_scope(),
+            "a table claiming BLOCKED while dropping nothing must be detectable"
+        );
+
+        let real = hollow
+            .replace("scope_v4_0", "scope_v4_4")
+            .replace("scope_v6_0", "scope_v6_4");
+        let installed = parse_installed(&real).expect("reads");
+        assert_eq!(installed.scope, PerFamily::new(4, 4));
+        assert!(installed.covers_a_scope());
+    }
+
+    #[test]
+    fn ks5_one_family_covered_and_the_other_not_is_non_conforming_not_degraded() {
+        let lopsided = r#"{"nftables":[
+          {"counter":{"family":"inet","name":"posture_protected","table":"twinvpn","handle":1}},
+          {"counter":{"family":"inet","name":"scope_v4_4","table":"twinvpn","handle":2}},
+          {"counter":{"family":"inet","name":"scope_v6_0","table":"twinvpn","handle":3}}
+        ]}"#;
+        let installed = parse_installed(lopsided).expect("reads");
+        assert!(
+            !installed.covers_a_scope(),
+            "KS-5: v4 protected and v6 not is NON-CONFORMING, and must not read \
+             as covered"
+        );
     }
 
     #[test]
