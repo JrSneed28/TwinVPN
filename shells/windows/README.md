@@ -444,11 +444,22 @@ Each of these is a gap this wave did not close, with the reason.
 
 ## 8. Registry substitutions
 
-`contracts/registry/reason_codes.json` is frozen (`ownership.md` §3), and several
-codes the ADRs name for this platform are not in it. Nothing here invents one.
-Where a code is absent, the nearest **registered** code is emitted and the
-specified spelling travels beside it in the log's `specified_code` field —
-exactly the pattern `shells/linux/twinvpnd/src/main.rs` uses.
+`contracts/registry/reason_codes.json` is frozen (`ownership.md` §3), and most of
+the codes the ADRs name for this platform are not in it. The arithmetic, checked
+against the registry rather than estimated:
+
+| Source | Codes the ADR names | Registered |
+|---|---|---|
+| ADR-0016 §11.12 (`PLATFORM.SERVICE.*` + `PLATFORM.PRIV.*`) | 19 | **3** — `SERVICE.UNINSTALL_INCOMPLETE`, `PRIV.HELPER_UNTRUSTED`, `PRIV.SANDBOX_DEGRADED` |
+| ADR-0017 (`MGMT.*`) | 38 | **4** — this is `ownership.md` §8 **W-18**, unchanged, and it lands on this shell exactly as it landed on the Linux one |
+| ADR-0012 §11.9 (`POLICY.KILLSWITCH.*`) | 9 | **3** |
+| ADR-0020 §11.12 (`STORE.*`) | 19 | 6 |
+| ADR-0022 (`PLATFORM.LIFECYCLE.*`) | 6 | **0** |
+
+Nothing here invents one. Where a code is absent, the nearest **registered** code
+is emitted and the specified spelling travels beside it in the log's
+`specified_code` field — exactly the pattern
+`shells/linux/twinvpnd/src/main.rs` uses.
 
 | ADR names | Registered code emitted | What is lost |
 |---|---|---|
@@ -460,6 +471,9 @@ exactly the pattern `shells/linux/twinvpnd/src/main.rs` uses.
 | `NET.WFP_UNAVAILABLE` (`docs/networking.md` §5.3) | `PLATFORM.ADAPTER_UNAVAILABLE` | which subsystem was unavailable |
 | `POLICY.KILLSWITCH.ASSERTION_MISMATCH`, `RULESET_TAMPERED`, `DISARMED_BY_OWNER`, `DISARM_REFUSED_REMOTE` (ADR-0012 §11.9) | — | **not emitted**; the registry carries three of ADR-0012 §11.9's nine `POLICY.KILLSWITCH.*` codes — `ENGAGED`, `ARM_FAILED` and `UNPROTECTED_FALLBACK`. The *conditions* are all detected and reported as typed values (`netcfg::ProtectionAssertion`, `wfp::readback::Verdict`); what is missing is the code to name them with |
 | `POLICY.LEAK.EGRESS_OBSERVED` (ADR-0012 §11.9) | `POLICY.LEAK.DETECTED` | the distinction between "the canary observed egress" and "a leak was detected" |
+| `PLATFORM.RESUMED` (ADR-0022 LC-24 step 5) | `NET.RESUME_OK` | the `PLATFORM` domain. The class (`TRANSIENT`) and severity (`INFO`) are right, and the measured gap travels as evidence either way |
+| `PLATFORM.SERVICE.UI_DETACHED` (ADR-0016 PS-3) | — | **not emitted**; the *behaviour* PS-3 requires — the last client disconnecting changes nothing — is asserted by a test, which is the half that matters |
+| `PLATFORM.SERVICE.SUPERVISOR_ABSENT` (PS-11), `PLATFORM.SERVICE.QUARANTINED` (PS-9), `PLATFORM.PRIV.CAPABILITY_MISSING` (PS-18), `PLATFORM.PRIV.CLIENT_UNAUTHORIZED` / `ADMIN_AUTH_REQUIRED` / `REMOTE_ADMIN_REFUSED` (PS-12, PS-14) | — | **not emitted as codes.** Each condition is detected and refused; what is missing is the registered name to refuse it *with*. `PLATFORM.PRIV.SANDBOX_DEGRADED` is registered and is used for the PS-17 warnings it actually owns |
 
 **W-18, again.** No `PlatformError` variant is retryable under the frozen
 registry: `PLATFORM.ADAPTER_UNAVAILABLE` is classed `PERSISTENT`, so
