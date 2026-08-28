@@ -246,10 +246,47 @@ impl SessionRuntime {
         let before = self.machine.state();
         let outcome = self.machine.apply(trigger, guards, ctx);
         let after = self.machine.state();
+
         if before != after {
             self.rearm(after);
+            return outcome;
+        }
+
+        // **W-34.** The state did not change, and if the trigger was a TIMER
+        // then `fire_due` has already consumed its deadline — so nothing is left
+        // to bound the state.
+        //
+        // §4.4 bounds every transient state deliberately: `DISCOVERING` by
+        // `T_DISCOVER`, `CONNECTING` by `T_CONNECT`, `RECONNECTING` by
+        // `T_RECONNECT_GRACE`. A timer that fires and matches no §4.5 row would
+        // leave the machine in one of them with **no deadline at all**, which is
+        // the unbounded state those constants exist to prevent. It is not
+        // reachable from a driver that delivers `EV_CANDIDATES_READY` promptly,
+        // and it is exactly the shape that becomes reachable the moment a guard
+        // is false for a reason nobody anticipated.
+        //
+        // Re-arming rather than leaving it bare is the safe direction: the worst
+        // case is one extra timeout on a state that was going to time out
+        // anyway, and the alternative is a `Session` that waits forever.
+        if matches!(trigger, Trigger::Timer(_)) {
+            self.rearm_missing(after);
         }
         outcome
+    }
+
+    /// Re-arms any deadline `state` owns that is not currently armed.
+    ///
+    /// Distinct from [`SessionRuntime::rearm`], which cancels first: this one
+    /// **must not** disturb a deadline that is still running, because a state
+    /// with two live timers is only in trouble if one of them is a duplicate of
+    /// the other.
+    fn rearm_missing(&mut self, state: SessionState) {
+        let now = self.env.now_monotonic();
+        for (id, constant) in timers_for(state) {
+            if !self.timers.is_armed(*id) {
+                self.timers.arm(*id, *constant, now);
+            }
+        }
     }
 
     /// Re-arms for `state`, cancelling everything the previous state owned.
@@ -421,11 +458,22 @@ mod tests {
             Context::default(),
         );
         vt.advance(timers::T_DISCOVER.default);
-        let outcomes = rt.tick(Guards::default(), Context::default());
+        // T04 needs `no_candidate_either_family`; supplying it makes the timer
+        // MOVE the machine, which is the case this test is about.
+        let guards = Guards {
+            no_candidate_either_family: true,
+            ..Guards::default()
+        };
+        let outcomes = rt.tick(guards, Context::default());
         assert_eq!(outcomes.len(), 1, "T_DISCOVER must fire exactly once");
+        assert_ne!(
+            rt.machine().state(),
+            SessionState::Discovering,
+            "T04 must have moved the machine"
+        );
         assert!(
             !rt.timers().is_armed(TimerId::Discover),
-            "a fired timer is disarmed, not left to fire again"
+            "a timer that MOVED the machine is disarmed; the new state arms its own"
         );
     }
 
@@ -486,6 +534,84 @@ mod tests {
             TimerId::Discover,
             timers::T_TRUST_HARD,
             MonotonicInstant::ORIGIN,
+        );
+    }
+
+    #[test]
+    fn w34_a_timer_that_matches_no_row_does_not_leave_the_state_unbounded() {
+        // `DISCOVERING` is bounded by `T_DISCOVER`. Firing a timer the table has
+        // no row for must not consume that bound and leave nothing behind.
+        let (mut rt, vt) = runtime();
+        rt.apply(
+            Trigger::Event(E::ConnectRequested),
+            connect_guards(),
+            Context::default(),
+        );
+        assert!(rt.timers().is_armed(TimerId::Discover));
+
+        // `T_DEGRADED_MAX` has no row from `DISCOVERING`, so the machine ignores
+        // it — and before this fix, `T_DISCOVER` would still have been consumed
+        // by the same `fire_due` sweep in a real driver.
+        vt.advance(timers::T_DISCOVER.default);
+        let outcomes = rt.tick(Guards::default(), Context::default());
+        assert!(!outcomes.is_empty());
+
+        // Whatever state the table moved to, it is bounded if §4.4 says it
+        // should be.
+        let state = rt.machine().state();
+        for (id, _) in timers_for(state) {
+            assert!(
+                rt.timers().is_armed(*id),
+                "{state:?} left {} unarmed",
+                id.name()
+            );
+        }
+    }
+
+    #[test]
+    fn w34_an_ignored_timer_rearms_the_state_it_did_not_move() {
+        let (mut rt, vt) = runtime();
+        rt.apply(
+            Trigger::Event(E::ConnectRequested),
+            connect_guards(),
+            Context::default(),
+        );
+        // Force the deadline to be consumed while the state does not change: a
+        // timer the table has no row for, delivered directly.
+        rt.apply(
+            Trigger::Timer(TimerId::DegradedMax),
+            Guards::default(),
+            Context::default(),
+        );
+        assert_eq!(rt.machine().state(), SessionState::Discovering);
+        assert!(
+            rt.timers().is_armed(TimerId::Discover),
+            "DISCOVERING must still be bounded by T_DISCOVER"
+        );
+        let _ = vt;
+    }
+
+    #[test]
+    fn rearming_a_still_running_deadline_does_not_move_it() {
+        // `rearm_missing` must not disturb a live deadline: restarting one on
+        // every ignored timer would let a state outlive its own bound.
+        let (mut rt, vt) = runtime();
+        rt.apply(
+            Trigger::Event(E::ConnectRequested),
+            connect_guards(),
+            Context::default(),
+        );
+        let first = rt.timers().next_deadline();
+        vt.advance(core::time::Duration::from_secs(1));
+        rt.apply(
+            Trigger::Timer(TimerId::DegradedMax),
+            Guards::default(),
+            Context::default(),
+        );
+        assert_eq!(
+            rt.timers().next_deadline(),
+            first,
+            "a live T_DISCOVER must keep its original deadline"
         );
     }
 

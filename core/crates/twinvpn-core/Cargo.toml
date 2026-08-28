@@ -85,6 +85,9 @@ futures-core          = { workspace = true }
 prost                 = { workspace = true }
 
 [dev-dependencies]
+# The crate's own dev-dependency on itself, so `testing` is reachable from an
+# integration test as well as from a unit test (`core/README.md` §3).
+twinvpn-core          = { path = ".", features = ["test-support"] }
 proptest              = { workspace = true }
 twinvpn-platform      = { workspace = true, features = ["mock"] }
 twinvpn-env           = { workspace = true, features = ["test-support"] }

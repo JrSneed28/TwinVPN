@@ -17,8 +17,11 @@ use std::sync::Arc;
 
 use twinvpn_env::virtual_time::VirtualTime;
 use twinvpn_env::{Entropy, Env, EnvError, EnvParts, SystemRngSource, WallClockReading};
-use twinvpn_platform::mock::{MockAdapter, MockOptions};
+use twinvpn_platform::mock::{MockAdapter, MockNetwork, MockOptions};
+use twinvpn_platform::socket::{SocketFamily, SocketOptions, UdpBindSpec, UdpSocket};
+use twinvpn_platform::PlatformAdapter as _;
 use twinvpn_types::Diagnostic;
+use twinvpn_types::Endpoint;
 
 use crate::core::{Core, CoreParts};
 
@@ -68,11 +71,80 @@ pub fn env() -> (Env, VirtualTime) {
     (env, vt)
 }
 
+/// The in-memory fabric a harness's sockets share.
+///
+/// Held by the harness rather than created inside the adapter, so a test can
+/// bind a *second* socket on the same fabric and stand in for a peer — which is
+/// what makes "a packet moved" assertable without a network.
+#[must_use]
+pub fn network() -> MockNetwork {
+    MockNetwork::new()
+}
+
+/// A mock-bound core, its adapter, its fabric and its clock.
+pub struct Harness {
+    /// The core.
+    pub core: Core,
+    /// The adapter it is bound to.
+    pub adapter: Arc<MockAdapter>,
+    /// The fabric both ends share.
+    pub net: MockNetwork,
+    /// The virtual clock.
+    pub time: VirtualTime,
+}
+
+/// A complete harness.
+///
+/// # Errors
+///
+/// The [`Diagnostic`] `Core::create` returns.
+pub fn harness() -> Result<Harness, Box<Diagnostic>> {
+    let net = network();
+    let (parts, adapter, time) = parts_on(&net);
+    Ok(Harness {
+        core: Core::create(parts)?,
+        adapter,
+        net,
+        time,
+    })
+}
+
+/// Binds a socket that stands in for the peer, on the harness's fabric.
+///
+/// Returns the socket — which the caller must **hold**, because dropping it
+/// closes the inbox — and the endpoint to aim probes at.
+#[must_use]
+pub fn bind_peer(adapter: &Arc<MockAdapter>) -> Option<(Box<dyn UdpSocket>, Endpoint)> {
+    let spec = UdpBindSpec {
+        family: SocketFamily::V4,
+        local: None,
+        options: SocketOptions::default(),
+    };
+    // A tiny inline executor: `MockSockets::bind_udp` is ready on first poll,
+    // and asserting that keeps this helper free of a runtime it does not need.
+    let waker = core::task::Waker::noop();
+    let mut cx = core::task::Context::from_waker(waker);
+    let mut future = adapter.sockets().bind_udp(&spec);
+    match core::future::Future::poll(future.as_mut(), &mut cx) {
+        core::task::Poll::Ready(Ok(socket)) => {
+            let endpoint = socket.local_endpoint().ok()?;
+            Some((socket, endpoint))
+        }
+        _ => None,
+    }
+}
+
 /// The parts for a mock-bound core.
 #[must_use]
 pub fn parts() -> (CoreParts, Arc<MockAdapter>, VirtualTime) {
+    parts_on(&network())
+}
+
+/// The parts for a mock-bound core sharing `net`.
+#[must_use]
+pub fn parts_on(net: &MockNetwork) -> (CoreParts, Arc<MockAdapter>, VirtualTime) {
     let (env, vt) = env();
-    let adapter = Arc::new(MockAdapter::new(&MockOptions::default()));
+    let adapter = Arc::new(MockAdapter::on_network(net, &MockOptions::default()));
     let parts = CoreParts {
         env,
         adapter: Arc::clone(&adapter) as Arc<dyn twinvpn_platform::PlatformAdapter>,

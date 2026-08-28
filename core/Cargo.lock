@@ -1315,6 +1315,7 @@ dependencies = [
  "prost",
  "thiserror",
  "tracing",
+ "twinvpn-core",
  "twinvpn-cp-client",
  "twinvpn-crypto",
  "twinvpn-diag",

@@ -389,10 +389,10 @@ fn the_core_executes_every_operation_the_catalogue_advertises_or_says_it_does_no
     // the core does not execute is enumerable, not hidden.
     let implemented = CoreCommand::ALL
         .iter()
-        .filter(|op| twinvpn_core::core::is_implemented(**op))
+        .filter(|op| twinvpn_core::core::executes(**op))
         .count();
     assert_eq!(
-        implemented + twinvpn_core::core::UNIMPLEMENTED.len(),
+        implemented + twinvpn_core::core::unimplemented().len(),
         CoreCommand::ALL.len()
     );
     assert!(
