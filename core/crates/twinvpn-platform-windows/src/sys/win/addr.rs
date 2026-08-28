@@ -130,12 +130,7 @@ pub unsafe fn from_sockaddr(sa: &SOCKADDR_INET) -> Option<IpAddr> {
         Some(IpAddr::V4(V4Addr::from_octets(raw.to_ne_bytes())))
     } else if family == AF_INET6 as ADDRESS_FAMILY {
         // SAFETY: `si_family` says this is the `Ipv6` arm.
-        let (octets, zone) = unsafe {
-            (
-                sa.Ipv6.sin6_addr.u.Byte,
-                sa.Ipv6.Anonymous.sin6_scope_id,
-            )
-        };
+        let (octets, zone) = unsafe { (sa.Ipv6.sin6_addr.u.Byte, sa.Ipv6.Anonymous.sin6_scope_id) };
         V6Addr::from_slice(&octets, zone).ok().map(IpAddr::V6)
     } else {
         None

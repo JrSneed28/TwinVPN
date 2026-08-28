@@ -159,7 +159,10 @@ fn contract(generation: u64, ruleset: Ruleset) -> NetworkContract {
 struct Harness {
     system: Arc<FakeSystem>,
     config: WindowsNetworkConfig,
-    #[allow(dead_code)]
+    /// The **same** latch the configuration holds, so a test can begin shutdown
+    /// the way `PlatformAdapter::begin_shutdown` does rather than by
+    /// constructing a second latch that nothing is listening to.
+    shutdown: ShutdownLatch,
     dir: std::path::PathBuf,
 }
 
@@ -167,16 +170,18 @@ fn harness(name: &str) -> Harness {
     let system = Arc::new(FakeSystem::new(InterfaceLuid(OVERLAY)));
     let dir = std::env::temp_dir().join(format!("twinvpn-win-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
+    let shutdown = ShutdownLatch::new();
     let config = WindowsNetworkConfig::new(NetworkConfigParts {
         system: system.clone(),
         enforcement: enforcement(),
         stub: stub(),
         restore_point_path: dir.join("resolver.restore"),
-        shutdown: ShutdownLatch::new(),
+        shutdown: shutdown.clone(),
     });
     Harness {
         system,
         config,
+        shutdown,
         dir,
     }
 }
@@ -234,6 +239,80 @@ fn startup_reports_the_boot_artifact_as_absent_when_the_installer_never_wrote_it
 }
 
 #[test]
+fn the_boot_artifact_survives_every_runtime_commit() {
+    // The leak KS-19 exists to close, arrived at from inside our own
+    // transaction. A commit replaces every owner-tagged object; the boot filters
+    // carry our provider key; so without the exception in `FilterEngine::commit`
+    // the first apply after a boot would delete the artifact, and the NEXT
+    // reboot would find the pre-service interval uncovered. Nobody would notice
+    // until it mattered.
+    let h = harness("boot-artifact-survives");
+    twinvpn_platform_windows::sys::FilterEngine::commit(&*h.system, &wfp::boot::boot_set())
+        .expect("the installer writes it");
+    assert!(h
+        .config
+        .verify_boot_artifact()
+        .expect("queries")
+        .is_registered());
+
+    // Now the service runs: reclaim, apply, swap, apply again, roll back.
+    h.config.reclaim(None).expect("reclaims");
+    block_on(h.config.apply(&contract(1, Ruleset::Protected))).expect("applies");
+    block_on(
+        h.config
+            .set_ruleset(ContractGeneration(1), Ruleset::Blocked),
+    )
+    .expect("swaps");
+    block_on(h.config.apply(&contract(2, Ruleset::Protected))).expect("re-applies");
+    block_on(h.config.rollback(ContractGeneration(2))).expect("rolls back");
+
+    assert!(
+        h.config
+            .verify_boot_artifact()
+            .expect("queries")
+            .is_registered(),
+        "the KS-19 artifact must outlive every runtime transaction"
+    );
+
+    // ...and the runtime read-back is not confused by the extra objects: it
+    // counts the boot filters separately, so a healthy host does not report
+    // `FiltersMissing` forever.
+    let intended = wfp::filters::render(
+        &contract(2, Ruleset::Blocked),
+        Ruleset::Blocked,
+        &enforcement(),
+    );
+    let state = twinvpn_platform_windows::sys::FilterEngine::read(&*h.system).expect("reads");
+    let installed = twinvpn_platform_windows::wfp::readback::parse_installed(&state)
+        .expect("a ruleset is installed");
+    assert!(installed.boot_filters > 0, "the artifact is still counted");
+    assert_eq!(installed.owned_filters, intended.filters.len());
+}
+
+#[test]
+fn a_purge_removes_the_boot_artifact_too_because_that_is_an_uninstall() {
+    // PS-21 step 5 and KS-20a's `twinvpn-unblock`: "atomic-swap the enforcement
+    // rule set to *no TwinVPN rules*". That is the ONE operation the boot
+    // filters do not survive, and it is deliberate — an uninstall that left the
+    // boot deny behind would leave a host permanently blocking the overlay space
+    // with nothing installed to unblock it.
+    let h = harness("purge");
+    twinvpn_platform_windows::sys::FilterEngine::commit(&*h.system, &wfp::boot::boot_set())
+        .expect("the installer writes it");
+    block_on(h.config.apply(&contract(1, Ruleset::Protected))).expect("applies");
+    h.config.disarm().expect("disarms");
+    assert!(!h
+        .config
+        .verify_boot_artifact()
+        .expect("queries")
+        .is_registered());
+    assert_eq!(
+        h.config.assert_protection(None).expect("asserts").posture,
+        None
+    );
+}
+
+#[test]
 fn startup_refuses_to_report_protection_when_the_engine_cannot_be_queried() {
     // O-18: an assertion that cannot be renewed becomes UNKNOWN, never
     // PROTECTED. Here the query itself fails, which must be an error and not an
@@ -265,8 +344,12 @@ fn shutdown_leaves_the_installed_filters_exactly_where_they_were() {
     let installed = block_on(h.config.installed_ruleset()).expect("reads");
     assert_eq!(installed, Some(Ruleset::Protected));
 
-    let latch = ShutdownLatch::new();
-    latch.begin();
+    // Exactly what `PlatformAdapter::begin_shutdown` does: set the latch and
+    // nothing else. Then drop the whole configuration, which is what a service
+    // stop does to it.
+    h.shutdown.begin();
+    let routes_at_shutdown = h.system.routes_now();
+    let rules_at_shutdown = h.system.rules();
     drop(h.config);
 
     // The adapter is gone; the engine still holds the ruleset.
@@ -279,6 +362,10 @@ fn shutdown_leaves_the_installed_filters_exactly_where_they_were() {
         before,
         "shutdown committed nothing"
     );
+    // ...and it touched neither the routes nor the resolver, which is the other
+    // half of PS-21's ordering: a *stop* is not an uninstall.
+    assert_eq!(h.system.routes_now(), routes_at_shutdown);
+    assert_eq!(h.system.rules(), rules_at_shutdown);
 }
 
 #[test]

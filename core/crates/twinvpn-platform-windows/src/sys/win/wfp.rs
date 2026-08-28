@@ -42,25 +42,25 @@ use twinvpn_types::AddressFamily;
 use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmEngineClose0, FwpmEngineOpen0, FwpmEngineSetOption0, FwpmFilterAdd0, FwpmFilterCreateEnumHandle0,
-    FwpmFilterDeleteByKey0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFilterGetById0,
-    FwpmFreeMemory0, FwpmNetEventCreateEnumHandle0, FwpmNetEventDestroyEnumHandle0,
-    FwpmNetEventEnum2, FwpmProviderAdd0, FwpmProviderDeleteByKey0, FwpmProviderGetByKey0,
-    FwpmSubLayerAdd0, FwpmSubLayerDeleteByKey0, FwpmSubLayerGetByKey0, FwpmTransactionAbort0,
-    FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_ACTION0, FWPM_ACTION0_0,
-    FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_ALE_USER_ID, FWPM_CONDITION_FLAGS,
+    FwpmEngineClose0, FwpmEngineOpen0, FwpmEngineSetOption0, FwpmFilterAdd0,
+    FwpmFilterCreateEnumHandle0, FwpmFilterDeleteByKey0, FwpmFilterDestroyEnumHandle0,
+    FwpmFilterEnum0, FwpmFilterGetById0, FwpmFreeMemory0, FwpmNetEventCreateEnumHandle0,
+    FwpmNetEventDestroyEnumHandle0, FwpmNetEventEnum2, FwpmProviderAdd0, FwpmProviderDeleteByKey0,
+    FwpmProviderGetByKey0, FwpmSubLayerAdd0, FwpmSubLayerDeleteByKey0, FwpmSubLayerGetByKey0,
+    FwpmTransactionAbort0, FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_ACTION0,
+    FWPM_ACTION0_0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_ALE_USER_ID, FWPM_CONDITION_FLAGS,
     FWPM_CONDITION_IP_LOCAL_ADDRESS_TYPE, FWPM_CONDITION_IP_LOCAL_INTERFACE,
     FWPM_CONDITION_IP_PROTOCOL, FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT,
     FWPM_DISPLAY_DATA0, FWPM_ENGINE_COLLECT_NET_EVENTS, FWPM_FILTER0, FWPM_FILTER_CONDITION0,
     FWPM_FILTER_ENUM_TEMPLATE0, FWPM_FILTER_FLAG_BOOTTIME, FWPM_FILTER_FLAG_PERSISTENT,
     FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_NET_EVENT2,
     FWPM_NET_EVENT_ENUM_TEMPLATE0, FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW,
-    FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, FWPM_PROVIDER0, FWPM_SUBLAYER0, FWPM_SUBLAYER_FLAG_PERSISTENT,
-    FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB, FWP_CONDITION_FLAG_IS_LOOPBACK,
-    FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0, FWP_FILTER_ENUM_FULLY_CONTAINED, FWP_IP_VERSION_V4,
-    FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ANY_SET, FWP_MATCH_NOT_EQUAL, FWP_UINT16, FWP_UINT32,
-    FWP_UINT64, FWP_UINT8, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK,
-    FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
+    FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, FWPM_PROVIDER0, FWPM_SUBLAYER0,
+    FWPM_SUBLAYER_FLAG_PERSISTENT, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB,
+    FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0,
+    FWP_FILTER_ENUM_FULLY_CONTAINED, FWP_IP_VERSION_V4, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ANY_SET,
+    FWP_MATCH_NOT_EQUAL, FWP_UINT16, FWP_UINT32, FWP_UINT64, FWP_UINT8, FWP_V4_ADDR_AND_MASK,
+    FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
 };
 use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 
@@ -244,13 +244,34 @@ impl Drop for Transaction<'_> {
 }
 
 /// The GUID form of one of ours.
+///
+/// `Guid` holds the sixteen bytes in the order a GUID prints, and
+/// `GUID::from_u128` splits a big-endian `u128` into exactly those fields — so
+/// the round trip through `u128` is the identity and not a re-ordering.
 const fn guid(g: Guid) -> GUID {
     GUID::from_u128(u128::from_be_bytes(g.0))
 }
 
 /// Our GUID form of one of Windows'.
 const fn ours(g: GUID) -> Guid {
-    Guid(g.to_u128().to_be_bytes())
+    let a = g.data1.to_be_bytes();
+    let b = g.data2.to_be_bytes();
+    let c = g.data3.to_be_bytes();
+    let d = g.data4;
+    Guid([
+        a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d[0], d[1], d[2], d[3], d[4], d[5], d[6],
+        d[7],
+    ])
+}
+
+/// Whether two GUIDs are the same value.
+///
+/// `windows_sys::core::GUID` derives neither `PartialEq` nor `Eq`, so this is
+/// written out. Comparing through [`ours`] rather than field by field means the
+/// crate has exactly one notion of GUID equality, and it is the one the filter
+/// keys and the read-back already use.
+fn guid_eq(a: GUID, b: GUID) -> bool {
+    ours(a).0 == ours(b).0
 }
 
 const fn layer_guid(layer: Layer) -> GUID {
@@ -388,7 +409,6 @@ fn build_conditions(spec: &FilterSpec, arena: &mut FilterArena) {
                 value
             }
             Condition::AppId(_) => {
-                let blob = &mut arena.app_ids[app];
                 let value = FWPM_FILTER_CONDITION0 {
                     fieldKey: FWPM_CONDITION_ALE_APP_ID,
                     matchType: FWP_MATCH_EQUAL,
@@ -399,10 +419,10 @@ fn build_conditions(spec: &FilterSpec, arena: &mut FilterArena) {
                         },
                     },
                 };
-                // The blob has to live somewhere the filter can point at, and a
-                // `FWP_BYTE_BLOB` is itself a struct the engine dereferences —
-                // see `app_id_blobs` below, which owns them.
-                let _ = blob;
+                // The pointer is filled in by `link_blobs`, once the blob
+                // arena exists: a `FWP_BYTE_BLOB` is itself a struct the engine
+                // dereferences, so it needs storage the condition can point at
+                // and that storage cannot exist until both arenas do.
                 app += 1;
                 value
             }
@@ -417,7 +437,9 @@ fn build_conditions(spec: &FilterSpec, arena: &mut FilterArena) {
                         },
                     },
                 };
+                // Same as the app-id arm: `link_blobs` fills the pointer in.
                 sid += 1;
+                let _ = sid;
                 value
             }
             Condition::RemotePrefix(prefix) => {
@@ -607,9 +629,10 @@ impl WfpEngine {
                     filterType: GUID::from_u128(0),
                 },
             },
-            Anonymous: windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_FILTER0_0 {
-                rawContext: 0,
-            },
+            Anonymous:
+                windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_FILTER0_0 {
+                    rawContext: 0,
+                },
             reserved: core::ptr::null_mut(),
             filterId: 0,
             effectiveWeight: FWP_VALUE0 {
@@ -619,6 +642,8 @@ impl WfpEngine {
         };
         let mut weight = spec.weight;
         let mut filter = filter;
+        // The engine reads the weight through this pointer during the call, so
+        // `weight` has to outlive it — it does, being a local of this function.
         filter.weight.Anonymous.uint64 = &raw mut weight;
 
         let mut id: u64 = 0;
@@ -786,10 +811,10 @@ impl WfpEngine {
                 let filter = unsafe { &**entries.add(index) };
                 let provider_owned = !filter.providerKey.is_null()
                     // SAFETY: checked non-null immediately above.
-                    && unsafe { *filter.providerKey } == ours;
-                let layer = if filter.layerKey == FWPM_LAYER_ALE_AUTH_CONNECT_V4 {
+                    && guid_eq(unsafe { *filter.providerKey }, ours);
+                let layer = if guid_eq(filter.layerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V4) {
                     Layer::AleAuthConnectV4
-                } else if filter.layerKey == FWPM_LAYER_ALE_AUTH_CONNECT_V6 {
+                } else if guid_eq(filter.layerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V6) {
                     Layer::AleAuthConnectV6
                 } else {
                     // A layer this crate does not install into. Skipped rather

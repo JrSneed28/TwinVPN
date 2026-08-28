@@ -66,6 +66,19 @@ pub trait FilterEngine: Send + Sync {
     /// not in `set` but carrying our provider key is deleted inside the same
     /// transaction, which is what makes a posture swap a swap rather than a
     /// remove-then-add (KS-23).
+    ///
+    /// # One exception, and it is load-bearing
+    ///
+    /// **A filter belonging to the KS-19 boot artifact is never deleted**, even
+    /// though it carries our provider key. Without that exception the first
+    /// `apply` after a boot would remove the very filters the Base Filtering
+    /// Engine applies *before* the service starts, and the next reboot would find
+    /// the pre-service interval uncovered — the leak KS-19 exists to close,
+    /// arrived at from inside our own transaction. ADR-0016 PS-7 says the same
+    /// thing from the other side: the artifact is package-owned and "the
+    /// authority MUST NOT rewrite it as an ordinary runtime action". Not deleting
+    /// it is the narrowest reading of that.
+    /// [`crate::wfp::boot::is_boot_filter`] is the predicate.
     fn commit(&self, set: &FilterSet) -> Result<(), PlatformError>;
 
     /// Enumerates what the engine holds.

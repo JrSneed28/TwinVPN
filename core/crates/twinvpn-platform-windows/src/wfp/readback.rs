@@ -82,8 +82,19 @@ pub struct Installed {
     pub scope_denies: PerFamily<usize>,
     /// Whether a Tier-2 overlay permit exists, per family.
     pub overlay_permits: PerFamily<bool>,
-    /// How many owned filters the engine holds in total.
+    /// How many owned filters the engine holds that the **runtime** set owns.
+    ///
+    /// Excludes the KS-19 boot artifact, which a runtime commit deliberately
+    /// does not delete (see [`super::boot::is_boot_filter`]) and therefore must
+    /// not be counted against the runtime set's size — a comparison that counted
+    /// them would report `FiltersMissing` on every healthy host that had booted.
     pub owned_filters: usize,
+    /// How many of the engine's owned filters are the boot artifact's.
+    ///
+    /// Reported separately rather than folded away, because "the boot artifact
+    /// is still installed" is a fact ADR-0016 §11.6 step (1) asks about and a
+    /// support case has no other way to see.
+    pub boot_filters: usize,
 }
 
 impl Installed {
@@ -156,7 +167,12 @@ pub fn parse_installed(state: &EngineState) -> Option<Installed> {
             count(TrafficClass::OverlayEgress, AddressFamily::V4) > 0,
             count(TrafficClass::OverlayEgress, AddressFamily::V6) > 0,
         ),
-        owned_filters: owned().count(),
+        owned_filters: owned()
+            .filter(|f| !super::boot::is_boot_filter(f.key))
+            .count(),
+        boot_filters: owned()
+            .filter(|f| super::boot::is_boot_filter(f.key))
+            .count(),
     })
 }
 

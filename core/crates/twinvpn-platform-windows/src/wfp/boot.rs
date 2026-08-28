@@ -263,6 +263,42 @@ fn is_boot_key(key: super::Guid, layer: Layer) -> bool {
     })
 }
 
+/// Whether a key belongs to the KS-19 boot artifact, whatever its class.
+///
+/// **This is what keeps the boot set alive across a runtime commit.** The
+/// service's transaction replaces every owner-tagged object it finds, and the
+/// boot filters carry our provider key — so without this predicate, the first
+/// `apply` after a boot would **delete the KS-19 artifact**, and the next reboot
+/// would find nothing covering the interval before the service starts. That is
+/// precisely the leak KS-19 exists to close, arrived at from the inside.
+///
+/// PS-7 says the same thing from the other direction: the artifact is
+/// package-owned and "the authority MUST NOT rewrite it as an ordinary runtime
+/// action". Not deleting it is the narrowest possible reading of that, and it is
+/// the one [`crate::sys::FilterEngine::commit`] is specified to hold.
+///
+/// The band is checked over both layers and every class the boot set uses, so a
+/// filter is recognised as the artifact's by its **key** — the same key the
+/// installer wrote — rather than by a flag the enumeration might not carry.
+#[must_use]
+pub fn is_boot_filter(key: super::Guid) -> bool {
+    const BOOT_CLASSES: [TrafficClass; 3] = [
+        TrafficClass::Loopback,
+        TrafficClass::UnderlayConfiguration,
+        TrafficClass::ProtectedScopeDeny,
+    ];
+    for layer in Layer::BOTH {
+        for class in BOOT_CLASSES {
+            for offset in 0..8u16 {
+                if filter_key(class, layer, BOOT_ORDINAL + offset) == key {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

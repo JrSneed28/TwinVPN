@@ -189,9 +189,10 @@ impl IpHelper {
             else {
                 continue;
             };
-            let Ok(destination) =
-                twinvpn_types::IpPrefix::new(address, u32::from(row.DestinationPrefix.PrefixLength))
-            else {
+            let Ok(destination) = twinvpn_types::IpPrefix::new(
+                address,
+                u32::from(row.DestinationPrefix.PrefixLength),
+            ) else {
                 // A prefix with host bits set is not something `IpPrefix` can
                 // hold. Skipping rather than masking: a masked value would be a
                 // different route, and reporting it as ours would make rollback
@@ -566,7 +567,7 @@ impl RouteTable for IpHelper {
             families: match (v4, v6) {
                 (true, true) => UnderlayFamilies::DualStack,
                 (true, false) => UnderlayFamilies::V4Only,
-                (false, true) => UnderlayFamilies::V6Only,
+                (false, true) => UnderlayFamilies::V6Only { nat64: None },
                 // No default route in either family. Reported as v4-only rather
                 // than as a fourth value the type does not have; the
                 // `default_routes` pair below carries the real answer, and the

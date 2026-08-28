@@ -227,10 +227,21 @@ impl FilterEngine for FakeSystem {
         if let Some(fault) = state.faults.filter_commit {
             return Err(fault.as_error("FwpmTransactionCommit0", oserr::Context::Enforcement));
         }
-        // One step: every owner-tagged object is replaced. There is no
+        // One step: every owner-tagged object is replaced — **except** the KS-19
+        // boot artifact, which survives a runtime commit. There is no
         // intermediate state in which the host holds neither set, which is what
-        // KS-17 asks of the real engine.
-        state.engine.filters.retain(|f| !f.provider_owned);
+        // KS-17 asks of the real engine, and the boot filters are still there
+        // afterwards, which is what PS-7 asks of us.
+        state
+            .engine
+            .filters
+            .retain(|f| !f.provider_owned || crate::wfp::boot::is_boot_filter(f.key));
+        // A key the incoming set also carries is replaced rather than
+        // duplicated: `FwpmFilterAdd0` on an existing key is a replace.
+        state
+            .engine
+            .filters
+            .retain(|f| !set.filters.iter().any(|s| s.key == f.key));
         state
             .engine
             .filters
