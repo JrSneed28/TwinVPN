@@ -319,10 +319,35 @@ cross-check:
 	@echo "==> cross-check twinvpn-platform-macos ($(MAC_TARGET))"
 	@cd core && $(CARGO) clippy -p twinvpn-platform-macos --all-targets \
 	    --target $(MAC_TARGET) -- -D warnings
+# The shells/windows arm is NARROWED, and the narrowing is the honest part.
+#
+# `twinvpnsvc`'s default features pull `twinvpn-core` -> `snow` -> `ring`, whose
+# build script refuses a GNU compiler for an MSVC target and needs `lib.exe`.
+# This host has no clang-cl and no llvm-lib, so `cargo-xwin` is not an option
+# either: nothing here can drive that build script, and it fails before reaching
+# a single line of our code.
+#
+# So this arm checks what it can actually check -- and that is nearly all of it:
+# `twinvpnctl` whole, and `twinvpnsvc`'s ENTIRE Win32 surface (`scm`, `power`,
+# `privilege`, `peer`, `start`, `mi`, `win32`) through the `service` feature that
+# `desktop-windows` split from `core-host` for exactly this reason. That split
+# paid for itself on its first run, finding two type errors and eight lints in
+# code nothing had ever compiled.
+#
+# NOT covered, and it must not be reported as covered: `twinvpnsvc`'s
+# `runtime`, `server` and `main`, which are the three files that name the core.
+# They are compiled the day this repository has a Windows builder or an
+# MSVC-targeting C toolchain. `shells/windows/README.md` §7.19 carries the
+# detail and the two ways out.
 	@if [ -f shells/windows/Cargo.toml ]; then \
 	  echo "==> cross-check shells/windows ($(WIN_TARGET))"; \
-	  ( cd shells/windows && $(CARGO) clippy --workspace --all-targets \
-	      --target $(WIN_TARGET) -- -D warnings ) || exit 1; \
+	  ( cd shells/windows && \
+	    $(CARGO) clippy -p twinvpnctl --all-targets \
+	        --target $(WIN_TARGET) -- -D warnings && \
+	    $(CARGO) clippy -p twinvpnsvc --no-default-features --features service \
+	        --all-targets --target $(WIN_TARGET) -- -D warnings ) || exit 1; \
+	  echo "    NOT covered: twinvpnsvc's runtime/server/main -- ring's build"; \
+	  echo "    script needs an MSVC-targeting C compiler. README 7.19."; \
 	fi
 	@if [ -f shells/macos/Cargo.toml ]; then \
 	  echo "==> cross-check shells/macos ($(MAC_TARGET))"; \

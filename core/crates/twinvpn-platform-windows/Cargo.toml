@@ -55,3 +55,13 @@ windows-sys = { workspace = true, features = [
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "io-util", "macros"] }
+# Integration-lead correction. `tests/enforcement.rs` is `#![cfg(feature =
+# "test-support")]`, and the feature is off by default -- correctly, since it
+# binds an in-memory engine no production build may reach. But `make test` runs
+# `cargo test --workspace` with no features, so those 32 tests reported a
+# cheerful `0 passed` and the gate never ran the enforcement suite at all. A
+# self-referential dev-dependency turns the feature on for THIS crate's own test
+# targets and for nothing else: production builds and every dependent still see
+# it off. Same reasoning as CD-3's: a test that is never seen to run is not a
+# mechanism.
+twinvpn-platform-windows = { path = ".", features = ["test-support"] }
