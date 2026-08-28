@@ -338,7 +338,7 @@ line, makes every rendered `next_action` correct today, and leaves the rename
 available later. Recorded in `twinvpnctl/Cargo.toml`'s header too, so it cannot
 be lost with this file.
 
-### 2. The event stream carries topics and sequence numbers; four of the five topics carry an **empty payload**.
+### 2. ~~Four of the five event topics carry an empty payload.~~ **CLOSED.** `CoreEventKind::encoded_payload()` landed in the seam work package; `payload_of` is a one-line delegation with no branch on which variant carries a body, so a variant that gains one is carried the day it lands. `Compacted` stays empty, which is the whole truth rather than a missing encoder.
 
 The stream itself is here — pushed `Event` frames, MI-18 attribution, MI-19's
 ordered `Compacted` marker, §11.10's three-rung ladder, and `event.resync`'s
@@ -367,7 +367,7 @@ response exists. A locally-mutating operation such as `session.connect` reaches
 no C1 request and has no `net_seq`. Reporting S-47's generation there, as this
 shell once did, tells a client it has read-your-writes when it has not.
 
-### 4. `twinvpn-gateway` has **no caller anywhere in the workspace**, so a headless host cannot be operated as a gateway through any interface this product has.
+### 4. ~~`twinvpn-gateway` has no caller anywhere in the workspace.~~ **CLOSED** (`ownership.md` §9.6 X-3). The MI catalogue gained a `gateway` noun and `twinvpn-core::gateway` is the caller, so ADR-0013 is reachable through the only interface a headless host has. The noun appears in this CLI with no edit here, because the verb table is generated from the catalogue (MI-C1). `gateway.set` is refused by name for ADR-0013 MG-15's own reason: MG-15 refuses an over-committed configuration *at configuration time*, which needs a durable ceiling and a memory measurement this build does not have.
 
 This is the largest finding of the wave and it is **not this domain's to fix**.
 
