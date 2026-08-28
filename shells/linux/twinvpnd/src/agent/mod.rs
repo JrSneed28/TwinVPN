@@ -6,7 +6,10 @@
 //!
 //! Behind the `agent` feature, so `twinvpnctl` links none of it.
 
+pub mod authority;
+pub mod conn;
 pub mod endpoint;
+pub mod events;
 pub mod logging;
 pub mod peer;
 pub mod privilege;

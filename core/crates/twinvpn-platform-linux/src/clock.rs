@@ -354,8 +354,7 @@ mod tests {
         // readings go through the same code path, so the only difference between
         // them is the clock id — which is what makes the comparison meaningful.
         let boot = BootTimeElapsedClock::read_micros_of(libc::CLOCK_BOOTTIME).expect("boottime");
-        let mono =
-            BootTimeElapsedClock::read_micros_of(libc::CLOCK_MONOTONIC).expect("monotonic");
+        let mono = BootTimeElapsedClock::read_micros_of(libc::CLOCK_MONOTONIC).expect("monotonic");
         assert!(
             boot >= mono,
             "CLOCK_BOOTTIME ({boot} us) must never read behind CLOCK_MONOTONIC \

@@ -29,19 +29,24 @@
 //! > Exactly one process per host is the network and policy authority… A second
 //! > process claiming any of them is `INTERNAL.INVARIANT_VIOLATED`.
 //!
-//! There is no second holder here: the endpoint's bind-and-rename is the mutual
-//! exclusion, and a second agent that reached step 6 would take the name from
-//! the first — which is why the first also holds the listening socket, and a
-//! client that connects reaches whichever agent owns the fd. Making that a hard
-//! refusal needs a lock file whose ownership survives a crash; it is **not** in
-//! this wave and is reported.
+//! Step **3c** is where that becomes true. Wave 1 relied on the endpoint's
+//! bind-and-rename, which is atomic on the *name* — so a second agent reaching
+//! step 6 **won** the name while the first kept its listening socket, its
+//! `CAP_NET_ADMIN` and its belief that it was the authority. Two processes were
+//! then programming one host's `table inet twinvpn` and one routing table 52.
+//!
+//! [`authority::take`] is a crash-surviving `flock(2)` on a file in the runtime
+//! directory, taken **before** the first privileged mutation of host state. The
+//! kernel releases it when the holder dies by any route, so no cleanup step
+//! stands between a crash and the successor's start (ADR-0012 KS-20).
 
 #![forbid(unsafe_code)]
 
 use std::sync::Arc;
 
 use twinvpnd::agent::{
-    boot_artifact_present, endpoint, logging, peer, privilege, runtime, server, StartSequence,
+    authority, boot_artifact_present, conn, endpoint, events, logging, peer, privilege, runtime,
+    server, StartSequence,
 };
 use twinvpnd::mi;
 
@@ -164,6 +169,24 @@ fn start() -> Result<(), StartupRefusal> {
         });
     }
 
+    // ---- 3c. PS-1's lock --------------------------------------------------
+    //
+    // **Before the first privileged mutation of host state**, which is step 4b's
+    // arm. Two agents arming one host's nftables table is the race PS-1 exists
+    // to prevent, so the lock has to be held before the arm rather than before
+    // the endpoint bind. It is taken *after* the privilege check so that a host
+    // which would be refused for running as root is refused for that reason,
+    // rather than for a lock it could not have taken anyway.
+    //
+    // Bound to a NAMED local: `let _ = ...` would drop the guard immediately and
+    // release the exclusion in the same statement that acquired it.
+    let _authority = authority::take(&runtime_dir()).map_err(|e| StartupRefusal {
+        code: e.reason_code(),
+        specified: e.specified_code(),
+        detail: e.to_string(),
+        exit: 71,
+    })?;
+
     // ---- 4. the adapter, and the capability probe -------------------------
     let adapter = Arc::new(build_adapter());
     let adapter_posture = adapter.posture();
@@ -249,6 +272,10 @@ fn start() -> Result<(), StartupRefusal> {
              intended. This fails closed."
         );
     }
+    // **§11.10's event stream.** One fan-out for the process, because F-5 gives
+    // the core exactly one ordered stream and `next_event` pops from it — so
+    // there is exactly one reader, and it is the drain thread below.
+    let fanout = Arc::new(events::Fanout::new());
     let context = Arc::new(server::ServerContext {
         core: Arc::clone(&core),
         env,
@@ -256,7 +283,26 @@ fn start() -> Result<(), StartupRefusal> {
         platform_ctx: platform_ctx(),
         // F-6 / S-47: exactly one thread holds the core for mutation at a time.
         submission: Arc::new(tokio::sync::Mutex::new(())),
+        fanout: Arc::clone(&fanout),
     });
+
+    // A `std::thread`, not a `tokio::spawn`: `Core::next_event` blocks on a
+    // condvar, and blocking a runtime worker on a condvar is how a runtime
+    // deadlocks. The core's own documentation says the same — "called from the
+    // shell's drain thread, which is not inside the core's runtime".
+    let drain = {
+        let core = Arc::clone(&core);
+        let fanout = Arc::clone(&fanout);
+        std::thread::Builder::new()
+            .name("twinvpn-drain".to_owned())
+            .spawn(move || events::drain(&core, &fanout, DRAIN_TIMEOUT))
+            .map_err(|e| StartupRefusal {
+                code: "PLATFORM.ADAPTER_UNAVAILABLE",
+                specified: "PLATFORM.ADAPTER_UNAVAILABLE",
+                detail: e.to_string(),
+                exit: 71,
+            })?
+    };
 
     // The daemon's `main` is the one place `block_on` is legitimate:
     // `twinvpn_env::Runtime`'s own documentation says so ("The entry point the
@@ -266,6 +312,7 @@ fn start() -> Result<(), StartupRefusal> {
     let mut outcome = Ok(());
     {
         let slot = &mut outcome;
+        let context = Arc::clone(&context);
         twinvpn_env::Runtime::block_on(
             tokio_runtime.as_ref(),
             Box::pin(async move {
@@ -273,7 +320,36 @@ fn start() -> Result<(), StartupRefusal> {
             }),
         );
     }
+
+    // The drain is joined rather than detached: `serve_forever` closed the
+    // fan-out on its way out, and a drain still inside `next_event` would
+    // otherwise be reading a core the process is about to drop.
+    fanout.close();
+    core.wake();
+    let _ = drain.join();
     outcome
+}
+
+/// How long the drain thread sits in one `Core::next_event` call.
+///
+/// **Not a timeout on anything the core decides.** CD-2 makes timeouts the
+/// core's, and this is not one: `next_event` has no deadline semantics — it is a
+/// blocking read that returns `None` on timeout, on wake, or on close, and the
+/// core's own documentation says a caller distinguishes those "by asking again".
+/// The value bounds how long the thread sits in one call so that shutdown is
+/// observed promptly, and nothing else depends on it.
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The runtime directory, from the endpoint's own parent.
+///
+/// CB-7: the path is **injected**, never discovered — it is
+/// `RuntimeDirectory=twinvpn`'s, reached through the same
+/// `TWINVPN_MGMT_SOCKET` the endpoint uses, so the lock and the endpoint can
+/// never end up in different directories.
+fn runtime_dir() -> std::path::PathBuf {
+    mi::socket_path()
+        .parent()
+        .map_or_else(|| std::path::PathBuf::from(mi::SOCKET_DIR), Into::into)
 }
 /// §11.6 step (2), delegated to the library so it is testable.
 fn arm_at_startup(
@@ -421,7 +497,7 @@ async fn serve_forever(
                     Ok((stream, _)) => {
                         let context = Arc::clone(&context);
                         tokio::spawn(async move {
-                            if let Err(error) = server::serve(context, stream).await {
+                            if let Err(error) = conn::serve(context, stream).await {
                                 tracing::debug!(
                                     target: "twinvpn.mi",
                                     reason_code = error.reason_code(),
@@ -448,6 +524,11 @@ async fn serve_forever(
     // so a client that connects during the drain gets `MGMT.UNAVAILABLE` rather
     // than a successful connect and a hang (§10.3).
     endpoint::remove(&path);
+    // The event stream closes before the core does, so every per-connection pump
+    // wakes, finds it closed and returns — and every dispatcher still waiting
+    // for a command body is settled rather than left hanging. CB-6 is untouched:
+    // this closes queues, not the installed ruleset.
+    context.fanout.close();
     agent.shutdown();
     Ok(())
 }

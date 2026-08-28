@@ -17,16 +17,17 @@
 //! and it uses both privileges only where the alternative is a syscall the core
 //! cannot make.
 //!
-//! # The twenty-five `unsafe` blocks, and what each is for
+//! # The twenty-six `unsafe` blocks, and what each is for
 //!
 //! | Module | Blocks | What they are, and the invariant |
 //! |---|---|---|
 //! | [`sock`] | 14 | the single `setsockopt` call site; the zeroed `sockaddr_storage` and `msghdr` that `libc`'s private padding makes unconstructible in safe code; the `recvmsg`; the `cmsg` walk (`CMSG_FIRSTHDR`/`NXTHDR`/`DATA`/`LEN`, the two `copy_nonoverlapping`s, each guarded by a length check against `CMSG_LEN` **first**); and the two `sockaddr_in`/`in6` copies, each width-checked against the kernel-supplied `msg_namelen` |
 //! | [`netlink`] | 6 | `socket`, `bind`, `send`, `recv`, and the zeroed `sockaddr_nl` — a fresh owned fd, and live buffers of their declared lengths |
 //! | [`tun`] | 3 | `ioctl(TUNSETIFF)` on an open `/dev/net/tun` fd with a live 40-byte `ifreq`, and the `read`/`write` on an open tun fd with a live slice of its true length |
+//! | [`lock`] | 1 | `flock(LOCK_EX\|LOCK_NB)` on a live borrowed fd — two `c_int`s by value, dereferencing nothing. PS-1's crash-surviving exclusion |
 //! | [`clock`] | 2 | `clock_gettime(CLOCK_BOOTTIME)` into a local `timespec`, and `getrandom(2)` into a slice this call holds exclusively — the two platform primitives CD-3's W-36 exemption places here (`cd3_crate_may_read_platform_primitives`) |
 //!
-//! **Every one carries a `// SAFETY:` comment naming its invariant** — 25 of 25,
+//! **Every one carries a `// SAFETY:` comment naming its invariant** — 26 of 26,
 //! and every hand-written C layout is asserted against `libc`'s own `size_of` in
 //! the owning module's tests, so a drifting offset fails the build rather than
 //! corrupting a route.
@@ -79,6 +80,7 @@ pub mod addr;
 pub mod clock;
 pub mod custody;
 pub mod iface;
+pub mod lock;
 pub mod netcfg;
 pub mod netlink;
 pub mod nft;
