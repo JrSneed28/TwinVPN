@@ -197,6 +197,11 @@ fn exact16(b: &[u8]) -> Option<[u8; 16]> {
 mod tests {
     use super::*;
 
+    /// The published §9.1 and §11.7 vectors (W-33). A plain public module in
+    /// `twinvpn-crypto`, so there is one copy and both ends of the wire fail
+    /// together rather than separately.
+    use twinvpn_crypto::blake2s::vectors;
+
     fn key() -> IssuerPublicKey {
         IssuerPublicKey {
             key_id: "k1".into(),
@@ -275,35 +280,23 @@ mod tests {
         assert_ne!(tag, [0_u8; 8], "an all-zero tag would be a silent failure");
     }
 
-    /// `K_leg` for the shared golden vector — `twinvpn-crypto`'s own fixture key.
-    const PIN_KEY: [u8; 32] = [0x4b; 32];
-
-    /// The accepted reading: `BLAKE2s-256(key)[0..8]`, from `twinvpn-crypto`'s
-    /// `the_frame_mac_truncates_and_is_not_a_short_output_blake2s`.
-    const TRUNCATED_READING: [u8; 8] = [0xd0, 0x4f, 0x9b, 0xe2, 0xb5, 0x7f, 0xc1, 0x5b];
-
-    /// The reading ADR-0005 §9.1 **rejects**: `BLAKE2s(digest_length = 8)`,
-    /// recorded so the divergence is visible in the source, not only in a comment.
-    const SHORT_OUTPUT_READING: [u8; 8] = [0x77, 0x42, 0x14, 0xe9, 0x63, 0x46, 0xc3, 0xfa];
-
     /// The golden vector's frame, built through **this crate's own assembler**.
     ///
-    /// Deliberately not a literal copy of `twinvpn-crypto`'s fixture bytes: the
-    /// cross-crate risk is that the two disagree about §9.1's field order or
-    /// widths, and only building it through [`crate::frame::RelayFrame::mac_input`]
-    /// can catch that.
+    /// The **field** constants come from `twinvpn_crypto::blake2s::vectors`
+    /// (W-33); the assembled `FRAME_MAC_INPUT` deliberately does **not**. The
+    /// cross-crate risk is a disagreement about §9.1's field order or widths, and
+    /// only building the frame through [`crate::frame::RelayFrame`] and comparing
+    /// can catch that — importing the assembled bytes as a literal would prove
+    /// only that this crate can copy.
     fn pin_frame() -> crate::frame::RelayFrame {
         use bytes::Bytes;
-        let mut v = vec![0x01_u8, 1 << 4]; // type = DATA, ver = 1, flags = 0
-        v.extend_from_slice(&0x0708_u16.to_be_bytes()); // counter_low
-        v.extend_from_slice(&0xdead_beef_u32.to_be_bytes()); // flow_id
+        let mut v = vec![vectors::FRAME_TYPE_DATA, vectors::FRAME_VER_FLAGS];
+        v.extend_from_slice(&vectors::FRAME_COUNTER_LOW.to_be_bytes());
+        v.extend_from_slice(&vectors::FRAME_FLOW_ID.to_be_bytes());
         v.extend_from_slice(&[0x00; 8]); // auth_tag, not part of the MAC input
-        v.extend_from_slice(&[0xab; 16]); // payload
+        v.extend_from_slice(&vectors::FRAME_PAYLOAD);
         crate::frame::RelayFrame::parse(Bytes::from(v)).expect("parses")
     }
-
-    /// The golden vector's `counter_full`.
-    const PIN_COUNTER: u64 = 0x0102_0304_0506_0708;
 
     #[test]
     fn this_crates_mac_input_matches_the_shared_golden_vector() {
@@ -311,18 +304,26 @@ mod tests {
         // `twinvpn-crypto` owns the MAC and the truncation, this crate owns the
         // frame layout, and if the two disagree about §9.1's order or widths every
         // legitimate frame is dropped while both sides look correct.
-        let mut expected = Vec::new();
-        expected.push(0x01_u8); // type
-        expected.push(1 << 4); // ver | flags
-        expected.extend_from_slice(&PIN_COUNTER.to_be_bytes()); // counter_full, BE
-        expected.extend_from_slice(&0xdead_beef_u32.to_be_bytes()); // flow_id, BE
-        expected.extend_from_slice(&[0xab; 16]); // payload, last and variable
-        assert_eq!(pin_frame().mac_input(PIN_COUNTER), expected);
+        assert_eq!(
+            pin_frame().mac_input(vectors::FRAME_COUNTER_FULL),
+            vectors::FRAME_MAC_INPUT,
+            "this crate's frame assembler disagrees with the published §9.1 vector"
+        );
 
-        // And nothing is length-prefixed: the assembled input is exactly the sum
-        // of its fields. Prefixing a specified wire format would make this relay
+        // Nothing is length-prefixed: the assembled input is exactly the sum of
+        // its fields. Prefixing a specified wire format would make this relay
         // reject every legitimate frame (the opposite call from ADR-0020 §11.5).
-        assert_eq!(expected.len(), 1 + 1 + 8 + 4 + 16);
+        assert_eq!(
+            vectors::FRAME_MAC_INPUT.len(),
+            1 + 1 + 8 + 4 + vectors::FRAME_PAYLOAD.len()
+        );
+
+        // And the wire's truncated counter really is the low half of the one the
+        // MAC covers, so the vector exercises the wrap case it claims to.
+        assert_eq!(
+            u64::from(vectors::FRAME_COUNTER_LOW),
+            vectors::FRAME_COUNTER_FULL & 0xffff
+        );
     }
 
     #[test]
@@ -332,26 +333,38 @@ mod tests {
         // BLAKE2s(digest_length = 32)[0..8] are different functions over the same
         // key and the same input. ADR-0005 §9.1's "truncated" is the SECOND.
         //
-        // `twinvpn-crypto` pins this on the producer side; it is pinned again
-        // here because the consequence lands on this side — a relay computing the
-        // other reading verifies nothing while looking correctly configured.
+        // Both readings come from the shared module, so the `assert_ne!` below is
+        // pinned to THIS key and THIS input. An earlier revision of this test held
+        // its own copies and pinned a pair taken from a *different* key and input,
+        // which made the discrimination pass for free.
         let p = CryptoProvider::new();
         let tag = p
-            .frame_mac(&LegKey::new(PIN_KEY), &pin_frame().mac_input(PIN_COUNTER))
+            .frame_mac(
+                &LegKey::new(vectors::FRAME_MAC_KEY),
+                &pin_frame().mac_input(vectors::FRAME_COUNTER_FULL),
+            )
             .expect("bound");
 
         assert_eq!(
-            tag, TRUNCATED_READING,
+            tag,
+            vectors::FRAME_MAC_TAG,
             "the tag must be the leading eight bytes of the FULL 256-bit keyed MAC"
         );
         assert_ne!(
-            tag, SHORT_OUTPUT_READING,
+            tag,
+            vectors::FRAME_MAC_TAG_SHORT_OUTPUT_REJECTED,
             "the tag is a short-output BLAKE2s, which is a different function; \
              a relay computing it verifies nothing while looking configured"
         );
-        // The two readings genuinely differ for this vector, so the pair above is
-        // a real discrimination and not two assertions about the same value.
-        assert_ne!(TRUNCATED_READING, SHORT_OUTPUT_READING);
+    }
+
+    #[test]
+    fn the_shared_vectors_are_self_consistent() {
+        // The published constants agree with the implementation they describe, so
+        // importing them cannot silently drift from `frame_mac`. Worth calling
+        // from this side too: it is the assertion that would catch the shared
+        // module itself being regenerated wrongly.
+        vectors::self_consistency();
     }
 
     #[test]

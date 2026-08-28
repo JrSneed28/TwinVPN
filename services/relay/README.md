@@ -32,11 +32,12 @@ Four checkable properties, in [`tests/cannot_decrypt.rs`](tests/cannot_decrypt.r
 1. `the_key_inventory_is_exactly_three_items` — reads `src/crypto.rs` and
    `src/config.rs` and fails if a fourth key type appears anywhere.
 2. `no_decrypt_operation_exists_anywhere` — `RelayCrypto` declares exactly four
-   methods (`verify_signature`, `verify_frame_mac`, `frame_mac`, `digest16`) and
+   methods (`verify_statement`, `verify_frame_mac`, `frame_mac`, `digest16`) and
    nothing in the crate calls a decryption verb.
-3. `the_payload_type_has_no_reader` — the payload is
-   [`frame::Opaque`](src/frame.rs): no decode, no `Display`, no `Serialize`, and a
-   `Debug` that prints a length.
+3. `the_payload_type_has_no_reader` — the payload is a
+   `twinvpn_service_common::Verbatim` built through `Verbatim::from_opaque`: no
+   decode, no `Display`, no `Serialize`, and a `Debug` that prints a length, a
+   channel and the framing token.
 4. `the_payload_survives_forwarding_byte_for_byte` — over a corpus including
    bytes that *would* decode as protobuf with an unknown field, which is W-4's trap.
 
@@ -265,9 +266,10 @@ The relay is the stated exception (`infra/README.md` §6.3), and the reason is t
 a relay is not a component boundary in that sense — it is a forwarder that must
 not know what it forwards.
 
-**Payload capture is prevented structurally, not by filtering.** `frame::Opaque`
-has no `Display` and a `Debug` that prints a length, so an enclosing
-`#[derive(Debug)]` renders `Opaque(1200 bytes)`. `crypto::LegKey` wraps
+**Payload capture is prevented structurally, not by filtering.** The payload's
+`Verbatim` has no `Display` and a `Debug` that prints a length, a channel and the
+framing token, so an enclosing `#[derive(Debug)]` renders
+`Verbatim(1200 B on c1_c2_c7, opaque, <not rendered>)`. `crypto::LegKey` wraps
 `Secret<[u8; 32]>`.
 
 ---
@@ -297,18 +299,26 @@ flood of dropped frames.
 "truncated to 64 bits", and BLAKE2 parameterises output length *inside the
 initialisation block* — so `BLAKE2s(digest_length = 8)` and
 `BLAKE2s(digest_length = 32)[0..8]` are **different functions over the same key
-and the same input**. "Truncated" is the second. `twinvpn-crypto` pins both
-readings and names the rejected one; this crate pins it **again from the consumer
-side**, against the same published vector, because the consequence lands here — a
-relay computing the other reading verifies nothing while looking correctly
-configured.
+and the same input**. "Truncated" is the second. This crate pins it from the
+consumer side, because the consequence lands here — a relay computing the other
+reading verifies nothing while looking correctly configured.
 
-More important than either, and the assertion that actually catches a cross-crate
-divergence: `this_crates_mac_input_matches_the_shared_golden_vector` builds the
-vector's frame through **this crate's own** `RelayFrame::mac_input` and compares
-it byte for byte. `twinvpn-crypto` owns the MAC and the truncation; this crate
-owns the frame layout; if the two disagree about §9.1's field order or widths,
-every legitimate frame is dropped and both sides look correct.
+**Both readings are imported, not copied** (W-33). `twinvpn_crypto::blake2s::vectors`
+is a plain public module carrying the §9.1 and §11.7 vectors once, so the two
+ends of the wire fail together rather than separately. An earlier revision of this
+crate held its own copies and — pinning a rejected-reading pair taken from a
+*different* key and input — made the discrimination pass for free. Importing
+`FRAME_MAC_TAG` and `FRAME_MAC_TAG_SHORT_OUTPUT_REJECTED` means the `assert_ne!`
+is bound to *this* key and *this* input, and `vectors::self_consistency()` proves
+the published constants still agree with the implementation they describe.
+
+**The assembled `FRAME_MAC_INPUT` is deliberately *not* imported as a literal.**
+`this_crates_mac_input_matches_the_shared_golden_vector` imports the **field**
+constants, builds the frame through **this crate's own** `RelayFrame::mac_input`,
+and compares byte for byte. `twinvpn-crypto` owns the MAC and the truncation; this
+crate owns the frame layout; if the two disagree about §9.1's field order or
+widths, every legitimate frame is dropped and both sides look correct. Copying the
+assembled bytes in would prove only that this crate can copy.
 
 **The MAC input is not length-prefixed, deliberately.** §9.1's fields are
 fixed-width except `payload`, which is last, so the encoding is already
@@ -421,8 +431,8 @@ Stated here rather than discovered later.
 | bytes out equal bytes in, incl. protobuf-with-unknown-field | corpus test | **yes** |
 | protobuf framing refuses ciphertext, opaque framing carries it | both halves in one test | **yes** |
 | the payload bound clears the 1280 overlay floor | derivation + parse test | **yes** |
-| the frame MAC is a truncation, not a short-output BLAKE2s | shared golden vector, both readings | **yes** |
-| this crate's `mac_input` matches `twinvpn-crypto`'s vector | byte-for-byte | **yes** |
+| the frame MAC is a truncation, not a short-output BLAKE2s | `twinvpn-crypto`'s imported vector, both readings | **yes** |
+| this crate's `mac_input` matches the imported `FRAME_MAC_INPUT` | byte-for-byte, built by this crate | **yes** |
 | the MAC covers type, flags, full counter, `flow_id`, payload | six negative assertions | **yes** |
 | a forged or cross-key tag is refused | real constant-time verify | **yes** |
 | **a real frame traverses a real relay between two real sockets** | UDP loopback, real MAC both legs | **yes** |
