@@ -290,6 +290,41 @@ pub struct Succession {
     pub generation: u64,
 }
 
+/// What a verified `RevocationStatement` actually says, as **signed**.
+///
+/// R-4: `RevokeDeviceRequest.target_device_id` is an unsigned wire field, so
+/// without this the service verified an Owner signature and then revoked
+/// whatever the *caller* named. Replaying any Owner-signed revocation with a
+/// different wire target revoked an arbitrary device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revocation {
+    /// The device the **Owner** signed for. The only authority on the target.
+    pub target_device_id: [u8; 32],
+    /// The generation, or `None` meaning every generation.
+    pub target_identity_id: Option<[u8; 32]>,
+    /// Which `TwinNet` the Owner signed about.
+    pub twinnet_id: String,
+    /// From the `AUTH` domain, for the audit row.
+    pub reason_code: String,
+}
+
+/// What a verified `PolicyBundle` actually says, as **signed**.
+///
+/// R-4: `PolicyBundle.policy_version` on the wire is an unsigned hint, and the
+/// floor was advanced from it. An old signed bundle re-wrapped with a higher
+/// wire version is a **signed policy rollback**; `u64::MAX` permanently bricks
+/// every future bundle. The number that orders policy has to come from inside
+/// the signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyClaims {
+    /// Monotone. "A device MUST reject `<=` its high-water mark."
+    pub policy_version: u64,
+    /// The document lineage, constant across versions.
+    pub policy_id: String,
+    /// A floor, never a ceiling.
+    pub killswitch_floor: u64,
+}
+
 /// A statement whose signature verified **over the received octets**.
 #[derive(Debug, Clone)]
 pub struct Verified {
@@ -334,6 +369,16 @@ pub struct Verified {
     /// did not decode — a verifier reports what it read, and the handler decides
     /// what a missing successor means rather than being handed a default.
     pub succession: Option<Succession>,
+    /// What a `RevocationStatement` or `PairingRevocation` **signed**, for
+    /// those kinds only (R-4).
+    ///
+    /// The handler compares this against whatever the wire named. `None` for
+    /// every other kind, and `None` for a payload that did not decode — the
+    /// same "report what you read" rule [`Verified::succession`] follows, which
+    /// is what lets the handler refuse rather than be handed a default target.
+    pub revocation: Option<Revocation>,
+    /// What a `PolicyBundle` **signed**, for that kind only (R-4).
+    pub policy: Option<PolicyClaims>,
 }
 
 /// Why verification failed.
@@ -657,12 +702,14 @@ impl StatementVerifier for CryptoVerifier {
                         authority: signer.authority(),
                         signer_key_id: statement.key_id().map(hex_lower).unwrap_or_default(),
                         octets: octets.clone(),
-                        not_before_ms: 0,
+                        not_before_ms: not_before_of(expected, &statement),
                         not_after_ms: not_after_of(expected, &statement),
                         pairing_id: pairing_id_of(expected, &statement),
                         signer_delegation: holder.cloned(),
                         delegation: delegation_of(expected, &statement),
                         succession: succession_of(expected, &statement),
+                        revocation: revocation_of(expected, &statement),
+                        policy: policy_of(expected, &statement),
                     });
                 }
                 // Only a signature mismatch is worth trying the next anchor:
@@ -675,6 +722,45 @@ impl StatementVerifier for CryptoVerifier {
             }
         }
         Err(last)
+    }
+}
+
+/// Reads the statement's own `not_before_ms`, where its CDDL declares one.
+///
+/// # R-12
+///
+/// This used to be the literal `0`, on the line beside a decoded
+/// `not_after_ms`. Every `admit` therefore passed `now_ms < claim.not_before_ms`
+/// unconditionally, so the not-yet-valid gate did not exist in the shipped
+/// object at all — the nbf tests exercise [`testing::ScriptedVerifier`], which
+/// is `#[cfg(test)]`, so they were thorough against the wrong object.
+///
+/// The match has **no wildcard arm**, for the reason [`succession_of`] has none:
+/// `signed_statements.cddl` declares `not_before_ms` on exactly two statements
+/// (`device-identity-record` field 9 and `relay-capability-token` field 5), and
+/// this service admits neither. That is a fact about the frozen contract, not a
+/// decision this code gets to make silently — so each of the ten kinds names
+/// itself here, and a statement that later gains an nbf fails to compile until
+/// someone has decided whether to read it.
+fn not_before_of(
+    expected: StatementKind,
+    statement: &twinvpn_crypto::cose::VerifiedStatement,
+) -> u64 {
+    let _ = statement;
+    match expected {
+        // None of the ten kinds this service admits declares `not_before_ms`.
+        // Zero is "valid from the beginning of time", which is what a statement
+        // with no lower bound means — not "the check is skipped".
+        StatementKind::RevocationStatement
+        | StatementKind::PolicyBundle
+        | StatementKind::PairingAttestation
+        | StatementKind::IdentitySuccession
+        | StatementKind::TunnelKeyBinding
+        | StatementKind::RouteAdvertisement
+        | StatementKind::ExitNodeOffer
+        | StatementKind::RelayEpochFloor
+        | StatementKind::PairingRevocation
+        | StatementKind::OwnerDelegation => 0,
     }
 }
 
@@ -772,6 +858,86 @@ fn pairing_id_of(
         | StatementKind::RevocationStatement
         | StatementKind::PairingRevocation
         | StatementKind::TunnelKeyBinding => None,
+    }
+}
+
+/// Reads the target a revocation **signed**, and nothing else.
+///
+/// # R-4
+///
+/// `revoke` took its target from `RevokeDeviceRequest.target_device_id` — a
+/// wire field no signature covers. The Owner statement was verified and then
+/// never opened, so an attacker who obtained *any* Owner-signed revocation
+/// (they are distributed to every device by design) could re-wrap it naming a
+/// different device and the service would revoke that device instead.
+///
+/// The CDDL puts `target_device_id` at label 2 and requires it in the `crit`
+/// set, so a revocation that does not commit to its target is already
+/// unverifiable. This reads the committed value; the handler compares.
+///
+/// No wildcard arm, for the reason [`succession_of`] has none.
+fn revocation_of(
+    expected: StatementKind,
+    statement: &twinvpn_crypto::cose::VerifiedStatement,
+) -> Option<Revocation> {
+    match expected {
+        // Both share the CDDL shape — see `StatementKind::as_crypto_kind`.
+        StatementKind::RevocationStatement | StatementKind::PairingRevocation => {
+            twinvpn_crypto::statements::decode_revocation_statement(statement)
+                .ok()
+                .map(|r| Revocation {
+                    target_device_id: r.target_device_id,
+                    target_identity_id: r.target_identity_id,
+                    twinnet_id: r.twinnet_id,
+                    reason_code: r.reason_code,
+                })
+        }
+        StatementKind::PolicyBundle
+        | StatementKind::PairingAttestation
+        | StatementKind::IdentitySuccession
+        | StatementKind::TunnelKeyBinding
+        | StatementKind::RouteAdvertisement
+        | StatementKind::ExitNodeOffer
+        | StatementKind::RelayEpochFloor
+        | StatementKind::OwnerDelegation => None,
+    }
+}
+
+/// Reads the version a `PolicyBundle` **signed**, and nothing else.
+///
+/// # R-4
+///
+/// `put_policy` advanced the monotone floor from `PutPolicyRequest.bundle
+/// .policy_version`, which no signature covers. Re-wrapping last year's signed
+/// bundle with a higher wire version was therefore a **signed policy
+/// rollback**; wrapping any of them with `u64::MAX` advanced the floor past
+/// every version the Owner could ever sign again.
+///
+/// The CDDL requires `policy_version` in the `crit` set, so the signed value
+/// always exists for a bundle that verified at all.
+///
+/// No wildcard arm, for the reason [`succession_of`] has none.
+fn policy_of(
+    expected: StatementKind,
+    statement: &twinvpn_crypto::cose::VerifiedStatement,
+) -> Option<PolicyClaims> {
+    match expected {
+        StatementKind::PolicyBundle => twinvpn_crypto::statements::decode_policy_bundle(statement)
+            .ok()
+            .map(|b| PolicyClaims {
+                policy_version: b.policy_version,
+                policy_id: b.policy_id,
+                killswitch_floor: b.killswitch_floor,
+            }),
+        StatementKind::RevocationStatement
+        | StatementKind::PairingRevocation
+        | StatementKind::PairingAttestation
+        | StatementKind::IdentitySuccession
+        | StatementKind::TunnelKeyBinding
+        | StatementKind::RouteAdvertisement
+        | StatementKind::ExitNodeOffer
+        | StatementKind::RelayEpochFloor
+        | StatementKind::OwnerDelegation => None,
     }
 }
 
@@ -991,6 +1157,12 @@ pub mod testing {
         pub delegation: Option<super::Delegation>,
         /// The successor an `IdentitySuccession` will be reported as naming.
         pub succession: Option<super::Succession>,
+        /// The target a revocation will be reported as having **signed** (R-4).
+        /// `None` means "the payload did not decode", which every handler must
+        /// refuse rather than fall back to the wire's target.
+        pub revocation: Option<super::Revocation>,
+        /// The version a `PolicyBundle` will be reported as having **signed**.
+        pub policy: Option<super::PolicyClaims>,
     }
 
     impl ScriptedVerifier {
@@ -1005,6 +1177,8 @@ pub mod testing {
                 signer_delegation: None,
                 delegation: None,
                 succession: None,
+                revocation: None,
+                policy: None,
             }
         }
 
@@ -1019,6 +1193,8 @@ pub mod testing {
                 signer_delegation: None,
                 delegation: None,
                 succession: None,
+                revocation: None,
+                policy: None,
             }
         }
 
@@ -1063,6 +1239,20 @@ pub mod testing {
             self.succession = Some(succession);
             self
         }
+
+        /// Reports the target a revocation **signed** (R-4).
+        #[must_use]
+        pub fn revoking(mut self, revocation: super::Revocation) -> Self {
+            self.revocation = Some(revocation);
+            self
+        }
+
+        /// Reports the version a `PolicyBundle` **signed** (R-4).
+        #[must_use]
+        pub fn publishing(mut self, policy: super::PolicyClaims) -> Self {
+            self.policy = Some(policy);
+            self
+        }
     }
 
     impl StatementVerifier for ScriptedVerifier {
@@ -1090,6 +1280,8 @@ pub mod testing {
                 signer_delegation: self.signer_delegation.clone(),
                 delegation: self.delegation.clone(),
                 succession: self.succession,
+                revocation: self.revocation.clone(),
+                policy: self.policy.clone(),
             })
         }
     }
@@ -1100,7 +1292,7 @@ mod tests {
     use super::testing::ScriptedVerifier;
     use super::{
         admit, opaque_statement, CryptoVerifier, RefuseUnverifiable, SignerKey, SigningAuthority,
-        StatementKind,
+        StatementKind, StatementVerifier,
     };
 
     fn octets() -> twinvpn_service_common::forward::Verbatim {
@@ -1192,6 +1384,94 @@ mod tests {
         )
         .expect_err("it does not carry POLICY");
         assert_eq!(err.code().as_str(), "AUTH.UNEXPECTED_DELEGATION");
+    }
+
+    /// R-12: the validity window, exercised against the **shipped** verifier.
+    ///
+    /// Every existing nbf/exp test drives [`ScriptedVerifier`], which is
+    /// `#[cfg(test)]` — so the window was tested thoroughly against an object
+    /// that never ships. These two drive `CryptoVerifier` through a real ORK →
+    /// OSK chain and real ES256 signatures.
+    #[test]
+    fn the_shipped_verifier_reads_the_signed_expiry_not_the_callers_word() {
+        let root = fixture(b"root");
+        let signing = fixture(b"osk-policy");
+        // The DELEGATION expiry is the one the CDDL declares, at label 6.
+        let delegation =
+            ork_signed_delegation(&root, &signing, "osk-policy", &["POLICY"], 1, 5_000);
+        let verifier = CryptoVerifier::with_delegations(&[root.cose_key()], &[delegation], 1)
+            .expect("the chain loads");
+        let statement = signed(&signing);
+
+        assert!(
+            admit(
+                &verifier,
+                &statement,
+                StatementKind::PolicyBundle,
+                4_999,
+                SignerKey::OwnerAnchors,
+            )
+            .is_ok(),
+            "inside the signed window"
+        );
+        let err = admit(
+            &verifier,
+            &statement,
+            StatementKind::PolicyBundle,
+            5_001,
+            SignerKey::OwnerAnchors,
+        )
+        .expect_err("past the signed window");
+        assert_eq!(err.code().as_str(), "AUTH.CRED_EXPIRED");
+    }
+
+    #[test]
+    fn the_shipped_verifier_reports_a_not_before_for_every_kind_it_admits() {
+        // `signed_statements.cddl` declares `not_before_ms` on exactly two
+        // statements — `device-identity-record` (9) and
+        // `relay-capability-token` (5) — and this service admits neither. So
+        // the honest answer for all ten is 0, "valid from the beginning of
+        // time", and `admit`'s `now_ms < not_before_ms` gate is live rather
+        // than dead: at `now_ms == 0` it is evaluated and passes.
+        //
+        // `not_before_of`'s match carries no wildcard arm, so a kind that later
+        // gains an nbf cannot reach this assertion without someone deciding to
+        // read it.
+        let root = fixture(b"root");
+        let signing = fixture(b"osk-all");
+        let delegation = ork_signed_delegation(
+            &root,
+            &signing,
+            "osk-all",
+            &["ENROLL", "REVOKE", "POLICY", "DELEGATE", "ADMINISTER"],
+            1,
+            0,
+        );
+        let verifier = CryptoVerifier::with_delegations(&[root.cose_key()], &[delegation], 1)
+            .expect("the chain loads");
+        let statement = signed(&signing);
+
+        for kind in [
+            StatementKind::RevocationStatement,
+            StatementKind::PolicyBundle,
+            StatementKind::RelayEpochFloor,
+            StatementKind::PairingRevocation,
+        ] {
+            let claim = verifier
+                .verify(&statement, kind, 0, SignerKey::OwnerAnchors)
+                .expect("the OSK signed it");
+            assert_eq!(
+                claim.not_before_ms,
+                0,
+                "{} declares no not_before_ms in the frozen CDDL",
+                kind.as_str()
+            );
+            assert!(
+                admit(&verifier, &statement, kind, 0, SignerKey::OwnerAnchors).is_ok(),
+                "{} must be admissible at t=0",
+                kind.as_str()
+            );
+        }
     }
 
     #[test]

@@ -49,7 +49,7 @@
 //!
 //! | Where the panic is | What happens | Why |
 //! |---|---|---|
-//! | Rust marshalling on **this** side of a call — building a slice, collecting a sink, decoding UTF-8 | caught by [`SwiftHost::guarded`], reported as [`HostStatus::NotAttached`] | ordinary `catch_unwind` |
+//! | Rust marshalling on **this** side of a call — building a slice, collecting a sink, decoding UTF-8 | caught by `SwiftHost::guarded`, reported as [`HostStatus::NotAttached`] | ordinary `catch_unwind` |
 //! | Inside a **Swift** callback | cannot occur as a Rust unwind | Swift has no Rust panics; a Swift fatal error terminates the process before Rust sees anything |
 //! | Inside a **Rust `extern "C"`** function reached through the vtable | **the process aborts**, and `catch_unwind` around the call never runs | since Rust 1.71 an `extern "C"` function that unwinds aborts at the ABI boundary. The guard is on the wrong side of that boundary to help |
 //!

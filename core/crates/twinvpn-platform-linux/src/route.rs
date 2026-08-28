@@ -147,7 +147,7 @@ enum Applied {
 
 /// Everything this module put on the host for one generation.
 ///
-/// Held by the caller so [`unwind`] can remove exactly what was added — the
+/// Held by the caller so `unwind` can remove exactly what was added — the
 /// §5.5 rule that "TwinVPN MUST NOT delete or modify routes it did not create",
 /// expressed as a data structure rather than as care.
 #[derive(Debug, Clone, Default)]

@@ -52,7 +52,7 @@
 //!
 //! The classification, the notification decode, the facts assembly and the drop
 //! accounting are plain functions over plain data, tested on the Linux host this
-//! crate was written on. Only [`imp`] — `GetAdaptersAddresses` and the three
+//! crate was written on. Only `imp` — `GetAdaptersAddresses` and the three
 //! registrations — needs Windows, and **it has never executed**.
 
 use std::pin::Pin;

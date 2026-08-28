@@ -114,6 +114,16 @@ cargo build --release -p twinvpn-platform-android --target aarch64-linux-android
 
 cp target/aarch64-linux-android/release/libtwinvpn_platform_android.so \
    ../shells/android/app/src/main/jniLibs/arm64-v8a/
+
+# The SECOND library: the core's JNI carriage. Two `.so`s, not one, because
+# CD-I5 forbids `twinvpn-platform-android` to name `twinvpn-core` — a platform
+# implementation that could reach the composition root would let a decision
+# migrate downward into it. `System.loadLibrary` loads both.
+cd ../shells/android/jni
+cargo build --release --target aarch64-linux-android
+
+cp target/aarch64-linux-android/release/libtwinvpn_android_jni.so \
+   ../app/src/main/jniLibs/arm64-v8a/
 ```
 
 Two things a builder must check, because both fail on a user's device rather
@@ -206,18 +216,24 @@ a packet capture.
 Stated plainly rather than left to be discovered.
 
 1. **Nothing here compiles.** §1.
-2. **The core event stream is not bound.** `core/CoreClient.kt` is a stub, and
-   the reason is a contract gap rather than a shortcut: `tw_core_submit` takes
-   *"an encoded command from the same command set the local management interface
-   carries"*, and **`contracts/` defines no such message** (OQ-2 excluded
-   `mgmt.proto`; recorded as `ownership.md` §8 **W-38**). `shells/linux` does not
-   hit this because it links the Rust crates and calls typed constructors; a
-   Kotlin shell cannot. Inventing an encoding here would create the second
-   vocabulary OQ-2 exists to prevent, in the shell least able to keep it in step.
-   **Raised as a cross-boundary request; not worked around.**
-   Consequence: the UI renders nothing yet, the notification renders its
-   placeholder, and the quick-settings tile is `STATE_UNAVAILABLE`. Each is the
-   fail-safe value, and none is a fabricated status.
+2. **The core event stream is bound; the UI's subscription to it is not.**
+   `core/CoreClient.kt` used to be a stub, and the recorded reason —
+   `contracts/` defining no command or event message for `tw_core_submit` to
+   carry (**W-38**) — is **stale**. M-1 and M-2 closed its premise: both
+   directions now carry the management-interface frame every other carriage
+   carries, a four-byte big-endian length and UTF-8 JSON, so a Kotlin shell
+   decodes it and links no Rust type. No `mgmt.proto` was needed, which was
+   OQ-2's whole objection, and nothing here invents an encoding.
+
+   What is bound: `NativeBridge` declares `nativeCoreCreate`, `nativeCoreSubmit`,
+   `nativeCoreNextEvent`, `nativeCoreWake`, `nativeCoreDestroy` and
+   `nativeRenderDiagnostic` over `shells/android/jni`; `TwinVpnService` creates a
+   core and `CoreClient` drains its one ordered stream on a thread of its own.
+
+   What is **not**: the app process does not yet subscribe. The service owns the
+   `CoreClient` and the UI is a different process, so the stream has to cross a
+   binder to reach `TwinVpnApp`. Until it does, the UI renders "nothing has been
+   established" — the fail-safe value, and not a fabricated status.
 3. **`SocketKeepalive` is not bound to the platform API.**
    `SocketKeepaliveHolder` logs and returns. The API needs a connected
    `DatagramSocket` object and the socket lives on the Rust side (§10.4 puts the

@@ -35,11 +35,16 @@ internal enum class Destination { STATUS, PEERS, PAIRING, DIAGNOSTICS }
  * which is a real state and is rendered as such — never as "connected" and never
  * as "disconnected", because neither has been established.
  *
- * In this wave it stays `null`: `CoreClient` cannot subscribe, because
- * `contracts/` defines no command or event message for `tw_core_submit` to carry
- * (W-38). That is a reported gap rather than a stub with a fake, and the UI is
- * written so the fix is one binding rather than a rewrite — nothing below
- * synthesises a status.
+ * `CoreClient` now drives the stream: both directions carry the
+ * management-interface frame every other carriage carries (M-1/M-2 closed W-38's
+ * premise — the envelope is JSON behind a four-byte length, so a Kotlin shell
+ * decodes it and links no Rust type).
+ *
+ * What this composable still lacks is the WIRING from that stream to here: the
+ * service owns the `CoreClient` and the app process is a different one, so a
+ * subscription has to cross a binder. Until it does, `rendered` stays `null` and
+ * is rendered as "nothing has been established" — never as "connected" and never
+ * as "disconnected". Nothing below synthesises a status.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,8 +58,9 @@ internal fun TwinVpnApp(
 ) {
     var destination by remember { mutableStateOf(Destination.STATUS) }
 
-    // The core has published nothing yet. See the function documentation: this
-    // is honest rather than convenient.
+    // The core has published nothing THIS PROCESS has seen. See the function
+    // documentation: honest rather than convenient, and a `null` here is
+    // rendered as "not established" rather than as either outcome.
     val rendered: Rendered? = null
 
     Scaffold(

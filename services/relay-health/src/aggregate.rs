@@ -47,46 +47,19 @@ pub struct SelfReport {
 }
 
 /// `relay.proto HealthState`, with its ADR-0006 §11.2 score delta.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum HealthState {
-    /// Reachable and under the degraded threshold. Delta 0.
-    Healthy,
-    /// Reachable but over `TWINVPN_RELAYHEALTH_DEGRADED_RTT_MS`, or heavily
-    /// loaded. Delta −40.
-    Degraded,
-    /// Not answering its admin probe. Delta −150. **Still a candidate.**
-    Unhealthy,
-    /// Never heard from, or the observation is stale. Delta **0**.
-    #[default]
-    Unknown,
-}
-
-impl HealthState {
-    /// The score delta this state contributes to ADR-0006 §11.2's ranking.
-    ///
-    /// This is the **only** thing a `HealthState` can be turned into. There is no
-    /// `is_healthy`, no `is_usable` and no `Into<bool>`, because S-10 must never
-    /// gate a connection attempt.
-    #[must_use]
-    pub const fn score_delta(self) -> i32 {
-        match self {
-            HealthState::Healthy | HealthState::Unknown => 0,
-            HealthState::Degraded => -40,
-            HealthState::Unhealthy => -150,
-        }
-    }
-
-    /// The `TWINVPN_RELAYHEALTH_STATES` spelling, for a log line.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            HealthState::Healthy => "HEALTHY",
-            HealthState::Degraded => "DEGRADED",
-            HealthState::Unhealthy => "UNHEALTHY",
-            HealthState::Unknown => "UNKNOWN",
-        }
-    }
-}
+///
+/// **W-20's disposition, executed (R-14).** This module used to hand-write a
+/// FOUR-variant copy of the frozen five-variant enum, re-encoding §11.2's
+/// deltas as literals. The omitted variant was `HEALTH_STATE_UNSPECIFIED`, the
+/// proto3 zero an unset field decodes to — the one value a service reading
+/// another party's report is most likely to meet, and the one a four-variant
+/// model has to invent an answer for.
+///
+/// This is a re-export of `twinvpn-types`' canonical enum. `score_delta` and
+/// `as_str` come from there, so the numbers this service ranks by and the ones
+/// the client ranks by are the same definition rather than two that agree
+/// today.
+pub use twinvpn_types::state::HealthState;
 
 /// How a report becomes a state.
 #[derive(Debug, Clone, Copy)]

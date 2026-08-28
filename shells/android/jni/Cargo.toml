@@ -1,0 +1,48 @@
+# The Android shell's JNI carriage for `twinvpn.h`.
+#
+# ADR-0018 §11.12 puts "/shells/android/  Kotlin app + Rust JNI"; this is the
+# Rust half's *core* side. `twinvpn-platform-android` is the other half and is
+# deliberately a different crate: CD-I5 forbids a `twinvpn-platform-*` crate to
+# name `twinvpn-core`, and that arrow must not be inverted to save a `.so`.
+#
+# CB-2: a shell holds NO decision. Everything here marshals — a `ByteArray`
+# becomes a `tw_slice`, a `tw_buf` becomes a `ByteArray`, and nothing in
+# between is interpreted.
+#
+# THIS MANIFEST IS OWNED BY THE INTEGRATION LEAD.
+[workspace]
+resolver = "2"
+members = ["."]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.90"
+license      = "Apache-2.0"
+repository   = "https://github.com/twinvpn/twinvpn"
+
+[package]
+name    = "twinvpn-android-jni"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the Android JNI carriage for twinvpn.h (ADR-0018 §11.12)"
+publish = false
+
+[lib]
+name = "twinvpn_android_jni"
+# `cdylib` only. `System.loadLibrary` wants a shared object, and an `rlib`
+# alongside it would invite a second crate to link the ABI a second time.
+crate-type = ["cdylib"]
+
+[dependencies]
+# The ABI OF RECORD, in-process. This crate calls `tw_core_create`,
+# `tw_core_submit`, `tw_core_next_event`, `tw_core_wake` and `tw_core_destroy`
+# through their Rust declarations rather than through the C header, because it
+# is in the same address space and linking the header twice would give one
+# process two copies of the surface F-1 makes a permanent obligation.
+twinvpn-ffi = { path = "../../../core/crates/twinvpn-ffi" }
+
+jni = "0.21"

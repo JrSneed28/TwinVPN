@@ -431,4 +431,21 @@ impl HealthState {
             HealthState::Healthy | HealthState::Degraded | HealthState::Unhealthy
         )
     }
+
+    /// The `TWINVPN_RELAYHEALTH_STATES` spelling, for a log line or a metric
+    /// label.
+    ///
+    /// The `HEALTH_STATE_` prefix of the proto enumerator is dropped, which is
+    /// the form the relay-health service's own environment contract uses. Five
+    /// arms, so a renderer cannot quietly omit the zero value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            HealthState::Unspecified => "UNSPECIFIED",
+            HealthState::Healthy => "HEALTHY",
+            HealthState::Degraded => "DEGRADED",
+            HealthState::Unhealthy => "UNHEALTHY",
+            HealthState::Unknown => "UNKNOWN",
+        }
+    }
 }

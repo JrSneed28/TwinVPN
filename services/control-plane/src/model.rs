@@ -226,7 +226,14 @@ pub struct DocumentRecord {
 }
 
 /// S-30: a `RelayCapabilityToken` issuance record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// # `Debug` is written by hand (R-9)
+///
+/// `octets` is a complete, live `RelayCapabilityToken` — a bearer credential.
+/// A derived `Debug` rendered the whole replayable token into any log line or
+/// assertion failure that touched a `RelayTokenRecord`, or any of the several
+/// `#[derive(Debug)]` types that hold one (`NetState`, `Mutation`).
+#[derive(Clone, PartialEq, Eq)]
 pub struct RelayTokenRecord {
     /// Whose token.
     pub device_id: DeviceKey,
@@ -236,6 +243,19 @@ pub struct RelayTokenRecord {
     pub octets: Vec<u8>,
     /// `limits.json relay.token_lifetime_ms` from issuance.
     pub not_after_ms: u64,
+}
+
+impl std::fmt::Debug for RelayTokenRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayTokenRecord")
+            .field("device_id", &self.device_id)
+            .field("epoch", &self.epoch)
+            // NOT the token. A bearer credential has no debugging value that
+            // its length does not also carry.
+            .field("octets_len", &self.octets.len())
+            .field("not_after_ms", &self.not_after_ms)
+            .finish()
+    }
 }
 
 /// ADR-0008 N-5's dedup record.

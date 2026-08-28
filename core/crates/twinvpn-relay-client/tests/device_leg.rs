@@ -470,13 +470,22 @@ fn a_stale_server_ranking_decays_to_zero_influence_over_24_hours() {
 
 #[test]
 fn health_state_is_a_delta_and_unknown_never_renders_as_healthy() {
-    assert_eq!(HealthState::Healthy.delta(), 0);
-    assert_eq!(HealthState::Degraded.delta(), -40);
-    assert_eq!(HealthState::Unhealthy.delta(), -150);
-    assert_eq!(HealthState::Unknown.delta(), 0);
-    assert!(HealthState::Healthy.renders_healthy());
-    assert!(!HealthState::Unknown.renders_healthy());
-    assert!(!HealthState::Degraded.renders_healthy());
+    assert_eq!(HealthState::Healthy.score_delta(), 0);
+    assert_eq!(HealthState::Degraded.score_delta(), -40);
+    assert_eq!(HealthState::Unhealthy.score_delta(), -150);
+    assert_eq!(HealthState::Unknown.score_delta(), 0);
+    assert!(HealthState::Healthy.renders_as_healthy());
+    assert!(!HealthState::Unknown.renders_as_healthy());
+    assert!(!HealthState::Degraded.renders_as_healthy());
+
+    // R-14: the variant every hand-written copy omitted. `HEALTH_STATE_
+    // UNSPECIFIED` is the proto3 zero an UNSET field decodes to, so it is the
+    // value a peer that says nothing about a relay actually sends — and a
+    // four-variant model had to invent an answer for it.
+    assert_eq!(HealthState::Unspecified.score_delta(), 0);
+    assert!(!HealthState::Unspecified.renders_as_healthy());
+    assert_eq!(HealthState::from_wire(0), Ok(HealthState::Unspecified));
+    assert_eq!(HealthState::ALL.len(), 5, "the frozen enum has five values");
 }
 
 #[test]

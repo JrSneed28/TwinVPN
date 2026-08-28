@@ -199,8 +199,8 @@ pub fn delegation(osk_id: &str, powers: &[OskPower]) -> Delegation {
 /// `RegisterDevice`'s authorisation is the delegation inside the proof rather
 /// than whoever signed it.
 #[must_use]
-pub fn owner() -> ScriptedVerifier {
-    ScriptedVerifier::owner().granting(delegation("osk-enroll", &[OskPower::Enroll]))
+pub fn owner() -> SignedAs {
+    SignedAs::new(ScriptedVerifier::owner().granting(delegation("osk-enroll", &[OskPower::Enroll])))
 }
 
 /// An `Owner` verifier whose **signer** is an OSK holding exactly `powers`.
@@ -209,16 +209,18 @@ pub fn owner() -> ScriptedVerifier {
 /// per-device signing key does the work. A test that wants a refusal asks for a
 /// key without the power the operation needs.
 #[must_use]
-pub fn owner_osk(powers: &[OskPower]) -> ScriptedVerifier {
-    ScriptedVerifier::owner()
-        .held_by(delegation("osk-1", powers))
-        .granting(delegation("osk-1", powers))
+pub fn owner_osk(powers: &[OskPower]) -> SignedAs {
+    SignedAs::new(
+        ScriptedVerifier::owner()
+            .held_by(delegation("osk-1", powers))
+            .granting(delegation("osk-1", powers)),
+    )
 }
 
 /// A verifier that attributes every statement to a device.
 #[must_use]
-pub fn device() -> ScriptedVerifier {
-    ScriptedVerifier::device()
+pub fn device() -> SignedAs {
+    SignedAs::new(ScriptedVerifier::device())
 }
 
 /// A device verifier that reports an attestation for ceremony `pairing_id`.
@@ -228,19 +230,112 @@ pub fn device() -> ScriptedVerifier {
 /// fail — and a check that the double could not satisfy is a check no test could
 /// distinguish from a broken one.
 #[must_use]
-pub fn device_attesting(pairing_id: u8) -> ScriptedVerifier {
-    ScriptedVerifier::device().attesting_to([pairing_id; 16])
+pub fn device_attesting(pairing_id: u8) -> SignedAs {
+    SignedAs::new(ScriptedVerifier::device().attesting_to([pairing_id; 16]))
 }
 
 /// The fail-closed verifier this build ships.
 pub const NO_ANCHOR: RefuseUnverifiable = RefuseUnverifiable;
 
 /// A non-empty COSE_Sign1 stand-in. Deliberately CBOR-shaped, not protobuf.
+///
+/// # The trailing bytes are the SIGNED PAYLOAD (R-4)
+///
+/// A real statement commits to its own target and version, and the handlers now
+/// take those from inside the signature rather than from the unsigned wire
+/// fields beside it. A double whose "payload" carried nothing would make every
+/// such check unsatisfiable, and a check no test can satisfy is
+/// indistinguishable from a broken one.
+///
+/// So the stand-in carries them: `tag` at index 3 doubles as the revocation's
+/// `target_device_id` byte (matching [`dev`]), and [`cose_at_version`] appends
+/// the policy version [`SignedAs`] reports. That is what lets
+/// [`mismatched_revoke_request`] express "the wire says one device, the
+/// signature says another" as a real disagreement.
 #[must_use]
 pub fn cose(tag: u8) -> v1::SignedStatement {
     v1::SignedStatement {
         cose_sign1: vec![0xd2, 0x84, 0x43, tag],
         statement_type: 0,
+    }
+}
+
+/// A stand-in whose signed payload also names a policy version.
+#[must_use]
+pub fn cose_at_version(tag: u8, policy_version: u64) -> v1::SignedStatement {
+    let mut cose_sign1 = vec![0xd2, 0x84, 0x43, tag];
+    cose_sign1.extend_from_slice(&policy_version.to_le_bytes());
+    v1::SignedStatement {
+        cose_sign1,
+        statement_type: 0,
+    }
+}
+
+/// The device byte a stand-in's payload commits to, if it has one.
+#[must_use]
+fn signed_target(octets: &[u8]) -> Option<u8> {
+    octets.get(3).copied()
+}
+
+/// The policy version a stand-in's payload commits to, if it has one.
+#[must_use]
+fn signed_policy_version(octets: &[u8]) -> Option<u64> {
+    let bytes: [u8; 8] = octets.get(4..12)?.try_into().ok()?;
+    Some(u64::from_le_bytes(bytes))
+}
+
+/// A [`ScriptedVerifier`] that also reports what the stand-in payload **signed**.
+///
+/// R-4: `revoke` and `put_policy` now compare the wire's target and version
+/// against the signature's. `ScriptedVerifier` alone reports neither, because
+/// it has no payload to read — so this wrapper reads the fixture's, keeping the
+/// knowledge of the fixture encoding in the fixture file rather than in the
+/// shipped crate.
+pub struct SignedAs {
+    inner: ScriptedVerifier,
+}
+
+impl SignedAs {
+    #[must_use]
+    pub const fn new(inner: ScriptedVerifier) -> Self {
+        Self { inner }
+    }
+}
+
+impl StatementVerifier for SignedAs {
+    fn verify(
+        &self,
+        octets: &twinvpn_service_common::forward::Verbatim,
+        expected: cp::verify::StatementKind,
+        now_ms: u64,
+        signer: cp::verify::SignerKey<'_>,
+    ) -> Result<cp::verify::Verified, cp::verify::VerifyFailure> {
+        use cp::verify::StatementKind as K;
+        let mut v = self.inner.verify(octets, expected, now_ms, signer)?;
+        let bytes = octets.as_bytes();
+        match expected {
+            K::RevocationStatement | K::PairingRevocation => {
+                v.revocation = signed_target(bytes).map(|t| cp::verify::Revocation {
+                    target_device_id: dev(t),
+                    target_identity_id: None,
+                    twinnet_id: TWINNET.to_owned(),
+                    reason_code: "AUTH.DEVICE_REVOKED".to_owned(),
+                });
+            }
+            K::PolicyBundle => {
+                v.policy = signed_policy_version(bytes).map(|n| cp::verify::PolicyClaims {
+                    policy_version: n,
+                    policy_id: "pol".to_owned(),
+                    killswitch_floor: 0,
+                });
+            }
+            // `StatementKind` is `#[non_exhaustive]`, so a downstream test
+            // crate cannot spell a total match. The kinds above are the ones
+            // that carry a signed target or version; every other kind — present
+            // or future — carries neither, and the double reports neither.
+            _ => {}
+        }
+        Ok(v)
     }
 }
 
@@ -353,6 +448,38 @@ pub fn revoke_request(target: u8, k: &[u8]) -> Vec<u8> {
     .encode_to_vec()
 }
 
+/// A `RevokeDeviceRequest` whose WIRE target is not the one the statement
+/// signed — R-4's attack, as a fixture.
+#[must_use]
+pub fn mismatched_revoke_request(wire_target: u8, signed_target: u8, k: &[u8]) -> Vec<u8> {
+    v1::RevokeDeviceRequest {
+        metadata: meta(k),
+        target_device_id: dev(wire_target).to_vec(),
+        revocation_statement: Some(cose(signed_target)),
+        reason_code: "AUTH.DEVICE_REVOKED".to_owned(),
+    }
+    .encode_to_vec()
+}
+
+/// A `PutPolicyRequest` whose WIRE version is not the one the bundle signed.
+#[must_use]
+pub fn mismatched_policy_request(wire_version: u64, signed_version: u64, k: &[u8]) -> Vec<u8> {
+    v1::PutPolicyRequest {
+        metadata: meta(k),
+        bundle: Some(v1::PolicyBundle {
+            twinnet_id: TWINNET.to_owned(),
+            policy_version: wire_version,
+            policy_id: "pol".to_owned(),
+            signed: Some(cose_at_version(1, signed_version)),
+            ..Default::default()
+        }),
+        precondition: Some(v1::VersionPrecondition {
+            precondition: Some(v1::version_precondition::Precondition::IfVersion(0)),
+        }),
+    }
+    .encode_to_vec()
+}
+
 /// A `PutPolicyRequest` at `version`, conditional on `if_version`.
 #[must_use]
 pub fn put_policy_request(version: u64, if_version: u64, k: &[u8], content: u8) -> Vec<u8> {
@@ -362,7 +489,7 @@ pub fn put_policy_request(version: u64, if_version: u64, k: &[u8], content: u8) 
             twinnet_id: TWINNET.to_owned(),
             policy_version: version,
             policy_id: "pol".to_owned(),
-            signed: Some(cose(content)),
+            signed: Some(cose_at_version(content, version)),
             ..Default::default()
         }),
         precondition: Some(v1::VersionPrecondition {

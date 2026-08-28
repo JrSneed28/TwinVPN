@@ -173,7 +173,13 @@ pub enum TlsError {
 ///
 /// In RFC 7250 mode there is no certificate, so the key is the whole of the
 /// server's identity.
-#[derive(Debug, Clone)]
+/// # `Debug` is written by hand (R-9)
+///
+/// `Pkcs8Der` is **the server's private key**. A derived `Debug` rendered every
+/// byte of it — and `ServerTlsBuilder`, which holds one, derives `Debug` too, so
+/// a single `tracing` field or panic message printed the whole key. The path
+/// variant is safe to render and useful to; the DER never is.
+#[derive(Clone)]
 pub enum KeySource {
     /// A PEM file on disk — the deployment shape
     /// (`/run/secrets/<service>/tls.key`).
@@ -181,6 +187,20 @@ pub enum KeySource {
     /// PKCS#8 DER already in memory: a test, or a key vended by a secret store
     /// rather than discovered on a filesystem.
     Pkcs8Der(Vec<u8>),
+}
+
+impl std::fmt::Debug for KeySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // A path names where the key lives, which is what an operator
+            // debugging a startup failure needs, and is not the key.
+            KeySource::PemFile(p) => f.debug_tuple("PemFile").field(p).finish(),
+            // Deliberately not even the length: it is a fingerprint of the key
+            // type, and there is nothing to debug here that `describe` below
+            // does not already say.
+            KeySource::Pkcs8Der(_) => f.write_str("Pkcs8Der(<redacted>)"),
+        }
+    }
 }
 
 /// Builds the server configuration.

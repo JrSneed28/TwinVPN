@@ -329,7 +329,31 @@ fn quote(s: &str) -> String {
     out
 }
 
-/// Registry `condition` text goes into a doc comment; it must not break out of one.
+/// Registry `condition` text goes into a doc comment; it must not break out of
+/// one, and it must not be read as markdown.
+///
+/// # The condition is PROSE, not documentation source
+///
+/// It is written for an operator reading `reason_codes.json`, and several
+/// entries use angle brackets as metavariables — *"Line N of `<file>` is not
+/// valid `<format>`"*, *"pass `--offer-out <path>`"*. Emitted raw, rustdoc reads
+/// those as unclosed HTML tags and `-D warnings` fails the build; a reader of
+/// the rendered docs would see the placeholder silently vanish, which is worse
+/// than the error.
+///
+/// So the three HTML-significant characters become entities. `&` goes first, or
+/// escaping it afterwards would double-escape the `&` this function just
+/// introduced.
+///
+/// Deliberately **not** a general markdown escape. The registry is frozen and
+/// its 454 conditions contain one `*` and four bracket pairs, none of which
+/// rustdoc misreads; escaping every markdown-active character would churn the
+/// rendered text for a problem that does not exist. If a future entry does hit
+/// one, the lint says so and this is where it is answered.
 fn doc_escape(s: &str) -> String {
-    s.replace(['\n', '\r'], " ").replace("*/", "* /")
+    s.replace(['\n', '\r'], " ")
+        .replace("*/", "* /")
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }

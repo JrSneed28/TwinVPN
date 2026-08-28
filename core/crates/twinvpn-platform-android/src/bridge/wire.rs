@@ -26,7 +26,7 @@
 //! What it does inherit from F-8 is the *discipline*: only lengths, scalars and
 //! octets cross; **no TwinVPN domain fact does**. There is no `ConnectionState`
 //! here, no `reason_code`, no policy verdict, no candidate priority. A reviewer
-//! checking §10.4's prohibition reads [`Field`] and is done.
+//! checking §10.4's prohibition reads `Field` and is done.
 //!
 //! # Every bound, and where it comes from
 //!

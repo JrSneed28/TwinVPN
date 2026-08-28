@@ -19,54 +19,18 @@ use twinvpn_types::{Endpoint, PerFamily, RegionId, RelayId};
 
 /// The derived, eventually-consistent opinion held about a relay (S-10).
 ///
-/// Mirrors `twinvpn.v1.HealthState` one-for-one. **`twinvpn-types` does not
-/// carry this enum** — it exports `ConnectionState`, `PathClass` and
-/// `TrafficDisposition` from `connection.proto` and stops there — so it is
-/// modelled here rather than redeclared from nothing.
+/// **W-20's disposition, executed (R-14).** This crate used to hand-write a
+/// FOUR-variant copy of `twinvpn.v1.HealthState` and re-encode ADR-0006 §11.2's
+/// deltas as literals beside it. The frozen enum has FIVE variants, and the one
+/// every copy omitted was `HEALTH_STATE_UNSPECIFIED` — the proto3 zero an unset
+/// field decodes to. A four-variant model cannot represent "the sender did not
+/// say", so it has to invent an answer, and the convenient invention is
+/// `HEALTHY`.
 ///
-/// **Finding W-20, accepted and routed to `core-foundation`:** this belongs in
-/// `twinvpn-types` beside the other three `connection.proto` enums. When it
-/// lands there, **delete this copy** and re-export the canonical one — two
-/// definitions of one wire enum is exactly the drift the frozen contracts exist
-/// to prevent.
-///
-/// `docs/reliability.md` §4.1: it "is **not** a `ConnectionState`, shares only
-/// the name `DEGRADED` with one, and — decisively — **MUST NOT gate a connection
-/// attempt**: it contributes a score delta to relay selection and nothing more."
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum HealthState {
-    /// Healthy.
-    Healthy,
-    /// Degraded.
-    Degraded,
-    /// Unhealthy.
-    Unhealthy,
-    /// Before any observation exists, and after one goes stale. **Never
-    /// rendered as healthy.**
-    #[default]
-    Unknown,
-}
-
-impl HealthState {
-    /// ADR-0006 §11.2's score delta. A **delta**, never a gate.
-    #[must_use]
-    pub const fn delta(self) -> i32 {
-        match self {
-            // UNKNOWN scores the same as HEALTHY deliberately: a relay nobody
-            // has observed must not be penalised into last place, or a fresh
-            // fleet would never be tried.
-            HealthState::Healthy | HealthState::Unknown => 0,
-            HealthState::Degraded => -40,
-            HealthState::Unhealthy => -150,
-        }
-    }
-
-    /// Whether this value may be rendered as healthy. `UNKNOWN` may not.
-    #[must_use]
-    pub const fn renders_healthy(self) -> bool {
-        matches!(self, HealthState::Healthy)
-    }
-}
+/// The canonical enum now lives in `twinvpn-types` beside `ConnectionState`,
+/// `PathClass` and `TrafficDisposition`, and this is a re-export of it. The
+/// score delta has one definition; a second place to drift no longer exists.
+pub use twinvpn_types::state::HealthState;
 
 /// A relay's carriage, from `relay.proto`'s `RelayCarriage`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

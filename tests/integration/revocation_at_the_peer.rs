@@ -62,6 +62,37 @@ fn owner_with_revoke() -> ScriptedVerifier {
     ScriptedVerifier::owner()
         .held_by(delegation.clone())
         .granting(delegation)
+        // **R-4.** `revoke` takes its target from inside the SIGNATURE now, not
+        // from `RevokeDeviceRequest.target_device_id` — an unsigned wire field
+        // that let any Owner-signed revocation be re-wrapped to revoke an
+        // arbitrary device. A double that reported no target would make the
+        // check unsatisfiable; this reports the one the Owner signed for.
+        .revoking(twinvpn_control_plane::verify::Revocation {
+            target_device_id: target(),
+            target_identity_id: None,
+            twinnet_id: TWINNET.to_owned(),
+            reason_code: "AUTH.DEVICE_REVOKED".to_owned(),
+        })
+}
+
+/// The same Owner, signing a revocation for a DIFFERENT device (R-4).
+fn owner_revoking(other: [u8; 32]) -> ScriptedVerifier {
+    let delegation = Delegation {
+        osk_id: "osk-revoke".to_owned(),
+        osk_pub_cose: vec![0xa5; 8],
+        powers: vec![OskPower::Revoke],
+        anchor_version: 1,
+        not_after_ms: 0,
+    };
+    ScriptedVerifier::owner()
+        .held_by(delegation.clone())
+        .granting(delegation)
+        .revoking(twinvpn_control_plane::verify::Revocation {
+            target_device_id: other,
+            target_identity_id: None,
+            twinnet_id: TWINNET.to_owned(),
+            reason_code: "AUTH.DEVICE_REVOKED".to_owned(),
+        })
 }
 
 /// A non-empty COSE_Sign1 stand-in, CBOR-shaped rather than protobuf.
@@ -180,6 +211,58 @@ fn revoke_at_the_control_plane() -> (u64, u64) {
     );
     let after = futures::executor::block_on(store.trust_epoch(TWINNET)).expect("a trust epoch");
     (before, after)
+}
+
+/// **R-4, through the real service.**
+///
+/// An Owner signs a revocation for device `0xEE`. The caller presents it on the
+/// wire naming device `target()` instead. Before the fix the service verified
+/// the Owner's signature — which is genuine — and then revoked whatever the
+/// WIRE named, so one leaked revocation revoked any device on demand.
+#[test]
+fn a_revocation_signed_for_one_device_cannot_revoke_another() {
+    let store = twinvpn_control_plane::store::mem::MemStore::new();
+    let base = std::time::Instant::now();
+    let endpoints = vec!["cp.twinvpn.example".to_owned()];
+    let other = [0xEEu8; 32];
+
+    let run = |code: CommandCode, body: Vec<u8>, verifier: &dyn StatementVerifier| {
+        futures::executor::block_on(store.execute(Request {
+            twinnet_id: TWINNET,
+            caller: target(),
+            caller_identity_key: None,
+            now_ms: 10_000,
+            now: base + Duration::from_millis(10),
+            code,
+            body: &body,
+            correlation: Correlation::empty(),
+            verifier,
+            coordination_endpoints: &endpoints,
+            quorum_available: true,
+        }))
+    };
+
+    let revoke = v1::RevokeDeviceRequest {
+        // The wire names one device...
+        target_device_id: target().to_vec(),
+        revocation_statement: Some(cose(2)),
+        metadata: Some(v1::MessageMetadata {
+            idempotency_key: vec![3u8; 16],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    // ...and the Owner signed for another.
+    let err = run(
+        CommandCode::RevokeDevice,
+        revoke.encode_to_vec(),
+        &owner_revoking(other),
+    )
+    .expect_err("a retargeted revocation must be refused");
+    assert_eq!(err.code().as_str(), "AUTH.PEER_UNTRUSTED");
+
+    let epoch = futures::executor::block_on(store.trust_epoch(TWINNET)).expect("a trust epoch");
+    assert_eq!(epoch, 0, "and nothing was revoked, in either direction");
 }
 
 // ===========================================================================

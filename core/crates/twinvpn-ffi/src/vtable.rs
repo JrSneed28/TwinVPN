@@ -181,33 +181,156 @@ impl core::fmt::Debug for HostFns {
     }
 }
 
+/// The end offset of the vtable **header** — `size` and `ctx`.
+///
+/// Everything after it is a function-pointer entry, and every one of those is
+/// pointer-sized and pointer-aligned. Both facts are asserted below, because
+/// [`HostFns::copy_from`] relies on them to truncate a short vtable at a field
+/// boundary rather than mid-pointer.
+const HEADER_END: usize =
+    core::mem::offset_of!(TwHostVtable, ctx) + core::mem::size_of::<*mut c_void>();
+
+// The entry region begins where the header ends, and is pointer-aligned. If a
+// future field breaks either property, `copy_from`'s truncation could land in
+// the middle of one, so this fails the build instead.
+const _: () = assert!(HEADER_END == core::mem::offset_of!(TwHostVtable, buf_bytes));
+const _: () = assert!(HEADER_END.is_multiple_of(core::mem::align_of::<*mut c_void>()));
+const _: () = assert!(
+    core::mem::size_of::<TwHostVtable>().is_multiple_of(core::mem::align_of::<*mut c_void>())
+);
+const _: () = assert!(
+    core::mem::size_of::<Option<extern "C" fn(*mut c_void) -> i32>>()
+        == core::mem::size_of::<*mut c_void>()
+);
+
 /// The smallest `size` this core will accept.
 ///
 /// A shell that declared a smaller struct did not compile the entries the core
 /// requires, and proceeding would read past the end of its allocation. Refused
 /// by name rather than risked.
-pub const MIN_VTABLE_SIZE: u32 = 8;
+///
+/// This is the **header**: a `size` that cannot even cover `size` and `ctx` is
+/// not a truncated vtable, it is a wrong pointer.
+// The header is a `u32` and a pointer — tens of bytes on every target this
+// product builds for. The cast cannot truncate, and saturating makes that
+// explicit rather than leaving it to a reader.
+pub const MIN_VTABLE_SIZE: u32 = {
+    // `u32::try_from` is not yet const, so the bound is asserted and the cast
+    // then cannot truncate. The header is a `u32` and a pointer — tens of bytes
+    // on every target — so this holds by construction rather than by hope, and
+    // a layout that broke it would fail the build here.
+    assert!(HEADER_END <= u32::MAX as usize);
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        HEADER_END as u32
+    }
+};
+
+impl TwHostVtable {
+    /// A vtable with no `ctx` and no entries.
+    ///
+    /// The base [`HostFns::copy_from`] copies the shell's declared bytes onto.
+    /// Written out field by field rather than zeroed through `MaybeUninit`,
+    /// because DP-4 forbids `assume_init` anywhere in this tree — and because a
+    /// field added to the struct then fails to compile here until someone has
+    /// decided what its absent value is.
+    pub const EMPTY: Self = Self {
+        size: 0,
+        ctx: core::ptr::null_mut(),
+        buf_bytes: None,
+        buf_free: None,
+        create_interface: None,
+        apply: None,
+        rollback: None,
+        set_link: None,
+        set_ruleset: None,
+        query_link_facts: None,
+        destroy_interface: None,
+        identity_public: None,
+        identity_sign: None,
+        identity_agree: None,
+        identity_attestation: None,
+        secure_item_read: None,
+        secure_item_write_atomic: None,
+        secure_item_delete: None,
+        store_root: None,
+        record_aead_custody: None,
+        os_csprng: None,
+        elapsed_millis: None,
+        boot_id: None,
+    };
+}
 
 impl HostFns {
-    /// Copies the shell's vtable.
+    /// Copies the shell's vtable, reading **only the bytes its `size` covers**.
+    ///
+    /// # R-3: `size` is honoured BEFORE the struct is dereferenced
+    ///
+    /// `twinvpn.h` promises the core "reads only the entries the declared size
+    /// covers", and that promise is what makes adding an entry a *minor* bump.
+    /// The previous implementation did `let v = *ptr` — materialising all 24
+    /// fn-pointer fields — and only then compared `size`. A wave-2 shell built
+    /// against an older, shorter header therefore had every byte past the end
+    /// of its allocation read, and any non-zero word past it became `Some(fn)`
+    /// **and was called**.
+    ///
+    /// This reads `size` on its own (it is the first field, so it is covered by
+    /// any conforming allocation), clamps it to what this core compiled, rounds
+    /// it **down to a whole entry** so a truncation can never land mid-pointer,
+    /// and copies exactly that many bytes over [`TwHostVtable::EMPTY`]. Entries
+    /// the shell did not declare are therefore `None` — the same value a shell
+    /// that declared and left them null produces, which
+    /// [`missing`] already reports as
+    /// `PLATFORM.ADAPTER_UNAVAILABLE`.
     ///
     /// # Safety
     ///
     /// `ptr` is either null or a valid `*const tw_host_vtable` whose `size`
-    /// field truthfully reports the size the shell compiled. That is the
-    /// contract `twinvpn.h` states for `tw_core_create`'s `host` argument.
+    /// field truthfully reports the size the shell compiled, and which is
+    /// readable for that many bytes. That is the contract `twinvpn.h` states
+    /// for `tw_core_create`'s `host` argument.
     #[must_use]
     pub unsafe fn copy_from(ptr: *const TwHostVtable) -> Option<Self> {
         if ptr.is_null() {
             return None;
         }
-        // SAFETY: non-null, and by this function's contract it points to a
-        // readable `tw_host_vtable`. The struct is `Copy`, so this is a plain
-        // read with no ownership transfer.
-        let v = unsafe { *ptr };
-        if v.size < MIN_VTABLE_SIZE {
+        // SAFETY: non-null and, by this function's contract, pointing at a
+        // `tw_host_vtable` whose declared size is at least its own first field.
+        // `size` is at offset 0, so this read is inside ANY conforming
+        // allocation — including one shorter than `TwHostVtable`. Nothing else
+        // is touched until the declared size has been checked.
+        let declared = unsafe { core::ptr::addr_of!((*ptr).size).read() };
+        if declared < MIN_VTABLE_SIZE {
             return None;
         }
+
+        // Never read past the shell's allocation, and never past our own struct
+        // (a NEWER shell may legitimately declare a larger one).
+        let readable = core::cmp::min(declared as usize, core::mem::size_of::<TwHostVtable>());
+        // Round down to a whole entry: a `size` landing mid-pointer would
+        // otherwise leave a half-copied, non-null word that reads as `Some(fn)`.
+        let align = core::mem::align_of::<*mut c_void>();
+        let n = readable - (readable % align);
+
+        // `n` is a multiple of the pointer alignment and so never splits an
+        // entry: a copied one is exactly the shell's bit pattern, an uncopied
+        // one keeps `EMPTY`'s `None`.
+        let mut v = TwHostVtable::EMPTY;
+        // SAFETY: `ptr` is readable for `declared` bytes by this function's
+        // contract and `n <= declared`; `v` is a live, fully-initialised local
+        // of `TwHostVtable`, so it is writable for `size_of` >= `n` bytes and
+        // cannot overlap `ptr`, being a fresh stack local.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                ptr.cast::<u8>(),
+                core::ptr::addr_of_mut!(v).cast::<u8>(),
+                n,
+            );
+        }
+        // Report what we actually honoured, not what the shell claimed, so
+        // `Debug` and any future gate read the same number this copy used.
+        v.size = u32::try_from(n).unwrap_or(u32::MAX);
+
         Some(Self {
             ctx: HostCtx(v.ctx),
             v,
@@ -986,6 +1109,84 @@ mod tests {
         };
         // SAFETY: `&raw const v` is a valid, readable pointer to a live value.
         assert!(unsafe { HostFns::copy_from(&raw const v) }.is_none());
+    }
+
+    extern "C" fn never_called_buf_free(_ctx: *mut c_void, _buf: *mut TwBuf) {
+        unreachable!("an entry past the declared size must never be reached");
+    }
+
+    /// R-3, the regression the old test could not catch.
+    ///
+    /// The previous test built a FULL-SIZE Rust struct and set `size: 1`, so
+    /// every field it "must not read" was in fact live, initialised memory —
+    /// it passed whether or not `size` was honoured. This allocates a buffer
+    /// that genuinely ENDS after the header plus two entries, fills the bytes
+    /// past it with a non-zero pattern, and checks the core neither reads them
+    /// nor turns them into callable entries.
+    #[test]
+    fn entries_past_the_declared_size_are_not_read_and_are_not_callable() {
+        let entry = core::mem::size_of::<*mut c_void>();
+        let declared = HEADER_END + 2 * entry; // size, ctx, buf_bytes, buf_free.
+
+        // A *pointer-aligned* allocation of exactly `declared` bytes, followed
+        // by a poison region standing in for "memory this shell never owned".
+        //
+        // `Vec<usize>` and not `Vec<u8>`: a `Vec<u8>`'s buffer is 1-aligned, so
+        // reading a `TwHostVtable` out of it would be undefined regardless of
+        // what this test is trying to prove. The element type IS the alignment.
+        let words = (declared + 8 * entry).div_ceil(entry);
+        let mut backing = vec![0usize; words];
+        // SAFETY: `backing` owns `words * entry` initialised bytes and outlives
+        // this borrow; `u8` has no alignment requirement and no invalid bit
+        // pattern, so viewing the allocation as bytes is sound.
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), words * entry)
+        };
+        bytes[declared..].fill(0xAA);
+        bytes[..core::mem::size_of::<u32>()]
+            .copy_from_slice(&u32::try_from(declared).expect("small").to_le_bytes());
+        let free = never_called_buf_free as *const ();
+        bytes[HEADER_END + entry..HEADER_END + 2 * entry]
+            .copy_from_slice(&(free as usize).to_ne_bytes());
+
+        // SAFETY: the buffer is `declared` bytes of initialised memory, aligned
+        // for `TwHostVtable` because its element type is pointer-sized, and its
+        // first field truthfully declares that size — exactly the `twinvpn.h`
+        // contract for a shell compiled against a shorter header. If
+        // `copy_from` reads past `declared` it reads the poison, which the
+        // assertions below then catch.
+        let fns = unsafe { HostFns::copy_from(backing.as_ptr().cast::<TwHostVtable>()) }
+            .expect("the header is present");
+
+        // Declared: honoured.
+        assert!(fns.v.buf_free.is_some(), "a declared entry is kept");
+        // Undeclared: absent, NOT the 0xAAAA.. poison reinterpreted as a fn.
+        assert!(fns.v.apply.is_none(), "an entry past `size` must be None");
+        assert!(fns.v.set_ruleset.is_none(), "R-3: never a poisoned pointer");
+        assert!(fns.v.os_csprng.is_none());
+        assert!(fns.v.boot_id.is_none());
+        assert_eq!(
+            fns.v.size,
+            u32::try_from(declared).expect("small"),
+            "the honoured size is reported, not the claim"
+        );
+    }
+
+    /// A `size` that stops in the middle of an entry truncates to the entry
+    /// BEFORE it, so no half-copied word can read as `Some(fn)`.
+    #[test]
+    fn a_size_landing_mid_entry_truncates_to_the_previous_entry() {
+        let entry = core::mem::size_of::<*mut c_void>();
+        let mut v = TwHostVtable::EMPTY;
+        v.buf_free = Some(never_called_buf_free);
+        v.size = u32::try_from(HEADER_END + 2 * entry - 1).expect("small");
+        // SAFETY: `&raw const v` is a valid, readable, fully-initialised value,
+        // and its declared size is smaller than the struct.
+        let fns = unsafe { HostFns::copy_from(&raw const v) }.expect("the header is present");
+        assert!(
+            fns.v.buf_free.is_none(),
+            "a partially covered entry is dropped, never half-read"
+        );
     }
 
     #[test]

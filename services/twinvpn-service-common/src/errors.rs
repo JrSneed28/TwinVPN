@@ -105,7 +105,7 @@ impl ServiceError {
     /// is the only party that knows whether `ECONNREFUSED` on this socket means
     /// `CONTROL.UNREACHABLE` or `RELAY.NONE_REACHABLE`.
     ///
-    /// The raw error is retained as [`ServiceError::source`] for logs and is
+    /// The raw error is retained as `ServiceError::source` for logs and is
     /// **never** encoded into the envelope.
     #[must_use]
     pub fn from_os_error(code: ReasonCode, component: Component, error: std::io::Error) -> Self {

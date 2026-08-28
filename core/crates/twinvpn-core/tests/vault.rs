@@ -148,6 +148,13 @@ fn a_session_survives_into_the_journal_and_comes_back_reconnecting() {
     let mut flushed = None;
     env.runtime().block_on(Box::pin(async {
         h.core.open_store().await.expect("opens");
+        // `session.connect` reads its T01 guards now, so the peer has to be an
+        // ADR-0007 N-4 `TrustedPeer` before it will execute. Cached through the
+        // CD-I5 port, which is what the control-plane client will do.
+        h.core.control_plane_port().put_peer(
+            &TwinnetId::new("tn-vault").expect("valid"),
+            peer_record(0x77),
+        );
         h.core.submit(&connect).expect("session.connect executes");
         flushed = Some(h.core.flush().await.map_err(|d| d.code().as_str()));
     }));

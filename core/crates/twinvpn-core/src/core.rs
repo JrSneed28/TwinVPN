@@ -134,6 +134,17 @@ pub struct Core {
     /// S-61's current phase, as `host.lifecycle` last reported it.
     #[cfg(feature = "full")]
     lifecycle: Mutex<Lifecycle>,
+    /// **CB-6's second clause** — the composed data plane's enforcement state
+    /// (R-2/R-7).
+    ///
+    /// Held here for the same reason `gateway` is: `twinvpn-route`,
+    /// `twinvpn-dns` and `twinvpn-enforce` are data-plane crates, they each
+    /// *compute* and none of them *installs*, and this is the only crate
+    /// permitted to hold one of them beside a `PlatformAdapter`. Until this
+    /// field existed, `PlatformAdapter::apply` and `set_ruleset` had no
+    /// production caller anywhere in the tree.
+    #[cfg(feature = "full")]
+    enforcement: Mutex<crate::enforce::Enforcement>,
 }
 
 /// Whether the durable store has been opened.
@@ -238,6 +249,12 @@ impl Core {
             // ceiling — see `dispatch::disposition`.
             #[cfg(feature = "full")]
             gateway: Mutex::new(GatewayState::unconfigured()),
+            // Starts BLOCKED. KS-19's direction: "the deny predates the first
+            // packet the host can emit", and a core that started with no
+            // posture would have an interval in which neither rule set is in
+            // force.
+            #[cfg(feature = "full")]
+            enforcement: Mutex::new(crate::enforce::Enforcement::default()),
             bridge: Mutex::new(None),
             #[cfg(feature = "full")]
             journal: CoreSessionJournal::new(Arc::clone(&shared), Vec::new()),
@@ -442,6 +459,44 @@ impl Core {
         self.sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The composed data plane's enforcement state (R-2/R-7).
+    ///
+    /// `pub` rather than `pub(crate)`: a shell asks a composed core what posture
+    /// is in force, and ADR-0015 §11.6 rule 1 makes that question the only
+    /// legitimate source of a `ProtectionAssertion`. There is no setter — every
+    /// mutation goes through [`crate::enforce`], which is what keeps "the latch
+    /// moved" and "the adapter was told" from becoming two facts.
+    #[cfg(feature = "full")]
+    pub fn enforcement(&self) -> MutexGuard<'_, crate::enforce::Enforcement> {
+        self.enforcement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether any `Session` is carrying traffic on a validated path.
+    ///
+    /// KS-18(a)'s input: *"an authenticated bidirectional path validation"*.
+    /// `SessionState::Steady` is the state the §4.5 table enters only through
+    /// T08–T10, each of which has `path_validated` as its guard — so reading the
+    /// state IS reading the validation, rather than keeping a second belief
+    /// about it beside the machine that owns the first.
+    ///
+    /// `Degraded` counts and `Migrating` does not: a degraded session is still
+    /// carrying on a validated path (§4.5 puts the quality objective and the
+    /// validation in different columns), while a migration is by definition
+    /// between one validated path and another that is not yet.
+    #[cfg(feature = "full")]
+    #[must_use]
+    pub fn any_session_connected(&self) -> bool {
+        use twinvpn_session::state::SessionState;
+        self.sessions().values().any(|e| {
+            matches!(
+                e.runtime.machine().state(),
+                SessionState::Steady(_) | SessionState::Degraded { .. }
+            )
+        })
     }
 
     /// The gateway role's live state (ADR-0013).
@@ -1040,7 +1095,12 @@ mod tests {
 
     #[test]
     fn a_mutating_command_advances_the_s47_generation() {
-        let core = testing::core().expect("creates");
+        let (core, adapter) = testing::core_and_adapter().expect("creates");
+        let peer = twinvpn_types::DeviceId::from_slice(&[0x11; 32]).expect("32");
+        // `session.connect` now READS its T01 guards rather than asserting
+        // them, so a test that wants it to execute has to establish the facts:
+        // an open vault and an authorized peer. See `testing::authorize_peer`.
+        testing::authorize_peer(&core, &adapter, peer).expect("authorizes");
         let before = core.generation();
         let mut connect = Submission::bare(CoreCommand::SessionConnect);
         connect.params = vec![0x11; 32];

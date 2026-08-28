@@ -178,6 +178,16 @@ pub struct BridgeState {
     trust_epoch: BTreeMap<TwinnetId, u64>,
     documents: BTreeMap<(TwinnetId, &'static str), HeldDocument>,
     peers: BTreeMap<(TwinnetId, DeviceId), PeerRecord>,
+    /// **This device's own** overlay allocation (S-08), per `TwinNet`.
+    ///
+    /// Cached, not queued for durability, and deliberately so: S-08 makes the
+    /// allocation immutable and the control plane re-delivers it in the device
+    /// record on every reconnect, so a durable copy would be a second authority
+    /// for a fact the control plane already owns. What it is *for* is
+    /// [`crate::enforce`], which cannot assemble a `NetworkContract` without the
+    /// interface's own addresses — R1 requires both families and
+    /// `OverlayAddresses` has no half.
+    local_overlay: BTreeMap<TwinnetId, twinvpn_types::OverlayAddresses>,
     causality: BTreeMap<TwinnetId, Vec<u8>>,
     pending: Vec<PendingWrite>,
     /// Set when the durable store refused a write. Read by the data-plane view,
@@ -451,6 +461,22 @@ impl ControlPlanePort {
         Arc::clone(&self.shared)
     }
 
+    /// Records **this device's own** overlay allocation (S-08).
+    ///
+    /// Cached rather than queued for durability: S-08 makes the allocation
+    /// immutable and the control plane re-delivers it in the device record on
+    /// every reconnect, so a durable copy here would be a second authority for a
+    /// fact the control plane owns.
+    ///
+    /// What it is *for* is [`crate::enforce`], which cannot assemble a
+    /// `NetworkContract` without the overlay interface's own addresses — R1
+    /// requires both families and `OverlayAddresses` has no half.
+    pub fn put_local_overlay(&self, twinnet: &TwinnetId, overlay: twinvpn_types::OverlayAddresses) {
+        if let Ok(mut state) = self.shared.lock() {
+            state.local_overlay.insert(twinnet.clone(), overlay);
+        }
+    }
+
     /// Records the newest `causality_token`.
     pub fn put_causality_token(&self, twinnet: &TwinnetId, token: &[u8]) {
         self.record(PendingWrite::CausalityToken {
@@ -499,6 +525,51 @@ impl DataPlaneView {
             .lock()
             .ok()
             .and_then(|s| s.peers.get(&(twinnet.clone(), device_id)).cloned())
+    }
+
+    /// Whether `device_id` is an authorized `TrustedPeer` in **any** cached
+    /// `TwinNet`.
+    ///
+    /// # Why this is twinnet-agnostic
+    ///
+    /// ADR-0017 §11.9's `session.connect` takes a peer `device_id` and no
+    /// `twinnet_id`, so the composed core has no selector to narrow with. The
+    /// honest reading of "is this peer authorized" is therefore "in any TwinNet
+    /// this device belongs to", and a device belongs to the ones whose records
+    /// it holds.
+    ///
+    /// # ADR-0007 N-4
+    ///
+    /// > A peer whose `TunnelKeyBinding` has not verified is **not** a
+    /// > `TrustedPeer`.
+    ///
+    /// So a cached record is not on its own an authorization: the binding must
+    /// have verified. `false` for a peer nobody has cached is the fail-closed
+    /// answer and the one this build gives while there is no `ControlTransport`
+    /// (W-12) to populate the cache — an absent control plane must not read as
+    /// a granted one.
+    #[must_use]
+    pub fn peer_authorized(&self, device_id: DeviceId) -> bool {
+        self.shared.lock().is_ok_and(|s| {
+            s.peers
+                .iter()
+                .any(|((_, id), record)| *id == device_id && record.tunnel_key_binding_verified)
+        })
+    }
+
+    /// **This device's own** overlay allocation, in any cached `TwinNet`.
+    ///
+    /// Twinnet-agnostic for the reason
+    /// [`DataPlaneView::peer_authorized`] is: the operations that need it name
+    /// no `twinnet_id`. `None` while no control plane has supplied one, which
+    /// keeps [`crate::enforce`] fail-closed rather than letting it invent an
+    /// address for the overlay interface.
+    #[must_use]
+    pub fn local_overlay(&self) -> Option<(TwinnetId, twinvpn_types::OverlayAddresses)> {
+        self.shared
+            .lock()
+            .ok()
+            .and_then(|s| s.local_overlay.iter().next().map(|(t, o)| (t.clone(), *o)))
     }
 
     /// Every cached peer for a `TwinNet`.

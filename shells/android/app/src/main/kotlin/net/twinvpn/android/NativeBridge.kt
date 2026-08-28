@@ -39,6 +39,12 @@ internal object NativeBridge {
      */
     init {
         System.loadLibrary("twinvpn_platform_android")
+        // The core's JNI carriage. A SECOND library, because CD-I5 forbids
+        // `twinvpn-platform-android` to name `twinvpn-core` — a platform
+        // implementation that could reach the composition root would let a
+        // decision migrate downward into it. Merging the two `.so`s to save a
+        // load would invert exactly that arrow.
+        System.loadLibrary("twinvpn_android_jni")
     }
 
     /**
@@ -94,6 +100,80 @@ internal object NativeBridge {
      * permitted ones, so a reachability test from this process proves nothing.
      */
     external fun nativeOnLockdownReport(handle: Long, reported: Int)
+
+    // -----------------------------------------------------------------------
+    // The CORE, across `twinvpn.h`.
+    // -----------------------------------------------------------------------
+    //
+    // Every entry below is a marshalling call and none is an Android fact, so
+    // §10.4's prohibition — no `ConnectionState`, no `reason_code` class, no
+    // policy verdict, no candidate priority — holds here for a different
+    // reason than it does above: these carry OPAQUE BYTES, and a `ByteArray`
+    // has no domain meaning to leak.
+    //
+    // F-8: "only handles, slices and scalars cross; structured data crosses as
+    // encoded bytes." That is why none of these takes a typed parameter.
+
+    /**
+     * `tw_core_create`. Returns an opaque handle, or `0` on refusal.
+     *
+     * The `config` slice is empty on this platform: the adapter is linked
+     * in-process as a Rust crate, so the core reaches the platform directly
+     * rather than back out through F-9 — `ownership.md` §10.4's ruling.
+     */
+    external fun nativeCoreCreate(config: ByteArray): Long
+
+    /**
+     * `tw_core_destroy`. Idempotent on `0`.
+     *
+     * **Does not tear down enforcement.** CB-6 puts the installed claim in the
+     * OS's custody so that the core going away cannot drop protection.
+     */
+    external fun nativeCoreDestroy(handle: Long)
+
+    /**
+     * `tw_core_submit`. Non-blocking (F-5).
+     *
+     * `command` is one management-interface frame — a 4-byte big-endian length
+     * prefix and UTF-8 JSON — whose body is a `request`. Returns `null` on
+     * success and the **F-4 envelope** on refusal: codes and typed evidence,
+     * never a sentence (MI-15).
+     */
+    external fun nativeCoreSubmit(handle: Long, command: ByteArray): ByteArray?
+
+    /**
+     * `tw_core_next_event`. **The only blocking call in the ABI.**
+     *
+     * Returns one MI frame, or `null` on a timeout, a wake, or a refusal. The
+     * three are deliberately not distinguished: the core's own documentation
+     * says a caller tells them apart "by asking again", which is what a drain
+     * loop does anyway.
+     */
+    external fun nativeCoreNextEvent(handle: Long, timeoutMs: Int): ByteArray?
+
+    /**
+     * `tw_core_wake`. Cancels an in-flight [nativeCoreNextEvent].
+     *
+     * Callable from **any** thread, which is what lets shutdown stop the drain
+     * loop rather than wait out its timeout — and is why the drain thread is
+     * never killed.
+     */
+    external fun nativeCoreWake(handle: Long)
+
+    /**
+     * `tw_render_diagnostic` — **F-10**, the one deliberate exception to F-1's
+     * small surface.
+     *
+     * The core owns every rendered string. A shell that composed one would be
+     * making the judgement CB-4 removes from it, and six shells composing them
+     * independently is R-31.
+     */
+    external fun nativeRenderDiagnostic(
+        reasonCode: String,
+        evidence: ByteArray,
+        locale: String,
+        platformCtx: ByteArray,
+    ): ByteArray?
 
     /** The three-valued encoding [nativeOnLockdownReport] takes. */
     const val LOCKDOWN_UNVERIFIED: Int = -1

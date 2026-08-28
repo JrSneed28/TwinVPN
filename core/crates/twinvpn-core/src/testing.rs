@@ -184,6 +184,57 @@ pub fn core_and_adapter() -> Result<(Core, Arc<MockAdapter>), Box<Diagnostic>> {
     Ok((Core::create(parts)?, adapter))
 }
 
+/// Gives `core` the two facts `session.connect`'s T01 guards read.
+///
+/// # Why a test has to say this out loud now
+///
+/// `execute::connect` used to supply `credentials_valid: true` and
+/// `peer_authorized: true` as literals, so every test reached CONNECTED whether
+/// or not the peer was authorized — which meant no test could tell an
+/// authorized peer from an unauthorized one, and none did. Both guards are now
+/// read from state, and this is the helper that establishes it:
+///
+/// It caches an authorized peer record — ADR-0007 N-4's `TrustedPeer`, a record
+/// whose `TunnelKeyBinding` verified. The other guard, `credentials_valid`, is
+/// the adapter's `identity_public`, which the mock answers.
+///
+/// A test that wants the refusal simply does not call this.
+///
+/// # Errors
+///
+/// Infallible today; the `Result` is kept so a future guard that *can* fail to
+/// be established does not have to change every call site.
+#[cfg(feature = "full")]
+pub fn authorize_peer(
+    core: &Core,
+    adapter: &Arc<MockAdapter>,
+    peer: twinvpn_types::DeviceId,
+) -> Result<(), Box<Diagnostic>> {
+    let _ = adapter;
+    core.control_plane_port().put_peer(
+        &twinvpn_types::TwinnetId::new("tn-test").unwrap_or_else(|_| unreachable!("literal")),
+        crate::planes::PeerRecord {
+            device_id: peer,
+            generation: 1,
+            tk_generation: 1,
+            // ADR-0007 N-4: this is what makes the record an authorization
+            // rather than an acquaintance.
+            tunnel_key_binding_verified: true,
+            endpoints: Vec::new(),
+            overlay: twinvpn_types::OverlayAddresses {
+                v4: twinvpn_types::V4Addr::from_slice(&[100, 64, 0, 9])
+                    .unwrap_or_else(|_| unreachable!("literal")),
+                v6: twinvpn_types::V6Addr::from_slice(
+                    &[0xfd, 0x7c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9],
+                    0,
+                )
+                .unwrap_or_else(|_| unreachable!("literal")),
+            },
+        },
+    );
+    Ok(())
+}
+
 /// A mock-bound core, with the parts adjusted first.
 ///
 /// # Errors

@@ -28,11 +28,11 @@
 //! # `unsafe` in this module
 //!
 //! Six blocks, each with a `// SAFETY:` naming its invariant: the single
-//! `setsockopt` call site ([`setsockopt_bytes`]), the zeroed `sockaddr_storage`
+//! `setsockopt` call site (`setsockopt_bytes`), the zeroed `sockaddr_storage`
 //! that `libc`'s private padding makes unconstructible in safe code, the
-//! `recvmsg` in [`LinuxUdpSocket::recv_once`], the `cmsg` walk in
-//! [`read_pktinfo`] and its two `copy_nonoverlapping`s, and the two
-//! `sockaddr_in`/`sockaddr_in6` copies in [`sockaddr_to_std`]. Everything else
+//! `recvmsg` in `LinuxUdpSocket::recv_once`, the `cmsg` walk in
+//! `read_pktinfo` and its two `copy_nonoverlapping`s, and the two
+//! `sockaddr_in`/`sockaddr_in6` copies in `sockaddr_to_std`. Everything else
 //! goes through `socket2`.
 
 use std::io;

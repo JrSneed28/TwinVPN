@@ -75,6 +75,33 @@ pub fn put(
         verify::SignerKey::OwnerAnchors,
     )?;
 
+    // THE VERSION COMES FROM INSIDE THE SIGNATURE (R-4).
+    //
+    // `bundle.policy_version` is an UNSIGNED WIRE FIELD, and the monotone floor
+    // used to be advanced from it. Two attacks followed, both from bundles this
+    // service would happily verify:
+    //
+    //   * re-wrap last year's signed bundle with a HIGHER wire version — the
+    //     floor advances and the rollback is accepted as an advance, which is
+    //     exactly the "silent authorization hole" this module's own table names;
+    //   * re-wrap any of them with `u64::MAX` — the floor advances past every
+    //     version the Owner can ever sign again, permanently bricking policy.
+    //
+    // The CDDL requires `policy_version` in the `crit` set, so a bundle that
+    // verified has committed to one. A payload that did not decode is refused
+    // rather than falling back to the wire's number.
+    let claims = verified
+        .policy
+        .as_ref()
+        .ok_or_else(|| codes::bare(codes::SIGNATURE_INVALID))?;
+    let policy_version = claims.policy_version;
+    // The wire field stays in the message as a routing hint, so a caller that
+    // disagrees with what it forwarded is a defect worth naming rather than
+    // silently overriding.
+    if bundle.policy_version != policy_version {
+        return Err(codes::bare(codes::SIGNATURE_INVALID));
+    }
+
     // N-2. The current version is 0 before the first bundle, which is what
     // `if_absent` matches.
     check_precondition(req.precondition.as_ref(), tx.state().policy_version)?;
@@ -84,7 +111,7 @@ pub fn put(
     tx.put_document(
         DocumentType::PolicyBundle,
         DocumentRecord {
-            version: bundle.policy_version,
+            version: policy_version,
             content_digest: digest,
             octets: verified.octets.as_bytes().to_vec(),
             net_seq: net_seq_slot,
@@ -92,7 +119,7 @@ pub fn put(
             issued_at_ms: ctx.now_ms,
         },
     )?;
-    tx.advance_policy_version(bundle.policy_version);
+    tx.advance_policy_version(policy_version);
 
     // ADR-0002 §11.4: inline below the 16 KiB cap, by reference above it. The
     // reference form is what makes a large bundle unable to monopolise a stream,
@@ -100,21 +127,21 @@ pub fn put(
     let inline = wire::fits_inline(verified.octets.as_bytes());
     let reference = v1::StateDocumentRef {
         doc_type: DocumentType::PolicyBundle.to_wire(),
-        version: bundle.policy_version,
+        version: policy_version,
         size_bytes: verified.octets.len() as u64,
         digest: digest.to_vec(),
     };
 
     let net_seq = tx.append(&DurableEvent::new(EventBody::PolicyBundleUpdated(
         v1::PolicyBundleUpdated {
-            policy_version: bundle.policy_version,
+            policy_version,
             bundle: inline.then(|| bundle.clone()),
             reference: Some(reference),
         },
     ))?)?;
 
     let resp = v1::PutPolicyResponse {
-        policy_version: bundle.policy_version,
+        policy_version,
         result: Some(mutation_result(net_seq, tx.state().trust_epoch)),
         error: None,
     };

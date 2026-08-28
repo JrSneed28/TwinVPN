@@ -10,7 +10,10 @@ mod common;
 
 use std::time::Duration;
 
-use common::{cose, dev, device, key, meta, owner, put_policy_request, register, Net, NO_ANCHOR};
+use common::{
+    cose_at_version, dev, device, key, meta, mismatched_policy_request, mismatched_revoke_request,
+    owner, put_policy_request, register, Net, NO_ANCHOR,
+};
 use prost::Message;
 use twinvpn_control_plane::event::DurableEvent;
 use twinvpn_control_plane::model::{DocumentType, NetState};
@@ -282,12 +285,15 @@ fn the_policy_bundle_is_warehoused_verbatim_and_pullable() {
     let document = resp.document.expect("document");
     assert_eq!(
         document.cose_sign1,
-        cose(0x5a).cose_sign1,
+        cose_at_version(0x5a, 1).cose_sign1,
         "the received octets, byte for byte"
     );
     let reference = resp.reference.expect("reference");
     assert_eq!(reference.version, 1);
-    assert_eq!(reference.size_bytes, cose(0x5a).cose_sign1.len() as u64);
+    assert_eq!(
+        reference.size_bytes,
+        cose_at_version(0x5a, 1).cose_sign1.len() as u64
+    );
 
     // A version this shard does not hold is refused rather than answered with
     // an older one — serving the older document would be R-5's rollback.
@@ -337,4 +343,70 @@ fn the_policy_event_is_durable_and_carries_the_bundle_or_a_reference() {
     assert!(body.reference.is_some(), "always pullable");
     assert!(body.bundle.is_some(), "a small bundle travels inline");
     assert_eq!(body.policy_version, 1);
+}
+
+// ---------------------------------------------------------------------------
+// R-4 — the verified payload is the authority, not the wire field beside it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_revocation_cannot_be_retargeted_at_a_different_device() {
+    // The attack: Owner-signed revocations are distributed to every device by
+    // design, so anyone holding one can re-wrap it. Before R-4 the service
+    // verified the Owner's signature and then revoked whatever
+    // `target_device_id` the CALLER named — so one leaked revocation of a
+    // decommissioned laptop revoked any device in the TwinNet on demand.
+    let net = Net::new();
+    register(&net, 1, 0);
+    register(&net, 2, 0);
+    register(&net, 3, 0);
+
+    let err = net
+        .run(
+            dev(1),
+            CommandCode::RevokeDevice,
+            // The Owner signed for device 3; the wire says device 2.
+            &mismatched_revoke_request(2, 3, &key(120)),
+            1_000,
+            Duration::from_secs(120),
+            &owner(),
+        )
+        .expect_err("the wire target is not the signed target");
+    assert_eq!(err.code().as_str(), "AUTH.PEER_UNTRUSTED");
+
+    let state = net.store.snapshot(common::TWINNET).expect("net");
+    assert!(state.revoked.is_empty(), "no device was revoked");
+    assert_eq!(state.trust_epoch, 0, "and the epoch did not advance");
+}
+
+#[test]
+fn a_policy_bundle_cannot_be_rewrapped_at_a_higher_version() {
+    // Two attacks from one hole, both with a genuinely Owner-signed bundle:
+    // re-wrap an old one at a HIGHER wire version and the rollback is accepted
+    // as an advance; re-wrap any one at `u64::MAX` and the monotone floor moves
+    // past every version the Owner can ever sign again.
+    let net = Net::new();
+    register(&net, 1, 0);
+
+    for (wire, signed) in [(9u64, 1u64), (u64::MAX, 1)] {
+        let err = net
+            .run(
+                dev(1),
+                CommandCode::PutPolicy,
+                &mismatched_policy_request(wire, signed, &key(121)),
+                1_000,
+                Duration::from_secs(120),
+                &owner(),
+            )
+            .expect_err("the wire version is not the signed version");
+        assert_eq!(err.code().as_str(), "AUTH.BINDING_INVALID");
+        assert_eq!(
+            net.store
+                .snapshot(common::TWINNET)
+                .expect("net")
+                .policy_version,
+            0,
+            "the floor did not move"
+        );
+    }
 }

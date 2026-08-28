@@ -47,6 +47,10 @@ serde_json = { workspace = true }
 # and its real store trait. A dev-dependency: no shipped crate gains it, and
 # CD-I5 is untouched because nothing here is a data-plane crate.
 twinvpn-control-plane = { workspace = true }
+# The relay-health service, so the ONE `HealthState` R-14 collapsed the three
+# copies into can be asserted identical from both ends — the device's and the
+# service's. A dev-dependency, for the reason above: no shipped crate gains it.
+twinvpn-relay-health = { workspace = true }
 twinvpn-service-common = { workspace = true }
 futures = "0.3"
 prost      = { workspace = true }

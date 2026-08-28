@@ -66,12 +66,27 @@ pub mod validate;
 /// The generated `twinvpn.v1` bindings, included from the frozen source.
 ///
 /// The lint allowances are for generated code and apply to nothing hand-written.
+///
+/// # `invalid_html_tags`
+///
+/// The doc comments here are the **`.proto` comments**, carried through by
+/// `prost` — they are contract prose, not Rust documentation this repository
+/// authors, and the frozen `.proto` is the only place they could be changed.
+/// Several use angle brackets as metavariables (`"relay:<region>"`,
+/// `"<twinnet-label>.tnet.twinvpn.net"`), which rustdoc reads as unclosed HTML.
+///
+/// Allowed rather than "fixed": the alternatives are editing a frozen contract
+/// comment to satisfy a Rust lint, or post-processing the committed bindings so
+/// they no longer match a regeneration — and `verify-bindings` exists to catch
+/// exactly that second one. The allowance is scoped to this module, so nothing
+/// hand-written in this crate loses the lint.
 #[allow(
     clippy::all,
     clippy::pedantic,
     missing_docs,
     non_camel_case_types,
-    clippy::doc_lazy_continuation
+    clippy::doc_lazy_continuation,
+    rustdoc::invalid_html_tags
 )]
 pub mod v1 {
     include!(concat!(

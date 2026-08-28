@@ -63,8 +63,20 @@ class TwinVpnService : VpnService() {
         const val RESTRICTION_LOCKDOWN = "always_on_lockdown"
     }
 
+    /** The PLATFORM ADAPTER's handle (`twinvpn-platform-android`). */
     @Volatile
     private var handle: Long = 0
+
+    /**
+     * The CORE's handle (`twinvpn.h`, through `twinvpn-android-jni`).
+     *
+     * A second handle, because they are two libraries: CD-I5 forbids
+     * `twinvpn-platform-android` to name `twinvpn-core`, so the core's JNI
+     * entries live in a separate `.so` and hand back a separate opaque value.
+     * Conflating them would be the first step towards merging the crates.
+     */
+    @Volatile
+    private var coreHandle: Long = 0
 
     private lateinit var notification: ServiceNotification
     private var connectivity: ConnectivityWatcher? = null
@@ -103,7 +115,25 @@ class TwinVpnService : VpnService() {
 
         connectivity = ConnectivityWatcher(this) { handle }.also { it.start() }
         power = PowerWatcher(this) { handle }.also { it.start() }
-        core = CoreClient(handle).also { client ->
+
+        // **The core.** Until this call existed, `CoreClient` was a stub: this
+        // service ran a platform adapter with nothing behind it, the
+        // notification appeared, and no command reached anything.
+        //
+        // The config slice is empty: on Android the adapter is linked
+        // in-process as a Rust crate, so the core reaches the platform directly
+        // rather than back out through F-9 (`ownership.md` §10.4).
+        coreHandle = NativeBridge.nativeCoreCreate(ByteArray(0))
+        if (coreHandle == 0L) {
+            // ADR-0015 O-18 again: a service that came up without a core would
+            // render a posture it cannot know. Refusing to start is the weaker
+            // failure and the correct one.
+            Log.e(TAG, "the core could not be created")
+            stopSelf()
+            return
+        }
+
+        core = CoreClient(coreHandle).also { client ->
             // The ONE ordered event stream (ADR-0018 F-5). The notification is a
             // subscriber like any other; it renders what the core resolved.
             client.subscribe { rendered -> notification.render(rendered) }
@@ -134,7 +164,11 @@ class TwinVpnService : VpnService() {
             notification.startForeground(this)
         }
 
-        core?.requestConnect()
+        // `net.up` rather than a per-peer connect: the service is starting the
+        // TUNNEL, and which peers exist is the core's to know. A shell that
+        // enumerated peers here would be holding a decision CB-2 removes from
+        // it.
+        core?.requestNetUp()
         // ADR-0022 §11.4: on a low-memory kill the system restarts us. A null
         // intent on the restart is what `START_STICKY` delivers, and it is
         // indistinguishable from an always-on start — which is why the branch
@@ -161,7 +195,18 @@ class TwinVpnService : VpnService() {
     override fun onDestroy() {
         connectivity?.stop()
         power?.stop()
+        // The drain thread first — `stop()` wakes an in-flight `next_event`
+        // rather than waiting out its timeout — and only then the instance it
+        // is reading from. Destroying a core a thread is still blocked inside
+        // is how a shutdown becomes a crash.
         core?.stop()
+        core = null
+        val heldCore = coreHandle
+        coreHandle = 0
+        if (heldCore != 0L) {
+            // CB-6: this does NOT tear down enforcement.
+            NativeBridge.nativeCoreDestroy(heldCore)
+        }
         val held = handle
         handle = 0
         if (held != 0L) {

@@ -246,6 +246,22 @@ fn start() -> Result<(), StartupRefusal> {
 
     // ---- 5. the core (VR-4 first) -----------------------------------------
     let core = Arc::new(build_core(&env, Arc::clone(&adapter))?);
+
+    // ---- 5b. open the durable store ---------------------------------------
+    //
+    // **Review finding R-10.** `sequence.state_rehydrated` above was set to
+    // `true` having rehydrated nothing: `Core::open_store` had only test
+    // callers, so the composed daemon ran with a MEMORY-ONLY vault and W-28's
+    // crash window was the entire process lifetime. Every durable claim
+    // S-12/S-15/S-27/S-30/S-37 make was true of the type and false of the
+    // product.
+    //
+    // Before the endpoint, so no management command can observe a core whose
+    // persistence is not yet established; after the core, because the store is
+    // opened THROUGH it (CB-7 splits the store at the CB-1 line and the core
+    // owns the bridge).
+    open_vault(&tokio_runtime, &core)?;
+
     let agent = runtime::Agent {
         env: env.clone(),
         adapter: Arc::clone(&adapter),
@@ -351,6 +367,19 @@ fn runtime_dir() -> std::path::PathBuf {
         .parent()
         .map_or_else(|| std::path::PathBuf::from(mi::SOCKET_DIR), Into::into)
 }
+/// §11.6 step (5b), delegated to the library so it is testable (R-10).
+fn open_vault(
+    runtime: &Arc<twinvpn_env::binding::tokio_rt::TokioRuntime>,
+    core: &Arc<twinvpn_core::Core>,
+) -> Result<(), StartupRefusal> {
+    runtime::open_vault_at_startup(runtime, core).map_err(|error| StartupRefusal {
+        code: error.reason_code(),
+        specified: "STORE.CUSTODY_DEGRADED",
+        detail: error.to_string(),
+        exit: 71,
+    })
+}
+
 /// §11.6 step (2), delegated to the library so it is testable.
 fn arm_at_startup(
     runtime: &Arc<twinvpn_env::binding::tokio_rt::TokioRuntime>,

@@ -176,7 +176,7 @@ pub const SCOPE_PREFIX: [(&str, AddressFamily); 2] = [
 /// # Why a baseline exists at all
 ///
 /// Review finding **R-6**: `set_ruleset(_, Blocked)` used to render a contract
-/// with an empty route set, and [`emit_scope_drop`] is two loops over that set —
+/// with an empty route set, and `emit_scope_drop` is two loops over that set —
 /// so it emitted **zero rules**, under `policy accept`, and the script's
 /// `delete table` then replaced the real drops a previous `apply` had installed.
 /// A "fail-closed" swap that opened the host.

@@ -20,6 +20,24 @@ use std::path::Path;
 
 use twinvpn_relay_health::aggregate::{Aggregate, HealthState, SelfReport, Thresholds};
 
+/// The canonical `HealthState`'s own source, in `twinvpn-types`.
+///
+/// Read across the workspace boundary deliberately: this guard is about a
+/// property of the enum, and after R-14 the enum is defined once, elsewhere. A
+/// guard that stopped at this crate's own `src/` would report success the
+/// moment the thing it guards moved.
+fn canonical_source() -> String {
+    let p =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/crates/twinvpn-types/src/state.rs");
+    std::fs::read_to_string(&p).unwrap_or_else(|e| {
+        panic!(
+            "read the canonical HealthState at {}: {e}. If twinvpn-types moved, \
+             this guard must follow it rather than be deleted.",
+            p.display()
+        )
+    })
+}
+
 fn source(name: &str) -> String {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(name);
     let s = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
@@ -59,7 +77,33 @@ fn no_api_here_can_be_used_as_a_gate() {
         );
     }
     // The one permitted conversion.
-    assert!(src.contains("pub const fn score_delta(self) -> i32"));
+    //
+    // R-14 moved the enum itself to `twinvpn-types` — three hand-written copies
+    // of one frozen enum was the drift W-20 named — so this module now
+    // RE-EXPORTS it. That must not silently defeat the guard: the assertion
+    // follows the definition to its new home rather than passing vacuously
+    // because the text left this file.
+    assert!(
+        src.contains("pub use twinvpn_types::state::HealthState;"),
+        "the canonical enum is the one this service must use; a local copy is \
+         the R-14 divergence returning"
+    );
+    let canonical = canonical_source();
+    assert!(canonical.contains("pub const fn score_delta(self) -> i32"));
+    for forbidden in [
+        "fn is_healthy",
+        "fn is_usable",
+        "fn is_available",
+        "fn may_connect",
+        "fn may_attempt",
+        "impl From<HealthState> for bool",
+    ] {
+        assert!(
+            !canonical.contains(forbidden),
+            "twinvpn-types' HealthState provides `{forbidden}`: S-10 MUST NOT gate \
+             a connection attempt, wherever the enum lives"
+        );
+    }
 
     // And the sharper form: no `bool` is ever returned for a RELAY. The only two
     // `-> bool` methods in the module are `Aggregate::is_empty` — a collection

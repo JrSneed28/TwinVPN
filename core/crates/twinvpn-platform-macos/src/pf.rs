@@ -23,7 +23,7 @@
 //! > An implementation that can install the Tier-2 rule set for one family
 //! > without the other is **non-conforming**, not degraded.
 //!
-//! [`emit_scope`] is the only function that writes a Tier-2 rule and it writes
+//! `emit_scope` is the only function that writes a Tier-2 rule and it writes
 //! **both families or neither**. There is no call site that can emit the v4 half
 //! without the v6 half, because there is no separate v6 emitter to forget.
 //!

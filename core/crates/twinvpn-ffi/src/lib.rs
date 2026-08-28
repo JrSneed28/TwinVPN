@@ -101,9 +101,25 @@ fn contained<T>(fallback: T, body: impl FnOnce() -> T) -> T {
 }
 
 /// Runs `body` on a live instance, containing any panic and poisoning on one.
-fn contained_on<T>(core: Option<&TwCore>, fallback: T, body: impl FnOnce(&TwCore) -> T) -> T {
+///
+/// # R-16: the fallback is a THUNK, not a value
+///
+/// Every caller's fallback is `(TW_ERR, envelope_for(..))`, and `envelope_for`
+/// allocates a `Box<TwBuf>` holding an encoded envelope. Taken **by value**,
+/// that allocation happened on every call — including the success path, where
+/// the value is dropped without ever reaching `write_out`, so the `Box` was
+/// never reclaimed by anything. On the shell's blocking `tw_core_next_event`
+/// loop in a long-lived privileged daemon that is an unbounded heap leak.
+///
+/// Taking it as `FnOnce() -> T` means the envelope is built **only on the two
+/// paths that hand it to the caller** — a null instance, or a contained panic.
+fn contained_on<T>(
+    core: Option<&TwCore>,
+    fallback: impl FnOnce() -> T,
+    body: impl FnOnce(&TwCore) -> T,
+) -> T {
     let Some(core) = core else {
-        return fallback;
+        return fallback();
     };
     catch_unwind(AssertUnwindSafe(|| body(core))).unwrap_or_else(|_| {
         // F-7: emit INTERNAL.CORE_PANIC, mark the instance poisoned, make
@@ -111,7 +127,7 @@ fn contained_on<T>(core: Option<&TwCore>, fallback: T, body: impl FnOnce(&TwCore
         // installed rule set. `Core::poison` touches no adapter capability,
         // which is what makes the last clause true.
         core.core.poison();
-        fallback
+        fallback()
     })
 }
 
@@ -450,19 +466,16 @@ pub unsafe extern "C" fn tw_core_submit(
 
     let (rc, err) = contained_on(
         instance,
-        (TW_ERR, envelope_for(codes::INTERNAL_UNEXPECTED_STATE)),
+        || (TW_ERR, envelope_for(codes::INTERNAL_UNEXPECTED_STATE)),
         |tw| {
-            // F-8: the command crosses as an encoded blob. Its first field is the
-            // operation name, and the name is looked up in the SAME catalogue the MI
-            // transport uses — one contract, two carriages.
-            let Ok(name) = core::str::from_utf8(bytes) else {
-                return (TW_ERR, envelope_for(codes::PROTO_MALFORMED_MESSAGE));
+            // F-8: the command crosses as an encoded blob, and the name inside
+            // it is looked up in the SAME catalogue the MI transport uses — one
+            // contract, two carriages.
+            let submission = match decode_submission(bytes) {
+                Ok(submission) => submission,
+                Err(reason) => return (TW_ERR, envelope_for(reason)),
             };
-            let Some(op) = twinvpn_mgmt::CoreCommand::from_name(name.trim()) else {
-                // MGMT.OP_UNKNOWN, substituted — see `twinvpn_mgmt::codes`.
-                return (TW_ERR, envelope_for(twinvpn_mgmt::codes::op_unknown()));
-            };
-            match tw.core.submit(&twinvpn_mgmt::Submission::bare(op)) {
+            match tw.core.submit(&submission) {
                 Ok(()) => (TW_OK, core::ptr::null_mut()),
                 Err(d) => (TW_ERR, envelope(&d)),
             }
@@ -493,11 +506,13 @@ pub unsafe extern "C" fn tw_core_next_event(
 
     let (rc, event, err) = contained_on(
         instance,
-        (
-            TW_ERR,
-            core::ptr::null_mut(),
-            envelope_for(codes::INTERNAL_UNEXPECTED_STATE),
-        ),
+        || {
+            (
+                TW_ERR,
+                core::ptr::null_mut(),
+                envelope_for(codes::INTERNAL_UNEXPECTED_STATE),
+            )
+        },
         |tw| {
             match tw
                 .core
@@ -520,6 +535,90 @@ pub unsafe extern "C" fn tw_core_next_event(
     // SAFETY: as above.
     unsafe { write_out(err_out, err) };
     rc
+}
+
+/// Decodes a submitted command, in **either** of the two forms this ABI accepts.
+///
+/// # M-1's other direction
+///
+/// M-1 made the *event* side self-describing: every event now crosses as a
+/// length-prefixed [`twinvpn_mgmt::envelope::MgmtEnvelope`], the same vocabulary
+/// the Unix socket, the named pipe and XPC speak (MI-20 — *"one contract, two
+/// carriages, never two contracts"*). The **command** side was left as a bare
+/// UTF-8 operation name, and that is a real ceiling rather than a stylistic
+/// one: `Submission` carries `params`, `idempotency_key`, `if_version` and
+/// `actor_principal`, and a bare name can express none of them.
+///
+/// The consequence was visible in the mobile shells. `shells/ios`'
+/// `CoreCommand.pathSnapshot(json, acrossWake:)` and
+/// `CoreCommand.memoryPressure(residentBytes:)` had no way to carry the JSON or
+/// the byte count across, and `session.connect` — which requires a 32-byte peer
+/// `device_id` — could not be submitted **at all**, because its parameter is the
+/// whole of what it means.
+///
+/// So this accepts both:
+///
+/// 1. **A length-prefixed `MgmtEnvelope` whose body is a `Request`.** The full
+///    submission: operation, `params`, `if_version`. This is the form a shell
+///    should use, and it is byte-identical to what it would put on a socket.
+/// 2. **A bare UTF-8 operation name.** Kept, unchanged, because F-1 makes every
+///    exported function a compatibility obligation forever — a shell already
+///    submitting a bare name must keep working. It means exactly what it
+///    always did: `Submission::bare`.
+///
+/// The two are told apart by the framing, not by a flag: a frame begins with a
+/// four-byte big-endian length that equals the remaining byte count, and no
+/// operation name in the catalogue has that shape.
+///
+/// # Errors
+///
+/// `PROTO.MALFORMED_MESSAGE` for bytes that are neither, and the substituted
+/// `MGMT.OP_UNKNOWN` for a name the catalogue does not contain — a **typed**
+/// rejection, never a parse failure (ADR-0017 §11.7).
+fn decode_submission(bytes: &[u8]) -> Result<twinvpn_mgmt::Submission, ReasonCode> {
+    use twinvpn_mgmt::envelope::{Body, MgmtEnvelope};
+
+    // Form 1: the MI frame. Tried first and told apart by SHAPE — a frame whose
+    // declared length matches its own body cannot be mistaken for an operation
+    // name, and no catalogue name begins with a four-byte length that happens
+    // to equal the rest of it.
+    //
+    // A frame that decodes and is NOT a `Request` does not fall through to form
+    // 2. It is malformed *as a submission*, and saying so beats letting its
+    // JSON be read as an operation name and answered `MGMT.OP_UNKNOWN` — which
+    // would tell a shell "that operation does not exist" about bytes that named
+    // no operation at all. MI-3's direction rule: a client may send `Hello`,
+    // `Request` or `Goodbye`, and only the middle one is a command.
+    if let Ok(MgmtEnvelope { body, .. }) = twinvpn_mgmt::envelope::decode_frame(bytes) {
+        let Body::Request(request) = body else {
+            return Err(codes::PROTO_MALFORMED_MESSAGE);
+        };
+        let Some(op) = twinvpn_mgmt::CoreCommand::from_name(request.operation.trim()) else {
+            return Err(twinvpn_mgmt::codes::op_unknown());
+        };
+        return Ok(twinvpn_mgmt::Submission {
+            op,
+            params: request.params,
+            // The ABI is in-process and fire-and-forget, so there is no retry to
+            // deduplicate and no key to carry one. Left absent rather than
+            // fabricated; `dispatch::disposition` refuses an operation whose
+            // catalogue row requires one, by name.
+            idempotency_key: None,
+            if_version: request.if_version,
+            // MI-18: the OS principal. There is no peer on this carriage to
+            // attribute to, and inventing one would make "the tunnel went down"
+            // and "someone took the tunnel down" the same fact.
+            actor_principal: None,
+        });
+    }
+
+    // Form 2: the bare name.
+    let Ok(name) = core::str::from_utf8(bytes) else {
+        return Err(codes::PROTO_MALFORMED_MESSAGE);
+    };
+    twinvpn_mgmt::CoreCommand::from_name(name.trim())
+        .map(twinvpn_mgmt::Submission::bare)
+        .ok_or_else(twinvpn_mgmt::codes::op_unknown)
 }
 
 /// Encodes one event for the wire, **in the MI envelope every other carriage
@@ -656,7 +755,7 @@ fn encode_event(event: &twinvpn_core::CoreEvent, as_of_ms: u64) -> Vec<u8> {
 pub unsafe extern "C" fn tw_core_wake(core: *mut TwCore) {
     // SAFETY: the caller's instance-pointer contract; null is handled.
     let instance = unsafe { as_ref_opt(core.cast_const()) };
-    contained_on(instance, (), |tw| tw.core.wake());
+    contained_on(instance, || (), |tw| tw.core.wake());
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,6 +1165,127 @@ mod tests {
         unsafe { tw_core_wake(core::ptr::null_mut()) };
         // SAFETY: null is handled.
         unsafe { tw_core_destroy(core::ptr::null_mut()) };
+    }
+
+    /// The MI-frame form carries an operation's PARAMETERS.
+    ///
+    /// `tw_core_submit` used to parse its whole slice as a bare operation name,
+    /// so `session.connect` — whose parameter is a 32-byte peer `device_id` and
+    /// which means nothing without it — could not be submitted across this ABI
+    /// at all. `shells/ios`' `CoreCommand.pathSnapshot(_:acrossWake:)` and
+    /// `.memoryPressure(residentBytes:)` had the same problem, and
+    /// `shells/android` had no submission path at all.
+    #[test]
+    fn a_submission_may_carry_parameters_in_an_mi_frame() {
+        use twinvpn_mgmt::envelope::{self, Body, MgmtEnvelope, Request};
+
+        let framed = envelope::encode_frame(&MgmtEnvelope {
+            mi_version: envelope::MI_VERSION,
+            request_id: Vec::new(),
+            correlation_id: Vec::new(),
+            seq: 0,
+            idempotency_key: Vec::new(),
+            as_of_ms: 0,
+            body: Body::Request(Request {
+                operation: "session.connect".to_owned(),
+                params: vec![0x5a; 32],
+                if_version: None,
+            }),
+        })
+        .expect("within the cap");
+
+        let submission = decode_submission(&framed).expect("decodes");
+        assert_eq!(submission.op, twinvpn_mgmt::CoreCommand::SessionConnect);
+        assert_eq!(
+            submission.params,
+            vec![0x5a; 32],
+            "the parameter is the whole of what the operation means"
+        );
+    }
+
+    /// The bare-name form still means exactly what it always did.
+    ///
+    /// F-1 makes every exported function a compatibility obligation forever, so
+    /// the new form is an ADDITION beside this one rather than a replacement —
+    /// which is what makes the version bump minor.
+    #[test]
+    fn a_bare_operation_name_is_still_accepted_with_no_parameters() {
+        let submission = decode_submission(b"net.up").expect("decodes");
+        assert_eq!(submission.op, twinvpn_mgmt::CoreCommand::NetUp);
+        assert!(submission.params.is_empty());
+        assert!(submission.if_version.is_none());
+
+        // Whitespace is trimmed, as it always was.
+        assert_eq!(
+            decode_submission(
+                b"  status.get 
+"
+            )
+            .expect("decodes")
+            .op,
+            twinvpn_mgmt::CoreCommand::StatusGet
+        );
+    }
+
+    #[test]
+    fn both_forms_refuse_an_unknown_operation_by_name_rather_than_parsing_it() {
+        use twinvpn_mgmt::envelope::{self, Body, MgmtEnvelope, Request};
+
+        // ADR-0017 §11.7: "Never a parse error, never a hang, never a generic
+        // failure."
+        assert_eq!(
+            decode_submission(b"tunnel.explode").unwrap_err(),
+            twinvpn_mgmt::codes::op_unknown()
+        );
+        let framed = envelope::encode_frame(&MgmtEnvelope {
+            mi_version: envelope::MI_VERSION,
+            request_id: Vec::new(),
+            correlation_id: Vec::new(),
+            seq: 0,
+            idempotency_key: Vec::new(),
+            as_of_ms: 0,
+            body: Body::Request(Request {
+                operation: "tunnel.explode".to_owned(),
+                params: Vec::new(),
+                if_version: None,
+            }),
+        })
+        .expect("within the cap");
+        assert_eq!(
+            decode_submission(&framed).unwrap_err(),
+            twinvpn_mgmt::codes::op_unknown()
+        );
+
+        // And bytes that are neither form are malformed, not an unknown op:
+        // the two are different facts and the shell acts differently on them.
+        assert_eq!(
+            decode_submission(&[0xff, 0xfe, 0xfd]).unwrap_err(),
+            codes::PROTO_MALFORMED_MESSAGE
+        );
+    }
+
+    #[test]
+    fn an_agent_originated_body_is_not_a_submission() {
+        use twinvpn_mgmt::envelope::{self, Body, MgmtEnvelope};
+
+        // MI-3's direction rule. A `Goodbye` is client-originated but means
+        // nothing on an in-process carriage with no connection, and a
+        // `HelloAck` is the agent's own — neither is a command, and neither may
+        // fall through to being read as an operation NAME.
+        let framed = envelope::encode_frame(&MgmtEnvelope {
+            mi_version: envelope::MI_VERSION,
+            request_id: Vec::new(),
+            correlation_id: Vec::new(),
+            seq: 0,
+            idempotency_key: Vec::new(),
+            as_of_ms: 0,
+            body: Body::Goodbye,
+        })
+        .expect("within the cap");
+        assert_eq!(
+            decode_submission(&framed).unwrap_err(),
+            codes::PROTO_MALFORMED_MESSAGE
+        );
     }
 
     #[test]

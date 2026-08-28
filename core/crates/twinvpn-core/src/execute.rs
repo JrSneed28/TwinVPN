@@ -137,6 +137,67 @@ pub(crate) fn execute(core: &Core, submission: &Submission) -> Result<Outcome, B
     }
 }
 
+/// T01's `credentials_valid` and `peer_authorized`, as facts — or a refusal.
+///
+/// Both are `true` in the `Ok` case, and there is deliberately no way to get a
+/// `false` out: a guard this build could not establish is a **refusal to
+/// proceed**, not a `false` handed to the state machine, which would leave the
+/// session in DISCONNECTED with no record of why.
+///
+/// # What each one reads
+///
+/// **`credentials_valid`** — this device holds an identity at all, asked of the
+/// adapter through `identity_public`. That is CB-5's only way to ask: the
+/// private half is not representable in any type this crate can name (CD-I4),
+/// so "do we have credentials" is a question only the platform can answer.
+///
+/// On a host with no secure element the Linux adapter's `AbsentElement` refuses
+/// it — §11.16 (l)'s *specified* behaviour, whose whole point is that the core
+/// "MUST NOT substitute a file-backed signer silently" — and the connect is
+/// refused rather than proceeding without credentials.
+///
+/// It is deliberately NOT the same as `!credentials_expired`. `Guards` keeps
+/// the two apart because "not yet checked" must not read as "expired", and this
+/// build cannot check a window: the device's own `DeviceIdentityRecord` carries
+/// `not_before_ms`/`not_after_ms` and arrives over C2, which has no transport
+/// (W-12). So `credentials_expired` stays `false` — the honest value for a
+/// window nobody has read — and the missing check is a *refusal to proceed*
+/// through `credentials_valid` rather than a claim about expiry.
+///
+/// The vault is deliberately **not** consulted here. R-10's memory-only vault
+/// is a startup property and is refused at startup, in the shell's §11.6 step
+/// (5b); folding it into a per-connect guard would report a durability failure
+/// as an authentication one.
+///
+/// **`peer_authorized`** — [`crate::planes::DataPlaneView::peer_authorized`],
+/// which is ADR-0007 N-4's rule: a cached peer record whose `TunnelKeyBinding`
+/// verified. Not "we have heard of this device".
+///
+/// # Both fail closed, and that is visible
+///
+/// With no `ControlTransport` bound, nothing populates the peer cache, so
+/// `peer_authorized` is `false` and `session.connect` is REFUSED by name. That
+/// is the correct answer and it is meant to be noticed: the previous `true`
+/// made an unauthenticated build look like a working one, which is how "the
+/// composed product connects" came to be reported upward.
+fn trust_guards(core: &Core, peer: DeviceId) -> Result<(bool, bool), Box<Diagnostic>> {
+    let credentials_valid = core.block_on_adapter(|_env, adapter| {
+        Box::pin(async move { adapter.identity().public_identity().await.is_ok() })
+    });
+    if !credentials_valid {
+        return Err(Box::new(reject(codes::AUTH_KEY_UNAVAILABLE)));
+    }
+    // Refused BY NAME rather than by the state machine declining to move: T01's
+    // guard failing leaves the session in DISCONNECTED with no transition
+    // record, which a caller reads as "nothing happened" — the shape §11.6
+    // forbids. The two codes are different facts, and an operator acts
+    // differently on each.
+    if !core.data_plane_view().peer_authorized(peer) {
+        return Err(Box::new(reject(codes::AUTH_PEER_UNTRUSTED)));
+    }
+    Ok((true, true))
+}
+
 /// `session.connect` — the whole establishment chain.
 ///
 /// Naturally idempotent (§11.9's `nat`), and the mechanism is the derived
@@ -160,15 +221,20 @@ fn connect(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnost
     let usable_candidate = gathered.usable_candidate();
     let no_candidate_either_family = gathered.no_candidate_either_family();
 
-    // 2. T01. `credentials_valid` and `peer_authorized` are facts this build
-    //    cannot check: no trust store is bound, because twinvpn-trust's peer set
-    //    is populated over C2 and there is no ControlTransport (W-12). They are
-    //    supplied as `true` so establishment proceeds, and THAT IS A REAL
-    //    WEAKNESS, recorded here and in the crate README rather than hidden: a
-    //    build with a trust store must supply the real values.
+    // 2. T01's two trust guards, READ rather than asserted.
+    //
+    //    These were literal `true`s, with a comment saying so — "THAT IS A REAL
+    //    WEAKNESS". The consequence was that `session.connect` drove the state
+    //    machine to CONNECTED for any 32 bytes a caller passed as a peer: no
+    //    credential check, no authorization check, no handshake. An unauthorized
+    //    peer was indistinguishable from an authorized one at every layer above.
+    //
+    //    Both are now facts the composed core can establish, and both FAIL
+    //    CLOSED when it cannot. See `trust_guards`.
+    let (credentials_valid, peer_authorized) = trust_guards(core, peer)?;
     let guards = Guards {
-        credentials_valid: true,
-        peer_authorized: true,
+        credentials_valid,
+        peer_authorized,
         usable_candidate,
         no_candidate_either_family,
         ..Guards::default()
@@ -303,14 +369,37 @@ fn disconnect(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagn
 fn net_up(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnostic>> {
     let peers: Vec<DeviceId> = core.sessions().values().map(|e| e.peer).collect();
     let mut effects = 0u32;
+    let mut connected = 0usize;
     for peer in peers {
         let mut scoped = submission.clone();
         scoped.op = CoreCommand::SessionConnect;
         scoped.params = peer.as_bytes().to_vec();
         if let Ok(outcome) = connect(core, &scoped) {
             effects = effects.saturating_add(outcome.effects);
+            connected += 1;
         }
     }
+
+    // **R-2 / R-7.** The data plane is now composed and installed here.
+    //
+    // Until this call existed, `PlatformAdapter::apply` had no production caller
+    // anywhere in the tree: the composed product installed no ruleset of its
+    // own, programmed no route, applied no DNS policy and created no overlay
+    // interface. On a Linux host the KS-19 boot table was the only enforcement
+    // that ever existed and its scope is the overlay prefixes alone.
+    //
+    // `crate::enforce::arm` is fail-closed at every step, so a refusal here
+    // leaves the host `Blocked` rather than open — which is why the refusal is
+    // reported as the operation's outcome and not swallowed.
+    let armed = crate::enforce::arm(core)?;
+    effects = effects.saturating_add(1);
+    tracing::info!(
+        target: "twinvpn.core.enforce",
+        generation = armed.generation.0,
+        ruleset = ?armed.ruleset,
+        sessions = connected,
+        "net.up installed a contract generation and read the posture back"
+    );
     Ok(Outcome::new(Vec::new(), effects.max(1)))
 }
 
@@ -327,6 +416,18 @@ fn net_down(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnos
     for id in ids {
         effects = effects.saturating_add(close_one(core, id, submission));
     }
+
+    // §11.8's teardown, in order: link down → swap to `RULESET_BLOCKED` →
+    // destroy the interface. **The rules stay live** — CB-6 puts them in the
+    // OS's custody so that the tunnel going away cannot drop protection.
+    //
+    // MI-K1 is untouched: this RAISES the posture and never clears the latch,
+    // and only §11.14's authenticated ceremony can lower one. Leaving the
+    // interface up with no contract on it — which is what this used to do,
+    // because nothing here reached the adapter at all — is the state that
+    // *would* have leaked.
+    crate::enforce::teardown(core);
+    effects = effects.saturating_add(1);
     Ok(Outcome::new(Vec::new(), effects.max(1)))
 }
 

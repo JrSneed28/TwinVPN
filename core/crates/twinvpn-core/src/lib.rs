@@ -69,6 +69,8 @@ pub mod planes;
 #[cfg(feature = "full")]
 pub mod dispatch;
 #[cfg(feature = "full")]
+pub mod enforce;
+#[cfg(feature = "full")]
 pub mod establish;
 #[cfg(feature = "full")]
 pub(crate) mod execute;
@@ -102,4 +104,9 @@ pub use planes::{ControlPlanePort, DataPlaneView, PeerRecord};
 pub const ABI_MAJOR: u32 = 1;
 
 /// **V-B minor.** Bumped on an addition (VR-1).
-pub const ABI_MINOR: u32 = 0;
+///
+/// `0 -> 1`: `tw_core_submit` gained the MI-frame form, which carries an
+/// operation's parameters. An addition — the bare-name form is unchanged and
+/// still accepted — so a shell compiled against minor 0 keeps working, which is
+/// exactly what makes it minor rather than major.
+pub const ABI_MINOR: u32 = 1;

@@ -65,7 +65,16 @@ pub const FLAG_SECRET_BEARING: u64 = 4;
 const KNOWN_FLAGS: u64 = FLAG_VERBATIM_SIGNED | FLAG_DERIVED | FLAG_SECRET_BEARING;
 
 /// A record's plaintext plus the metadata that is authenticated alongside it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// # `Debug` is written by hand (R-9)
+///
+/// `value` is *the plaintext*, in the composed path — a `PairSecret`, an
+/// identity blob, whatever ST-14 says the namespace holds. A derived `Debug`
+/// put all of it into any log line, panic message or `assert_eq!` failure that
+/// rendered a `Record`, and into every enclosing `#[derive(Debug)]` above it.
+/// The hand-written one prints the length and the flags, which are the
+/// dimensions an operator actually debugs with.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Record {
     /// The per-namespace record schema version.
     pub rec_schema: u64,
@@ -75,6 +84,18 @@ pub struct Record {
     pub flags: u64,
     /// The plaintext.
     pub value: Vec<u8>,
+}
+
+impl core::fmt::Debug for Record {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Record")
+            .field("rec_schema", &self.rec_schema)
+            .field("rec_seq", &self.rec_seq)
+            .field("flags", &self.flags)
+            // NOT the plaintext. The length is what a decode bug shows up in.
+            .field("value_len", &self.value.len())
+            .finish()
+    }
 }
 
 impl Record {

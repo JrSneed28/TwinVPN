@@ -282,6 +282,82 @@ pub fn arm_owner_tagged_ruleset(
     outcome
 }
 
+/// Why the durable store could not be opened at startup (R-10).
+#[derive(Debug, thiserror::Error)]
+pub enum VaultError {
+    /// The store's own ladder refused, naming a `STORE.*` code.
+    #[error("the durable store could not be opened: {0}")]
+    Open(String),
+}
+
+impl VaultError {
+    /// The registered code this refusal carries.
+    #[must_use]
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            // The whole `STORE.*` ladder collapses onto the one code the
+            // startup refusal table knows. The store's own code is carried in
+            // `detail`, so nothing is lost.
+            VaultError::Open(_) => "STORE.CUSTODY_DEGRADED",
+        }
+    }
+}
+
+/// **§11.6 step (4b) — open the durable store.**
+///
+/// # Review finding R-10
+///
+/// `Core::open_store` existed, worked, and had **only test callers**. The agent
+/// set `state_rehydrated = true` and opened nothing, so S-12, S-15, S-27, S-30
+/// and S-37 were memory-only for the life of the process and W-28's crash
+/// window was the whole process lifetime. Two domains each documented that the
+/// *other* end was wired.
+///
+/// This is that call. It runs **before** the endpoint accepts connections, so
+/// no management command can observe a core whose persistence is not yet
+/// established, and it hydrates §6.5's resumed sessions in the same step.
+///
+/// # Why a failure is a refusal rather than a warning
+///
+/// PS-18 forbids starting "in a mode that cannot arm enforcement while
+/// reporting itself as running", and the same reasoning applies to the store: a
+/// daemon that came up with a silently memory-only vault would report every
+/// write as durable, accept a revocation, and lose the never-shrinking set on
+/// the next restart. The store's own ST-24 ladder already distinguishes a
+/// degraded-but-usable rung — which opens successfully and publishes
+/// `STORE.CUSTODY_DEGRADED` — from an unusable one, so what reaches here is
+/// the second kind.
+///
+/// # Errors
+///
+/// [`VaultError::Open`] carrying the `STORE.*` code the ladder produced.
+pub fn open_vault_at_startup(
+    runtime: &Arc<TokioRuntime>,
+    core: &Arc<twinvpn_core::Core>,
+) -> Result<(), VaultError> {
+    let mut outcome: Result<(), VaultError> = Ok(());
+    {
+        let slot = &mut outcome;
+        let core = Arc::clone(core);
+        twinvpn_env::Runtime::block_on(
+            runtime.as_ref(),
+            Box::pin(async move {
+                match core.open_store().await {
+                    Ok(state) => tracing::info!(
+                        target: "twinvpn.store",
+                        ?state,
+                        "the durable store is open; S-12/S-15/S-27/S-30/S-37 survive a restart"
+                    ),
+                    Err(diagnostic) => {
+                        *slot = Err(VaultError::Open(diagnostic.code().as_str().to_owned()));
+                    }
+                }
+            }),
+        );
+    }
+    outcome
+}
+
 /// The running agent: one `Env`, one adapter, one core.
 ///
 /// **S-47**: "exactly **one process** \[holds\] a mutating core handle at a time",

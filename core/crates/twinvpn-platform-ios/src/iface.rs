@@ -35,7 +35,7 @@
 //! consequence: the queue that just refused a change refuses the notice about it
 //! too, so the subscriber that fell behind is the one subscriber never told. The
 //! count therefore lives in an [`AtomicU64`] beside the queue, and
-//! [`ChangeStream::poll_next`] reports it **before** it reports any queued
+//! `ChangeStream::poll_next` reports it **before** it reports any queued
 //! change — so the gap arrives the instant the consumer drains, ahead of the
 //! events that survived it.
 

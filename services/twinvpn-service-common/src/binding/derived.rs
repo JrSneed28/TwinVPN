@@ -159,7 +159,7 @@ impl<S: DerivableSubject> DerivedPreferred<S> {
     ///
     /// A rotated device is the expected cause. A sustained rise with no rotation
     /// campaign means something is presenting keys of a shape
-    /// [`super::spki`] does not convert — a silent downgrade to pinning, and the
+    /// `super::spki` does not convert — a silent downgrade to pinning, and the
     /// counter is how it stops being silent.
     #[must_use]
     pub const fn unprovable_keys(&self) -> u64 {

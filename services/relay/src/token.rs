@@ -47,12 +47,31 @@ use crate::subject::RelaySub;
 /// attacker-controlled — naming the wrong key can only cause a refusal, never an
 /// acceptance, because the signature is then checked under the key that was
 /// named. `cose_sign1` is verified verbatim and never decoded-then-re-encoded.
-#[derive(Debug, Clone)]
+///
+/// # `Debug` is written by hand (R-9)
+///
+/// The derived one rendered `cose_sign1` — **the complete, replayable bearer
+/// token** — as a list of digits. The tripwire below asserted only that the
+/// rendering omitted the words `"epoch"`, `"quota"`, `"subject"` and
+/// `"not_after"`, which a `Vec<u8>` never contains, so it passed while the
+/// whole token sat in the output. A guard that reports success.
+#[derive(Clone)]
 pub struct PresentedToken {
     /// The `iss` the bearer claims. A *hint for key selection only*.
     pub issuer_key_id: String,
     /// The COSE_Sign1 envelope, exactly as received.
     pub cose_sign1: Vec<u8>,
+}
+
+impl std::fmt::Debug for PresentedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PresentedToken")
+            // Attacker-controlled and non-secret: it selects a candidate key,
+            // and naming the wrong one can only cause a refusal.
+            .field("issuer_key_id", &self.issuer_key_id)
+            .field("cose_sign1_len", &self.cose_sign1.len())
+            .finish()
+    }
 }
 
 impl PresentedToken {
@@ -601,6 +620,33 @@ mod tests {
         assert!(!rendered.contains("quota"));
         assert!(!rendered.contains("subject"));
         assert!(!rendered.contains("not_after"));
+
+        // R-9. The four assertions above pass against a DERIVED `Debug` too,
+        // because a `Vec<u8>` renders as digits and contains none of those
+        // words — so they reported success while the complete replayable token
+        // sat in the output. This is the assertion that fails if the derive
+        // comes back: the token's own bytes must not appear.
+        for byte in &t.cose_sign1 {
+            let _ = byte;
+        }
+        let bytes_rendered = t
+            .cose_sign1
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(
+            !bytes_rendered.is_empty(),
+            "the fixture must carry a token for this to prove anything"
+        );
+        assert!(
+            !rendered.contains(&bytes_rendered),
+            "the bearer token itself must never be rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("cose_sign1_len"),
+            "the length is what replaces it"
+        );
     }
 
     #[test]

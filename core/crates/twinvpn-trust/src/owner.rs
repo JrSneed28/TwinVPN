@@ -200,6 +200,23 @@ impl AnchorChain {
             }
             (Some(held), Some(held_digest)) => {
                 if offered.anchor_version > held.anchor_version {
+                    // R-8 / ADR-0007 §7.5. The root moved, so every delegation
+                    // the OLD root made goes with it.
+                    //
+                    // This used to replace the anchor and touch nothing else,
+                    // which made phrase-compromise recovery fail at the step it
+                    // exists for: an attacker who obtained an OSK delegated
+                    // under the old anchor still authorised after the Owner
+                    // rotated the root, because the delegation set was never
+                    // consulted about the rotation. `install_delegation` already
+                    // refuses a delegation bound BELOW the pinned version and
+                    // says why in its own doc comment — this is the other half
+                    // of that same invariant, applied when the pin moves
+                    // instead of when a delegation arrives.
+                    //
+                    // A delegation bound at or above the NEW version survives:
+                    // the Owner issued it under the root now in force.
+                    self.retire_delegations_below(offered.anchor_version);
                     self.anchor = Some(offered);
                     self.anchor_content_digest = Some(digest);
                     Ok(true)
@@ -253,6 +270,24 @@ impl AnchorChain {
     /// Removes a delegation, as a revocation of that OSK requires.
     pub fn remove_delegation(&mut self, osk_id: &str) {
         self.delegations.remove(osk_id);
+    }
+
+    /// Drops every delegation bound to an anchor below `pinned` (R-8).
+    ///
+    /// Called by [`AnchorChain::offer_anchor`] when the root advances. Written
+    /// as a collect-then-remove rather than `BTreeMap::retain` so each removal
+    /// goes through [`AnchorChain::remove_delegation`] — one place where a
+    /// delegation leaves this set, whatever the reason.
+    fn retire_delegations_below(&mut self, pinned: u64) {
+        let superseded: Vec<String> = self
+            .delegations
+            .iter()
+            .filter(|(_, d)| d.anchor_version < pinned)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for osk_id in superseded {
+            self.remove_delegation(&osk_id);
+        }
     }
 
     /// How many OSKs are currently delegated. N-13's warning input.
@@ -618,6 +653,83 @@ mod tests {
         assert!(c
             .authorize(Operation::MintOsk, &[VerifiedSigner::osk("osk-1")], &[])
             .is_ok());
+    }
+
+    /// **Attack test — R-8, ADR-0007 §7.5's phrase-compromise recovery.**
+    ///
+    /// The Owner's laptop is stolen with an `ADMINISTER`-powered OSK on it. The
+    /// Owner recovers with the phrase and rotates the root — which is the whole
+    /// point of §7.5. Before this fix `offer_anchor` replaced the anchor and
+    /// touched nothing else, so the stolen OSK's delegation stayed in the set
+    /// and kept authorising: the recovery ceremony achieved nothing against the
+    /// key it exists to remove.
+    #[test]
+    fn a_root_rotation_retires_the_old_roots_delegations() {
+        let mut c = AnchorChain::new();
+        c.offer_anchor(anchor(1, b"ork-a")).expect("pin");
+        c.install_delegation(delegation("stolen", vec![OskPower::Administer], 1))
+            .expect("install");
+        c.install_delegation(delegation("also-old", vec![OskPower::Enroll], 1))
+            .expect("install");
+        assert_eq!(c.osk_count(), 2);
+        let before = c.delegation_set_digest();
+
+        // The recovery: a new root at a higher anchor_version.
+        assert!(c
+            .offer_anchor(anchor(2, b"ork-recovered"))
+            .expect("advance"));
+
+        assert_eq!(c.osk_count(), 0, "the old root's delegations are retired");
+        assert!(c.delegation("stolen").is_none());
+        assert!(matches!(
+            c.osk_key("stolen"),
+            Err(TrustError::NotAuthorized { .. })
+        ));
+        assert_ne!(
+            c.delegation_set_digest(),
+            before,
+            "and every peer sees the set changed, through the prologue"
+        );
+    }
+
+    /// The other half: a rotation must not be a lockout.
+    ///
+    /// A delegation the Owner issued UNDER THE NEW ROOT survives the advance
+    /// that installs it — otherwise an Owner who published the anchor and its
+    /// delegations together would find the delegations discarded by their own
+    /// anchor.
+    #[test]
+    fn a_root_rotation_keeps_delegations_bound_at_or_above_the_new_anchor() {
+        let mut c = AnchorChain::new();
+        c.offer_anchor(anchor(1, b"ork-a")).expect("pin");
+        c.install_delegation(delegation("old", vec![OskPower::Enroll], 1))
+            .expect("install");
+        c.install_delegation(delegation("new", vec![OskPower::Enroll], 2))
+            .expect("install");
+
+        c.offer_anchor(anchor(2, b"ork-b")).expect("advance");
+
+        assert!(c.delegation("old").is_none(), "issued under the old root");
+        assert!(c.delegation("new").is_some(), "issued under the new one");
+        assert_eq!(c.osk_count(), 1);
+    }
+
+    /// A no-op re-delivery and a refused rollback must not disturb the set.
+    #[test]
+    fn only_an_advance_retires_delegations() {
+        let mut c = AnchorChain::new();
+        c.offer_anchor(anchor(3, b"ork-a")).expect("pin");
+        c.install_delegation(delegation("osk-1", vec![OskPower::Enroll], 3))
+            .expect("install");
+
+        assert!(!c.offer_anchor(anchor(3, b"ork-a")).expect("re-delivery"));
+        assert_eq!(c.osk_count(), 1, "a reconnect must not retire anything");
+
+        assert!(c.offer_anchor(anchor(2, b"ork-a")).is_err());
+        assert_eq!(c.osk_count(), 1, "a refused rollback changes nothing");
+
+        assert!(c.offer_anchor(anchor(3, b"ork-b")).is_err());
+        assert_eq!(c.osk_count(), 1, "and neither does a detected fork");
     }
 
     /// The delegation-set digest is deterministic and changes with the set,

@@ -42,6 +42,97 @@ impl Drop for Harness {
     }
 }
 
+/// A `SigningElement` that has a public identity and nothing else.
+///
+/// # Why this file needs one now
+///
+/// `session.connect` used to supply `credentials_valid: true` and
+/// `peer_authorized: true` as literals. Both are read from state now, and this
+/// harness binds `AbsentElement` — which is §11.16 (l)'s *specified* behaviour
+/// for a host with no secure element and refuses every identity operation. A
+/// composed daemon on such a host therefore refuses `session.connect` with
+/// `AUTH.KEY_UNAVAILABLE`, correctly.
+///
+/// These tests are about the **MI transport**, not the identity gate, so they
+/// bind an element that has a public half. It still refuses `sign` and `agree`:
+/// CB-5 puts the private half outside anything the core can name, and a test
+/// double that produced signatures would be asserting against a capability the
+/// product does not have.
+#[derive(Debug, Clone, Copy)]
+struct PublicOnlyElement;
+
+impl twinvpn_platform_linux::SigningElement for PublicOnlyElement {
+    fn name(&self) -> &'static str {
+        "test-public-only"
+    }
+
+    fn hardware_backed(&self) -> bool {
+        // Truthfully false, exactly as `AbsentElement` reports it.
+        false
+    }
+
+    fn public_identity(
+        &self,
+    ) -> Result<twinvpn_platform::custody::IdentityPublic, twinvpn_platform::PlatformError> {
+        Ok(twinvpn_platform::custody::IdentityPublic {
+            device_id: twinvpn_types::DeviceId::from_slice(&[0xab; 32]).expect("32"),
+            identity_id: twinvpn_types::IdentityId::from_slice(&[0xcd; 32]).expect("32"),
+            generation: 0,
+            public_key: vec![0x04; 65],
+        })
+    }
+
+    fn sign(
+        &self,
+        _key: twinvpn_platform::custody::IdentityKeyRef,
+        _message: &[u8],
+    ) -> Result<twinvpn_platform::custody::Signature, twinvpn_platform::PlatformError> {
+        Err(twinvpn_platform::PlatformError::IdentityKeyUnavailable(
+            None,
+        ))
+    }
+
+    fn agree(
+        &self,
+        _key: twinvpn_platform::custody::IdentityKeyRef,
+        _peer: &twinvpn_platform::custody::PeerPublicKey,
+    ) -> Result<twinvpn_platform::custody::SharedSecret, twinvpn_platform::PlatformError> {
+        Err(twinvpn_platform::PlatformError::OsUnsupported(None))
+    }
+
+    fn attestation(&self) -> Option<(Vec<u8>, &'static str)> {
+        None
+    }
+}
+
+/// Caches the ADR-0007 N-4 `TrustedPeer` `session.connect`'s T01 guard reads.
+///
+/// The other guard, `credentials_valid`, is the adapter's `identity_public` —
+/// which is why this harness binds [`PublicOnlyElement`] rather than
+/// `AbsentElement`.
+fn provision(core: &Arc<twinvpn_core::Core>) {
+    core.control_plane_port().put_peer(
+        &twinvpn_types::TwinnetId::new("tn-mi").expect("valid"),
+        twinvpn_core::PeerRecord {
+            device_id: twinvpn_types::DeviceId::from_slice(&peer_params()).expect("32"),
+            generation: 1,
+            tk_generation: 1,
+            tunnel_key_binding_verified: true,
+            endpoints: Vec::new(),
+            overlay: twinvpn_types::OverlayAddresses {
+                v4: twinvpn_types::V4Addr::from_slice(&[100, 64, 0, 7]).expect("v4"),
+                v6: twinvpn_types::V6Addr::from_slice(
+                    &[
+                        0xfd, 0x7c, 0x9e, 0x5d, 0x2a, 0x10, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7,
+                    ],
+                    0,
+                )
+                .expect("v6"),
+            },
+        },
+    );
+}
+
 fn harness() -> (Harness, Arc<server::ServerContext>) {
     use std::os::unix::fs::PermissionsExt as _;
     static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -68,7 +159,10 @@ fn harness() -> (Harness, Arc<server::ServerContext>) {
             },
             store_root: dir.join("store"),
             resolver_restore_point: dir.join("resolver.restore"),
-            identity_element: Arc::new(twinvpn_platform_linux::AbsentElement),
+            // A public-only element rather than `AbsentElement`: these tests
+            // exercise the MI transport, and a host with no identity at all
+            // now correctly refuses `session.connect` before it reaches one.
+            identity_element: Arc::new(PublicOnlyElement),
         },
     ));
     let core = Arc::new(
@@ -87,6 +181,8 @@ fn harness() -> (Harness, Arc<server::ServerContext>) {
         })
         .expect("the ABI matches"),
     );
+
+    provision(&core);
 
     let fanout = Arc::new(events::Fanout::new());
     let context = Arc::new(server::ServerContext {

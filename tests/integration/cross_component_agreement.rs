@@ -115,6 +115,11 @@ fn admin_from_wire(w: v1::RelayAdminState) -> Option<twinvpn_relay_client::map::
 
 fn health_to_wire(h: twinvpn_relay_client::map::HealthState) -> v1::HealthState {
     match h {
+        // R-14: the fifth variant. `twinvpn-relay-client` now RE-EXPORTS the
+        // canonical five-variant enum instead of hand-writing a four-variant
+        // copy, so the proto3 zero is representable on the device side too and
+        // this match has to name it.
+        twinvpn_relay_client::map::HealthState::Unspecified => v1::HealthState::Unspecified,
         twinvpn_relay_client::map::HealthState::Healthy => v1::HealthState::Healthy,
         twinvpn_relay_client::map::HealthState::Degraded => v1::HealthState::Degraded,
         twinvpn_relay_client::map::HealthState::Unhealthy => v1::HealthState::Unhealthy,
@@ -122,13 +127,18 @@ fn health_to_wire(h: twinvpn_relay_client::map::HealthState) -> v1::HealthState 
     }
 }
 
-fn health_from_wire(w: v1::HealthState) -> Option<twinvpn_relay_client::map::HealthState> {
+fn health_from_wire(w: v1::HealthState) -> twinvpn_relay_client::map::HealthState {
     match w {
-        v1::HealthState::Unspecified => None,
-        v1::HealthState::Healthy => Some(twinvpn_relay_client::map::HealthState::Healthy),
-        v1::HealthState::Degraded => Some(twinvpn_relay_client::map::HealthState::Degraded),
-        v1::HealthState::Unhealthy => Some(twinvpn_relay_client::map::HealthState::Unhealthy),
-        v1::HealthState::Unknown => Some(twinvpn_relay_client::map::HealthState::Unknown),
+        // No longer `None`. A device that could not represent "the sender did
+        // not set the field" had to invent an answer, and the convenient
+        // invention is HEALTHY — which is exactly what W-20 and R-14 name. It
+        // now decodes to a real variant that scores 0 and never renders as
+        // healthy.
+        v1::HealthState::Unspecified => twinvpn_relay_client::map::HealthState::Unspecified,
+        v1::HealthState::Healthy => twinvpn_relay_client::map::HealthState::Healthy,
+        v1::HealthState::Degraded => twinvpn_relay_client::map::HealthState::Degraded,
+        v1::HealthState::Unhealthy => twinvpn_relay_client::map::HealthState::Unhealthy,
+        v1::HealthState::Unknown => twinvpn_relay_client::map::HealthState::Unknown,
     }
 }
 
@@ -188,22 +198,46 @@ fn the_health_state_vocabulary_is_the_frozen_one_exactly() {
     // modelled twice. The exhaustive matches make a third model impossible to
     // introduce silently.
     for h in [
+        twinvpn_relay_client::map::HealthState::Unspecified,
         twinvpn_relay_client::map::HealthState::Healthy,
         twinvpn_relay_client::map::HealthState::Degraded,
         twinvpn_relay_client::map::HealthState::Unhealthy,
         twinvpn_relay_client::map::HealthState::Unknown,
     ] {
-        assert_eq!(health_from_wire(health_to_wire(h)), Some(h));
+        assert_eq!(health_from_wire(health_to_wire(h)), h);
     }
-    assert_eq!(health_from_wire(v1::HealthState::Unspecified), None);
+
+    // **R-14, the whole point.** The device and the relay-health service used
+    // to hold two hand-written FOUR-variant copies of this five-variant enum,
+    // and both omitted `HEALTH_STATE_UNSPECIFIED` — the proto3 zero an UNSET
+    // field decodes to, which is the value the device is most likely to meet.
+    // Both now re-export one definition, so the vocabularies cannot disagree.
+    assert_eq!(twinvpn_relay_client::map::HealthState::ALL.len(), 5);
+    assert_eq!(
+        twinvpn_relay_client::map::HealthState::ALL,
+        twinvpn_relay_health::aggregate::HealthState::ALL,
+        "the device and the health service must hold ONE model of this enum"
+    );
 
     // The contract's own comment — "NEVER RENDERED AS HEALTHY" — is a property
-    // of `UNKNOWN`, and the device's default must honour it.
-    assert_eq!(
-        twinvpn_relay_client::map::HealthState::default(),
+    // of both zero-ish values, and neither scores as an endorsement.
+    for h in [
+        twinvpn_relay_client::map::HealthState::Unspecified,
         twinvpn_relay_client::map::HealthState::Unknown,
-        "the device's default health must be UNKNOWN, never HEALTHY"
+    ] {
+        assert!(
+            !h.renders_as_healthy(),
+            "{h:?} must never render as healthy"
+        );
+        assert_eq!(h.score_delta(), 0, "{h:?} must neither help nor harm");
+    }
+
+    // And the wire numbers are the contract's, so a renumbering is caught.
+    assert_eq!(
+        twinvpn_relay_client::map::HealthState::Unspecified.to_wire(),
+        0
     );
+    assert_eq!(twinvpn_relay_client::map::HealthState::Unknown.to_wire(), 4);
 }
 
 #[test]

@@ -92,7 +92,10 @@ extern "C" {
  * RECEIVER MAY BRANCH ON A RECEIVED VALUE.
  * -------------------------------------------------------------------------- */
 #define TW_ABI_MAJOR 1u
-#define TW_ABI_MINOR 0u
+/* 0 -> 1: `tw_core_submit` gained the MI-frame form, which can carry an
+ * operation's PARAMETERS. VR-1 makes an ADDITION a MINOR bump: the bare-name
+ * form it joins is unchanged and still accepted, so no shell breaks. */
+#define TW_ABI_MINOR 1u
 
 /* Opaque handles. F-8: no struct with product fields crosses. */
 typedef struct tw_core tw_core; /* one core instance (S-47)               */
@@ -357,6 +360,36 @@ void tw_core_destroy(tw_core *core);
  * `command` is an encoded command from the SAME command set the local
  * management interface carries — one contract, two carriages, NEVER TWO
  * CONTRACTS (ADR-0017 MI-20, ADR-0018 §11.16 (b)).
+ *
+ * ---------------------------------------------------------------------------
+ * THE BYTES IN `command`. This paragraph is normative.
+ * ---------------------------------------------------------------------------
+ * TWO forms are accepted, told apart by their SHAPE and not by a flag.
+ *
+ *  1. PREFERRED — one MANAGEMENT-INTERFACE FRAME, exactly as *event_out below
+ *     carries one and exactly as the Unix socket, the named pipe and XPC carry
+ *     one: a 4-byte BIG-ENDIAN length prefix followed by that many bytes of
+ *     UTF-8 JSON. `body.kind` MUST be "request", and the body carries:
+ *
+ *       operation   string  the wire name, e.g. "session.connect"
+ *       params      []uint8 the operation's encoded parameters (F-8)
+ *       if_version  uint?   the precondition, where the catalogue needs one
+ *
+ *     This is the form that can carry PARAMETERS, and several operations mean
+ *     nothing without them: `session.connect` names a 32-byte peer device_id,
+ *     `host.lifecycle` names a phase, `host.network_changed` names a snapshot.
+ *
+ *  2. LEGACY — a bare UTF-8 operation name, no framing. Means exactly what it
+ *     always did: that operation, with NO parameters. Kept because F-1 makes
+ *     every exported function a compatibility obligation forever.
+ *
+ * Anything else is PROTO.MALFORMED_MESSAGE; a name the catalogue does not
+ * contain is MGMT.OP_UNKNOWN. Both are TYPED rejections — never a parse error,
+ * never a hang, never a generic failure (ADR-0017 11.7).
+ *
+ * `request_id`, `correlation_id` and `idempotency_key` are ignored on this
+ * carriage and SHOULD be empty: the ABI is in-process and fire-and-forget, so
+ * there is no request to correlate and no retry to deduplicate.
  *
  * A rejected command still produces an EVENT; it is never a silent drop. */
 int32_t tw_core_submit(tw_core *core, tw_slice command, tw_buf **err_out);

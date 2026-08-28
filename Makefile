@@ -13,6 +13,9 @@ SHELL := /bin/bash
 # server artifacts, the Linux shell and TwinLab are SEPARATE artifacts and
 # therefore separate workspaces, so that no domain silently acquires another's
 # dependency graph and each domain owns its own manifests.
+# `shells/android/jni` is NOT here: it is a `cdylib` for bionic with no
+# host tests, and `cross-check` is where it is proven. Adding it would run
+# `cargo test` on a crate whose only entry points need a JVM.
 WORKSPACES := core services shells/linux lab tests
 CARGO      := cargo
 
@@ -389,6 +392,16 @@ cross-check:
 	@echo "==> cross-check twinvpn-platform-android ($(AND_TARGET))"
 	@cd core && $(CARGO) clippy -p twinvpn-platform-android --all-targets \
 	    --target $(AND_TARGET) -- -D warnings
+# The Android shell's Rust half. Two libraries, not one: CD-I5 forbids
+# `twinvpn-platform-android` to name `twinvpn-core`, so the core's JNI entries
+# live in their own crate and their own `.so`. It is checked here for the same
+# reason the platform adapters are -- it is Rust, it ships, and nothing else on
+# this host compiles it.
+	@if [ -f shells/android/jni/Cargo.toml ]; then \
+	  echo "==> cross-check shells/android/jni ($(AND_TARGET))"; \
+	  ( cd shells/android/jni && $(CARGO) clippy --workspace --all-targets \
+	      --target $(AND_TARGET) -- -D warnings ) || exit 1; \
+	fi
 	@echo "==> cross-check OK (compile only -- nothing was linked or run)"
 	@echo "    NOT covered: Swift (shells/ios), Kotlin (shells/android) -- no"
 	@echo "    Darwin SDK, no JDK/Android SDK/NDK on this host. ownership.md 9.2."

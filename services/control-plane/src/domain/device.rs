@@ -353,6 +353,27 @@ pub fn revoke(
         verify::SignerKey::OwnerAnchors,
     )?;
 
+    // STEP 1b — BIND THE TARGET TO THE SIGNATURE (R-4).
+    //
+    // `req.target_device_id` is an UNSIGNED WIRE FIELD. Verifying the Owner's
+    // signature establishes only that the Owner authorised *some* revocation;
+    // it says nothing about which device. Owner-signed revocations are
+    // distributed to every device by design, so without this check anyone
+    // holding one could re-wrap it naming a different `target_device_id` and
+    // have this service revoke an arbitrary device on the Owner's authority.
+    //
+    // The CDDL puts the target at label 2 and requires it in the `crit` set, so
+    // a statement that verified at all has committed to one. A payload that did
+    // not decode is refused rather than falling back to the wire's word — the
+    // fallback IS the vulnerability.
+    let signed = verified
+        .revocation
+        .as_ref()
+        .ok_or_else(|| codes::bare(codes::SIGNATURE_INVALID))?;
+    if signed.target_device_id != target {
+        return Err(codes::bare(twinvpn_types::codes::AUTH_PEER_UNTRUSTED));
+    }
+
     // ADR-0008 N-7: re-revoking is a no-op. The revoked set never shrinks and
     // the epoch does not advance twice for one device, so a retry outside the
     // dedup window is still safe.

@@ -37,7 +37,7 @@ pub const LOCALITY_FLOOR: i32 = -200;
 pub const BREAKER_FLOOR: i32 = -400;
 
 /// Everything measured or reported about one relay.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Observations {
     /// EWMA RTT in milliseconds, α = 1/8. Contributes −1 each, floored at −250.
     pub ewma_rtt_ms: u32,
@@ -59,6 +59,30 @@ pub struct Observations {
     /// The circuit breaker's penalty, from `twinvpn-session`. −400 when open.
     /// **A delta, never a filter.**
     pub breaker_penalty: i32,
+}
+
+impl Default for Observations {
+    /// Nothing measured and nothing reported.
+    ///
+    /// `health` is written out rather than derived (R-14): `HealthState`'s
+    /// proto3 zero is `Unspecified` — "the sender did not set the field" — and
+    /// what an unmeasured relay actually has is `Unknown`, "no observation
+    /// exists yet". Both score 0 and neither renders as healthy, so the two are
+    /// interchangeable to the ranking; they are not interchangeable to a reader
+    /// deciding whether a report arrived, and a `#[derive(Default)]` would pick
+    /// one silently.
+    fn default() -> Self {
+        Self {
+            ewma_rtt_ms: 0,
+            loss_pct: 0,
+            ewma_jitter_ms: 0,
+            map_age_hours: 0,
+            health: HealthState::Unknown,
+            region_locality_penalty: 0,
+            bind_success_rate: 0.0,
+            breaker_penalty: 0,
+        }
+    }
 }
 
 /// §11.2's table, term by term.
@@ -119,7 +143,7 @@ pub fn score(relay: &Relay, obs: Observations) -> i32 {
         + loss
         + jitter
         + rank
-        + obs.health.delta()
+        + obs.health.score_delta()
         + load
         + locality
         + bind_history

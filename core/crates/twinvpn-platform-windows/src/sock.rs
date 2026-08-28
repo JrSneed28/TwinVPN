@@ -979,7 +979,7 @@ mod imp {
 
 /// A bound Windows UDP socket, as the seam sees it.
 ///
-/// The concrete type lives in [`imp`] because it holds a `SOCKET`; what is here
+/// The concrete type lives in `imp` because it holds a `SOCKET`; what is here
 /// is the shutdown latch and the closed flag, which are the two facts the trait
 /// contract turns on and which are the same on every target.
 #[derive(Debug)]

@@ -561,7 +561,7 @@ pub const BOOT_INSTANT_SAMPLES: usize = 8;
 ///    classifies the resume as a cold start, and a cold start runs the whole of
 ///    LC-4 — including step 3's enforcement query and step 4's re-assertion —
 ///    rather than skipping it.
-/// 3. **The mixing is not cryptographic.** [`mix`] is FNV-1a, chosen because it
+/// 3. **The mixing is not cryptographic.** `mix` is FNV-1a, chosen because it
 ///    is short enough to read in full and needs no dependency. It is a
 ///    diffusion function, not a hash: it makes two nearby boot instants produce
 ///    unrelated identities, and it makes no claim about preimages.

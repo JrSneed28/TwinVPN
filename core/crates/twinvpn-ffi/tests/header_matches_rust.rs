@@ -394,9 +394,15 @@ fn the_unsafe_block_count_is_pinned() {
     // number here makes the increase a test failure rather than a diff nobody
     // measured. If this fails, the right response is to justify the new block in
     // review and update the number — not to raise it quietly.
+    // Raised 23 -> 24 for R-3. Honouring `tw_host_vtable.size` BEFORE
+    // dereferencing the struct needs two raw reads with a check between them:
+    // `addr_of!((*ptr).size).read()`, the `size` comparison, then a
+    // `copy_nonoverlapping` of only the declared bytes. The block it replaced
+    // (`let v = unsafe { *ptr }`) read all 24 fn-pointer fields unconditionally,
+    // so this is one more block covering strictly less memory.
     let count = unsafe_blocks().len();
     assert_eq!(
-        count, 23,
+        count, 24,
         "the `unsafe` block count in twinvpn-ffi changed to {count}. A net increase \
          requires a security reviewer (DP-4)."
     );

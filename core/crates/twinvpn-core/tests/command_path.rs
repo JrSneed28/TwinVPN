@@ -62,6 +62,29 @@ fn dual_stack_interface() -> InterfaceFacts {
     }
 }
 
+/// The `DeviceId` every session operation in this file names.
+fn peer_id() -> twinvpn_types::DeviceId {
+    twinvpn_types::DeviceId::from_slice(&PEER).expect("32")
+}
+
+/// Establishes what `session.connect`'s T01 guards now READ.
+///
+/// `execute::connect` used to supply `credentials_valid: true` and
+/// `peer_authorized: true` as literals — so this file's assertions about "work"
+/// held for a peer nobody had authorized, and the strongest test suite in the
+/// tree could not tell an authorized connect from an unauthorized one. Both
+/// guards are read from state now, and a test that wants the work to happen has
+/// to say what the state is.
+///
+/// The refusal is asserted separately, in
+/// [`an_unauthorized_peer_is_refused_rather_than_connected`].
+fn authorize(
+    core: &twinvpn_core::Core,
+    adapter: &std::sync::Arc<twinvpn_platform::mock::MockAdapter>,
+) {
+    testing::authorize_peer(core, adapter, peer_id()).expect("the vault opens and the peer caches");
+}
+
 /// A submission carrying whatever its catalogue row requires.
 fn well_formed(op: CoreCommand) -> Submission {
     let mut s = Submission::bare(op);
@@ -91,6 +114,7 @@ fn every_operation_either_works_or_is_refused_by_name() {
     adapter
         .interfaces_mock()
         .set_interfaces(vec![dual_stack_interface()]);
+    authorize(&core, &adapter);
 
     let mut executed = 0usize;
     let mut refused = 0usize;
@@ -186,6 +210,7 @@ fn session_connect_reaches_the_platform_and_opens_both_families() {
     adapter
         .interfaces_mock()
         .set_interfaces(vec![dual_stack_interface()]);
+    authorize(&core, &adapter);
 
     assert_eq!(adapter.sockets_mock().opened(), 0, "nothing yet");
     core.submit(&well_formed(CoreCommand::SessionConnect))
@@ -205,6 +230,7 @@ fn session_connect_drives_the_real_transition_table() {
     adapter
         .interfaces_mock()
         .set_interfaces(vec![dual_stack_interface()]);
+    authorize(&core, &adapter);
     core.submit(&well_formed(CoreCommand::SessionConnect))
         .expect("executes");
 
@@ -237,6 +263,7 @@ fn session_connect_is_naturally_idempotent() {
     adapter
         .interfaces_mock()
         .set_interfaces(vec![dual_stack_interface()]);
+    authorize(&core, &adapter);
     core.submit(&well_formed(CoreCommand::SessionConnect))
         .expect("first");
     core.submit(&well_formed(CoreCommand::SessionConnect))
@@ -263,6 +290,7 @@ fn session_connect_moves_a_packet_once_a_peer_endpoint_is_known() {
     h.adapter
         .interfaces_mock()
         .set_interfaces(vec![dual_stack_interface()]);
+    authorize(&h.core, &h.adapter);
 
     // The peer's socket must OUTLIVE the probe: dropping it closes the inbox and
     // the datagram would be counted as dropped rather than delivered.
@@ -307,6 +335,7 @@ fn disconnect_clears_session_intent() {
     adapter
         .interfaces_mock()
         .set_interfaces(vec![dual_stack_interface()]);
+    authorize(&core, &adapter);
     core.submit(&well_formed(CoreCommand::SessionConnect))
         .expect("connect");
     while core.next_event(Duration::ZERO).is_some() {}
@@ -379,6 +408,7 @@ fn status_get_carries_a_reason_code_whenever_the_state_requires_one() {
     adapter
         .interfaces_mock()
         .set_interfaces(vec![dual_stack_interface()]);
+    authorize(&core, &adapter);
     core.submit(&well_formed(CoreCommand::SessionConnect))
         .expect("connect");
     while core.next_event(Duration::ZERO).is_some() {}
@@ -435,4 +465,63 @@ fn a_core_with_no_vault_refuses_durable_operations() {
         .submit(&well_formed(CoreCommand::SettingsGet))
         .expect_err("refused");
     assert_eq!(err.code().as_str(), "STORE.CUSTODY_DEGRADED");
+}
+
+// ---------------------------------------------------------------------------
+// 5. An unauthorized peer is refused. (`ownership.md` §8 wave-1 review, item 2.)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unauthorized_peer_is_refused_rather_than_connected() {
+    // The defect: `execute::connect` supplied `credentials_valid: true` and
+    // `peer_authorized: true` as LITERALS, with a comment saying so. Any 32
+    // bytes a caller passed as a peer therefore drove the state machine to
+    // CONNECTED — no credential check, no authorization check, no handshake —
+    // and every test in this file passed, because none of them authorized
+    // anything either.
+    //
+    // Two refusals, and they are different facts.
+    let (core, adapter) = testing::core_and_adapter().expect("creates");
+    adapter
+        .interfaces_mock()
+        .set_interfaces(vec![dual_stack_interface()]);
+
+    // (a) No identity: `identity_public` refuses, which is §11.16 (l)'s
+    //     specified behaviour on a host with no secure element — and the core
+    //     "MUST NOT substitute a file-backed signer silently".
+    //     AUTH.KEY_UNAVAILABLE.
+    adapter.identity_mock().set_unavailable(true);
+    let err = core
+        .submit(&well_formed(CoreCommand::SessionConnect))
+        .expect_err("a core with no credentials must not connect");
+    assert_eq!(err.code().as_str(), "AUTH.KEY_UNAVAILABLE");
+    adapter.identity_mock().set_unavailable(false);
+
+    // (b) Vault open, peer not cached: ADR-0007 N-4's `TrustedPeer` does not
+    //     exist, so the peer is not authorized. AUTH.PEER_UNTRUSTED — a
+    //     DIFFERENT code, because "we have no credentials" and "we have them and
+    //     you are not on the list" are different answers to the operator.
+    let stranger = twinvpn_types::DeviceId::from_slice(&[0x5b; 32]).expect("32");
+    testing::authorize_peer(&core, &adapter, peer_id()).expect("authorizes the OTHER peer");
+    let mut connect = Submission::bare(CoreCommand::SessionConnect);
+    connect.params = vec![0x5b; 32];
+    let _ = stranger;
+    let err = core
+        .submit(&connect)
+        .expect_err("a peer nobody authorized must not connect");
+    assert_eq!(err.code().as_str(), "AUTH.PEER_UNTRUSTED");
+
+    // And the refusal is an EVENT, never a silent drop (§11.6).
+    let mut rejected = 0usize;
+    while let Some(event) = core.next_event(Duration::ZERO) {
+        if let CoreEventKind::CommandRejected { op, .. } = event.kind {
+            assert_eq!(op, "session.connect");
+            rejected += 1;
+        }
+    }
+    assert!(rejected >= 2, "each refusal produces its own event");
+
+    // The authorized peer still connects: the check is a gate, not a lockout.
+    core.submit(&well_formed(CoreCommand::SessionConnect))
+        .expect("the authorized peer connects");
 }
