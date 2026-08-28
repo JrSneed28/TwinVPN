@@ -514,6 +514,32 @@ of the following hold:
    clause: the right answer is that on the selected topology the surface **does not exist**.
 3. It is **not** on the forwarding path (KS-2).
 
+**Amendment KS-9b — clause 1 and clause 2 are only half-expressible on two of three desktop
+platforms, and the residual is recorded rather than assumed away.** Wave 2 built all three desktop
+enforcement layers; two reported the same shape from opposite sides.
+
+| Platform | What KS-9 asks for | What the enforcement layer can express | Residual |
+|---|---|---|---|
+| **Linux / OpenWrt** | `cgroup v2` path **and** `fwmark` via `SO_MARK` | both, exactly | none |
+| **macOS** | *"`pf` anchor keyed to the tunnel provider's owning uid **plus the provider's socket set**"* | `pf` has `user` and `group` and **no socket-identity selector**. The uid half holds; the socket-set half cannot be written | clause 1 is satisfied at **process** granularity, not socket granularity |
+| **Windows** | clause 2's per-socket registration | WFP's ALE conditions identify a **process** (`ALE_APP_ID` + `ALE_USER_ID`), not a socket, so `BOOTSTRAP`, `RESOLVER` and the probe classes collapse into one permit | clause 2 is satisfied at **process** granularity |
+
+**Normatively:** an implementation MUST express as much of the predicate as its enforcement layer
+supports, MUST NOT substitute a wider match while reporting the narrow one, and MUST carry the
+achieved granularity as a **value** the `ProtectionAssertion` and the diagnostic bundle can report
+— `desktop-macos` records it as `ExemptPredicate` with a `ks9_complete()` reading, and
+`desktop-windows` as `Ks9Residual`. A reviewer must be able to read the granularity off the
+running system rather than infer it from this table.
+
+**Why this is bounded rather than open.** The exemption's safety was never resting on socket
+granularity alone: KS-10 argues it from **what can enter the exempt sockets** — no proxy, no
+listener, no forwarder — and that argument is process-scoped already, so it holds unchanged at
+process granularity. Windows narrows it further, because ALE `AUTH_CONNECT` sees only
+locally-originated connections. What is genuinely lost is *defence in depth*: on those two
+platforms a second bug inside the agent that opened an unregistered socket would not be caught by
+the enforcement layer. KS-12 (registration failure denies egress) and KS-11's audit are what
+remain, and KS-11's divergence check is now the primary detector rather than a backstop.
+
 **Rule KS-10 — why it cannot carry protected traffic.** The exemption is not destination-scoped,
 so its safety must come from what can enter the exempt sockets. Normatively:
 
@@ -562,6 +588,19 @@ exempt rule, per family. The agent MUST compare exempt egress against its own tu
 control-plane frame accounting; a divergence beyond a declared tolerance raises
 `POLICY.EXEMPT.EGRESS_ANOMALY` at `CRITICAL` and drives `EV_POLICY_VIOLATION` → `BLOCKED`. The
 exemption is thus not merely narrow but *audited*.
+
+**Amendment KS-11a — the unit is part of the number.** KS-11 says "byte and packet counters".
+`nftables` supplies both. **WFP does not**: ALE classification is per *connection*, so the Windows
+enforcement layer can count connection events and cannot count bytes at that layer. A comparison
+that silently mixed a connection count with a byte count would make
+`POLICY.EXEMPT.EGRESS_ANOMALY` fire or stay silent for reasons unrelated to egress volume — and it
+would do so on one platform only, which is the hardest kind of defect to find.
+
+Normatively: **an exempt-rule counter MUST travel with its unit**, and the divergence check MUST
+compare like with like or decline to compare. Where a platform cannot supply the byte counter, it
+reports the unit it can supply and the tolerance is expressed in that unit; it MUST NOT report a
+connection count in a field a reader will take for bytes. `desktop-windows` implements this by
+carrying the unit beside the value.
 
 **Rule KS-12 — the exception does not widen on failure.** If socket registration fails, the
 socket is not exempt and its traffic is dropped. There is no "register everything on error" path.
@@ -650,8 +689,9 @@ them are a single atomic swap. `leave_blocked()` in `docs/networking.md` §5.1 m
 contradiction of it; §9.3's diagram remains exactly correct with this reading.
 
 ```
-arm:      RULESET_BLOCKED live ─► create iface (DOWN) ─► apply(contract_gen)
-                                       ─► link up ─► path validated + assertion OK
+arm:      RULESET_BLOCKED live ─► create iface (DOWN) ─► assign addresses
+                                       ─► link up ─► program routes
+                                       ─► path validated + assertion OK
                                        ─► atomic swap ─► RULESET_PROTECTED
 
 teardown: link down ─► atomic swap ─► RULESET_BLOCKED ─► destroy iface
@@ -660,6 +700,19 @@ teardown: link down ─► atomic swap ─► RULESET_BLOCKED ─► destroy ifa
 boot:     OS applies boot ruleset ─► network stack comes up ─► agent starts
           (the deny predates the first packet the host can emit)
 ```
+
+**Amendment KS-17a — `apply(contract_gen)` straddles `link up`, and must.** The diagram above
+previously read `create iface (DOWN) ─► apply(contract_gen) ─► link up`, which is not implementable
+on Linux and was corrected against a kernel rather than against a reading. An address can be added
+to a down interface; **a route cannot** — `RTM_NEWROUTE` answers `ENETDOWN`. So the link must come
+up *between* the addresses and the routes, and `apply()` is not a single point on this line.
+
+Found by `desktop-linux` in wave 2 and kept as an executed assertion rather than worked around
+silently. **This changes no guarantee.** What KS-17 actually requires is that `RULESET_BLOCKED` is
+live across the whole interval and that the swap to `RULESET_PROTECTED` happens only after KS-18's
+two checks — and both hold identically under the corrected ordering, because the interface carries
+no routes and the rule set is still `RULESET_BLOCKED` at the moment the link comes up. An adapter
+MUST NOT interpret `link up` as licence to leave `RULESET_BLOCKED` early.
 
 **Rule KS-18 — teardown ordering.** `RULESET_PROTECTED` may be entered only after **both**
 (a) an authenticated bidirectional path validation (`EV_PATH_VALIDATED`,

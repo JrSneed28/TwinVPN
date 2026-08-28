@@ -1348,10 +1348,24 @@ local push sinks**, and **no escalation path may be a TwinVPN-operated network s
 | # | Channel | Availability | Notes |
 |---|---|---|---|
 | 1 | **Syslog / journald at `ERROR` and `CRITICAL`, with `reason_code` as a structured field** | Always on, every profile | The floor. A router already has a log pipeline; using it beats inventing one. |
-| 2 | **A health file**: `$STATE_DIR/health` (tmpfs) holding one parse-stable line — derived `TwinNet`-scope state, worst active `reason_code`, timestamp | Always on | Readable by `cat`, `collectd`, Nagios, or a cron job with no daemon interaction and no management-interface call |
+| 2 | **A health file**: one parse-stable line — derived `TwinNet`-scope state, worst active `reason_code`, timestamp — in the **runtime** directory, **not** the state directory (**EM-69a**) | Always on | Readable by `cat`, `collectd`, Nagios, or a cron job with no daemon interaction and no management-interface call |
 | 3 | **`twinvpn status get --output json`** | Always on | An exec check for any monitoring system, keying on `class` per EM-37 |
 | 4 | **A `ubus` event** (`twinvpn.diagnostic`) on H-EMB; `sd_notify(STATUS=…)` plus a `systemd` `OnFailure=` hook on H-SRV | Always on | Read-only, EM-40 |
 | 5 | **In-band to the `Owner`'s paired admin devices** over the existing control-plane event channel | **Default: `CRITICAL` only**; configurable, disableable | Best-effort and **non-gating** — it MUST NOT be a control-plane dependency (**I5**). It carries only `PUBLIC`/`OPERATIONAL` fields ([ADR-0015](ADR-0015-observability-and-diagnostics.md) §11.4) because it crosses B3. It is a **device-initiated push to the `Owner`'s own devices**, never a support-initiated pull ([ADR-0015](ADR-0015-observability-and-diagnostics.md) §11.9 — that prohibition is preserved). **Disclosed tradeoff:** enabling it lets the control plane observe that this device is unhealthy, which is metadata it would not otherwise hold; the default is `CRITICAL`-only because for an unattended device with no user, silence is the failure mode **I6** exists to prevent, and a phone in the `Owner`'s pocket is the only screen that exists. |
+
+**Amendment EM-69a — `$STATE_DIR` and `(tmpfs)` name different directories under `systemd`, and
+the parenthetical is the one that is right.** Channel 2 originally read "`$STATE_DIR/health`
+(tmpfs)". On OpenWrt those agree and the conflict is invisible, which is likely why it survived. On
+`H-SRV` they do not: `systemd`'s `StateDirectory=` is `/var/lib` and **persists across reboot**,
+while the tmpfs is `RuntimeDirectory=` under `/run`.
+
+**The tmpfs is correct and the persistence would be a defect.** A health line that survives a
+reboot is a line a monitoring system can read *after* the agent has died and before it has started
+— which is precisely the confident, stale green that [ADR-0022](ADR-0022-application-lifecycle-and-background-execution.md)
+exists to prevent, arriving through a file instead of through a UI. Normatively: the health file
+lives in the runtime directory (`RuntimeDirectory=` on `H-SRV`, the equivalent tmpfs elsewhere), is
+written atomically, and is **retracted on exit**. Found by `desktop-linux` in wave 2 and resolved
+toward the parenthetical.
 
 `T_UNATTENDED_ALERT` (proposed default **300 s**) is requested for registration in
 [docs/reliability.md](../reliability.md) §5; until it lands, `T_DEGRADED_MAX` is used

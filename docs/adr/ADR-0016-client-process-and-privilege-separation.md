@@ -368,7 +368,7 @@ emits `PLATFORM.SERVICE.UI_DETACHED` and continues.
 |---|---|---|---|---|---|
 | **Linux (HC-1/HC-3)** | `twinvpnd` (system service) · `twinvpn` CLI · `twinvpn-ui` (optional, per-user) · `twinvpn-unblock` (privileged, on demand) | `twinvpnd`: `User=twinvpn`, `AmbientCapabilities=CAP_NET_ADMIN`, bounding set `CAP_NET_ADMIN` only, `NoNewPrivileges=yes`, supplementary group `tss` for `/dev/tpmrm0`. Clients: none | `twinvpnd` | `systemd`, `Type=notify`, `WantedBy=multi-user.target` (**never** `graphical.target`) | `twinvpn-killswitch.service` (`oneshot`, `Before=network-pre.target`), a **separate package-owned unit** applying `/etc/twinvpn/killswitch.nft` |
 | **Windows (HC-1)** | `TwinVPNService` (Windows service) · `twinvpn.exe` CLI · `TwinVPN.exe` UI (per-session, medium IL) · `twinvpn-unblock.exe` (elevated) | Service: `LocalSystem` with `SERVICE_SID_TYPE_UNRESTRICTED` service SID `NT SERVICE\TwinVPNService`, `RequiredPrivileges` trimmed to the §11.9 list. Clients: the interactive user's token | `TwinVPNService` | SCM with recovery actions | Installer-written **persistent** WFP filter set (`FWPM_FILTER_FLAG_PERSISTENT`) plus the `FWPM_FILTER_FLAG_BOOTTIME` coarse deny, both owned by BFE, not by the service |
-| **macOS (HC-1)** | `com.twinvpn.sysext` (NE **system extension**, root) · `com.twinvpn.ksd` (`LaunchDaemon`, root, minimal) · `TwinVPN.app` (per-user, sandboxed) · `twinvpn` CLI · `twinvpn-unblock` | sysext: root, NE-hosted. `ksd`: root, no network, no core, no key access. App/CLI: user | `com.twinvpn.sysext` | `launchd` for `ksd`; `systemextensionsd` + NE on-demand for the sysext | `com.twinvpn.ksd` (`RunAtLoad=true`), which applies the `/etc/twinvpn/pf.anchor` referenced from `/etc/pf.conf` |
+| **macOS (HC-1)** | `<app-bundle-id>.sysext` (NE **system extension**, root — **PS-19**: a system extension's bundle id MUST be prefixed by its containing app's, so the literal `com.twinvpn.sysext` used elsewhere in this ADR is not installable; it is retained below only as shorthand) · `com.twinvpn.ksd` (`LaunchDaemon`, root, minimal) · `TwinVPN.app` (per-user, sandboxed) · `twinvpn` CLI · `twinvpn-unblock` | sysext: root, NE-hosted. `ksd`: root, no network, no core, no key access. App/CLI: user | `com.twinvpn.sysext` | `launchd` for `ksd`; `systemextensionsd` + NE on-demand for the sysext | `com.twinvpn.ksd` (`RunAtLoad=true`), which applies the `/etc/twinvpn/pf.anchor` referenced from `/etc/pf.conf` |
 | **iOS / iPadOS (HC-2)** | `TwinVPN.app` (containing app) · `TwinVPNTunnel` (`NEPacketTunnelProvider` **app extension**) | Neither is privileged. The extension holds the tunnel by OS grant | The **extension** | The OS (NE on-demand rules) | **None available** — KS-19 is unsatisfiable; ADR-0012 emits `POLICY.KILLSWITCH.BOOT_ENFORCEMENT_UNAVAILABLE` |
 | **Android (HC-2)** | `:main` (UI/activities) · `:tunnel` (`VpnService` in a separate process, foreground service) | Neither is privileged; same UID | The `:tunnel` process | The OS (always-on/lockdown, or the foreground service) | OS always-on lockdown, enabled in Settings or by a DPC |
 | **OpenWrt / routers (HC-3)** | `twinvpnd` only | root (optionally `ujail` + seccomp — §11.10) | `twinvpnd` | `procd` (`respawn`) | init script ordered before `network`, applying a UCI-included `fw4`/nftables table |
@@ -589,6 +589,22 @@ by the package and is modified only by an **atomic replace** performed under `AD
 The authority MUST NOT rewrite it as an ordinary runtime action, and MUST NOT be a prerequisite for
 it to apply. Its absence at start is `PLATFORM.SERVICE.BOOT_ARTIFACT_UNREGISTERED` at `CRITICAL`.
 
+**Amendment PS-7a — "verified" in the start ordering means *reported*, not *required*.** The start
+ordering below reads "(1) the boot artifact's presence is verified (PS-7)", and an implementer can
+read `verified` as a gate. All three wave-2 desktop shells read it the other way, independently,
+and they are right.
+
+**Normatively: a missing boot artifact MUST NOT prevent the authority from starting.** It is
+`PLATFORM.SERVICE.BOOT_ARTIFACT_UNREGISTERED` at `CRITICAL`, and the authority continues. The
+reasoning is PS-7's own: the artifact is package-owned precisely so that it applies without the
+authority, and refusing to start on its absence would leave the host with **neither** the boot rule
+set **nor** a running agent — strictly worse than the state the rule exists to protect against, and
+a direct collision with KS-20's "blocked must not mean bricked".
+
+This does not weaken step (2). Reclaiming or re-asserting the owner-tagged rule set **is** a gate,
+and it is the step that must read back from the kernel rather than trust that an install call
+returned success.
+
 **Rule PS-8 — reclamation is privilege-gated.** [docs/networking.md](../networking.md) §5.5.3
 requires owner-tagged state to be reclaimable "by a fresh process after an unclean exit" but does not
 say by which. Normatively: only a process that (a) holds the authority's privilege and (b) passes the
@@ -608,7 +624,7 @@ owner-tagged TwinVPN state. A reclamation attempt failing (b) is `PLATFORM.PRIV.
 | Platform | Supervisor and restart policy | Crash-loop containment | Boot-blocking guard |
 |---|---|---|---|
 | **Linux** | `systemd`: `Restart=always`, `RestartSec=1s`, `StartLimitIntervalSec=300`, `StartLimitBurst=5` | `StartLimitAction=none` (**never** `reboot`), `OnFailure=twinvpn-quarantine.service` | The authority unit is `WantedBy=multi-user.target` and is **not** `Before=` anything on the boot path; the KS-19 unit is separate, `oneshot`, `TimeoutStartSec=15s`, `FailureAction=none` |
-| **Windows** | SCM recovery: restart at 1 s, restart at 5 s, then *run a command* (the quarantine action); `ResetPeriod=86400` | Third failure inside the reset period enters quarantine | The service is `SERVICE_AUTO_START` with delayed start; it is never a boot-critical service, and the persistent WFP set does not depend on it |
+| **Windows** | SCM recovery: restart at 1 s, restart at 5 s, then *run a command* (the quarantine action); `ResetPeriod=86400` | Third failure inside the reset period enters quarantine | The service is `SERVICE_AUTO_START`, **not delayed** ([ADR-0022](ADR-0022-application-lifecycle-and-background-execution.md) **LC-12**); it is never a boot-critical service, and the persistent WFP set does not depend on it. *Amended by the wave-2 integration lead: this cell previously read "with delayed start", which contradicts LC-12 — the rule that owns the question and reasons it out (delayed start defers the service by ~2 minutes after boot). ADR-0022 owns lifecycle, LC-12 is the reasoned rule and this was an unreasoned aside, so LC-12 wins. `desktop-windows` followed LC-12 and recorded the conflict in its `.wxs`.* |
 | **macOS** | `launchd` for `ksd`: `KeepAlive={SuccessfulExit:false}`, subject to launchd's 10 s throttle. The sysext is restarted by NE/`systemextensionsd` on-demand | launchd has no burst limit, so the authority maintains its **own** durable restart counter (**S-40**) and latches quarantine itself | `ksd` is tiny, has no network dependency, and is the only component on the boot path |
 | **iOS / iPadOS** | The OS, via on-demand rules. Restart cadence is not ours to set | Not controllable. A repeatedly-crashing provider is throttled by the OS. We count crashes durably and report | n/a |
 | **Android** | The OS: always-on restarts the service; a user-initiated foreground service is restarted per `START_STICKY` | Not controllable; counted durably and reported | n/a |
