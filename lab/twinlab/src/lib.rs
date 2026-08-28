@@ -68,5 +68,5 @@ pub use impair::{Impairment, ImpairmentSet, LossSchedule};
 pub use nat::{Personality, PortMap, Traversability};
 pub use outcome::{DirectPossibleTally, ObservedPath, OutcomeClass, Verdict};
 pub use record::RunRecord;
-pub use seed::{LabEnv, ScenarioSeed};
+pub use seed::{CountingEntropy, LabEnv, ScenarioSeed};
 pub use topology::{LinuxNamespaceBackend, Node, NodeKind, Realization, Topology};
