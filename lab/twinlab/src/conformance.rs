@@ -12,7 +12,7 @@
 //! TwinVPN code**)". A personality checked by the same traversal logic that will
 //! later be tested against it proves nothing: a shared misunderstanding of RFC
 //! 4787 passes both. [`Prober`] is therefore a trait with **no implementation in
-//! this crate**, and [`ConformanceSuite::run`] returns
+//! this crate**, and [`ConformanceSuite::nat_personality`] returns
 //! [`crate::outcome::Verdict::Unavailable`] when none is bound.
 //!
 //! That is the honest state today: no independent prober is available on this

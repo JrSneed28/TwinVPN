@@ -3,27 +3,51 @@
 //!
 //! **Authority:** `docs/testing-strategy.md` §2.4; the pattern is
 //! `services/control-plane/tests/client_agreement.rs`, which reads the client's
-//! table, the frozen `.proto` and `contract-matrix.md` as text and asserts all
-//! three agree.
+//! table, the frozen `.proto` and `contract-matrix.md` and asserts all three
+//! agree.
 //!
-//! # Why text, and why here
+//! # Enumerate the property, not the files or the literals
 //!
-//! `core/`, `services/` and `lab/` are separate cargo workspaces (ownership.md
-//! §1), so a client crate and its server cannot link each other. Agreement is
-//! therefore checked the only way left: **compile-time `include_str!`**, so a
-//! change on either side breaks this test rather than a deployment.
+//! This file was written as compile-time `include_str!` of the other side's
+//! source, because `core/`, `services/`, `lab/` and `tests/` are separate cargo
+//! workspaces and a client crate cannot link its server. That reasoning is still
+//! true. The conclusion drawn from it was wrong, and it broke four times in one
+//! wave — twice in this domain's own tests:
 //!
-//! `client_agreement.rs` does this for the control plane and its client. Four
-//! other pairs had nobody doing it, and each is a place where one side could
-//! change without the other noticing:
+//! - a `HEADER_LEN` tripwire scanned `map.rs` and `bind.rs`; the device frame
+//!   landed in a new `frame.rs` and it stayed green through exactly the change
+//!   it was built to catch;
+//! - a MAC-vector check scraped `services/relay/src/provider.rs` for four
+//!   literal declarations, and failed with "the two golden vectors have
+//!   drifted" on the day `relay-plane` **deleted** those literals in favour of
+//!   one shared artifact. The opposite of drift, reported as drift.
 //!
-//! | Pair | Why it matters |
+//! A check that enumerates its subject's source form fails loudest exactly when
+//! the subject improves. So the rule this file now follows:
+//!
+//! | Read | Do not read |
 //! |---|---|
-//! | `twinvpn-relay-client` ↔ `relay.proto` ↔ `relay-directory` | three independent spellings of `Carriage`, `AdminState` and `HealthState` |
-//! | `services/rendezvous`'s framing ↔ its README §5 ↔ `limits.json` | finding **RZ-1**: no frozen message describes this framing at all |
-//! | every core crate's `UNREGISTERED` table ↔ `reason_codes.json` | finding **W-18**: each domain tripwires only its own slice |
-//! | `services/relay`'s `Verbatim` claim ↔ what it actually forwards | finding **W-4**, and a stale claim in `lib.rs` |
+//! | a **frozen contract** — `relay.proto`, `limits.json`, `reason_codes.json`, the generated bindings | another crate's **source** |
+//! | a **specification** — an ADR's normative sentence, the ABI header | another crate's **literals** |
+//! | a **shared artifact** by value — `twinvpn_crypto::blake2s::vectors` | a file list, or a variant list, spelled out here |
+//!
+//! Where the two sides can be made to share one artifact, agreement becomes a
+//! value comparison and this file stops being the place it is checked. Where
+//! they cannot, an **exhaustive match** against the generated bindings moves the
+//! check to the compiler, which is stronger than any string search: a variant
+//! added on either side fails to build.
+//!
+//! # The one residual, named
+//!
+//! `services/rendezvous`'s framing is finding **RZ-1**: `contracts/` declares no
+//! message for it, so its README §5 table is the specification of record and
+//! `src/frame.rs` is the only implementation. There is nothing to compare by
+//! value and nothing frozen to compare against, so the opcode check below is
+//! still a source read. It is the residual of a missing contract rather than a
+//! choice, and it goes away the day RZ-1 does.
 
+use twinvpn_crypto::blake2s::vectors;
+use twinvpn_schema::v1;
 use twinvpn_types::ReasonCode;
 
 // ---------------------------------------------------------------------------
@@ -31,19 +55,9 @@ use twinvpn_types::ReasonCode;
 // ---------------------------------------------------------------------------
 
 const RELAY_PROTO: &str = include_str!("../../contracts/proto/twinvpn/v1/relay.proto");
-const CONNECTION_PROTO: &str = include_str!("../../contracts/proto/twinvpn/v1/connection.proto");
 const LIMITS_JSON: &str = include_str!("../../contracts/registry/limits.json");
 const REASON_CODES_JSON: &str = include_str!("../../contracts/registry/reason_codes.json");
 
-const RELAY_CLIENT_MAP: &str = include_str!("../../core/crates/twinvpn-relay-client/src/map.rs");
-const RELAY_CLIENT_BIND: &str = include_str!("../../core/crates/twinvpn-relay-client/src/bind.rs");
-const RELAY_DIRECTORY_FLEET: &str = include_str!("../../services/relay-directory/src/fleet.rs");
-const RELAY_SERVICE_FRAME: &str = include_str!("../../services/relay/src/frame.rs");
-const RELAY_SERVICE_LIB: &str = include_str!("../../services/relay/src/lib.rs");
-const RELAY_SERVICE_FORWARD: &str = include_str!("../../services/relay/src/forward.rs");
-const RELAY_SERVICE_PROVIDER: &str = include_str!("../../services/relay/src/provider.rs");
-const RELAY_CLIENT_FRAME: &str =
-    include_str!("../../core/crates/twinvpn-relay-client/src/frame.rs");
 const ADR_0005: &str = include_str!("../../docs/adr/ADR-0005-relay-architecture.md");
 const TWINVPN_H: &str = include_str!("../../core/ffi/include/twinvpn.h");
 
@@ -53,149 +67,202 @@ const RENDEZVOUS_README: &str = include_str!("../../services/rendezvous/README.m
 // ---------------------------------------------------------------------------
 // 1. Relay: three spellings of the same three enums.
 // ---------------------------------------------------------------------------
+//
+// These used to compare the device's enum against `contracts/`'s `.proto` text
+// and `services/relay-directory/src/fleet.rs`'s source. The proto half was
+// legitimate — a frozen contract is a specification — but the source half was
+// the pattern that broke elsewhere in this file, and the proto half only ever
+// proved that a *name* appeared somewhere in a file.
+//
+// What replaces both: an **exhaustive match in each direction** against the
+// generated bindings. A variant added to either side fails to compile here,
+// which is a stronger guarantee than any string search, and it is checked by
+// the compiler rather than by a test that has to be run and read.
+
+fn carriage_to_wire(c: twinvpn_relay_client::map::Carriage) -> v1::RelayCarriage {
+    match c {
+        twinvpn_relay_client::map::Carriage::Udp => v1::RelayCarriage::Udp,
+        twinvpn_relay_client::map::Carriage::Quic => v1::RelayCarriage::Quic,
+        twinvpn_relay_client::map::Carriage::Tls => v1::RelayCarriage::Tls,
+    }
+}
+
+fn carriage_from_wire(w: v1::RelayCarriage) -> Option<twinvpn_relay_client::map::Carriage> {
+    match w {
+        v1::RelayCarriage::Unspecified => None,
+        v1::RelayCarriage::Udp => Some(twinvpn_relay_client::map::Carriage::Udp),
+        v1::RelayCarriage::Quic => Some(twinvpn_relay_client::map::Carriage::Quic),
+        v1::RelayCarriage::Tls => Some(twinvpn_relay_client::map::Carriage::Tls),
+    }
+}
+
+fn admin_to_wire(a: twinvpn_relay_client::map::AdminState) -> v1::RelayAdminState {
+    match a {
+        twinvpn_relay_client::map::AdminState::Active => v1::RelayAdminState::Active,
+        twinvpn_relay_client::map::AdminState::Draining => v1::RelayAdminState::Draining,
+        twinvpn_relay_client::map::AdminState::Retired => v1::RelayAdminState::Retired,
+    }
+}
+
+fn admin_from_wire(w: v1::RelayAdminState) -> Option<twinvpn_relay_client::map::AdminState> {
+    match w {
+        v1::RelayAdminState::Unspecified => None,
+        v1::RelayAdminState::Active => Some(twinvpn_relay_client::map::AdminState::Active),
+        v1::RelayAdminState::Draining => Some(twinvpn_relay_client::map::AdminState::Draining),
+        v1::RelayAdminState::Retired => Some(twinvpn_relay_client::map::AdminState::Retired),
+    }
+}
+
+fn health_to_wire(h: twinvpn_relay_client::map::HealthState) -> v1::HealthState {
+    match h {
+        twinvpn_relay_client::map::HealthState::Healthy => v1::HealthState::Healthy,
+        twinvpn_relay_client::map::HealthState::Degraded => v1::HealthState::Degraded,
+        twinvpn_relay_client::map::HealthState::Unhealthy => v1::HealthState::Unhealthy,
+        twinvpn_relay_client::map::HealthState::Unknown => v1::HealthState::Unknown,
+    }
+}
+
+fn health_from_wire(w: v1::HealthState) -> Option<twinvpn_relay_client::map::HealthState> {
+    match w {
+        v1::HealthState::Unspecified => None,
+        v1::HealthState::Healthy => Some(twinvpn_relay_client::map::HealthState::Healthy),
+        v1::HealthState::Degraded => Some(twinvpn_relay_client::map::HealthState::Degraded),
+        v1::HealthState::Unhealthy => Some(twinvpn_relay_client::map::HealthState::Unhealthy),
+        v1::HealthState::Unknown => Some(twinvpn_relay_client::map::HealthState::Unknown),
+    }
+}
 
 #[test]
-fn the_relay_carriage_vocabulary_is_the_same_on_all_three_sides() {
-    // `RelayCarriage` in the frozen contract, `Carriage` in the device client,
-    // and whatever the directory service ranks. A carriage the client cannot
-    // name is a relay it silently never selects.
-    for (proto, rust) in [
-        ("RELAY_CARRIAGE_UDP", "Udp"),
-        ("RELAY_CARRIAGE_QUIC", "Quic"),
-        ("RELAY_CARRIAGE_TLS", "Tls"),
+fn the_relay_carriage_vocabulary_is_the_frozen_one_exactly() {
+    // A carriage the device cannot name is a relay it silently never selects.
+    // The two matches above make that a compile error; this asserts the round
+    // trip and that `UNSPECIFIED` — proto3's zero value — maps to nothing,
+    // because a relay published with no carriage must not read as UDP.
+    for c in [
+        twinvpn_relay_client::map::Carriage::Udp,
+        twinvpn_relay_client::map::Carriage::Quic,
+        twinvpn_relay_client::map::Carriage::Tls,
     ] {
-        assert!(
-            RELAY_PROTO.contains(proto),
-            "the frozen contract no longer declares {proto}"
-        );
-        assert!(
-            RELAY_CLIENT_MAP.contains(rust),
-            "twinvpn-relay-client does not name the carriage {proto} declares"
-        );
+        assert_eq!(carriage_from_wire(carriage_to_wire(c)), Some(c));
     }
-    // The negative half: the client must not have invented a fourth carriage the
-    // contract cannot express.
-    assert!(
-        !RELAY_CLIENT_MAP.contains("pub enum Carriage {\n    Udp,\n    Quic,\n    Tls,\n    "),
-        "twinvpn-relay-client's Carriage has a variant relay.proto does not declare"
+    assert_eq!(carriage_from_wire(v1::RelayCarriage::Unspecified), None);
+
+    // The wire numbers are the contract's, so a renumbering is caught too.
+    assert_eq!(
+        carriage_to_wire(twinvpn_relay_client::map::Carriage::Udp) as i32,
+        1
+    );
+    assert_eq!(
+        carriage_to_wire(twinvpn_relay_client::map::Carriage::Quic) as i32,
+        2
+    );
+    assert_eq!(
+        carriage_to_wire(twinvpn_relay_client::map::Carriage::Tls) as i32,
+        3
     );
 }
 
 #[test]
-fn the_admin_state_vocabulary_is_the_same_on_all_three_sides() {
-    for (proto, rust) in [
-        ("RELAY_ADMIN_STATE_ACTIVE", "Active"),
-        ("RELAY_ADMIN_STATE_DRAINING", "Draining"),
-        ("RELAY_ADMIN_STATE_RETIRED", "Retired"),
+fn the_admin_state_vocabulary_is_the_frozen_one_exactly() {
+    // A state the directory publishes and the client cannot read is a relay
+    // that is never excluded — `RETIRED` being unreadable is the dangerous
+    // direction, because the device would keep binding to a relay that no
+    // longer exists as a signed entity.
+    for a in [
+        twinvpn_relay_client::map::AdminState::Active,
+        twinvpn_relay_client::map::AdminState::Draining,
+        twinvpn_relay_client::map::AdminState::Retired,
     ] {
-        assert!(RELAY_PROTO.contains(proto), "contract lost {proto}");
-        assert!(
-            RELAY_CLIENT_MAP.contains(rust),
-            "the device client cannot name {proto}"
-        );
-        assert!(
-            RELAY_DIRECTORY_FLEET.contains(rust),
-            "relay-directory cannot name {proto}; a state the directory publishes \
-             and the client cannot read is a relay that is never excluded"
-        );
+        assert_eq!(admin_from_wire(admin_to_wire(a)), Some(a));
     }
+    assert_eq!(admin_from_wire(v1::RelayAdminState::Unspecified), None);
+    assert_eq!(
+        admin_to_wire(twinvpn_relay_client::map::AdminState::Retired) as i32,
+        3
+    );
 }
 
 #[test]
-fn the_health_state_vocabulary_agrees_with_the_frozen_enum() {
-    // W-20: `HealthState` is exported from `connection.proto` and was modelled
-    // twice. The registry of truth is the proto; this asserts the client's five
-    // variants are exactly its five.
-    for (proto, rust) in [
-        ("HEALTH_STATE_HEALTHY", "Healthy"),
-        ("HEALTH_STATE_DEGRADED", "Degraded"),
-        ("HEALTH_STATE_UNHEALTHY", "Unhealthy"),
-        ("HEALTH_STATE_UNKNOWN", "Unknown"),
+fn the_health_state_vocabulary_is_the_frozen_one_exactly() {
+    // W-20: `HealthState` is exported from `connection.proto` and was once
+    // modelled twice. The exhaustive matches make a third model impossible to
+    // introduce silently.
+    for h in [
+        twinvpn_relay_client::map::HealthState::Healthy,
+        twinvpn_relay_client::map::HealthState::Degraded,
+        twinvpn_relay_client::map::HealthState::Unhealthy,
+        twinvpn_relay_client::map::HealthState::Unknown,
     ] {
-        assert!(CONNECTION_PROTO.contains(proto), "contract lost {proto}");
-        assert!(
-            RELAY_CLIENT_MAP.contains(rust),
-            "twinvpn-relay-client cannot name {proto}"
-        );
+        assert_eq!(health_from_wire(health_to_wire(h)), Some(h));
     }
+    assert_eq!(health_from_wire(v1::HealthState::Unspecified), None);
+
+    // The contract's own comment — "NEVER RENDERED AS HEALTHY" — is a property
+    // of `UNKNOWN`, and the device's default must honour it.
+    assert_eq!(
+        twinvpn_relay_client::map::HealthState::default(),
+        twinvpn_relay_client::map::HealthState::Unknown,
+        "the device's default health must be UNKNOWN, never HEALTHY"
+    );
 }
 
 #[test]
 fn the_pair_tag_bucket_the_client_uses_is_the_one_limits_json_fixes() {
-    // A device that bucketed on a different period would present a `pair_tag`
-    // the relay computes differently, and the two peers would never match. The
-    // failure is silent: the relay simply never pairs them.
+    // A device bucketing on a different period presents a `pair_tag` the relay
+    // computes differently, and the two peers never match. The failure is
+    // silent: the relay simply never pairs them.
     let limits: serde_json::Value = serde_json::from_str(LIMITS_JSON).expect("limits.json");
-    let bucket = limits["relay"]["pair_tag_bucket_seconds"]
-        .as_u64()
-        .expect("relay.pair_tag_bucket_seconds");
-    let skew = limits["relay"]["accepted_bucket_skew"]
-        .as_u64()
-        .expect("relay.accepted_bucket_skew");
-
     assert_eq!(
         twinvpn_relay_client::bind::BUCKET_SECONDS,
-        bucket,
+        limits["relay"]["pair_tag_bucket_seconds"]
+            .as_u64()
+            .expect("relay.pair_tag_bucket_seconds"),
         "twinvpn-relay-client's BUCKET_SECONDS disagrees with limits.json"
     );
     assert_eq!(
         twinvpn_relay_client::bind::ACCEPTED_BUCKET_SKEW,
-        skew,
+        limits["relay"]["accepted_bucket_skew"]
+            .as_u64()
+            .expect("relay.accepted_bucket_skew"),
         "twinvpn-relay-client's ACCEPTED_BUCKET_SKEW disagrees with limits.json"
-    );
-    assert!(
-        RELAY_CLIENT_BIND.contains("BUCKET_SECONDS: u64 = 600"),
-        "the constant moved; re-read it before trusting this test"
     );
 }
 
 #[test]
-fn a_bind_request_still_carries_no_peer_identifier() {
-    // I1's client half, asserted against the frozen contract's `RelayBinding`:
-    // the relay identifies a pair only by `pair_tag`, and the request the client
-    // sends must not smuggle anything else in.
+fn a_bind_request_carries_nothing_but_the_pair_tag_and_its_leg_shape() {
+    // I1's client half. This used to grep the source for forbidden field names,
+    // which catches only the names it thought to list. Exhaustive destructuring
+    // catches **any** added field, at compile time: adding `device_id` to
+    // `BindRequest` breaks this line, and the reviewer has to say why.
+    let request = twinvpn_relay_client::bind::BindRequest {
+        pair_tag: twinvpn_types::PairTag::from_array([0x33; 16]),
+        bucket: 1,
+        carriage: twinvpn_relay_client::map::Carriage::Udp,
+        family: twinvpn_types::AddressFamily::V4,
+    };
+    let twinvpn_relay_client::bind::BindRequest {
+        pair_tag,
+        bucket,
+        carriage,
+        family,
+    } = request;
+
+    // And each surviving field is one the relay may see: a blinded tag, the
+    // bucket it was derived for, and the leg's own shape. None of them names a
+    // peer, and the relay must never learn one (I1).
+    assert_eq!(twinvpn_types::Identifier::as_bytes(&pair_tag).len(), 16);
+    assert_eq!(bucket, 1);
+    assert_eq!(carriage, twinvpn_relay_client::map::Carriage::Udp);
+    assert_eq!(family, twinvpn_types::AddressFamily::V4);
+
+    // The contract agrees that the tag is what identifies the pair.
     assert!(
         RELAY_PROTO.contains("pair_tag"),
         "relay.proto no longer carries pair_tag"
     );
-    for forbidden in ["device_id", "peer_id", "identity_id"] {
-        assert!(
-            !RELAY_CLIENT_BIND.contains(&format!("pub {forbidden}:")),
-            "BindRequest gained a `{forbidden}` field; the relay must never learn \
-             a peer identity (I1)"
-        );
-    }
 }
 
-// ---------------------------------------------------------------------------
-// 2. The relay data frame: a specification with one implementation and no
-//    counterpart. This is a FINDING, asserted as a tripwire.
-// ---------------------------------------------------------------------------
-
-/// The five constants ADR-0005 §9.1's layout fixes, defined once on each side.
-///
-/// The two workspaces cannot link each other (`tests/Cargo.toml` deliberately
-/// excludes `services/`), so the device's value is read through its crate and
-/// the relay's is read out of its source. That asymmetry is the honest one: the
-/// device side is *executed*, the service side is *read*.
-const SHARED_FRAME_CONSTANTS: [(&str, usize); 5] = [
-    ("HEADER_LEN", twinvpn_relay_client::frame::HEADER_LEN),
-    ("VERSION", twinvpn_relay_client::frame::VERSION as usize),
-    (
-        "MAX_DATA_PAYLOAD_BYTES",
-        twinvpn_relay_client::frame::MAX_DATA_PAYLOAD_BYTES,
-    ),
-    (
-        "L_DATA_OVERHEAD_BYTES",
-        twinvpn_relay_client::frame::L_DATA_OVERHEAD_BYTES,
-    ),
-    (
-        "OVERLAY_MTU_FLOOR",
-        twinvpn_relay_client::frame::OVERLAY_MTU_FLOOR,
-    ),
-];
-
-/// The nine wire bytes ADR-0005 §9.1 assigns positionally.
+/// The nine frame types, with the wire byte each occupies.
 const FRAME_TYPE_WIRE: [(twinvpn_relay_client::FrameType, u8, &str); 9] = [
     (twinvpn_relay_client::FrameType::Data, 0x01, "Data"),
     (twinvpn_relay_client::FrameType::Bind, 0x10, "Bind"),
@@ -212,81 +279,117 @@ const FRAME_TYPE_WIRE: [(twinvpn_relay_client::FrameType, u8, &str); 9] = [
     (twinvpn_relay_client::FrameType::Rebind, 0x17, "Rebind"),
 ];
 
+/// A conforming relay must carry the overlay floor plus L-DATA's overhead.
+///
+/// Every term is a `const`, so this is a **build** failure rather than a test
+/// failure — which is the stronger place for it. A relay leg whose maximum
+/// payload fell below `OVERLAY_MTU_FLOOR + L_DATA_OVERHEAD_BYTES` would
+/// black-hole every full-size packet on every carriage, and no test run would be
+/// needed to know that.
+const _: () = assert!(
+    twinvpn_relay_client::frame::MAX_DATA_PAYLOAD_BYTES
+        >= twinvpn_relay_client::frame::OVERLAY_MTU_FLOOR
+            + twinvpn_relay_client::frame::L_DATA_OVERHEAD_BYTES,
+    "the relay leg cannot carry the overlay floor plus L-DATA overhead"
+);
+
 #[test]
-fn the_relay_frames_shared_constants_hold_the_same_values_on_both_sides() {
-    // The device side now exists, so the tripwire that used to stand here —
-    // `the_relay_data_frame_still_has_no_device_side_implementation` — has been
-    // replaced by the agreement test it existed to demand.
-    //
-    // **That tripwire had gone blind and this records why.** It scanned only
-    // `map.rs` and `bind.rs` for `HEADER_LEN`; the device frame landed in a new
-    // file, `frame.rs`, which the scan never looked at. It therefore stayed
-    // green through exactly the change it was built to catch. A tripwire that
-    // enumerates the files it watches goes stale the moment a file is added,
-    // which is a lesson worth more than the tripwire was.
-    assert!(
-        RELAY_CLIENT_FRAME.contains("pub const HEADER_LEN"),
-        "the device-side frame moved again; this test enumerates a file and \
-         would go blind the same way"
+fn the_frame_constants_are_derived_from_the_specification_not_from_each_other() {
+    use twinvpn_relay_client::frame as f;
+
+    // `VERSION` and the `DATA` byte now live in one artifact all three sides
+    // import, so agreement is a value comparison against it.
+    assert_eq!(
+        f::VERSION,
+        vectors::FRAME_VERSION,
+        "the device's frame VERSION disagrees with the shared vector's"
+    );
+    assert_eq!(
+        twinvpn_relay_client::FrameType::Data.to_wire(),
+        vectors::FRAME_TYPE_DATA
+    );
+    assert_eq!(
+        f::VERSION << 4,
+        vectors::FRAME_VER_FLAGS,
+        "byte 1 is `ver` in the high nibble and `flags` in the low"
     );
 
-    for (name, device_value) in SHARED_FRAME_CONSTANTS {
-        let needle = format!("pub const {name}: ");
-        let line = RELAY_SERVICE_FRAME
-            .lines()
-            .find(|l| l.trim_start().starts_with(&needle))
-            .unwrap_or_else(|| panic!("services/relay/src/frame.rs no longer defines {name}"));
-        let literal: String = line
-            .rsplit('=')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .trim_end_matches(';')
-            .chars()
-            .filter(|c| c.is_ascii_digit())
-            .collect();
-        let service_value: usize = literal
-            .parse()
-            .unwrap_or_else(|_| panic!("{name} on the service side is not a literal: {line}"));
-        assert_eq!(
-            device_value, service_value,
-            "{name} is {device_value} on the device and {service_value} on the \
-             relay. Both sides derive their bounds from this value, and nothing \
-             else compares them."
-        );
-    }
+    // `HEADER_LEN` is the sum of §9.1's field widths, not a number to remember:
+    // type(1) + ver|flags(1) + counter_low(2) + flow_id(4) + tag(8).
+    assert_eq!(
+        f::HEADER_LEN,
+        1 + 1 + 2 + 4 + f::TAG_LEN,
+        "HEADER_LEN is no longer the sum of the fields the ADR draws"
+    );
+
+    // The overlay floor is one value shared with the route planner. Nothing
+    // compared them before, and a relay carrying less than the planner installs
+    // would black-hole every full-size packet.
+    assert_eq!(
+        f::OVERLAY_MTU_FLOOR,
+        twinvpn_route::plan::MTU_FLOOR as usize,
+        "the relay leg's overlay floor and the route planner's MTU floor differ"
+    );
+
+    // `MAX_DATA_PAYLOAD_BYTES` is derived from §9.2's overhead table at the row
+    // with the least framing beneath `RelayFrame` — R-UDP over IPv4 — so it is
+    // asserted as that arithmetic rather than as the literal it evaluates to.
+    assert_eq!(
+        f::MAX_DATA_PAYLOAD_BYTES,
+        1500 - 20 - 8 - f::HEADER_LEN,
+        "the DATA payload bound is no longer 1500 minus IPv4, UDP and RelayFrame"
+    );
+    // The conformance relation between the three is asserted at COMPILE time,
+    // just below — every term is a `const`, so a runtime `assert!` would be
+    // folded to `true` and could never fail. Clippy catches that, and it is
+    // right to: an assertion that cannot fail is not a test.
+
+    // And it is NOT C4's cap. Borrowing the rendezvous bound here would make the
+    // 1280 overlay floor unachievable on every carriage — the mistake the
+    // constant's own documentation exists to prevent.
+    assert_ne!(
+        f::MAX_DATA_PAYLOAD_BYTES,
+        twinvpn_schema::limits::C4_MAX_BYTES,
+        "the DATA bound has been set to C4's pre-authentication cap"
+    );
 }
 
 #[test]
-fn every_frame_type_maps_to_the_same_wire_byte_on_both_sides() {
-    // ADR-0005 §9.1 fixes `DATA = 0x01` and the control range `0x10..0x1F`, but
-    // assigns the eight control names **positionally** and never states a byte
-    // for any of them. Both implementations read the prose list in order and
-    // arrived at the same mapping — a convention, not a specification.
-    //
-    // The relay's own suite exercises only `0x01` and an unknown byte, and its
-    // `from_wire` is private, so a typo in its `to_wire` **and** `from_wire`
-    // together would round-trip locally and disagree with the device silently.
+fn every_frame_type_round_trips_and_sits_where_the_adr_puts_it() {
+    // ADR-0005 §9.1 fixes `DATA = 0x01` and the control range `0x10..0x1F`, and
+    // assigns the eight control names **positionally** without stating a byte
+    // for any of them. Both implementations read that list in order; the mapping
+    // is a convention. So what is asserted here is the device's round trip, the
+    // two bytes the ADR does fix, and that every control type lands inside the
+    // range it fixes — none of which needs anyone's source.
+    let mut seen: Vec<u8> = Vec::new();
     for (kind, wire, name) in FRAME_TYPE_WIRE {
         assert_eq!(
             kind.to_wire(),
             wire,
-            "the device maps {name} to 0x{:02x}, not 0x{wire:02x}",
+            "{name} maps to 0x{:02x}, not 0x{wire:02x}",
             kind.to_wire()
         );
         assert_eq!(
             twinvpn_relay_client::FrameType::from_wire(wire),
             Some(kind),
-            "the device does not decode 0x{wire:02x} back to {name}"
+            "0x{wire:02x} does not decode back to {name}"
         );
         assert!(
-            RELAY_SERVICE_FRAME.contains(&format!("FrameType::{name} => 0x{wire:02x}")),
-            "services/relay does not map {name} to 0x{wire:02x}; the two sides \
-             have diverged on a byte the ADR never states"
+            !seen.contains(&wire),
+            "0x{wire:02x} is assigned twice; {name} collides with an earlier type"
         );
+        seen.push(wire);
+        if wire != vectors::FRAME_TYPE_DATA {
+            assert!(
+                (0x10..=0x1f).contains(&wire),
+                "{name} is 0x{wire:02x}, outside the control range the ADR fixes"
+            );
+        }
     }
 
-    // The ADR's two statements that ARE normative.
+    // The ADR's two normative statements, read from the specification rather
+    // than from anyone's implementation.
     assert!(
         ADR_0005.contains("`type` `0x01` = `DATA`"),
         "ADR-0005 §9.1 no longer fixes DATA = 0x01"
@@ -295,106 +398,122 @@ fn every_frame_type_maps_to_the_same_wire_byte_on_both_sides() {
         ADR_0005.contains("0x10..0x1F` = control"),
         "ADR-0005 §9.1 no longer fixes the control range"
     );
-    for (_, wire, name) in FRAME_TYPE_WIRE {
-        if wire != 0x01 {
-            assert!(
-                (0x10..=0x1f).contains(&wire),
-                "{name} is 0x{wire:02x}, outside the control range the ADR fixes"
-            );
-        }
+
+    // An unassigned byte is refused rather than guessed at.
+    for unassigned in [0x00u8, 0x02, 0x18, 0x1f, 0xff] {
+        assert_eq!(
+            twinvpn_relay_client::FrameType::from_wire(unassigned),
+            None,
+            "0x{unassigned:02x} is unassigned and was decoded anyway"
+        );
     }
 }
 
 #[test]
-fn the_mac_input_layout_is_the_one_adr_0005_specifies_and_both_sides_build_it() {
+fn the_mac_input_is_the_shared_vector_built_through_the_devices_own_assembler() {
     // §9.1: the tag is "a keyed BLAKE2s MAC under `K_leg` over
     // `(type‖ver‖flags‖counter_full‖flow_id‖payload)`, truncated to 64 bits".
     //
-    // The golden vector that pins this is replicated **as source in four
-    // places** — `twinvpn-crypto`'s test module (where it is `#[cfg(test)]` and
-    // therefore unimportable), the relay's `provider.rs`, the device's
-    // `leg_frame.rs`, and here. Each side fails on its own. This is the only
-    // place the device's construction is checked against bytes assembled
-    // independently of it.
-    const COUNTER: u64 = 0x0102_0304_0506_0708;
-    const FLOW: u32 = 0xdead_beef;
-    const PAYLOAD: [u8; 16] = [0xab; 16];
-
-    let mut expected = Vec::new();
-    expected.push(0x01); // type = DATA
-    expected.push(1 << 4); // ver = 1 in the high nibble, flags = 0 in the low
-    expected.extend_from_slice(&COUNTER.to_be_bytes());
-    expected.extend_from_slice(&FLOW.to_be_bytes());
-    expected.extend_from_slice(&PAYLOAD);
-    assert_eq!(
-        expected.len(),
-        1 + 1 + 8 + 4 + 16,
-        "nothing in the MAC input is length-prefixed"
-    );
-
+    // This test used to compare the device's construction against literals
+    // scraped out of `services/relay/src/provider.rs`. `relay-plane` then
+    // imported the shared vectors and deleted its copies — and the scrape
+    // failed, reporting "the two golden vectors have drifted" when the opposite
+    // had happened. A check that enumerates its subject's source form fails
+    // loudest exactly when the subject improves.
+    //
+    // What replaces it: the frame is built from the **field** constants through
+    // the device's own assembler and compared against the assembled constant.
+    // Importing `FRAME_MAC_INPUT` and handing it straight to the MAC would only
+    // prove that a crate can copy an array.
     let frame = twinvpn_relay_client::OutboundFrame::new(
         twinvpn_relay_client::FrameType::Data,
-        0,
-        FLOW,
-        bytes::Bytes::from_static(&PAYLOAD),
+        vectors::FRAME_FLAGS,
+        vectors::FRAME_FLOW_ID,
+        bytes::Bytes::from_static(&vectors::FRAME_PAYLOAD),
     )
     .expect("a well-formed DATA frame");
+
     assert_eq!(
-        frame.mac_input(COUNTER),
-        expected,
-        "the device's MAC input is not §9.1's (type‖ver‖flags‖counter_full‖\
-         flow_id‖payload)"
+        frame.mac_input(vectors::FRAME_COUNTER_FULL),
+        vectors::FRAME_MAC_INPUT,
+        "the device's MAC input is not §9.1's \
+         (type‖ver‖flags‖counter_full‖flow_id‖payload)"
     );
 
-    // The relay assembles the same bytes, and its own pin agrees with this one.
-    assert!(
-        RELAY_SERVICE_PROVIDER.contains("const PIN_COUNTER: u64 = 0x0102_0304_0506_0708;"),
-        "the relay's pinned counter changed; the two golden vectors have drifted"
-    );
-    assert!(
-        RELAY_SERVICE_PROVIDER.contains("0xd0, 0x4f, 0x9b, 0xe2, 0xb5, 0x7f, 0xc1, 0x5b"),
-        "the relay's pinned tag changed; the two golden vectors have drifted"
+    // The tag on the wire is that input's truncated MAC.
+    let key = twinvpn_relay_client::LegKey::from_array(vectors::FRAME_MAC_KEY);
+    let wire = frame.encode(&key, vectors::FRAME_COUNTER_FULL);
+    assert_eq!(
+        &wire[8..16],
+        &vectors::FRAME_MAC_TAG,
+        "the encoded tag is not the shared vector's"
     );
 
-    // And the tag on the wire is that truncation.
-    let key = twinvpn_relay_client::LegKey::from_array([0x4b; 32]);
-    let wire = frame.encode(&key, COUNTER);
-    let tag: String = wire[8..16].iter().map(|b| format!("{b:02x}")).collect();
+    // The truncation discrimination stays pinned: a reading that asks BLAKE2s
+    // for an 8-byte output instead of truncating a 32-byte one is a *different*
+    // value, and the device must not produce it.
+    assert_ne!(
+        vectors::FRAME_MAC_TAG,
+        vectors::FRAME_MAC_TAG_SHORT_OUTPUT_REJECTED,
+        "the accepted and rejected readings are equal, so the pin is vacuous"
+    );
+    assert_ne!(
+        wire[8..16],
+        vectors::FRAME_MAC_TAG_SHORT_OUTPUT_REJECTED,
+        "the device produced the short-output reading ADR-0005 rejects"
+    );
+}
+
+#[test]
+fn the_shared_vectors_agree_with_the_implementation_that_produced_them() {
+    // One shared artifact removes four copies and introduces exactly one new
+    // failure mode: the artifact drifting from `frame_mac`. `self_consistency`
+    // is published so every consumer can close that hole rather than assume it,
+    // and both relay crates already call it. This suite is a third caller — and
+    // the only one that is neither the artifact's own crate nor a producer.
+    vectors::self_consistency();
+
+    // The HRW half, so the relay-directory's ranking input is covered here too
+    // rather than only in its own suite.
     assert_eq!(
-        tag, "d04f9be2b57fc15b",
-        "the encoded tag is not the shared golden vector's truncation"
+        twinvpn_crypto::blake2s::hrw_weight_digest(&vectors::HRW_RELAY_ID, &vectors::HRW_PAIR_ID),
+        vectors::HRW_DIGEST
     );
 }
 
 #[test]
 fn the_frame_header_is_sixteen_bytes_laid_out_the_way_the_adr_draws_it() {
-    // The layout, field by field, against the diagram in ADR-0005 §9.1. A
-    // change to any offset breaks every deployed relay at once, and the only
-    // other check on it is the golden tag — which does not cover `counter_low`,
+    // The layout, field by field, against the diagram in ADR-0005 §9.1. A change
+    // to any offset breaks every deployed relay at once, and the only other
+    // check on it is the golden tag — which does not cover `counter_low`,
     // because `counter_low` is not in the MAC input.
-    const COUNTER: u64 = 0x0102_0304_0506_0708;
+    const FLAGS: u8 = 0x0a;
     let frame = twinvpn_relay_client::OutboundFrame::new(
         twinvpn_relay_client::FrameType::Data,
-        0x0a,
-        0xdead_beef,
+        FLAGS,
+        vectors::FRAME_FLOW_ID,
         bytes::Bytes::from_static(b"payload"),
     )
     .expect("frame");
     let wire = frame.encode(
-        &twinvpn_relay_client::LegKey::from_array([0x4b; 32]),
-        COUNTER,
+        &twinvpn_relay_client::LegKey::from_array(vectors::FRAME_MAC_KEY),
+        vectors::FRAME_COUNTER_FULL,
     );
 
-    assert_eq!(wire[0], 0x01, "byte 0 is `type`");
-    assert_eq!(wire[1], (1 << 4) | 0x0a, "byte 1 is `ver` | `flags`");
+    assert_eq!(wire[0], vectors::FRAME_TYPE_DATA, "byte 0 is `type`");
+    assert_eq!(
+        wire[1],
+        (twinvpn_relay_client::frame::VERSION << 4) | FLAGS,
+        "byte 1 is `ver` | `flags`"
+    );
     assert_eq!(
         &wire[2..4],
-        &0x0708u16.to_be_bytes(),
+        &vectors::FRAME_COUNTER_LOW.to_be_bytes(),
         "bytes 2..4 are the LOW 16 bits of the counter, big-endian"
     );
     assert_eq!(
         &wire[4..8],
-        &0xdead_beefu32.to_be_bytes(),
+        &vectors::FRAME_FLOW_ID.to_be_bytes(),
         "bytes 4..8 are flow_id, big-endian"
     );
     assert_eq!(wire.len(), twinvpn_relay_client::frame::HEADER_LEN + 7);
@@ -406,11 +525,12 @@ fn the_frame_header_is_sixteen_bytes_laid_out_the_way_the_adr_draws_it() {
 }
 
 #[test]
-fn the_counter_window_reconstructs_identically_on_both_sides_at_the_wrap_boundary() {
-    // Both sides carry the same sliding-window algorithm, duplicated line for
-    // line, and each tests it with a **different** fixture: the device tests the
-    // 0xFFFF → 0x0000 wrap, the relay tests 65530 → 3. A divergence in the
-    // wrap rule would be caught by neither.
+fn the_counter_window_reconstructs_forwards_at_the_wrap_boundary() {
+    // Both sides carry the same sliding-window algorithm, and each tests it with
+    // a different fixture: the device tests the 0xFFFF → 0x0000 wrap, the relay
+    // tests 65530 → 3. Neither covers the other's. The window width has no
+    // shared artifact to compare against, so what is asserted here is the
+    // device's behaviour at the boundary — the relay pins its own.
     let mut w = twinvpn_relay_client::CounterWindow::new();
     assert!(w.accept(0));
     for c in 1..=5u64 {
@@ -428,50 +548,19 @@ fn the_counter_window_reconstructs_identically_on_both_sides_at_the_wrap_boundar
         0x1_0000,
         "0x0000 after 0xFFFF must reconstruct forwards, not backwards"
     );
-    assert!(
-        RELAY_SERVICE_FRAME.contains("pub const WIDTH: u64 = 64;"),
-        "the relay's window width changed; the device's is 64 and the two must \
-         agree or a frame accepted by one is a replay to the other"
-    );
-    assert_eq!(twinvpn_relay_client::CounterWindow::WIDTH, 64);
-}
 
-#[test]
-fn the_relay_services_own_documentation_agrees_with_what_it_forwards() {
-    // Previously a finding: `lib.rs` claimed `Verbatim` while `forward.rs` used
-    // `frame::Opaque`. `relay-plane` closed it in the other direction —
-    // `frame::Opaque` is gone and the relay uses `Verbatim` under
-    // `Framing::Opaque`. This asserts the resolved state so the two cannot drift
-    // apart again.
+    // And the width is real rather than declared: a counter exactly `WIDTH`
+    // behind the highest is too old to distinguish from a replay.
+    let mut edge = twinvpn_relay_client::CounterWindow::new();
+    let width = twinvpn_relay_client::CounterWindow::WIDTH;
+    assert!(edge.accept(width));
     assert!(
-        RELAY_SERVICE_LIB.contains("Verbatim"),
-        "services/relay/src/lib.rs no longer names Verbatim"
+        edge.accept(1),
+        "a counter inside the window must be judgeable"
     );
     assert!(
-        !RELAY_SERVICE_FRAME.contains("pub struct Opaque"),
-        "frame::Opaque is back; the forwarding payload type has two spellings again"
-    );
-    assert!(
-        RELAY_SERVICE_FRAME.contains("Verbatim"),
-        "the relay frame no longer carries its payload as Verbatim, which is \
-         W-4's forward-verbatim constraint"
-    );
-    // The *code* must not reference the deleted type. A doc comment in
-    // `forward.rs` still does — `[`crate::frame::Opaque`]` at its module head is
-    // now a broken intra-doc link — which is reported to `relay-plane` rather
-    // than asserted here, because a stale doc line in another domain's crate is
-    // a finding and not this suite's to fail on.
-    let code_uses_opaque = RELAY_SERVICE_FORWARD
-        .lines()
-        .filter(|l| {
-            let t = l.trim_start();
-            !t.starts_with("//") && !t.starts_with("/*") && !t.starts_with('*')
-        })
-        .any(|l| l.contains("frame::Opaque"));
-    assert!(
-        !code_uses_opaque,
-        "the forwarding path uses frame::Opaque again; the payload type has two \
-         spellings once more"
+        !edge.accept(0),
+        "a counter {width} behind the highest must be refused as too old"
     );
 }
 
