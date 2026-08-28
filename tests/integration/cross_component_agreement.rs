@@ -406,57 +406,6 @@ fn the_frame_header_is_sixteen_bytes_laid_out_the_way_the_adr_draws_it() {
 }
 
 #[test]
-fn a_device_authenticates_an_inbound_frame_it_should_never_have_been_sent() {
-    // **FINDING.** Direction enforcement exists on exactly one side and only for
-    // sends: `FrameType::device_may_send` refuses `BOUND`, `DRAIN` and
-    // `RELAY_STATUS` in `OutboundFrame::new`, and `FrameError::WrongDirection`
-    // is producible nowhere else. `InboundFrame::parse`/`verify` never check
-    // direction, so a device accepts and *authenticates* a `BIND` or `CAPS` —
-    // frames only a device sends — arriving from the relay.
-    //
-    // This is not a MAC forgery: an attacker still needs `K_leg`. It is a
-    // confused-deputy surface on a compromised or misbehaving relay, and the
-    // asymmetry is untested on both sides. Reported, not repaired:
-    // `core-dataplane` owns the crate.
-    let key = twinvpn_relay_client::LegKey::from_array([0x4b; 32]);
-    for kind in [
-        twinvpn_relay_client::FrameType::Bind,
-        twinvpn_relay_client::FrameType::Caps,
-    ] {
-        assert!(
-            kind.device_may_send(),
-            "{kind:?} is a device-to-relay frame"
-        );
-        let outbound =
-            twinvpn_relay_client::OutboundFrame::new(kind, 0, 1, bytes::Bytes::from_static(b"x"))
-                .expect("a device may send it");
-        let wire = outbound.encode(&key, 0);
-
-        let inbound = twinvpn_relay_client::InboundFrame::parse(&wire).expect("parses");
-        let mut window = twinvpn_relay_client::CounterWindow::new();
-        let verified = inbound.verify(&key, &mut window);
-        assert!(
-            verified.is_ok(),
-            "the device refused an inbound {kind:?}; if direction is now checked \
-             on receive, delete this finding"
-        );
-    }
-
-    // The half that IS enforced, as the contrast.
-    for kind in [
-        twinvpn_relay_client::FrameType::Bound,
-        twinvpn_relay_client::FrameType::Drain,
-        twinvpn_relay_client::FrameType::RelayStatus,
-    ] {
-        assert!(!kind.device_may_send());
-        assert_eq!(
-            twinvpn_relay_client::OutboundFrame::new(kind, 0, 1, bytes::Bytes::new()).unwrap_err(),
-            twinvpn_relay_client::FrameError::WrongDirection
-        );
-    }
-}
-
-#[test]
 fn the_counter_window_reconstructs_identically_on_both_sides_at_the_wrap_boundary() {
     // Both sides carry the same sliding-window algorithm, duplicated line for
     // line, and each tests it with a **different** fixture: the device tests the

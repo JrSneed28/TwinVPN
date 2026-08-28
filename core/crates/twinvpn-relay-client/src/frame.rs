@@ -37,6 +37,7 @@
 
 use bytes::Bytes;
 use twinvpn_crypto::{frame_mac, verify_frame_mac};
+use twinvpn_types::{codes as reg, ReasonCode};
 
 /// The wire header length. ADR-0005 §9.1.
 pub const HEADER_LEN: usize = 16;
@@ -157,6 +158,43 @@ impl FrameType {
                 | FrameType::Rebind
         )
     }
+
+    /// Whether a device legitimately **receives** this type from its relay.
+    ///
+    /// # This is not the complement of [`FrameType::device_may_send`]
+    ///
+    /// Most of the leg is genuinely bidirectional, so deriving one rule from the
+    /// other would be wrong in both directions. The rule is per frame, from what
+    /// each frame *means*:
+    ///
+    /// | Type | Received? | Why |
+    /// |---|---|---|
+    /// | `DATA` | yes | the relay forwards the peer's datagrams to us; that is its whole job |
+    /// | `BOUND` | yes | `protocol.md` line 590: `BIND{…}` **→** `BOUND{flow_id}`. The response half |
+    /// | `PONG` | yes | the reply to our `PING` |
+    /// | `PING` | yes | leg liveness is symmetric, and a `PONG` back is one frame of equal-or-smaller size — no amplification |
+    /// | `DRAIN` | yes | ADR-0005 §11: one of the two frames a relay originates unsolicited |
+    /// | `RELAY_STATUS` | yes | the other one |
+    /// | `CAPS` | yes | ADR-0005 §10: "a `CAPS` control frame **exchanged** at leg setup" — an exchange has two halves |
+    /// | `BIND` | **no** | a request a device makes *of* a relay |
+    /// | `REBIND` | **no** | the same request, re-issued |
+    ///
+    /// # What refusing `BIND` and `REBIND` prevents
+    ///
+    /// Those two are the only frames whose meaning is "admit me to your table".
+    /// A relay sending one is asking the device to act as a **relay's admission
+    /// surface** — the confused-deputy shape. It is not a forgery: the frame is
+    /// genuinely authentic under `K_leg`, which is exactly why the MAC cannot
+    /// catch it and a direction check must.
+    ///
+    /// `PING`, `CAPS` and `PONG` are deliberately **not** refused. The evidence
+    /// for them is symmetric or explicitly two-sided, and refusing an inbound
+    /// frame a conforming relay may legitimately send would produce a dead leg
+    /// that looks like a network fault.
+    #[must_use]
+    pub const fn device_may_receive(self) -> bool {
+        !matches!(self, FrameType::Bind | FrameType::Rebind)
+    }
 }
 
 /// An opaque relay payload.
@@ -269,8 +307,44 @@ pub enum FrameError {
     ReplayedCounter,
     /// A frame type only the relay may send arrived from a device, or the
     /// reverse.
+    ///
+    /// On the **receive** side this is W-32's condition and it is the serious
+    /// one: the frame authenticated under `K_leg`, so a real relay sent a device
+    /// a frame only a device sends.
     #[error("frame type is not one this direction may carry")]
     WrongDirection,
+}
+
+impl FrameError {
+    /// The registered `reason_code` this condition surfaces as.
+    ///
+    /// # The code this wants does not exist
+    ///
+    /// A relay sending a frame from the wrong side of the protocol is a
+    /// **misbehaving authenticated relay**, and the frozen registry has no
+    /// `RELAY.*` code for it — the twelve it carries are about reachability,
+    /// tokens, capacity, drain and failover. The spelling this needs is
+    /// `RELAY.FRAME_WRONG_DIRECTION`; it is recorded in
+    /// [`crate::codes::UNREGISTERED`] with the rest.
+    ///
+    /// `RELAY.MAP_UNVERIFIED` is emitted instead because it is the registry's
+    /// only "this relay is not one to be talking to" code and carries the right
+    /// `FATAL`/`CRITICAL` weight. Its registered *condition* is a different one,
+    /// which is exactly why the substitution is recorded rather than left to be
+    /// inferred from the code.
+    #[must_use]
+    pub const fn reason_code(self) -> ReasonCode {
+        match self {
+            FrameError::WrongDirection => reg::RELAY_MAP_UNVERIFIED,
+            FrameError::AuthenticationFailed | FrameError::ReplayedCounter => {
+                reg::CRYPTO_REPLAY_DETECTED
+            }
+            FrameError::TooShort
+            | FrameError::UnknownType
+            | FrameError::UnsupportedVersion
+            | FrameError::PayloadTooLarge { .. } => reg::PROTO_MALFORMED_MESSAGE,
+        }
+    }
 }
 
 /// A frame this device is about to send.
@@ -425,13 +499,16 @@ impl InboundFrame {
     /// Authenticates the frame and admits its counter.
     ///
     /// The order is: reconstruct the full counter (RFC 9147 §4.2.2), verify the
-    /// MAC **over that full value**, and only then admit it to the window.
-    /// Admitting first would let a forged counter advance the window and lock
-    /// out the genuine peer.
+    /// MAC **over that full value**, check the frame came from the side that may
+    /// send it, and only then admit it to the window. Admitting first would let
+    /// a forged or wrong-direction frame advance the window and lock out the
+    /// genuine peer.
     ///
     /// # Errors
     ///
-    /// [`FrameError::AuthenticationFailed`] or [`FrameError::ReplayedCounter`].
+    /// [`FrameError::AuthenticationFailed`], [`FrameError::WrongDirection`] when
+    /// the relay sent a frame only a device sends, or
+    /// [`FrameError::ReplayedCounter`]. Every one is a silent drop.
     pub fn verify(
         self,
         key: &LegKey,
@@ -447,6 +524,22 @@ impl InboundFrame {
         );
         if !verify_frame_mac(key.as_array(), &input, &self.auth_tag) {
             return Err(FrameError::AuthenticationFailed);
+        }
+        // Direction, AFTER the MAC and BEFORE the window (W-32).
+        //
+        // After the MAC, because the two failures mean different things and the
+        // diagnostic must not confuse them. A wrong-direction frame that fails
+        // the MAC is an ordinary forgery; a wrong-direction frame that PASSES it
+        // is a genuinely keyed relay sending a frame from the wrong side of the
+        // protocol, which is the confused-deputy finding and the one an operator
+        // needs to see. Checking direction first would report every forgery of a
+        // `BIND` as a misbehaving relay.
+        //
+        // Before the window, for the same reason the MAC is: a refused frame
+        // must not advance the counter window, or a relay could lock the device
+        // out of its own leg by burning counters with frames it may not send.
+        if !self.kind.device_may_receive() {
+            return Err(FrameError::WrongDirection);
         }
         if !window.accept(counter_full) {
             return Err(FrameError::ReplayedCounter);
