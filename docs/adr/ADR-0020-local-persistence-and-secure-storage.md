@@ -933,13 +933,54 @@ interface. Enforcement is an advisory exclusive lock (`flock` / `LockFileEx`) pl
 (`pid`, boot id, process start time) in `vault.lock`; a second opener refuses with
 `STORE.LOCK_CONTENDED` and MUST NOT fall back to read-only sharing.
 
-**Rule ST-31 (the iOS courier rule).** [docs/networking.md](../networking.md) §5.4 assigns contract
-fetch and parse to the *app* process because of C-1. That does not make the app a writer. The app
-fetches, performs structural validation only, and hands the **verbatim signed octets** to the
-provider over [ADR-0017](ADR-0017-local-management-interface.md); the provider verifies the signature over received octets
-([ADR-0003](ADR-0003-network-contract-schema-format.md)) and performs the ST-23 commit. Signature
-verification and floor enforcement happen at the writer, never at the courier. This is what keeps
-**I8** true across the iOS process split.
+**Rule ST-31 (the iOS courier rule).**
+
+> **AMENDED — ST-31a. The courier runs the other way, and the writer this rule protects is not the
+> provider.** The original text is preserved below because its *principle* is untouched and only
+> its two role assignments were wrong. Amended by the wave-3 integration lead after `mobile-ios`
+> reported that this rule, [ADR-0022](ADR-0022-application-lifecycle-and-background-execution.md)
+> LC-17 and [docs/networking.md](../networking.md) §5.4 place fetch in two different processes and
+> verification in two different processes — three documents, three answers
+> (`ownership.md` §10.8 **M-7**).
+>
+> **Two corrections, and neither weakens I8:**
+>
+> 1. **The app cannot fetch.** [ADR-0016](ADR-0016-client-process-and-privilege-separation.md)
+>    **PS-24 condition 3**: under `includeAllNetworks` the app process has **no network** — its
+>    traffic is [ADR-0012](ADR-0012-kill-switch-and-leak-prevention.md) class 1/2 and dropped, and
+>    it cannot match the class-7 bootstrap exemption because KS-9(1)'s predicate names the
+>    **provider**. An app-process fetch therefore fails in exactly the state where the contract is
+>    most needed, and fails *silently from the extension's point of view*. **The extension fetches**
+>    — it is the process that holds the exempted socket — and hands the verbatim signed octets to
+>    the app over [ADR-0017](ADR-0017-local-management-interface.md). The courier direction is
+>    reversed; the courier concept is not.
+>
+> 2. **"Verification happens at the writer" was applied to the wrong artifact.** This rule read
+>    *provider* for *writer*. But LC-17's division makes the **app** the sole writer of the compiled
+>    contract generation, and the **provider** the sole writer of the session state
+>    (S-12, S-15, S-31, S-37, S-62). Those are two different stores with two different writers.
+>    Signature verification and floor enforcement belong at the writer **of the document being
+>    committed**, which for a signed contract is the app. So the principle holds exactly as written
+>    once the writer is correctly identified — and it also puts the verification where C-3 needs it,
+>    because the multi-hundred-KB CBOR decode and the hash over it are the memory spike the 12 MB
+>    provider budget exists to keep out.
+>
+> **Normative form:** the **extension fetches**; it hands **verbatim signed octets** to the app; the
+> app's `core-lite` **verifies the signature and compiles** a compact pre-validated generation and
+> is the sole writer of it; the provider **consumes that generation read-only** and remains sole
+> writer of session state. The provider performs **no** general-purpose parse of a signed document
+> and makes **no** allocation proportional to one, per LC-17. I8 is preserved on both stores: each
+> has exactly one writer, and each writer verifies what it commits.
+
+The original text, superseded in its two role assignments only:
+
+> [docs/networking.md](../networking.md) §5.4 assigns contract
+> fetch and parse to the *app* process because of C-1. That does not make the app a writer. The app
+> fetches, performs structural validation only, and hands the **verbatim signed octets** to the
+> provider over [ADR-0017](ADR-0017-local-management-interface.md); the provider verifies the signature over received octets
+> ([ADR-0003](ADR-0003-network-contract-schema-format.md)) and performs the ST-23 commit. Signature
+> verification and floor enforcement happen at the writer, never at the courier. This is what keeps
+> **I8** true across the iOS process split.
 
 **Rule ST-32 (the store path must be suitable).** At open, the daemon checks that `store_root` is a
 local filesystem supporting `fsync` and advisory locking. A network mount, a filesystem without

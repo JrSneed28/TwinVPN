@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn linux_declares_the_cb6_custody_it_actually_has() {
         let c = config().enforcement_custody();
-        assert!(c.survives_core_exit);
+        assert!(c.survives_core_exit());
         assert!(c.swap_is_atomic);
     }
 

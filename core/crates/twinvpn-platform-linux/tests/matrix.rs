@@ -1010,7 +1010,7 @@ async fn matrix_daemon_restart_leaves_enforcement_installed_and_reclaims_the_int
     // code: the table is kernel-resident, so it outlives the process.
     let custody = adapter.network_config().enforcement_custody();
     assert!(
-        custody.survives_core_exit,
+        custody.survives_core_exit(),
         "CB-6: the installed ruleset is in the OS's custody so that the core \
          going away cannot drop protection"
     );
@@ -1026,7 +1026,7 @@ async fn matrix_daemon_restart_leaves_enforcement_installed_and_reclaims_the_int
         adapter
             .network_config()
             .enforcement_custody()
-            .survives_core_exit,
+            .survives_core_exit(),
         "CB-6: shutdown must not tear down enforcement"
     );
     assert!(adapter.is_shutting_down());

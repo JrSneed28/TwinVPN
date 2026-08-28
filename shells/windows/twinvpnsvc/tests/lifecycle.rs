@@ -225,7 +225,7 @@ fn ps3_a_client_detaching_changes_nothing() {
     // an event the authority acts on.
     assert!(
         twinvpn_platform::NetworkConfig::enforcement_custody(adapter.network_config())
-            .survives_core_exit
+            .survives_core_exit()
     );
 }
 

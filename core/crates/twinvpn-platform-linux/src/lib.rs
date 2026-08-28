@@ -355,12 +355,10 @@ mod tests {
         adapter.begin_shutdown();
         assert!(adapter.is_shutting_down());
         // The custody declaration is unchanged: the OS still holds the rules.
-        assert!(
-            adapter
-                .network_config()
-                .enforcement_custody()
-                .survives_core_exit
-        );
+        assert!(adapter
+            .network_config()
+            .enforcement_custody()
+            .survives_core_exit());
     }
 
     #[test]

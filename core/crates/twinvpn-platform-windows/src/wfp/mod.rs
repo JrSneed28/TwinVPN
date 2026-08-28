@@ -73,7 +73,7 @@ pub mod canary;
 pub mod filters;
 pub mod readback;
 
-use twinvpn_platform::{BootEnforcement, EnforcementCustody};
+use twinvpn_platform::{BootEnforcement, EnforcementCustody, RulesetCustody};
 use twinvpn_types::{AddressFamily, IpPrefix};
 
 pub use canary::{CounterSnapshot, NetEvent, NetEventKind};
@@ -674,7 +674,7 @@ pub fn baseline_protected() -> Vec<IpPrefix> {
 #[must_use]
 pub const fn custody() -> EnforcementCustody {
     EnforcementCustody {
-        survives_core_exit: true,
+        ruleset_custody: RulesetCustody::OsHeld,
         swap_is_atomic: true,
         // ADR-0012 §11.6's Windows boot row: `FWPM_FILTER_FLAG_BOOTTIME` coarse
         // deny plus `FWPM_FILTER_FLAG_PERSISTENT` full policy, reinstated by BFE
@@ -757,7 +757,7 @@ mod tests {
     fn the_custody_declaration_is_about_bfe_and_not_about_this_process() {
         // CB-6's normal case, and ADR-0012 §11.6's Windows durability row.
         let custody = custody();
-        assert!(custody.survives_core_exit);
+        assert!(custody.survives_core_exit());
         assert!(custody.swap_is_atomic);
     }
 

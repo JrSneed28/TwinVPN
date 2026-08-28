@@ -327,7 +327,7 @@ impl Agent {
             custody_survives_exit = twinvpn_platform::NetworkConfig::enforcement_custody(
                 self.adapter.network()
             )
-            .survives_core_exit,
+            .survives_core_exit(),
             "the installed enforcement ruleset is left in the OS's custody (CB-6)"
         );
     }

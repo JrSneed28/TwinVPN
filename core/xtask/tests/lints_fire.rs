@@ -15,6 +15,23 @@ fn dp(name: &str, deps: &[&str]) -> Package {
         manifest_path: format!("crates/{name}/Cargo.toml"),
         dir: format!("crates/{name}"),
         dependencies: deps.iter().map(|d| (*d).to_owned()).collect(),
+        non_dev_dependencies: deps.iter().map(|d| (*d).to_owned()).collect(),
+    }
+}
+
+/// A package whose edges to `dev_deps` are **dev**-dependencies.
+///
+/// They appear in `dependencies` — CD-I2 must still see a cipher a test pulls in
+/// — and are absent from `non_dev_dependencies`, which is the list CD-I5 walks.
+fn dp_with_dev(name: &str, deps: &[&str], dev_deps: &[&str]) -> Package {
+    let mut all: Vec<String> = deps.iter().map(|d| (*d).to_owned()).collect();
+    all.extend(dev_deps.iter().map(|d| (*d).to_owned()));
+    Package {
+        name: name.to_owned(),
+        manifest_path: format!("crates/{name}/Cargo.toml"),
+        dir: format!("crates/{name}"),
+        dependencies: all,
+        non_dev_dependencies: deps.iter().map(|d| (*d).to_owned()).collect(),
     }
 }
 
@@ -459,6 +476,57 @@ fn cd_i5_permits_the_composition_root_to_name_both() {
     assert!(checks::cd_i5(&workspace).is_empty());
     // And the positive half: the composition root really does wire both.
     assert!(checks::cd_i5_composition_root_wired(&workspace).is_empty());
+}
+
+#[test]
+fn cd_i5_does_not_count_a_dev_dependency_as_a_path_between_the_planes() {
+    // `ownership.md` §10.8 M-5, reported by `mobile-android`.
+    //
+    // A platform adapter that wants to run CB-2's falsification test for real
+    // must drive the machine that makes the decision, and the only way to reach
+    // it is a DEV-dependency on the composition root. That is not a path between
+    // the planes in any shipped artifact -- it exists while a test binary is
+    // linked and nowhere else -- so counting it made the rule forbid the
+    // evidence for the architecture it exists to protect.
+    let workspace = ws(vec![
+        dp("twinvpn-store", &[]),
+        dp("twinvpn-cp-client", &["twinvpn-store"]),
+        dp("twinvpn-session", &["twinvpn-store"]),
+        dp("twinvpn-path", &["twinvpn-store"]),
+        dp(
+            "twinvpn-core",
+            &["twinvpn-session", "twinvpn-path", "twinvpn-cp-client"],
+        ),
+        // The adapter ships against the TRAIT and reaches the composition root
+        // only from its tests.
+        dp_with_dev("twinvpn-platform-android", &[], &["twinvpn-core"]),
+    ]);
+
+    assert!(
+        checks::cd_i5(&workspace).is_empty(),
+        "a dev-dependency on the composition root is not a plane path: {:?}",
+        checks::cd_i5(&workspace)
+    );
+}
+
+#[test]
+fn cd_i5_still_fires_when_the_same_edge_is_a_real_dependency() {
+    // The other half of M-5, and the reason the fix is `kind`-aware rather than
+    // a relaxation: promote that dev-dependency to a real one and the rule must
+    // fire exactly as before. Otherwise the fix would be a hole, not a filter.
+    let workspace = ws(vec![
+        dp("twinvpn-store", &[]),
+        dp("twinvpn-cp-client", &["twinvpn-store"]),
+        dp("twinvpn-session", &["twinvpn-store"]),
+        dp("twinvpn-path", &["twinvpn-store"]),
+        dp(
+            "twinvpn-core",
+            &["twinvpn-session", "twinvpn-path", "twinvpn-cp-client"],
+        ),
+        dp("twinvpn-platform-android", &["twinvpn-core"]),
+    ]);
+
+    assert_eq!(rules(&checks::cd_i5(&workspace)), vec!["CD-I5"]);
 }
 
 #[test]

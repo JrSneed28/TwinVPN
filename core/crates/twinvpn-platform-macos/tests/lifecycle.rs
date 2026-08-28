@@ -121,7 +121,7 @@ fn the_enforcement_custody_is_declared_and_matches_what_pf_actually_gives() {
     let adapter = MacosPlatformAdapter::new(parts);
     let custody = adapter.network_config().enforcement_custody();
     // ADR-0012 §11.6's macOS durability row: "pf rules are kernel-resident".
-    assert!(custody.survives_core_exit);
+    assert!(custody.survives_core_exit());
     // A single `pfctl -f` load is one transaction (KS-17).
     assert!(custody.swap_is_atomic);
 }

@@ -493,14 +493,14 @@ fn shutdown_does_not_tear_down_enforcement() {
 #[test]
 fn a_target_whose_rules_die_with_the_process_declares_it() {
     let weak = MockAdapter::new(&MockOptions {
-        enforcement_survives_core_exit: false,
+        enforcement_custody: twinvpn_platform::RulesetCustody::ProcessHeld,
         ..MockOptions::default()
     });
     assert!(
         !weak
             .network_config()
             .enforcement_custody()
-            .survives_core_exit,
+            .survives_core_exit(),
         "a target without CB-6's guarantee must say so rather than let it be inferred"
     );
 }
@@ -765,4 +765,66 @@ fn every_platform_error_maps_to_a_registered_code_and_never_to_a_bare_number() {
         Some(detail)
     );
     assert_eq!(PlatformError::Cancelled.os_detail(), None);
+}
+
+/// `ownership.md` §10.8 **M-6** — the three custody values are three, not two.
+///
+/// Reported by `mobile-ios`. ADR-0012 §11.6's durability table gives iOS `◐` for
+/// both agent crash and `SIGKILL`: the rules do not outlive the provider, and the
+/// OS re-arms them with no user act. Against the former `bool`, `true` asserted
+/// CB-6's guarantee the platform does not give and `false` understated the
+/// re-arm, so the adapter had to round and the reported posture was wrong either
+/// way.
+///
+/// The property that matters is **discrimination**: `ProcessHeld` and
+/// `OsReArmed` must not be the same answer, because "unprotected until the user
+/// intervenes" and "unprotected for a measured window" are different facts and
+/// P09 exists to measure the second one.
+#[test]
+fn ruleset_custody_distinguishes_a_re_arm_from_a_permanent_loss() {
+    use twinvpn_platform::RulesetCustody;
+
+    // CB-6's predicate is TRUE for exactly one value. `OsReArmed` is not it:
+    // a re-arm means protection WAS dropped and then restored, and CB-6's
+    // guarantee is that a core exit cannot drop it at all. O-18's direction is
+    // to report the weaker fact.
+    assert!(RulesetCustody::OsHeld.survives_core_exit());
+    assert!(!RulesetCustody::OsReArmed.survives_core_exit());
+    assert!(!RulesetCustody::ProcessHeld.survives_core_exit());
+
+    // And the re-arm is carried as its own fact rather than by widening the
+    // predicate above -- which is the whole reason this is an enum.
+    assert!(RulesetCustody::OsHeld.os_rearms());
+    assert!(RulesetCustody::OsReArmed.os_rearms());
+    assert!(!RulesetCustody::ProcessHeld.os_rearms());
+
+    // The discrimination, stated directly: the two values that both answer
+    // `survives_core_exit()` false are still distinguishable from each other.
+    assert_ne!(
+        RulesetCustody::ProcessHeld.os_rearms(),
+        RulesetCustody::OsReArmed.os_rearms(),
+        "a permanent loss and a measured re-arm window must not be the same posture"
+    );
+}
+
+/// The mock can express every posture, including the one no local machine has.
+///
+/// CD-5 calls the mock "the payoff" -- 100% of the decision logic exercised on a
+/// Linux CI runner with no VM and no device farm. A posture the mock cannot
+/// represent is a posture the core is never tested against, and iOS is not a
+/// hypothetical target.
+#[test]
+fn the_mock_can_declare_the_re_arm_posture() {
+    use twinvpn_platform::mock::{MockAdapter, MockOptions};
+    use twinvpn_platform::RulesetCustody;
+
+    let adapter = MockAdapter::new(&MockOptions {
+        enforcement_custody: RulesetCustody::OsReArmed,
+        ..MockOptions::default()
+    });
+    let custody = adapter.network_config().enforcement_custody();
+
+    assert_eq!(custody.ruleset_custody, RulesetCustody::OsReArmed);
+    assert!(!custody.survives_core_exit());
+    assert!(custody.os_rearms());
 }

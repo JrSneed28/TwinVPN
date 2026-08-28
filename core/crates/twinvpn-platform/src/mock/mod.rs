@@ -70,8 +70,14 @@ pub struct MockOptions {
     pub supported_families: SupportedFamilies,
     /// Where the datapath runs (`KernelOffload` or `Userspace`).
     pub datapath: crate::config::Datapath,
-    /// Whether the installed ruleset would survive a core crash (CB-6).
-    pub enforcement_survives_core_exit: bool,
+    /// What happens to the installed ruleset when the core exits (CB-6).
+    ///
+    /// A [`crate::config::RulesetCustody`] and not a `bool`, so a core test can
+    /// exercise all **three** honest values — including `OsReArmed`, which is
+    /// ADR-0012 §11.6's `!` and which no boolean could express (M-6). CD-5 calls
+    /// the mock "the payoff"; a posture the mock cannot represent is a posture
+    /// the core's decision logic is never tested against.
+    pub enforcement_custody: crate::config::RulesetCustody,
     /// Whether the record AEAD is platform-performed (CB-6a). `false` — the
     /// software-held path — is the common case on 8 of 10 real targets.
     pub platform_performs_record_aead: bool,
@@ -86,7 +92,7 @@ impl Default for MockOptions {
                 dual_stack_socket: true,
             },
             datapath: crate::config::Datapath::Userspace,
-            enforcement_survives_core_exit: true,
+            enforcement_custody: crate::config::RulesetCustody::OsHeld,
             platform_performs_record_aead: false,
         }
     }
@@ -118,10 +124,7 @@ impl MockAdapter {
                 }),
             },
             tunnel: MockTunnel::new(options.datapath),
-            config: MockConfig::new(
-                options.enforcement_survives_core_exit,
-                Arc::clone(&shutting_down),
-            ),
+            config: MockConfig::new(options.enforcement_custody, Arc::clone(&shutting_down)),
             interfaces: MockInterfaces::new(),
             identity: MockIdentity::new(),
             store: MockStore::new(options.platform_performs_record_aead),

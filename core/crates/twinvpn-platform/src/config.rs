@@ -152,16 +152,77 @@ impl BootEnforcement {
     }
 }
 
+/// Who holds the installed ruleset across a core exit, declared per target.
+///
+/// **This was a `bool` and could not say what two of five targets actually do**
+/// (`ownership.md` §10.8 **M-6**, reported by `mobile-ios`). ADR-0012 §11.6's
+/// durability table gives iOS `◐` for both agent crash and `SIGKILL`: the rules
+/// do *not* outlive the provider, and the OS *does* re-arm them without any user
+/// act. Against a boolean, `true` asserts CB-6's guarantee the platform does not
+/// give and `false` understates the re-arm — so an adapter had to round, and
+/// whichever way it rounded the reported posture was wrong.
+///
+/// [`BootEnforcement`] in this same file is the precedent: a per-target fact with
+/// more than two honest values is an enum with a derived predicate, never a
+/// boolean plus a comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulesetCustody {
+    /// The OS holds the rules and they outlive the core process.
+    ///
+    /// CB-6's normal case: nftables, WFP, `pf`. A core crash cannot drop
+    /// protection because the core was never holding it.
+    OsHeld,
+    /// The rules die with the process, and nothing re-installs them.
+    ///
+    /// A core crash **does** drop protection. The core records this rather than
+    /// assuming a guarantee it does not have.
+    ProcessHeld,
+    /// The rules die with the process and the **OS re-arms them itself**, with no
+    /// user act.
+    ///
+    /// ADR-0012 §11.6's `◐`. iOS is the case: enforcement is the system's, via
+    /// `includeAllNetworks` and on-demand rules, so a provider that is killed
+    /// takes its rules with it and the OS brings both back. There **is** a
+    /// window, it is not zero, and P09 *measures* it rather than assuming it —
+    /// which is exactly why this is a third value and not a rounded boolean.
+    OsReArmed,
+}
+
+impl RulesetCustody {
+    /// Whether the installed ruleset outlives the core process **unconditionally**.
+    ///
+    /// Only [`Self::OsHeld`] is `true`. [`Self::OsReArmed`] is deliberately
+    /// **not**: CB-6's guarantee is that a core crash *cannot* drop protection,
+    /// and a re-arm means protection was dropped and restored. O-18's direction
+    /// is to report the weaker fact, and the re-arm is reported separately by
+    /// [`Self::os_rearms`] rather than by widening this predicate.
+    #[must_use]
+    pub const fn survives_core_exit(self) -> bool {
+        matches!(self, Self::OsHeld)
+    }
+
+    /// Whether the OS restores enforcement itself after a core exit, with no user
+    /// act.
+    ///
+    /// True for [`Self::OsHeld`] trivially — it never lapsed — and for
+    /// [`Self::OsReArmed`]. This is the fact a `ProtectionAssertion` needs to
+    /// distinguish "unprotected until the user intervenes" from "unprotected for
+    /// a measured window".
+    #[must_use]
+    pub const fn os_rearms(self) -> bool {
+        matches!(self, Self::OsHeld | Self::OsReArmed)
+    }
+}
+
 /// Who holds the installed enforcement rules, declared per target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnforcementCustody {
-    /// Whether the installed ruleset outlives the core process.
+    /// What happens to the installed ruleset when the core process exits.
     ///
-    /// `true` on a target where the OS holds the rules (nftables, WFP, `pf`) —
-    /// CB-6's normal case. `false` where the rules die with the process, on which
-    /// a core crash **does** drop protection; the core must record that in the
-    /// diagnostic bundle rather than assume the CB-6 guarantee it does not have.
-    pub survives_core_exit: bool,
+    /// See [`RulesetCustody`]. Read it through
+    /// [`EnforcementCustody::survives_core_exit`], which keeps CB-6's predicate
+    /// in one place.
+    pub ruleset_custody: RulesetCustody,
     /// Whether the swap between the two rulesets is atomic at the OS level.
     ///
     /// `false` means there is a window with no rules, which is KS-17's forbidden
@@ -175,6 +236,24 @@ pub struct EnforcementCustody {
     /// `twinvpn-enforce`'s `DurabilityPosture` **derives** it rather than taking
     /// it as a second field — one fact, one home.
     pub boot_enforcement: BootEnforcement,
+}
+
+impl EnforcementCustody {
+    /// Whether the installed ruleset outlives the core process unconditionally.
+    ///
+    /// Delegates to [`RulesetCustody::survives_core_exit`]. It is a method rather
+    /// than the former `bool` field so that the three-valued fact has exactly one
+    /// reading and a caller cannot re-derive CB-6's predicate its own way.
+    #[must_use]
+    pub const fn survives_core_exit(self) -> bool {
+        self.ruleset_custody.survives_core_exit()
+    }
+
+    /// Whether the OS restores enforcement itself after a core exit.
+    #[must_use]
+    pub const fn os_rearms(self) -> bool {
+        self.ruleset_custody.os_rearms()
+    }
 }
 
 /// The desired system state for one generation.

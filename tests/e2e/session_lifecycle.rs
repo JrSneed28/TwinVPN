@@ -253,12 +253,11 @@ fn enforcement_survives_the_core_going_away() {
         "shutting the core down dropped the installed ruleset; CB-6 says the OS \
          keeps custody so the core going away cannot drop protection"
     );
-    assert!(
-        rig.adapter
-            .network_config()
-            .enforcement_custody()
-            .survives_core_exit
-    );
+    assert!(rig
+        .adapter
+        .network_config()
+        .enforcement_custody()
+        .survives_core_exit());
 }
 
 #[test]
@@ -267,7 +266,7 @@ fn a_target_whose_rules_die_with_the_process_reports_that_rather_than_hiding_it(
     // WITHOUT durable custody, and the enforcement layer must classify it
     // differently rather than reporting the same posture.
     let weak = MockAdapter::new(&MockOptions {
-        enforcement_survives_core_exit: false,
+        enforcement_custody: twinvpn_platform::RulesetCustody::ProcessHeld,
         ..MockOptions::default()
     });
     // `boot_enforcement_available` is no longer a field: it is DERIVED from the

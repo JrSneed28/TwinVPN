@@ -544,7 +544,7 @@ and diagnostics to the app process for this reason. That division is completed h
 | `ConnectionState` machine, path probing, migration, keepalives | — | **owns** | I5: an established `Session` cannot depend on another process being alive |
 | Enforcement posture query + `ProtectionAssertion` | — | **owns** | Must be true when the app is dead |
 | Durable writes of S-12, S-15, S-31, S-37, S-62 | — | **owns** (sole writer) | I8 |
-| Fetch of `RelayMap`, `AccessPolicy`, `DNSPolicy`, trust documents | **owns** | — | Network I/O plus full-document parse is the memory spike |
+| Fetch of `RelayMap`, `AccessPolicy`, `DNSPolicy`, trust documents | — | **owns** (LC-17b) | **Corrected.** Under `includeAllNetworks` the app has no network at all — see LC-17b |
 | **Verification and compilation** of those documents into a compact, pre-validated binary generation | **owns** | — | Signature verification over a multi-hundred-KB document, and the allocator churn of a general parser, are the two largest transient costs |
 | `RelayCapabilityToken` (S-30) — acquisition | **owns** | — | Control-plane I/O; held durably so relay reconnect needs no control plane (LC-17a) |
 | Consumption of a compiled generation, and of S-30 | — | reads, **never writes** | One writer, many readers: the app publishes an immutable generation atomically; the extension consumes it read-only |
@@ -554,6 +554,34 @@ and diagnostics to the app process for this reason. That division is completed h
 | Pairing ceremony, QR, `Owner` flows | **owns** | — | UI-bound and memory-hungry |
 | Update check and download ([ADR-0021](ADR-0021-packaging-distribution-and-updates.md)) | **owns** | — | |
 | Crash-handler capture (§11.7) | both, independently | both | Each process crashes independently |
+
+**Amendment LC-17b — the app cannot fetch, and the row above is corrected rather than annotated.**
+This table originally gave the app process the fetch row, following
+[docs/networking.md](../networking.md) §5.4's pre-correction wording. It is unbuildable.
+
+[ADR-0016](ADR-0016-client-process-and-privilege-separation.md) **PS-24 condition 3**: under
+`includeAllNetworks` the app process has **no network**. Its traffic is
+[ADR-0012](ADR-0012-kill-switch-and-leak-prevention.md) class 1/2 and dropped, and it cannot match
+the class-7 bootstrap exemption because KS-9(1)'s predicate names the **provider**. An app-process
+fetch fails in precisely the state where the contract is most needed — a device that has just
+attached to a network and has no valid generation — and it fails *silently from the extension's
+point of view*, which is the deadlock shape where the component that can recover is not the
+component that holds the network.
+
+**The extension fetches**, because it is the process that holds the exempted socket, and hands the
+verbatim signed octets to the app over [ADR-0017](ADR-0017-local-management-interface.md).
+
+**The verification and compilation row is unchanged and is the reason this costs nothing.** What
+LC-17 exists to keep out of the provider is *"signature verification over a multi-hundred-KB
+document, and the allocator churn of a general parser"* — and both stay in the app. Fetching costs
+the extension a socket and a bounded buffer, not a parser: it streams into a fixed-size buffer,
+never decodes, and never allocates proportionally to the document. The division this rule derives
+from the 12 MB budget is therefore preserved exactly; only the row that named the wrong process for
+a socket has moved.
+
+Reported by `mobile-ios`, which found this rule, [ADR-0020](ADR-0020-local-persistence-and-secure-storage.md)
+ST-31 and [docs/networking.md](../networking.md) §5.4 giving three different answers
+(`ownership.md` §10.8 **M-7**). ST-31 is amended as **ST-31a** in step with this.
 
 **Forbidden inside the provider, normatively:** general-purpose document parsing of any
 `Owner`-signed or control-plane document; any allocation proportional to the size of a fetched

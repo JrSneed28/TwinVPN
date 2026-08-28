@@ -10,7 +10,8 @@ use zeroize::Zeroizing;
 
 use crate::config::{
     BootEnforcement, ContractGeneration, Datapath, EnforcementCustody, LinkFacts, LinkState,
-    NetworkConfig, NetworkContract, RouteCapabilities, Ruleset, TunnelDevice, TunnelHandle,
+    NetworkConfig, NetworkContract, RouteCapabilities, Ruleset, RulesetCustody, TunnelDevice,
+    TunnelHandle,
 };
 use crate::custody::{
     IdentityAttestation, IdentityCustody, IdentityKeyRef, IdentityPublic, PeerPublicKey,
@@ -224,7 +225,11 @@ impl Default for ConfigState {
             fail_next_apply: None,
             link_facts: None,
             custody: EnforcementCustody {
-                survives_core_exit: true,
+                // `survives_core_exit` is now a PREDICATE over `ruleset_custody`
+                // rather than a field, so CB-6's question is answered in one
+                // place. `OsHeld` is the value that answers it `true`, which is
+                // what this mock previously spelled as `survives_core_exit: true`.
+                ruleset_custody: RulesetCustody::OsHeld,
                 swap_is_atomic: true,
                 boot_enforcement: BootEnforcement::OsHeldFromBoot,
             },
@@ -234,9 +239,17 @@ impl Default for ConfigState {
 }
 
 impl MockConfig {
-    pub(super) fn new(survives_core_exit: bool, shutting_down: Arc<AtomicBool>) -> Self {
+    /// `custody` is the three-valued [`RulesetCustody`], not a boolean.
+    ///
+    /// It was a `bool survives_core_exit` before the enum existed. Taking the
+    /// enum is what lets a test reach `OsReArmed` — ADR-0012 §11.6's `◐`, where
+    /// the OS re-arms enforcement itself after a measured window. A boolean
+    /// cannot express that third outcome, and rounding it into `false` would
+    /// make "unprotected until the user intervenes" and "unprotected for a
+    /// measured window" the same mock state.
+    pub(super) fn new(custody: RulesetCustody, shutting_down: Arc<AtomicBool>) -> Self {
         let mut state = ConfigState::default();
-        state.custody.survives_core_exit = survives_core_exit;
+        state.custody.ruleset_custody = custody;
         Self {
             state: Mutex::new(state),
             shutting_down,

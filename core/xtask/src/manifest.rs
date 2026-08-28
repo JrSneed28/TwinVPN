@@ -26,8 +26,28 @@ pub struct Package {
     pub manifest_path: String,
     /// Its source directory, relative to the workspace root.
     pub dir: String,
-    /// Every dependency it declares, in every section and every target.
+    /// Every dependency it declares, in every section and every target,
+    /// **including dev- and build-dependencies**. CD-I2 asks "what cryptography
+    /// does this crate name", and a cipher pulled in by a test is still a name a
+    /// reviewer must be able to find, so that check reads this list.
     pub dependencies: Vec<String>,
+    /// Every dependency it declares **except dev-dependencies**.
+    ///
+    /// CD-I5 asks a different question from CD-I2 — not "what does this crate
+    /// name" but "is there a path between the planes" — and a dev-dependency is
+    /// not a path between the planes in any shipped artifact. It exists only
+    /// while a test binary is being built.
+    ///
+    /// Reading the undifferentiated list for CD-I5 had a cost that was paid:
+    /// `ownership.md` §10.8 **M-5**. CD-5 calls the mock adapter "the payoff" —
+    /// *"with every shell deleted and a mock adapter bound, the core must still
+    /// make every decision correctly"* — and the test that demonstrates it must
+    /// drive the real machine, which means a **dev**-dependency on
+    /// `twinvpn-core`. Counting that as a plane path made CB-2's own
+    /// falsification test unwritable by the crates that most need to write it,
+    /// so the rule was forbidding the evidence for the architecture it exists to
+    /// protect.
+    pub non_dev_dependencies: Vec<String>,
 }
 
 /// The workspace.
@@ -78,20 +98,29 @@ impl Workspace {
                 |p| p.to_string_lossy().into_owned(),
             );
 
-            let dependencies = p["dependencies"]
-                .as_array()
-                .map(|deps| {
-                    deps.iter()
-                        .filter_map(|d| d["name"].as_str().map(ToOwned::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default();
+            // `cargo metadata` spells the kind as a JSON null for a normal
+            // dependency and the strings "dev" / "build" otherwise. Both lists
+            // are built in one pass so they cannot drift.
+            let empty = Vec::new();
+            let raw = p["dependencies"].as_array().unwrap_or(&empty);
+            let mut dependencies = Vec::new();
+            let mut non_dev_dependencies = Vec::new();
+            for d in raw {
+                let Some(dep_name) = d["name"].as_str() else {
+                    continue;
+                };
+                dependencies.push(dep_name.to_owned());
+                if d["kind"].as_str() != Some("dev") {
+                    non_dev_dependencies.push(dep_name.to_owned());
+                }
+            }
 
             packages.push(Package {
                 name,
                 manifest_path: manifest_rel,
                 dir,
                 dependencies,
+                non_dev_dependencies,
             });
         }
         packages.sort_by(|a, b| a.name.cmp(&b.name));
@@ -123,9 +152,11 @@ impl Workspace {
             let Some(package) = by_name.get(current.as_str()) else {
                 continue;
             };
-            for dep in &package.dependencies {
+            for dep in &package.non_dev_dependencies {
                 // Only intra-workspace edges: a path between the planes can only
-                // run through workspace members.
+                // run through workspace members. And only NON-DEV edges: a
+                // dev-dependency is not a path between the planes in any shipped
+                // artifact (see `Package::non_dev_dependencies`, M-5).
                 if by_name.contains_key(dep.as_str()) && seen.insert(dep.clone()) {
                     stack.push(dep.clone());
                 }

@@ -58,7 +58,7 @@ use std::fmt::Write as _;
 
 use twinvpn_platform::{
     BootEnforcement, ContractGeneration, EnforcementCustody, NetworkContract, PlatformError,
-    Ruleset,
+    Ruleset, RulesetCustody,
 };
 use twinvpn_types::{AddressFamily, IpPrefix, PerFamily};
 
@@ -596,7 +596,7 @@ pub fn parse_installed(json: &str) -> Option<Installed> {
 #[must_use]
 pub const fn custody() -> EnforcementCustody {
     EnforcementCustody {
-        survives_core_exit: true,
+        ruleset_custody: RulesetCustody::OsHeld,
         swap_is_atomic: true,
         // ADR-0012 §11.6's Linux boot row: `twinvpn-killswitch.service`,
         // `Before=network-pre.target`, restoring `/etc/twinvpn/killswitch.nft`.
@@ -1030,7 +1030,7 @@ mod tests {
     #[test]
     fn linux_custody_is_declared_truthfully() {
         let c = custody();
-        assert!(c.survives_core_exit, "nftables is kernel-resident (CB-6)");
+        assert!(c.survives_core_exit(), "nftables is kernel-resident (CB-6)");
         assert!(
             c.swap_is_atomic,
             "`nft -f` applies a script as one transaction"

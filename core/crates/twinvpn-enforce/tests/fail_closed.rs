@@ -22,6 +22,7 @@ use twinvpn_enforce::scope::{LocalNetworkAccess, Tier1, Tier2};
 use twinvpn_env::{ElapsedInstant, MonotonicInstant};
 use twinvpn_platform::{
     BootEnforcement, ContractGeneration, EnforcementCustody, InterfaceIndex, Ruleset,
+    RulesetCustody,
 };
 use twinvpn_route::RoutingMode;
 use twinvpn_types::{
@@ -329,7 +330,7 @@ fn the_arming_policies_behave_as_m1_m2_and_m4() {
 fn a_target_whose_rules_die_with_the_process_must_disclose_it() {
     let good = DurabilityPosture {
         custody: EnforcementCustody {
-            survives_core_exit: true,
+            ruleset_custody: RulesetCustody::OsHeld,
             swap_is_atomic: true,
             boot_enforcement: BootEnforcement::OsHeldFromBoot,
         },
@@ -340,7 +341,7 @@ fn a_target_whose_rules_die_with_the_process_must_disclose_it() {
     // E4 (userspace-only) is rejected precisely because it fails K3.
     let bad = DurabilityPosture {
         custody: EnforcementCustody {
-            survives_core_exit: false,
+            ruleset_custody: RulesetCustody::ProcessHeld,
             swap_is_atomic: true,
             boot_enforcement: BootEnforcement::OsHeldFromBoot,
         },
@@ -370,7 +371,7 @@ fn a_target_whose_rules_die_with_the_process_must_disclose_it() {
 fn an_availability_gap_at_boot_is_not_the_same_fact_as_an_unprotected_boot() {
     let windows = DurabilityPosture {
         custody: EnforcementCustody {
-            survives_core_exit: true,
+            ruleset_custody: RulesetCustody::OsHeld,
             swap_is_atomic: true,
             boot_enforcement: BootEnforcement::OsHeldFromBoot,
         },

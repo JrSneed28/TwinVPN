@@ -84,7 +84,7 @@ pub mod mock;
 pub use config::{
     ApplyBudget, BootEnforcement, ContractGeneration, Datapath, DnsConfig, EnforcementCustody,
     LinkFacts, LinkState, NetworkConfig, NetworkContract, RouteCapabilities, RouteEntry, Ruleset,
-    TunnelDevice, TunnelHandle,
+    RulesetCustody, TunnelDevice, TunnelHandle,
 };
 pub use custody::{
     IdentityAttestation, IdentityCustody, IdentityKeyRef, IdentityPublic, PeerPublicKey,

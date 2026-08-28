@@ -47,7 +47,7 @@ use core::ffi::c_void;
 use futures_core::future::BoxFuture;
 use twinvpn_platform::config::{
     ApplyBudget, ContractGeneration, Datapath, EnforcementCustody, LinkFacts, LinkState,
-    NetworkConfig, NetworkContract, Ruleset, TunnelDevice, TunnelHandle,
+    NetworkConfig, NetworkContract, Ruleset, RulesetCustody, TunnelDevice, TunnelHandle,
 };
 use twinvpn_platform::custody::{
     IdentityAttestation, IdentityCustody, IdentityKeyRef, IdentityPublic, PeerPublicKey,
@@ -762,7 +762,7 @@ impl NetworkConfig for HostNetworkConfig {
         // CB-6: the core computes, the adapter installs, THE OS HOLDS IT. A
         // core crash therefore cannot drop protection.
         EnforcementCustody {
-            survives_core_exit: true,
+            ruleset_custody: RulesetCustody::OsHeld,
             // KS-17: the swap is atomic. F-9's `set_ruleset` is documented as an
             // ATOMIC SWAP, so a shell that binds this ABI has already promised
             // it; a shell that cannot deliver it must not implement the entry.
@@ -1038,12 +1038,10 @@ mod tests {
             RecordAeadCustody::CoreHeld
         );
         // CB-6: the OS holds the rules.
-        assert!(
-            adapter
-                .network_config()
-                .enforcement_custody()
-                .survives_core_exit
-        );
+        assert!(adapter
+            .network_config()
+            .enforcement_custody()
+            .survives_core_exit());
         // PB-1: no per-packet crossing exists.
         assert_eq!(adapter.tunnel().datapath(), Datapath::KernelOffload);
     }

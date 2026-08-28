@@ -1038,6 +1038,6 @@ fn the_declared_custody_says_the_os_holds_the_rules_and_the_swap_is_atomic() {
     // Windows durability row is `✔` for crash, kill, update and reboot.
     let h = harness("custody");
     let custody = h.config.enforcement_custody();
-    assert!(custody.survives_core_exit);
+    assert!(custody.survives_core_exit());
     assert!(custody.swap_is_atomic);
 }

@@ -227,7 +227,7 @@ impl DurabilityPosture {
     /// protection.
     #[must_use]
     pub const fn survives_core_exit(self) -> bool {
-        self.custody.survives_core_exit
+        self.custody.survives_core_exit()
     }
 
     /// Whether KS-17's atomic swap is atomic here. `false` means there is a

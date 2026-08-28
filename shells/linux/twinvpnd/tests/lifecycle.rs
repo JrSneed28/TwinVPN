@@ -101,7 +101,7 @@ fn matrix_shutdown_leaves_enforcement_in_the_operating_systems_custody() {
     let adapter = adapter();
     let before = twinvpn_platform::NetworkConfig::enforcement_custody(adapter.network());
     assert!(
-        before.survives_core_exit,
+        before.survives_core_exit(),
         "CB-6: enforcement is in the OS's custody so the core going away cannot \
          drop protection"
     );
@@ -110,7 +110,8 @@ fn matrix_shutdown_leaves_enforcement_in_the_operating_systems_custody() {
 
     let after = twinvpn_platform::NetworkConfig::enforcement_custody(adapter.network());
     assert_eq!(
-        before.survives_core_exit, after.survives_core_exit,
+        before.survives_core_exit(),
+        after.survives_core_exit(),
         "shutdown must not change the custody of the installed ruleset"
     );
     assert!(
