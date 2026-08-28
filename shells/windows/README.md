@@ -21,7 +21,7 @@ run.** It was written on a Linux host. What exists is:
 
 | Claim | How far it goes |
 |---|---|
-| it compiles for `x86_64-pc-windows-msvc` with `-D warnings` | `make cross-check`. A genuine compile proof. Not a behaviour proof. |
+| it compiles for `x86_64-pc-windows-msvc` with `-D warnings` | the adapter crate and `twinvpnctl`: **yes**, cleanly. `twinvpnsvc` with its `service` feature: **not on this host** — `ring`'s build script needs an MSVC-targeting C compiler and there is none here. See §7.19 |
 | its target-free layers behave correctly | `cargo test --workspace` here and in the adapter crate, on Linux. Real, and bounded by what "target-free" covers. |
 | the MSI installs a working service | **no evidence whatsoever.** WiX has never run. |
 
@@ -97,8 +97,19 @@ There is no Windows toolchain here, so what is available is the compile proof:
 
 ```sh
 source build/toolchain/env.sh
-make cross-check                              # both workspaces, Windows target, -D warnings
-cd shells/windows && cargo test --workspace   # the target-free layers, on Linux
+
+# The compile proof, as far as this host can take it. `make cross-check` runs
+# the first of these and then a `--workspace` clippy over this directory, which
+# stops inside `ring`'s build script — §7.19 says why, and what to do about it.
+cd core && cargo clippy -p twinvpn-platform-windows --all-targets \
+    --target x86_64-pc-windows-msvc -- -D warnings
+cd ../shells/windows
+cargo clippy -p twinvpnctl --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+cargo clippy -p twinvpnsvc --no-default-features --all-targets \
+    --target x86_64-pc-windows-msvc -- -D warnings
+
+# The behaviour proof, such as it is: the target-free layers, on Linux.
+cargo test --workspace
 cd ../../core && cargo test -p twinvpn-platform-windows --features test-support
 ```
 
@@ -316,6 +327,18 @@ Each of these is a gap this wave did not close, with the reason.
    platform** — `packaging/` declares it so the MSI's component list is right the
    day it lands.
 
+3a. **`twinvpn-restore.exe` does not exist.** ADR-0011 DN-20's restore service —
+   the package-owned artifact that repairs a host whose agent will not start, on
+   the platform the ADR calls "the highest-risk for D7". The restore point's
+   *format* is implemented and its encoder and parser are tested here; the
+   process that reads it is not built.
+
+3b. **`twinvpn-bootfilters.dll` does not exist.** The MSI custom action that
+   applies `wfp::boot::boot_set()`. The set is defined and tested; the thing that
+   installs it is not written. `TwinVPN.wxs` references all three missing
+   binaries, so a WiX build fails at `light.exe` with a missing file — which is
+   the correct direction.
+
 4. **The binary is named `twinvpnctl`, and ADR-0016 §11.2 names it
    `twinvpn.exe`.** ADR-0023 EM-42's rendered next actions say
    `run 'twinvpn peer disconnect nas-attic'`, which names a command that is not
@@ -430,11 +453,63 @@ Each of these is a gap this wave did not close, with the reason.
     `#![forbid(unsafe_code)]` posture is genuinely stronger and this one does not
     match it.
 
+17a. **`twinvpnctl` refuses colour on a plain `conhost` window that supports
+    VT.** EM-43's third condition is a console-mode property readable only
+    through `GetConsoleMode`, which is `unsafe`, and this binary has none. It
+    asks for `WT_SESSION`/`ANSICON`/`TERM` instead and **fails closed**: plain
+    text is legible; a literal `ESC[1m` in an incident record is not.
+
+17b. **The SCM restart ladder is one delay, not two.** ADR-0016 §11.6 specifies
+    restart at 1 s and then at 5 s; WiX v3's `util:ServiceConfig` carries a
+    single `RestartServiceDelayInSeconds` for all restart actions. The second
+    delay needs `sc failure` or a custom action, and neither is written.
+
+17c. **`/guard:cf /CETCOMPAT /DYNAMICBASE /HIGHENTROPYVA` are set nowhere.**
+    ADR-0016 §11.9 requires all four. They are a Rust build-configuration
+    concern and no `.cargo/config.toml` in this workspace sets them.
+
+17d. **PS-12a's local groups need a custom action the MSI does not have.** WiX
+    v3's `util:Group` *references* a group; only `util:User` creates one. The
+    `.wxs` declares `CreateGroups`/`RemoveGroups` and implements neither. A
+    missing group would not fail the install — it would silently leave the pipe
+    DACL naming a SID that does not resolve, which is a **fail-open** shape and
+    the one item in this list that most deserves a fix before anything ships.
+
+17e. **PS-21's uninstall order cannot be expressed in Windows Installer
+    sequencing.** `StopServices` and `DeleteServices` have fixed positions, so
+    steps 1–6 have to run in-process in the service before it stops
+    (`--uninstall-prepare`), leaving the installer only steps 7–8. Running 3–6
+    from a custom action after `StopServices` would run them with no authority
+    holding the WFP session — the ordering PS-21 forbids. The `.wxs` says so; the
+    service-side entry point is not written.
+
 18. **Protected Process Light is not claimed.** ADR-0016 §11.9 says so and
     records it as future work: it requires ELAM signing, which is a Microsoft
     process this project has not started.
 
-19. **Files exceed the 500-line guidance in several places.** The adapter's
+19. **`make cross-check`'s `shells/windows` arm cannot complete on a Linux
+    host.** `twinvpnsvc` hosts the core, the core reaches `snow`, and `snow`
+    reaches `ring`, whose build script refuses a GNU compiler for
+    `x86_64-pc-windows-msvc`. There is no `clang-cl` and no Windows SDK on this
+    machine, so the compile proof stops at the crates that do not link the core.
+    **What is actually proven here today:**
+
+    | Command | Result |
+    |---|---|
+    | `cargo clippy -p twinvpn-platform-windows --all-targets --target x86_64-pc-windows-msvc -- -D warnings` | **clean** — the whole adapter, including every `unsafe` block |
+    | `cargo clippy -p twinvpnctl --all-targets --target …` | **clean** |
+    | `cargo clippy -p twinvpnsvc --no-default-features --all-targets --target …` | **clean** — the `mi` module |
+    | `cargo clippy -p twinvpnsvc --all-targets --target …` | **fails in `ring`'s build script**, before reaching any of our code |
+
+    `shells/linux` has the identical dependency shape and is unaffected only
+    because it builds natively. Two fixes, both outside this domain: put an
+    MSVC-targeting C toolchain in the build image (`cargo-xwin` is the usual
+    answer), or split `twinvpnsvc`'s `service` feature so the Win32 half —
+    `scm`, `power`, `privilege`, `peer`, `start`, `win32` — type-checks without
+    the core. **Reported, not worked around**: making the gate pass by not
+    compiling the thing that matters would be worse than a red gate.
+
+20. **Files exceed the 500-line guidance in several places.** The adapter's
     `sock.rs` (1561), `custody.rs` (1398), `wintun.rs` (1020) and `iface.rs`
     (1015) are the largest. Roughly half of each is tests and doc prose; the
     excess over the Linux references is the *target-free* layer that makes the
@@ -475,7 +550,30 @@ is emitted and the specified spelling travels beside it in the log's
 | `PLATFORM.SERVICE.UI_DETACHED` (ADR-0016 PS-3) | — | **not emitted**; the *behaviour* PS-3 requires — the last client disconnecting changes nothing — is asserted by a test, which is the half that matters |
 | `PLATFORM.SERVICE.SUPERVISOR_ABSENT` (PS-11), `PLATFORM.SERVICE.QUARANTINED` (PS-9), `PLATFORM.PRIV.CAPABILITY_MISSING` (PS-18), `PLATFORM.PRIV.CLIENT_UNAUTHORIZED` / `ADMIN_AUTH_REQUIRED` / `REMOTE_ADMIN_REFUSED` (PS-12, PS-14) | — | **not emitted as codes.** Each condition is detected and refused; what is missing is the registered name to refuse it *with*. `PLATFORM.PRIV.SANDBOX_DEGRADED` is registered and is used for the PS-17 warnings it actually owns |
 
-**W-18, again.** No `PlatformError` variant is retryable under the frozen
+---
+
+## 9. Two contradictions this domain did not resolve
+
+1. **ADR-0016 §11.6 and ADR-0022 LC-12 disagree about the service start type.**
+   §11.6's supervision table says `SERVICE_AUTO_START` **with delayed start**;
+   LC-12 says "Automatic wins" and gives the reason — delayed start defers the
+   service by about two minutes, which lengthens exactly the window in which the
+   host is fail-closed and offline. This build follows **LC-12**: it is later,
+   it is reasoned, and it names the trade. The conflict is recorded in
+   `packaging/TwinVPN.wxs` beside the element it decides. **Needs a decision.**
+
+2. **`twinvpn_mgmt::catalogue_digest()` returns a `u64`; ADR-0017 §11.7's
+   `HelloAck.catalogue_digest` is a string.** This build renders the integer with
+   `to_string()`. §11.7 makes the digest "the capability contract", so if the
+   digest ever becomes a hex or base64 form, the two sides will disagree
+   *silently* — a client would compute one spelling, the agent another, and the
+   mismatch would look like a catalogue change rather than an encoding one.
+
+---
+
+## 10. W-18 on this platform
+
+No `PlatformError` variant is retryable under the frozen
 registry: `PLATFORM.ADAPTER_UNAVAILABLE` is classed `PERSISTENT`, so
 `is_retryable()` is `false` even for `WSAEWOULDBLOCK`. This adapter never drives
 a decision off it — it returns the variant and lets the core decide, which is
