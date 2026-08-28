@@ -29,9 +29,7 @@ use std::pin::Pin;
 use std::sync::Mutex;
 
 use futures_core::Stream;
-use twinvpn_platform::{
-    InterfaceFacts, LinkFacts, NetworkChange, PlatformError,
-};
+use twinvpn_platform::{InterfaceFacts, LinkFacts, NetworkChange, PlatformError};
 use twinvpn_types::{PerFamily, UnderlayFamilies};
 
 use crate::dns::{DnsPlan, InterfaceDns, NrptRule, RULE_PREFIX};
@@ -217,7 +215,9 @@ impl FakeSystem {
         // A poisoned lock means a test panicked while holding it; recovering the
         // guard keeps the panic that caused it as the reported failure rather
         // than replacing it with an unrelated one.
-        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -231,12 +231,15 @@ impl FilterEngine for FakeSystem {
         // intermediate state in which the host holds neither set, which is what
         // KS-17 asks of the real engine.
         state.engine.filters.retain(|f| !f.provider_owned);
-        state.engine.filters.extend(set.filters.iter().map(|f| InstalledFilter {
-            key: f.key,
-            layer: f.layer,
-            action: f.action,
-            provider_owned: true,
-        }));
+        state
+            .engine
+            .filters
+            .extend(set.filters.iter().map(|f| InstalledFilter {
+                key: f.key,
+                layer: f.layer,
+                action: f.action,
+                provider_owned: true,
+            }));
         state.engine.sublayer_present = true;
         state.engine.provider_data = Some(set.generation.to_be_bytes().to_vec());
         state.commits += 1;
@@ -323,7 +326,10 @@ impl RouteTable for FakeSystem {
         state.routes.rows = rows;
         state.routes.addresses = addresses;
         let metric = plan.addresses.interface_metric;
-        for family in [twinvpn_types::AddressFamily::V4, twinvpn_types::AddressFamily::V6] {
+        for family in [
+            twinvpn_types::AddressFamily::V4,
+            twinvpn_types::AddressFamily::V6,
+        ] {
             if let Some(value) = *metric.get(family) {
                 *state.routes.interface_metric.get_mut(family) = Some(value);
             }
@@ -344,10 +350,7 @@ impl RouteTable for FakeSystem {
 }
 
 impl Resolver for FakeSystem {
-    fn read(
-        &self,
-        overlay: InterfaceLuid,
-    ) -> Result<(Vec<NrptRule>, InterfaceDns), PlatformError> {
+    fn read(&self, overlay: InterfaceLuid) -> Result<(Vec<NrptRule>, InterfaceDns), PlatformError> {
         let state = self.lock();
         let interface = state.interface_dns.clone().unwrap_or(InterfaceDns {
             luid: overlay,

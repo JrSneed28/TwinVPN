@@ -196,10 +196,7 @@ pub fn canary_verdict(
 /// What this returns is the observed difference, per family, and the caller
 /// compares it against whatever tolerance the policy carries.
 #[must_use]
-pub fn exempt_divergence(
-    observed: &CounterSnapshot,
-    accounted: PerFamily<u64>,
-) -> PerFamily<i64> {
+pub fn exempt_divergence(observed: &CounterSnapshot, accounted: PerFamily<u64>) -> PerFamily<i64> {
     let diff = |family: AddressFamily| {
         let obs = i64::try_from(*observed.exempt.get(family)).unwrap_or(i64::MAX);
         let acc = i64::try_from(*accounted.get(family)).unwrap_or(i64::MAX);

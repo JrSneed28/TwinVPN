@@ -295,11 +295,7 @@ pub fn render(
         for (ordinal, origin) in sorted(&config.update_origins).into_iter().enumerate() {
             let layer = Layer::for_family(origin.family());
             filters.push(FilterSpec {
-                key: filter_key(
-                    TrafficClass::UpdateExemption,
-                    layer,
-                    ordinal_of(ordinal),
-                ),
+                key: filter_key(TrafficClass::UpdateExemption, layer, ordinal_of(ordinal)),
                 name: "twinvpn-update",
                 layer,
                 action: Action::Permit,
@@ -314,7 +310,11 @@ pub fn render(
     // ---- class 5: DHCP, DHCPv6, ND and RA on the underlay ------------------
     // Link-local scope only, per §11.2's own qualification on this class.
     filters.push(FilterSpec {
-        key: filter_key(TrafficClass::UnderlayConfiguration, Layer::AleAuthConnectV4, 0),
+        key: filter_key(
+            TrafficClass::UnderlayConfiguration,
+            Layer::AleAuthConnectV4,
+            0,
+        ),
         name: "twinvpn-dhcp4",
         layer: Layer::AleAuthConnectV4,
         action: Action::Permit,
@@ -327,7 +327,11 @@ pub fn render(
         flags: persistent(),
     });
     filters.push(FilterSpec {
-        key: filter_key(TrafficClass::UnderlayConfiguration, Layer::AleAuthConnectV6, 0),
+        key: filter_key(
+            TrafficClass::UnderlayConfiguration,
+            Layer::AleAuthConnectV6,
+            0,
+        ),
         name: "twinvpn-dhcp6",
         layer: Layer::AleAuthConnectV6,
         action: Action::Permit,
@@ -341,7 +345,11 @@ pub fn render(
         flags: persistent(),
     });
     filters.push(FilterSpec {
-        key: filter_key(TrafficClass::UnderlayConfiguration, Layer::AleAuthConnectV6, 1),
+        key: filter_key(
+            TrafficClass::UnderlayConfiguration,
+            Layer::AleAuthConnectV6,
+            1,
+        ),
         name: "twinvpn-nd-ra",
         layer: Layer::AleAuthConnectV6,
         action: Action::Permit,
@@ -463,11 +471,7 @@ pub fn render(
     for (ordinal, prefix) in protected_scope(contract).into_iter().enumerate() {
         let layer = Layer::for_family(prefix.family());
         filters.push(FilterSpec {
-            key: filter_key(
-                TrafficClass::ProtectedScopeDeny,
-                layer,
-                ordinal_of(ordinal),
-            ),
+            key: filter_key(TrafficClass::ProtectedScopeDeny, layer, ordinal_of(ordinal)),
             name: "twinvpn-scope-deny",
             layer,
             action: Action::Block,
@@ -724,7 +728,10 @@ mod tests {
 
     fn full_tunnel_contract() -> NetworkContract {
         contract(PerFamily::new(
-            vec![route(prefix([0, 0, 0, 0], 1)), route(prefix([128, 0, 0, 0], 1))],
+            vec![
+                route(prefix([0, 0, 0, 0], 1)),
+                route(prefix([128, 0, 0, 0], 1)),
+            ],
             vec![
                 route(v6_prefix(0x00, 0x00, 1)),
                 route(v6_prefix(0x80, 0x00, 1)),
@@ -739,7 +746,8 @@ mod tests {
         // set unrepresentable.
         for posture in [Ruleset::Blocked, Ruleset::Protected] {
             let set = render(&empty_contract(), posture, &config());
-            set.validate().expect("a rendered set is always installable");
+            set.validate()
+                .expect("a rendered set is always installable");
             assert_eq!(set.families_covered(), (true, true));
             assert_eq!(set.posture, posture);
             assert_eq!(set.generation, 7);
@@ -752,7 +760,10 @@ mod tests {
         let shapes = [
             empty_contract(),
             full_tunnel_contract(),
-            contract(PerFamily::new(vec![route(prefix([10, 0, 0, 0], 8))], Vec::new())),
+            contract(PerFamily::new(
+                vec![route(prefix([10, 0, 0, 0], 8))],
+                Vec::new(),
+            )),
             contract(PerFamily::new(
                 Vec::new(),
                 vec![route(v6_prefix(0x20, 0x01, 16))],
@@ -896,7 +907,10 @@ mod tests {
         });
         assert!(matches!(
             set.validate().expect_err("refused"),
-            SetDefect::FamilyAsymmetry { v4: true, v6: false }
+            SetDefect::FamilyAsymmetry {
+                v4: true,
+                v6: false
+            }
         ));
     }
 
@@ -1023,7 +1037,10 @@ mod tests {
         // A v4 complement with a bounded v6 set is NOT full tunnel: calling it
         // one would be exactly ADR-0010 R1's "a v4 story and a v6 story".
         let half = contract(PerFamily::new(
-            vec![route(prefix([0, 0, 0, 0], 1)), route(prefix([128, 0, 0, 0], 1))],
+            vec![
+                route(prefix([0, 0, 0, 0], 1)),
+                route(prefix([128, 0, 0, 0], 1)),
+            ],
             vec![route(v6_prefix(0x20, 0x01, 16))],
         ));
         assert_eq!(scope_mode(&half), ScopeMode::Bounded);

@@ -73,11 +73,7 @@ fn v6(first: u8, second: u8, len: u32) -> IpPrefix {
     let mut octets = [0u8; 16];
     octets[0] = first;
     octets[1] = second;
-    IpPrefix::new(
-        IpAddr::V6(V6Addr::prefix_base(octets).expect("base")),
-        len,
-    )
-    .expect("prefix")
+    IpPrefix::new(IpAddr::V6(V6Addr::prefix_base(octets).expect("base")), len).expect("prefix")
 }
 
 fn host_v4() -> IpPrefix {
@@ -93,11 +89,7 @@ fn host_v6() -> IpPrefix {
     octets[4] = 0x2a;
     octets[5] = 0x10;
     octets[15] = 5;
-    IpPrefix::new(
-        IpAddr::V6(V6Addr::new(octets, None).expect("address")),
-        128,
-    )
-    .expect("prefix")
+    IpPrefix::new(IpAddr::V6(V6Addr::new(octets, None).expect("address")), 128).expect("prefix")
 }
 
 fn route(destination: IpPrefix) -> RouteEntry {
@@ -225,11 +217,18 @@ fn startup_reports_the_boot_artifact_as_absent_when_the_installer_never_wrote_it
     // PS-7: the artifact is package-owned, and a missing one is CRITICAL and
     // NOT fatal. The adapter reports; the shell decides.
     let h = harness("startup-boot-artifact");
-    assert!(!h.config.verify_boot_artifact().expect("queries").is_registered());
+    assert!(!h
+        .config
+        .verify_boot_artifact()
+        .expect("queries")
+        .is_registered());
     // ...and installing the runtime set does not make it look registered.
     h.config.reclaim(None).expect("reclaims");
     assert!(
-        !h.config.verify_boot_artifact().expect("queries").is_registered(),
+        !h.config
+            .verify_boot_artifact()
+            .expect("queries")
+            .is_registered(),
         "the runtime set must not satisfy the KS-19 check"
     );
 }
@@ -244,7 +243,10 @@ fn startup_refuses_to_report_protection_when_the_engine_cannot_be_queried() {
         filter_read: Some(PlatformFault::NotPermitted),
         ..Faults::default()
     });
-    let err = h.config.assert_protection(None).expect_err("a query failure is an error");
+    let err = h
+        .config
+        .assert_protection(None)
+        .expect_err("a query failure is an error");
     assert_eq!(err.reason_code().as_str(), "PLATFORM.ADAPTER_UNAVAILABLE");
 }
 
@@ -272,7 +274,11 @@ fn shutdown_leaves_the_installed_filters_exactly_where_they_were() {
     let after = twinvpn_platform_windows::wfp::readback::parse_installed(&state)
         .expect("the OS still holds it");
     assert_eq!(after.posture, Ruleset::Protected);
-    assert_eq!(h.system.commit_count(), before, "shutdown committed nothing");
+    assert_eq!(
+        h.system.commit_count(),
+        before,
+        "shutdown committed nothing"
+    );
 }
 
 #[test]
@@ -311,13 +317,21 @@ fn the_posture_swap_is_one_transaction_and_never_a_remove_then_add() {
     let h = harness("kill-switch-swap");
     block_on(h.config.apply(&contract(1, Ruleset::Blocked))).expect("applies");
     let before = h.system.commit_count();
-    block_on(h.config.set_ruleset(ContractGeneration(1), Ruleset::Protected)).expect("swaps");
+    block_on(
+        h.config
+            .set_ruleset(ContractGeneration(1), Ruleset::Protected),
+    )
+    .expect("swaps");
     assert_eq!(h.system.commit_count(), before + 1, "one transaction");
     assert_eq!(
         block_on(h.config.installed_ruleset()).expect("reads"),
         Some(Ruleset::Protected)
     );
-    block_on(h.config.set_ruleset(ContractGeneration(1), Ruleset::Blocked)).expect("swaps back");
+    block_on(
+        h.config
+            .set_ruleset(ContractGeneration(1), Ruleset::Blocked),
+    )
+    .expect("swaps back");
     assert_eq!(h.system.commit_count(), before + 2);
 }
 
@@ -327,7 +341,11 @@ fn a_swap_carries_the_tier_1_scope_it_had_and_never_covers_nothing() {
     // contract would install a fail-closed posture over zero prefixes.
     let h = harness("kill-switch-r6");
     block_on(h.config.apply(&contract(4, Ruleset::Blocked))).expect("applies");
-    block_on(h.config.set_ruleset(ContractGeneration(4), Ruleset::Protected)).expect("swaps");
+    block_on(
+        h.config
+            .set_ruleset(ContractGeneration(4), Ruleset::Protected),
+    )
+    .expect("swaps");
     let assertion = h.config.assert_protection(None).expect("asserts");
     assert!(*assertion.families_covered.get(AddressFamily::V4));
     assert!(*assertion.families_covered.get(AddressFamily::V6));
@@ -352,7 +370,10 @@ fn a_tampered_ruleset_is_reported_and_never_read_as_healthy() {
 
     h.system
         .remove_filter(|f| class_of(f.key) == Some(TrafficClass::BootstrapExemption));
-    let after = h.config.assert_protection(Some(&intended)).expect("asserts");
+    let after = h
+        .config
+        .assert_protection(Some(&intended))
+        .expect("asserts");
     assert!(!after.is_protected(), "a tampered set is not protection");
     assert!(matches!(after.verdict, Verdict::FiltersMissing { .. }));
 }
@@ -361,14 +382,13 @@ fn a_tampered_ruleset_is_reported_and_never_read_as_healthy() {
 fn another_products_filters_never_make_us_believe_ours_are_installed() {
     // K11: coexistence. A third party's block at our layer is not our ruleset.
     let h = harness("kill-switch-coexist");
-    h.system.add_foreign_filter(
-        twinvpn_platform_windows::wfp::readback::InstalledFilter {
+    h.system
+        .add_foreign_filter(twinvpn_platform_windows::wfp::readback::InstalledFilter {
             key: twinvpn_platform_windows::wfp::FILTER_POSTURE_PROTECTED,
             layer: Layer::AleAuthConnectV4,
             action: Action::Block,
             provider_owned: false,
-        },
-    );
+        });
     let assertion = h.config.assert_protection(None).expect("asserts");
     assert_eq!(assertion.posture, None, "not ours, so not a posture");
     assert!(!assertion.is_fail_closed());
@@ -410,9 +430,11 @@ fn ipv4_is_denied_in_every_state_the_posture_machine_can_be_in() {
         let set = wfp::filters::render(&contract, posture, &enforcement());
         set.validate().expect("installable");
         assert!(
-            set.filters.iter().any(|f| f.layer == Layer::AleAuthConnectV4
-                && f.action == Action::Block
-                && f.class == TrafficClass::ProtectedScopeDeny),
+            set.filters
+                .iter()
+                .any(|f| f.layer == Layer::AleAuthConnectV4
+                    && f.action == Action::Block
+                    && f.class == TrafficClass::ProtectedScopeDeny),
             "{name}/{posture:?} has no IPv4 deny"
         );
     }
@@ -435,9 +457,11 @@ fn ipv6_is_denied_in_every_state_including_on_a_v4_only_contract() {
     for (name, contract, posture) in states {
         let set = wfp::filters::render(&contract, posture, &enforcement());
         assert!(
-            set.filters.iter().any(|f| f.layer == Layer::AleAuthConnectV6
-                && f.action == Action::Block
-                && f.class == TrafficClass::ProtectedScopeDeny),
+            set.filters
+                .iter()
+                .any(|f| f.layer == Layer::AleAuthConnectV6
+                    && f.action == Action::Block
+                    && f.class == TrafficClass::ProtectedScopeDeny),
             "{name}/{posture:?} has no IPv6 deny"
         );
         assert_eq!(set.families_covered(), (true, true), "{name}/{posture:?}");
@@ -465,7 +489,10 @@ fn no_state_contains_a_permit_that_could_carry_protected_traffic_off_the_host() 
                     | TrafficClass::PortalProbe
                     | TrafficClass::OverlayEgress
             );
-            assert!(accounted, "{name}/{posture:?}: unaccounted permit {filter:?}");
+            assert!(
+                accounted,
+                "{name}/{posture:?}: unaccounted permit {filter:?}"
+            );
             if posture == Ruleset::Blocked {
                 assert_ne!(
                     filter.class,
@@ -490,7 +517,11 @@ fn dns_is_contained_on_every_non_overlay_interface_in_every_state() {
             .iter()
             .filter(|f| f.class == TrafficClass::DnsContainment)
             .collect();
-        assert_eq!(containment.len(), 6, "{name}/{posture:?}: three ports x two families");
+        assert_eq!(
+            containment.len(),
+            6,
+            "{name}/{posture:?}: three ports x two families"
+        );
         for filter in containment {
             assert_eq!(filter.action, Action::Block);
             assert!(!filter
@@ -602,15 +633,13 @@ fn rollback_restores_the_routes_the_previous_generation_had() {
         metric: 0,
         protocol: RouteProtocol::NetMgmt,
     };
-    let system = Arc::new(
-        FakeSystem::new(InterfaceLuid(OVERLAY)).with_routes(
-            twinvpn_platform_windows::route::InstalledRoutes {
-                rows: vec![pre_existing],
-                addresses: Vec::new(),
-                interface_metric: PerFamily::new(None, None),
-            },
-        ),
-    );
+    let system = Arc::new(FakeSystem::new(InterfaceLuid(OVERLAY)).with_routes(
+        twinvpn_platform_windows::route::InstalledRoutes {
+            rows: vec![pre_existing],
+            addresses: Vec::new(),
+            interface_metric: PerFamily::new(None, None),
+        },
+    ));
     let config = WindowsNetworkConfig::new(NetworkConfigParts {
         system: system.clone(),
         enforcement: enforcement(),
@@ -643,15 +672,13 @@ fn a_row_the_adapter_does_not_own_survives_apply_and_rollback() {
         metric: 0,
         protocol: RouteProtocol::Other(2),
     };
-    let system = Arc::new(
-        FakeSystem::new(InterfaceLuid(OVERLAY)).with_routes(
-            twinvpn_platform_windows::route::InstalledRoutes {
-                rows: vec![foreign],
-                addresses: Vec::new(),
-                interface_metric: PerFamily::new(None, None),
-            },
-        ),
-    );
+    let system = Arc::new(FakeSystem::new(InterfaceLuid(OVERLAY)).with_routes(
+        twinvpn_platform_windows::route::InstalledRoutes {
+            rows: vec![foreign],
+            addresses: Vec::new(),
+            interface_metric: PerFamily::new(None, None),
+        },
+    ));
     let dir = std::env::temp_dir().join("twinvpn-win-routes-foreign");
     let config = WindowsNetworkConfig::new(NetworkConfigParts {
         system: system.clone(),
@@ -695,8 +722,15 @@ fn a_resolver_apply_that_fails_leaves_the_routes_and_the_filters_restored() {
     let failure = h.config.last_apply_failure().expect("recorded");
     assert_eq!(failure.step, "dns.apply");
     assert_eq!(failure.compensation, Compensation::Restored);
-    assert!(!h.system.rules().iter().any(|r| r.id.starts_with(RULE_PREFIX)));
-    assert!(h.system.routes_now().rows.is_empty(), "the routes went back");
+    assert!(!h
+        .system
+        .rules()
+        .iter()
+        .any(|r| r.id.starts_with(RULE_PREFIX)));
+    assert!(
+        h.system.routes_now().rows.is_empty(),
+        "the routes went back"
+    );
     assert_eq!(
         h.config.assert_protection(None).expect("asserts").posture,
         Some(Ruleset::Blocked),
@@ -714,9 +748,8 @@ fn rollback_points_the_host_back_at_the_resolver_it_had() {
         resolvers: vec![IpAddr::V4(V4Addr::from_octets([192, 168, 1, 1]))],
         dnssec_validation: false,
     };
-    let system = Arc::new(
-        FakeSystem::new(InterfaceLuid(OVERLAY)).with_foreign_rules(vec![prior.clone()]),
-    );
+    let system =
+        Arc::new(FakeSystem::new(InterfaceLuid(OVERLAY)).with_foreign_rules(vec![prior.clone()]));
     let dir = std::env::temp_dir().join("twinvpn-win-dns-recovery");
     let config = WindowsNetworkConfig::new(NetworkConfigParts {
         system: system.clone(),
@@ -749,9 +782,8 @@ fn a_third_partys_resolver_rule_survives_every_operation() {
         resolvers: Vec::new(),
         dnssec_validation: false,
     };
-    let system = Arc::new(
-        FakeSystem::new(InterfaceLuid(OVERLAY)).with_foreign_rules(vec![prior.clone()]),
-    );
+    let system =
+        Arc::new(FakeSystem::new(InterfaceLuid(OVERLAY)).with_foreign_rules(vec![prior.clone()]));
     let dir = std::env::temp_dir().join("twinvpn-win-dns-foreign");
     let config = WindowsNetworkConfig::new(NetworkConfigParts {
         system: system.clone(),

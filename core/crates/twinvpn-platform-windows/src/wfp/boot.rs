@@ -255,7 +255,11 @@ pub fn verify(state: &EngineState) -> BootArtifact {
 /// Whether a key lies in the boot ordinal band.
 fn is_boot_key(key: super::Guid, layer: Layer) -> bool {
     (0..8).any(|offset| {
-        filter_key(TrafficClass::ProtectedScopeDeny, layer, BOOT_ORDINAL + offset) == key
+        filter_key(
+            TrafficClass::ProtectedScopeDeny,
+            layer,
+            BOOT_ORDINAL + offset,
+        ) == key
     })
 }
 

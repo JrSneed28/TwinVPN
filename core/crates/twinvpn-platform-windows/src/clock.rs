@@ -170,9 +170,7 @@ fn fill_random(dst: &mut [u8]) -> Result<(), EnvError> {
 /// one place reports it in the other.
 #[cfg(windows)]
 fn read_machine_id() -> Result<Vec<u8>, EnvError> {
-    use windows_sys::Win32::System::Registry::{
-        RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
-    };
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 
     /// `SOFTWARE\Microsoft\Cryptography`, NUL-terminated UTF-16.
     fn wide(text: &str) -> Vec<u16> {
@@ -783,7 +781,8 @@ mod tests {
             "the Unix epoch itself is below the floor"
         );
         // One tick below the floor, and exactly at it.
-        let floor_ticks = FILETIME_TO_UNIX_TICKS + WALL_CLOCK_PLAUSIBILITY_FLOOR_MS * TICKS_PER_MILLI;
+        let floor_ticks =
+            FILETIME_TO_UNIX_TICKS + WALL_CLOCK_PLAUSIBILITY_FLOOR_MS * TICKS_PER_MILLI;
         assert_eq!(
             reading_from_filetime(floor_ticks - 1, WallClockTrust::Synchronised),
             WallClockReading::Unset
@@ -932,7 +931,11 @@ mod tests {
         // function of the readings and does not accumulate across samples.
         let expected = read_system_time_ticks().saturating_sub(read_biased_ticks());
         assert_eq!(derive_boot_instant_ticks(), expected);
-        assert_eq!(derive_boot_instant_ticks(), expected, "and it is repeatable");
+        assert_eq!(
+            derive_boot_instant_ticks(),
+            expected,
+            "and it is repeatable"
+        );
     }
 
     /// **The one capability that refuses rather than substituting.**

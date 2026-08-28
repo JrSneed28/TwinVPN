@@ -520,7 +520,8 @@ mod tests {
     fn full_mode_adds_the_dot_rule_which_is_what_stops_smhnr() {
         // ADR-0011 §11.7's Windows row and §11.9: NRPT makes a matched namespace
         // non-parallel, and in FULL mode the matched namespace is everything.
-        let programme = render(&config(&["corp.example"], true), OVERLAY, &stub()).expect("renders");
+        let programme =
+            render(&config(&["corp.example"], true), OVERLAY, &stub()).expect("renders");
         programme.validate().expect("valid");
         assert!(programme.rules.iter().any(|r| r.namespace == "."));
     }
@@ -529,11 +530,18 @@ mod tests {
     fn every_rule_points_at_all_four_stub_addresses() {
         // DN-12: a host whose only resolver is a v4 loopback has no v6 path to
         // the stub, and AAAA resolution must not depend on the underlay family.
-        let programme = render(&config(&["corp.example"], true), OVERLAY, &stub()).expect("renders");
+        let programme =
+            render(&config(&["corp.example"], true), OVERLAY, &stub()).expect("renders");
         for rule in &programme.rules {
             assert_eq!(rule.resolvers.len(), 4, "{}", rule.namespace);
-            assert!(rule.resolvers.iter().any(|a| a.family() == AddressFamily::V4));
-            assert!(rule.resolvers.iter().any(|a| a.family() == AddressFamily::V6));
+            assert!(rule
+                .resolvers
+                .iter()
+                .any(|a| a.family() == AddressFamily::V4));
+            assert!(rule
+                .resolvers
+                .iter()
+                .any(|a| a.family() == AddressFamily::V6));
         }
     }
 
@@ -558,7 +566,11 @@ mod tests {
     #[test]
     fn a_one_family_interface_configuration_is_refused() {
         let mut programme = render(&config(&[], true), OVERLAY, &stub()).expect("renders");
-        programme.interface.resolvers.get_mut(AddressFamily::V6).clear();
+        programme
+            .interface
+            .resolvers
+            .get_mut(AddressFamily::V6)
+            .clear();
         assert!(matches!(
             programme.validate().expect_err("refused"),
             DnsDefect::FamilyAsymmetry { v6: 0, .. }
@@ -629,8 +641,8 @@ mod tests {
             resolvers: Vec::new(),
             dnssec_validation: false,
         };
-        let desired = render(&config(&["tnet.twinvpn.net"], false), OVERLAY, &stub())
-            .expect("renders");
+        let desired =
+            render(&config(&["tnet.twinvpn.net"], false), OVERLAY, &stub()).expect("renders");
         let plan = plan(std::slice::from_ref(&foreign), &desired);
         plan.validate().expect("valid");
         assert!(plan.rule_deletes.is_empty(), "not ours to remove");
@@ -681,8 +693,8 @@ mod tests {
             prior_interface: prior_interface.clone(),
             restore_token: 42,
         };
-        let desired = render(&config(&["tnet.twinvpn.net"], true), OVERLAY, &stub())
-            .expect("renders");
+        let desired =
+            render(&config(&["tnet.twinvpn.net"], true), OVERLAY, &stub()).expect("renders");
         let restore = restore_plan(&point, &desired.ids());
         restore.validate().expect("valid");
         assert_eq!(restore.rule_deletes.len(), desired.rules.len());
@@ -752,8 +764,8 @@ mod tests {
 
     #[test]
     fn every_rule_id_carries_the_owner_tag() {
-        let programme = render(&config(&["a.example", "b.example"], true), OVERLAY, &stub())
-            .expect("renders");
+        let programme =
+            render(&config(&["a.example", "b.example"], true), OVERLAY, &stub()).expect("renders");
         for id in programme.ids() {
             assert!(id.starts_with(RULE_PREFIX), "{id}");
             assert!(!id.contains('\\'), "a registry subkey may not contain one");

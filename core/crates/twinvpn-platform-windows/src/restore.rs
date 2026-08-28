@@ -236,12 +236,14 @@ pub fn read(path: &Path) -> Result<Option<RestorePoint>, PlatformError> {
             )))
         }
     };
-    decode(&text).map(Some).ok_or(PlatformError::SecureStoreUnavailable(Some(
-        twinvpn_platform::OsDetail {
-            code: 0,
-            call: "restore point did not parse",
-        },
-    )))
+    decode(&text)
+        .map(Some)
+        .ok_or(PlatformError::SecureStoreUnavailable(Some(
+            twinvpn_platform::OsDetail {
+                code: 0,
+                call: "restore point did not parse",
+            },
+        )))
 }
 
 /// `v4:AABBCCDD` or `v6:<32 hex>%<zone>`.
@@ -403,7 +405,10 @@ mod tests {
         for cut in [1, 10, 30, full.len() / 2] {
             let truncated = &full[..cut.min(full.len())];
             // Either it fails the magic line or it is missing a required key.
-            assert!(decode(truncated).is_none(), "accepted a prefix of {cut} bytes");
+            assert!(
+                decode(truncated).is_none(),
+                "accepted a prefix of {cut} bytes"
+            );
         }
     }
 

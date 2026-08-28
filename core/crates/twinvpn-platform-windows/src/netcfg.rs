@@ -277,10 +277,7 @@ impl WindowsNetworkConfig {
         contract: Option<&NetworkContract>,
     ) -> Result<ProtectionAssertion, PlatformError> {
         self.shutdown.check()?;
-        let blocked = self.render(
-            contract.unwrap_or(&blank_contract()),
-            Ruleset::Blocked,
-        );
+        let blocked = self.render(contract.unwrap_or(&blank_contract()), Ruleset::Blocked);
         let observed = self.assert_protection(Some(&blocked))?;
         if observed.is_fail_closed() && observed.posture == Some(Ruleset::Blocked) {
             return Ok(observed);
@@ -375,7 +372,9 @@ impl WindowsNetworkConfig {
                 // rather than restoring "no rules": KS-17 has two rulesets and
                 // no third value, and a fresh host that failed to arm is
                 // fail-closed, not unfiltered.
-                None => self.commit(&self.render(contract, Ruleset::Blocked)).is_ok(),
+                None => self
+                    .commit(&self.render(contract, Ruleset::Blocked))
+                    .is_ok(),
             }
         };
 

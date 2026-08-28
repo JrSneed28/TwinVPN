@@ -449,10 +449,7 @@ pub fn desired_rows(contract: &NetworkContract, overlay: InterfaceLuid) -> Vec<R
 
 /// The address rows a contract implies.
 #[must_use]
-pub fn desired_address_rows(
-    contract: &NetworkContract,
-    overlay: InterfaceLuid,
-) -> Vec<AddressRow> {
+pub fn desired_address_rows(contract: &NetworkContract, overlay: InterfaceLuid) -> Vec<AddressRow> {
     let mut rows = Vec::new();
     for family in [AddressFamily::V4, AddressFamily::V6] {
         for prefix in contract.addresses.get(family) {
@@ -505,11 +502,7 @@ mod tests {
         let mut octets = [0u8; 16];
         octets[0] = first;
         octets[1] = second;
-        IpPrefix::new(
-            IpAddr::V6(V6Addr::prefix_base(octets).expect("base")),
-            len,
-        )
-        .expect("prefix")
+        IpPrefix::new(IpAddr::V6(V6Addr::prefix_base(octets).expect("base")), len).expect("prefix")
     }
 
     fn host_v4(octets: [u8; 4]) -> IpPrefix {
@@ -521,11 +514,7 @@ mod tests {
         octets[0] = 0xfd;
         octets[1] = 0x7c;
         octets[15] = tail;
-        IpPrefix::new(
-            IpAddr::V6(V6Addr::new(octets, None).expect("address")),
-            128,
-        )
-        .expect("prefix")
+        IpPrefix::new(IpAddr::V6(V6Addr::new(octets, None).expect("address")), 128).expect("prefix")
     }
 
     fn entry(destination: IpPrefix, metric: Option<u32>) -> RouteEntry {
@@ -564,7 +553,10 @@ mod tests {
                     entry(v4([0, 0, 0, 0], 1), None),
                     entry(v4([128, 0, 0, 0], 1), None),
                 ],
-                vec![entry(v6(0x00, 0x00, 1), None), entry(v6(0x80, 0x00, 1), None)],
+                vec![
+                    entry(v6(0x00, 0x00, 1), None),
+                    entry(v6(0x80, 0x00, 1), None),
+                ],
             ),
             PerFamily::new(vec![host_v4([100, 64, 0, 5])], vec![host_v6(5)]),
         )
@@ -638,8 +630,14 @@ mod tests {
         assert_eq!(back.addresses.adds, forward.addresses.deletes);
         // ...and the metric goes back to the value the host actually had, which
         // no amount of inverting the plan alone could recover.
-        assert_eq!(*back.addresses.interface_metric.get(AddressFamily::V4), Some(25));
-        assert_eq!(*back.addresses.interface_metric.get(AddressFamily::V6), Some(30));
+        assert_eq!(
+            *back.addresses.interface_metric.get(AddressFamily::V4),
+            Some(25)
+        );
+        assert_eq!(
+            *back.addresses.interface_metric.get(AddressFamily::V6),
+            Some(30)
+        );
     }
 
     #[test]

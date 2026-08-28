@@ -31,9 +31,7 @@ use twinvpn_platform::{ContractGeneration, Ruleset};
 use twinvpn_types::{AddressFamily, PerFamily};
 
 use super::filters::filter_key;
-use super::{
-    Action, Guid, Layer, TrafficClass, FILTER_POSTURE_BLOCKED, FILTER_POSTURE_PROTECTED,
-};
+use super::{Action, Guid, Layer, TrafficClass, FILTER_POSTURE_BLOCKED, FILTER_POSTURE_PROTECTED};
 
 /// One row of `FwpmFilterEnum0`, reduced to the fields that carry meaning.
 ///
@@ -433,7 +431,10 @@ mod tests {
         );
         assert_eq!(
             compare(&state, &set),
-            Verdict::FamilyUncovered { v4: false, v6: false }
+            Verdict::FamilyUncovered {
+                v4: false,
+                v6: false
+            }
         );
     }
 
@@ -449,7 +450,10 @@ mod tests {
         });
         assert_eq!(
             compare(&state, &set),
-            Verdict::FamilyUncovered { v4: true, v6: false }
+            Verdict::FamilyUncovered {
+                v4: true,
+                v6: false
+            }
         );
     }
 

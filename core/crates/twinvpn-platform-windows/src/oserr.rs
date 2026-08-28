@@ -533,11 +533,20 @@ mod tests {
         // `AUTH.KEY_UNAVAILABLE` is PERSISTENT/ERROR and ADR-0020's ladder goes
         // to L4 — re-enrolment. Reporting the second for the first would make a
         // momentarily unavailable protector look like a lost device.
-        for status in [NTE_BAD_KEYSET, NTE_NOT_FOUND, NTE_NO_KEY, NTE_DEVICE_NOT_READY] {
+        for status in [
+            NTE_BAD_KEYSET,
+            NTE_NOT_FOUND,
+            NTE_NO_KEY,
+            NTE_DEVICE_NOT_READY,
+        ] {
             assert_eq!(
-                from_status(Win32Error(status), "NCryptUnprotectSecret", Context::SecureStore)
-                    .reason_code()
-                    .as_str(),
+                from_status(
+                    Win32Error(status),
+                    "NCryptUnprotectSecret",
+                    Context::SecureStore
+                )
+                .reason_code()
+                .as_str(),
                 "AUTH.KEY_STORE_UNAVAILABLE",
                 "{status:#x}"
             );

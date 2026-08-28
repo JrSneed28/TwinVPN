@@ -118,10 +118,7 @@ pub trait Resolver: Send + Sync {
     ///
     /// Returns **every** rule, ours and not: DN-8's conflict diagnosis needs to
     /// know what else claimed a namespace.
-    fn read(
-        &self,
-        overlay: InterfaceLuid,
-    ) -> Result<(Vec<NrptRule>, InterfaceDns), PlatformError>;
+    fn read(&self, overlay: InterfaceLuid) -> Result<(Vec<NrptRule>, InterfaceDns), PlatformError>;
 
     /// Applies one plan.
     fn apply(&self, plan: &DnsPlan) -> Result<(), PlatformError>;
