@@ -160,7 +160,12 @@ where
             Err(error) => {
                 let reject = envelope(
                     context.as_of_ms(),
-                    Body::Reject(diagnostic(error.reason_code(), "PERSISTENT", "ERROR", false)),
+                    Body::Reject(diagnostic(
+                        error.reason_code(),
+                        "PERSISTENT",
+                        "ERROR",
+                        false,
+                    )),
                 );
                 let _ = write_frame(stream, &reject).await;
                 return Err(error);
@@ -456,12 +461,7 @@ fn envelope(as_of_ms: u64, body: Body) -> MgmtEnvelope {
 
 /// **MI-14.** The resolved attributes travel with the code, so a receiver never
 /// looks one up in a registry that may be older than this build.
-fn diagnostic(
-    reason_code: &str,
-    class: &str,
-    severity: &str,
-    user_actionable: bool,
-) -> Diagnostic {
+fn diagnostic(reason_code: &str, class: &str, severity: &str, user_actionable: bool) -> Diagnostic {
     Diagnostic {
         reason_code: reason_code.to_owned(),
         class: class.to_owned(),

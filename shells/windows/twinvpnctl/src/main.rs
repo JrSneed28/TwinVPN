@@ -518,10 +518,6 @@ mod tests {
     use twinvpnsvc::mi::codec::{read_frame, write_frame};
     use twinvpnsvc::mi::wire::{Body, HelloAck, MgmtEnvelope, PlatformCtx, Response};
 
-
-
-
-
     #[test]
     fn the_output_default_follows_isatty() {
         // EM-36 / §11.12: json when stdout is not a TTY, human when it is.

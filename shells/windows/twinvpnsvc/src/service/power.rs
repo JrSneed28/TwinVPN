@@ -331,7 +331,13 @@ impl ProtectionIndicator {
     /// `false` for [`Self::Unknown`], which is O-18's whole point.
     #[must_use]
     pub const fn is_protected(&self) -> bool {
-        matches!(self, Self::Asserted { protected: true, .. })
+        matches!(
+            self,
+            Self::Asserted {
+                protected: true,
+                ..
+            }
+        )
     }
 
     /// Whether the assertion has aged out of its freshness window.

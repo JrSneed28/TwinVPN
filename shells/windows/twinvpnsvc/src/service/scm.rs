@@ -337,7 +337,8 @@ mod tests {
     fn a_stop_during_start_is_honoured_rather_than_ignored() {
         // The SCM may cancel a start. A service that ignored it would hang the
         // boot, which is a worse outcome than an incomplete start.
-        let (state, actions) = on_control(ServiceState::StartPending { checkpoint: 3 }, Control::Stop);
+        let (state, actions) =
+            on_control(ServiceState::StartPending { checkpoint: 3 }, Control::Stop);
         assert_eq!(state, ServiceState::StopPending { checkpoint: 1 });
         assert!(actions.contains(&Action::BeginShutdown));
     }
@@ -346,10 +347,8 @@ mod tests {
     fn a_second_stop_is_idempotent_and_does_not_flush_twice() {
         // The SCM re-delivers a stop when one is slow. A second shutdown would
         // flush twice and race itself.
-        let (state, actions) = on_control(
-            ServiceState::StopPending { checkpoint: 2 },
-            Control::Stop,
-        );
+        let (state, actions) =
+            on_control(ServiceState::StopPending { checkpoint: 2 }, Control::Stop);
         assert_eq!(state, ServiceState::StopPending { checkpoint: 2 });
         assert_eq!(actions, vec![Action::ReportStatus]);
         assert!(!actions.contains(&Action::FlushDurableState));
@@ -358,10 +357,17 @@ mod tests {
     #[test]
     fn a_stop_after_stopped_does_nothing_at_all() {
         let (state, actions) = on_control(
-            ServiceState::Stopped { exit_code: NO_ERROR },
+            ServiceState::Stopped {
+                exit_code: NO_ERROR,
+            },
             Control::Stop,
         );
-        assert_eq!(state, ServiceState::Stopped { exit_code: NO_ERROR });
+        assert_eq!(
+            state,
+            ServiceState::Stopped {
+                exit_code: NO_ERROR
+            }
+        );
         assert!(actions.is_empty());
     }
 
@@ -371,7 +377,9 @@ mod tests {
             ServiceState::StartPending { checkpoint: 1 },
             ServiceState::Running,
             ServiceState::StopPending { checkpoint: 1 },
-            ServiceState::Stopped { exit_code: NO_ERROR },
+            ServiceState::Stopped {
+                exit_code: NO_ERROR,
+            },
         ] {
             let (after, actions) = on_control(state, Control::Interrogate);
             assert_eq!(after, state, "interrogate changed {state:?}");
@@ -400,7 +408,10 @@ mod tests {
     fn the_power_event_is_handed_on_and_never_interpreted_here() {
         // CB-2: the SCM module translates a control code into an action. What a
         // suspend *means* is `power`'s and ultimately the core's.
-        let (_, actions) = on_control(ServiceState::Running, Control::PowerEvent(PowerEvent::Suspend));
+        let (_, actions) = on_control(
+            ServiceState::Running,
+            Control::PowerEvent(PowerEvent::Suspend),
+        );
         assert!(matches!(actions.as_slice(), [Action::HandlePower(_)]));
     }
 
@@ -411,7 +422,12 @@ mod tests {
         let mut state = ServiceState::StartPending { checkpoint: 0 };
         for expected in 1..=5 {
             state = advance(state);
-            assert_eq!(state, ServiceState::StartPending { checkpoint: expected });
+            assert_eq!(
+                state,
+                ServiceState::StartPending {
+                    checkpoint: expected
+                }
+            );
         }
         // A running service has no checkpoint to advance.
         assert_eq!(advance(ServiceState::Running), ServiceState::Running);

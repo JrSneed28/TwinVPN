@@ -61,10 +61,8 @@ pub const SE_LOAD_DRIVER: Privilege = Privilege("SeLoadDriverPrivilege");
 pub const REQUIRED_PRIVILEGES: [Privilege; 3] = [SE_CHANGE_NOTIFY, SE_IMPERSONATE, SE_LOAD_DRIVER];
 
 /// The two §11.9 forbids **by name**.
-pub const FORBIDDEN_PRIVILEGES: [Privilege; 2] = [
-    Privilege("SeDebugPrivilege"),
-    Privilege("SeTcbPrivilege"),
-];
+pub const FORBIDDEN_PRIVILEGES: [Privilege; 2] =
+    [Privilege("SeDebugPrivilege"), Privilege("SeTcbPrivilege")];
 
 /// `SeAssignPrimaryTokenPrivilege`: "**not** required".
 ///
@@ -428,7 +426,9 @@ mod tests {
             Privilege("SeRestorePrivilege"),
             Privilege("SeTakeOwnershipPrivilege"),
         ]));
-        posture.verify().expect("none of those is forbidden by name");
+        posture
+            .verify()
+            .expect("none of those is forbidden by name");
         assert!(posture
             .degradations()
             .contains(&"RequiredPrivileges (the token holds privileges §11.9 does not list)"));
@@ -438,7 +438,10 @@ mod tests {
     fn a_forbidden_privilege_is_never_merely_a_degradation() {
         // The one ordering that matters: a token holding both an unlisted
         // privilege and a forbidden one must be refused, not warned about.
-        let posture = posture(with(&[Privilege("SeBackupPrivilege"), FORBIDDEN_PRIVILEGES[1]]));
+        let posture = posture(with(&[
+            Privilege("SeBackupPrivilege"),
+            FORBIDDEN_PRIVILEGES[1],
+        ]));
         assert!(posture.verify().is_err());
     }
 

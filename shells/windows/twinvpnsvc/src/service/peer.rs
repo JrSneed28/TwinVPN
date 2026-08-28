@@ -427,7 +427,10 @@ mod tests {
     fn a_pid_gates_nothing() {
         // MI-A2: "advisory only and MUST NOT gate any scope. Pids are reused."
         let a = principal(&[&sids().operate], SessionKind::Console);
-        let b = Principal { pid: 999_999, ..a.clone() };
+        let b = Principal {
+            pid: 999_999,
+            ..a.clone()
+        };
         assert_eq!(a.scopes(&sids()), b.scopes(&sids()));
         assert_eq!(a.administer_verdict(), b.administer_verdict());
     }
@@ -438,7 +441,10 @@ mod tests {
         // 'silent failure' reliability.md §10 forbids, wearing local clothes."
         let named = principal(&[], SessionKind::Console);
         assert_eq!(named.actor(), "dana");
-        let unnamed = Principal { account: None, ..named };
+        let unnamed = Principal {
+            account: None,
+            ..named
+        };
         assert_eq!(unnamed.actor(), "S-1-5-21-1-2-3-1050");
         assert!(!unnamed.actor().is_empty());
     }

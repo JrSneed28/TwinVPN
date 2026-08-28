@@ -335,7 +335,10 @@ mod tests {
             privilege_verified: true,
             ..StartSequence::default()
         };
-        assert!(!sequence.may_emit_a_packet(), "the ruleset is not reclaimed");
+        assert!(
+            !sequence.may_emit_a_packet(),
+            "the ruleset is not reclaimed"
+        );
         sequence.ruleset_reclaimed = true;
         assert!(sequence.may_emit_a_packet());
         // ...and that is still not `ready`: connections wait for everything.

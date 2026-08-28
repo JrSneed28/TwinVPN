@@ -330,7 +330,10 @@ mod tests {
             ("something-else", "[info]"),
         ] {
             assert_eq!(severity_token(severity), token);
-            assert!(token.is_ascii(), "US-ASCII, for a console with no code page");
+            assert!(
+                token.is_ascii(),
+                "US-ASCII, for a console with no code page"
+            );
             assert_eq!(token.len(), 6, "a fixed continuation indent");
         }
     }

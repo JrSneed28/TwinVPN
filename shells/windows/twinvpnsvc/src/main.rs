@@ -105,12 +105,17 @@ fn run() -> Result<(), StartupRefusal> {
     let mut sequence = StartSequence::default();
 
     // ---- 1. the single-instance lock (LC-5, PS-1) -------------------------
-    let _lock = acquire_instance_lock()?;
+    //
+    // The guard is held for the whole of `run`: LC-5's property is that a LIVE
+    // process holds it, and the kernel releases it at exit however that exit
+    // happens. Dropping it early would let a second authority start while this
+    // one was still programming routes.
+    let lock = acquire_instance_lock()?;
     sequence.single_instance = true;
 
     // ---- 2. the privilege posture (§11.9) ---------------------------------
-    let posture = privilege::Posture::read().map_err(refusal_from_privilege)?;
-    posture.verify().map_err(refusal_from_privilege)?;
+    let posture = privilege::Posture::read().map_err(|e| refusal_from_privilege(&e))?;
+    posture.verify().map_err(|e| refusal_from_privilege(&e))?;
     sequence.privilege_verified = true;
 
     // PS-17: every §11.9 directive that did not apply is named, at WARN.
@@ -262,7 +267,10 @@ fn run() -> Result<(), StartupRefusal> {
     }
 
     // ---- 7 and 8. the endpoint, then connections --------------------------
-    serve(env, tokio_runtime, adapter, core)
+    // The guard is passed in rather than dropped early: LC-5's property is that
+    // a LIVE authority holds it for as long as it is one, and passing it makes
+    // the lifetime a thing the compiler enforces rather than a comment.
+    serve(&env, &tokio_runtime, &adapter, &core, lock)
 }
 
 /// Steps 7 and 8: bind the pipe with its DACL, then accept.
@@ -286,10 +294,11 @@ fn run() -> Result<(), StartupRefusal> {
 /// management endpoint would be reporting itself as running while being
 /// unmanageable, so this refuses by name.
 fn serve(
-    _env: twinvpn_env::Env,
-    _runtime: Arc<twinvpn_env::binding::tokio_rt::TokioRuntime>,
-    _adapter: Arc<twinvpn_platform_windows::WindowsPlatformAdapter>,
-    _core: Arc<twinvpn_core::Core>,
+    _env: &twinvpn_env::Env,
+    _runtime: &Arc<twinvpn_env::binding::tokio_rt::TokioRuntime>,
+    _adapter: &Arc<twinvpn_platform_windows::WindowsPlatformAdapter>,
+    _core: &Arc<twinvpn_core::Core>,
+    _lock: InstanceLock,
 ) -> Result<(), StartupRefusal> {
     Err(StartupRefusal::platform(
         "MGMT.UNAVAILABLE",
@@ -301,7 +310,7 @@ fn serve(
     ))
 }
 
-fn refusal_from_privilege(error: privilege::PrivilegeError) -> StartupRefusal {
+fn refusal_from_privilege(error: &privilege::PrivilegeError) -> StartupRefusal {
     StartupRefusal::platform(
         error.reason_code(),
         error.specified_code(),
@@ -309,9 +318,24 @@ fn refusal_from_privilege(error: privilege::PrivilegeError) -> StartupRefusal {
     )
 }
 
+/// LC-5's guard, under one name on both platforms.
+///
+/// The alias exists so `run` holds a guard whose `drop` means the same thing
+/// wherever it is compiled — a unit on one side and a kernel handle on the other
+/// would make the release point invisible on the host this crate is read on.
+#[cfg(windows)]
+type InstanceLock = twinvpnsvc::win32::instance::InstanceLock;
+
+/// The non-Windows stand-in. **Never constructed**: `acquire_instance_lock`
+/// always refuses off Windows, because there is no `Global\` namespace to
+/// contend in.
+#[cfg(not(windows))]
+#[derive(Debug)]
+struct InstanceLock(());
+
 /// Takes LC-5's lock.
 #[cfg(windows)]
-fn acquire_instance_lock() -> Result<twinvpnsvc::win32::instance::InstanceLock, StartupRefusal> {
+fn acquire_instance_lock() -> Result<InstanceLock, StartupRefusal> {
     twinvpnsvc::win32::instance::acquire().map_err(|error| StartupRefusal {
         code: start::emitted_for("PLATFORM.LIFECYCLE.SINGLE_INSTANCE_CONFLICT"),
         specified: "PLATFORM.LIFECYCLE.SINGLE_INSTANCE_CONFLICT",
@@ -322,12 +346,11 @@ fn acquire_instance_lock() -> Result<twinvpnsvc::win32::instance::InstanceLock, 
 
 /// The non-Windows answer: there is no kernel mutex here.
 #[cfg(not(windows))]
-fn acquire_instance_lock() -> Result<(), StartupRefusal> {
+fn acquire_instance_lock() -> Result<InstanceLock, StartupRefusal> {
     Err(StartupRefusal::platform(
         "PLATFORM.OS_UNSUPPORTED",
         "PLATFORM.OS_UNSUPPORTED",
-        "this binary targets Windows; there is no SCM and no Global\\ namespace here"
-            .to_owned(),
+        "this binary targets Windows; there is no SCM and no Global\\ namespace here".to_owned(),
     ))
 }
 
@@ -337,8 +360,7 @@ fn acquire_instance_lock() -> Result<(), StartupRefusal> {
 /// principal below comes from the installer's own environment block or from a
 /// documented default, and none is probed.
 #[cfg(windows)]
-fn build_adapter(
-) -> Result<twinvpn_platform_windows::WindowsPlatformAdapter, StartupRefusal> {
+fn build_adapter() -> Result<twinvpn_platform_windows::WindowsPlatformAdapter, StartupRefusal> {
     use twinvpn_platform_windows::{custody, dns, wfp, wintun, WindowsAdapterParts};
 
     // ADR-0016 §10 puts the driver's lifecycle with the installer: the DLL ships
@@ -377,8 +399,7 @@ fn build_adapter(
 
 /// The non-Windows answer.
 #[cfg(not(windows))]
-fn build_adapter(
-) -> Result<twinvpn_platform_windows::WindowsPlatformAdapter, StartupRefusal> {
+fn build_adapter() -> Result<twinvpn_platform_windows::WindowsPlatformAdapter, StartupRefusal> {
     Err(StartupRefusal::platform(
         "PLATFORM.OS_UNSUPPORTED",
         "PLATFORM.OS_UNSUPPORTED",

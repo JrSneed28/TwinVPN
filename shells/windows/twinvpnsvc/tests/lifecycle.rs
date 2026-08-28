@@ -164,7 +164,10 @@ fn a_client_attaches_negotiates_and_is_granted_its_principals_scopes() {
         assert!(!client.catalogue_digest().is_empty());
 
         drop(client);
-        served.await.expect("the task joined").expect("a clean close");
+        served
+            .await
+            .expect("the task joined")
+            .expect("a clean close");
     });
 }
 
@@ -204,9 +207,10 @@ fn ps3_a_client_detaching_changes_nothing() {
                 .expect("the task joined")
                 .expect("a detach is a clean close, not an error");
 
-            let after = twinvpn_platform::NetworkConfig::installed_ruleset(adapter.network_config())
-                .await
-                .expect("the mock answers");
+            let after =
+                twinvpn_platform::NetworkConfig::installed_ruleset(adapter.network_config())
+                    .await
+                    .expect("the mock answers");
             assert_eq!(after, before, "the installed ruleset is unchanged");
         }
     });
@@ -360,9 +364,7 @@ fn an_administer_operation_is_refused_even_at_the_console_with_an_elevated_token
     let context = context(&env, &adapter);
 
     let administrator = Principal {
-        enabled_group_sids: vec![
-            twinvpnsvc::service::peer::ADMINISTRATORS_SID.to_owned(),
-        ],
+        enabled_group_sids: vec![twinvpnsvc::service::peer::ADMINISTRATORS_SID.to_owned()],
         session: SessionKind::Console,
         ..operator()
     };
@@ -406,9 +408,7 @@ fn ps14_an_administer_operation_from_a_remote_session_names_the_session_as_the_r
     let context = context(&env, &adapter);
 
     let remote = Principal {
-        enabled_group_sids: vec![
-            twinvpnsvc::service::peer::ADMINISTRATORS_SID.to_owned(),
-        ],
+        enabled_group_sids: vec![twinvpnsvc::service::peer::ADMINISTRATORS_SID.to_owned()],
         session: SessionKind::Remote,
         ..operator()
     };
@@ -454,13 +454,16 @@ fn mi_s2_a_membership_change_takes_effect_on_the_next_attach_and_not_the_current
     let context = context(&env, &adapter);
 
     block_on(async move {
-        for (principal, expects_connect) in [(operator(), true), (
-            Principal {
-                enabled_group_sids: vec![sids().observe.clone()],
-                ..operator()
-            },
-            false,
-        )] {
+        for (principal, expects_connect) in [
+            (operator(), true),
+            (
+                Principal {
+                    enabled_group_sids: vec![sids().observe.clone()],
+                    ..operator()
+                },
+                false,
+            ),
+        ] {
             let (client_side, mut server_side) = tokio::io::duplex(64 * 1024);
             let served = tokio::spawn({
                 let context = Arc::clone(&context);
@@ -539,11 +542,17 @@ fn a_service_restart_re_runs_the_whole_sequence_rather_than_resuming_it() {
 fn lc24_the_resume_ordering_puts_enforcement_before_the_sockets() {
     // "no packet may be emitted before this line", and the ADR restates the
     // ordering because "the temptation to re-open sockets first is strong".
-    let mut sequence = ResumeSequence::default();
-    sequence.classified = true;
-    assert!(!sequence.may_emit_a_packet());
-    sequence.enforcement_verified = true;
-    assert!(sequence.may_emit_a_packet());
+    let classified = ResumeSequence {
+        classified: true,
+        ..ResumeSequence::default()
+    };
+    assert!(!classified.may_emit_a_packet());
+    let verified = ResumeSequence {
+        enforcement_verified: true,
+        ..classified
+    };
+    assert!(verified.may_emit_a_packet());
+    let sequence = verified;
     assert_eq!(
         sequence.next_step(),
         Some("re-acquire sockets, interface handles and subscriptions")

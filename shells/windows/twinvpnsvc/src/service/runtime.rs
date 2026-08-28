@@ -46,7 +46,9 @@
 
 use std::sync::Arc;
 
-use twinvpn_env::{ElapsedClock, Entropy, Env, EnvError, EnvParts, MonotonicClock, SystemRngSource};
+use twinvpn_env::{
+    ElapsedClock, Entropy, Env, EnvError, EnvParts, MonotonicClock, SystemRngSource,
+};
 use twinvpn_platform::PlatformAdapter;
 use twinvpn_platform_windows::clock::{
     WallClockTrust, WindowsElapsedClock, WindowsEntropy, WindowsMonotonicClock, WindowsWallClock,
@@ -261,7 +263,7 @@ mod tests {
             assert!(outcome.is_ok(), "a Windows host has BCryptGenRandom");
         } else {
             let error = outcome.err().expect("no BCryptGenRandom on this host");
-            assert!(matches!(error, EnvError::EntropyUnavailable { .. }));
+            assert!(matches!(error, EnvError::EntropyUnavailable));
         }
     }
 

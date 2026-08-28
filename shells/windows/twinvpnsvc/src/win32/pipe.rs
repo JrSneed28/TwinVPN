@@ -23,8 +23,8 @@ use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Security::{RevertToSelf, TOKEN_QUERY};
 use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, ImpersonateNamedPipeClient};
 use windows_sys::Win32::System::RemoteDesktop::{
-    ProcessIdToSessionId, WTSActive, WTSConnectState, WTSFreeMemory,
-    WTSGetActiveConsoleSessionId, WTSQuerySessionInformationW, WTS_CURRENT_SERVER_HANDLE,
+    ProcessIdToSessionId, WTSActive, WTSConnectState, WTSFreeMemory, WTSGetActiveConsoleSessionId,
+    WTSQuerySessionInformationW, WTS_CURRENT_SERVER_HANDLE,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
@@ -87,14 +87,7 @@ pub unsafe fn read_client_principal(pipe: HANDLE) -> Result<Principal, Failure> 
     // `openasself` is TRUE so the open is checked against the *service's* own
     // context rather than the client's — otherwise a client whose token cannot
     // open itself would make this fail for the wrong reason.
-    let ok = unsafe {
-        OpenThreadToken(
-            GetCurrentThread(),
-            TOKEN_QUERY,
-            1,
-            &raw mut token_handle,
-        )
-    };
+    let ok = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &raw mut token_handle) };
     if ok == 0 {
         return Err(Failure::of("OpenThreadToken"));
     }
@@ -175,10 +168,17 @@ fn session_kind(pid: u32) -> SessionKind {
         return SessionKind::Unknown;
     }
     // `WTSConnectState` returns a `WTS_CONNECTSTATE_CLASS`, which is an `i32`.
-    // SAFETY: the call succeeded and reported a buffer, and the width is checked
-    // against the type before the read.
+    // The four bytes are **copied out** rather than read through a cast: WTS
+    // hands back a `PWSTR`, whose alignment is two, and a `*const i32` read from
+    // it would be an under-aligned load. A copy has no alignment requirement.
     let state = if returned as usize >= core::mem::size_of::<i32>() {
-        unsafe { *buffer.cast::<i32>() }
+        let mut raw = [0u8; core::mem::size_of::<i32>()];
+        // SAFETY: the call succeeded and reported at least four bytes at
+        // `buffer`, and `raw` is exactly four bytes; the two do not overlap.
+        unsafe {
+            core::ptr::copy_nonoverlapping(buffer.cast::<u8>(), raw.as_mut_ptr(), raw.len());
+        }
+        i32::from_ne_bytes(raw)
     } else {
         // A short buffer is not a state. `-1` matches nothing below, so the
         // answer is `Remote` — the closed direction.

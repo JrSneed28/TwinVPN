@@ -133,10 +133,21 @@ impl AlignedBuffer {
         self.words.as_mut_ptr().cast::<u8>()
     }
 
-    /// The readable pointer, aligned to eight.
-    #[must_use]
-    fn as_ptr(&self) -> *const u8 {
-        self.words.as_ptr().cast::<u8>()
+    /// The `T` the OS wrote at the start of this buffer.
+    ///
+    /// The cast is from `*const u64`, so the alignment of every `TOKEN_*`
+    /// structure is satisfied by construction rather than by the allocator
+    /// happening to be generous.
+    ///
+    /// # Safety
+    ///
+    /// The buffer must hold a validly-initialised `T`, which the caller
+    /// establishes by checking [`Self::len`] against `size_of::<T>()` first.
+    unsafe fn as_struct<T>(&self) -> &T {
+        // SAFETY: the caller guarantees the buffer holds a `T`, and the
+        // allocation is `u64`-aligned, which is at least `align_of::<T>()` for
+        // every structure this module reads.
+        unsafe { &*self.words.as_ptr().cast::<T>() }
     }
 
     /// How many bytes the OS said it wrote.
@@ -179,7 +190,7 @@ pub unsafe fn privileges_of(token: HANDLE) -> Result<Privileges, Failure> {
     // SAFETY: the buffer was filled by `GetTokenInformation(TokenPrivileges)`,
     // which writes a `TOKEN_PRIVILEGES`, and its length was checked against that
     // struct's size immediately above.
-    let header = unsafe { &*buffer.as_ptr().cast::<TOKEN_PRIVILEGES>() };
+    let header: &TOKEN_PRIVILEGES = unsafe { buffer.as_struct() };
     let count = header.PrivilegeCount as usize;
     // The array is a trailing variable-length member declared as `[_; 1]`. Its
     // true extent is checked against the buffer the OS filled, so a count field
@@ -261,7 +272,7 @@ pub unsafe fn enabled_group_sids(token: HANDLE) -> Result<Vec<String>, Failure> 
     }
     // SAFETY: the buffer was filled by `GetTokenInformation(TokenGroups)`, which
     // writes a `TOKEN_GROUPS`, and its length was checked above.
-    let header = unsafe { &*buffer.as_ptr().cast::<TOKEN_GROUPS>() };
+    let header: &TOKEN_GROUPS = unsafe { buffer.as_struct() };
     let count = header.GroupCount as usize;
     let entries_offset = core::mem::offset_of!(TOKEN_GROUPS, Groups);
     let entry_size = core::mem::size_of::<SID_AND_ATTRIBUTES>();
@@ -299,7 +310,7 @@ pub unsafe fn user_sid(token: HANDLE) -> Result<String, Failure> {
         return Err(Failure::of("TOKEN_USER (short buffer)"));
     }
     // SAFETY: filled by `GetTokenInformation(TokenUser)`, length checked above.
-    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let user: &TOKEN_USER = unsafe { buffer.as_struct() };
     sid_to_string(user.User.Sid).ok_or_else(|| Failure::of("ConvertSidToStringSidW"))
 }
 
