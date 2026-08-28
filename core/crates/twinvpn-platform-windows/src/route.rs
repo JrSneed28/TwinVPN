@@ -431,6 +431,64 @@ pub fn invert_with_metric(forward: &RoutePlan, previous: &InstalledRoutes) -> Ro
     inverse
 }
 
+/// The transaction that moves the host from what it holds **now** to a stated
+/// earlier state.
+///
+/// This is what rollback actually needs, and it is not the same as inverting the
+/// forward plan. Inverting assumes the host is still exactly where the forward
+/// plan left it — true in the happy case and **false** after a crash, after a
+/// third-party tool has touched the table, or after two generations have been
+/// applied. R5 requires reversibility "including after an unclean process exit",
+/// and the only state a fresh process can trust is the one it read back.
+///
+/// The interface metric comes from `desired`, because a metric is a value rather
+/// than a difference and there is nothing to diff.
+#[must_use]
+pub fn plan_to_state(
+    now: &InstalledRoutes,
+    desired: &InstalledRoutes,
+    overlay: InterfaceLuid,
+) -> RoutePlan {
+    let existing = now.ours();
+    let target = desired.ours();
+    let adds = target
+        .iter()
+        .copied()
+        .filter(|row| !existing.iter().any(|e| same_route(e, row)))
+        .collect();
+    let deletes = existing
+        .iter()
+        .copied()
+        .filter(|row| !target.iter().any(|d| same_route(d, row)))
+        .collect();
+
+    let mine = |rows: &[AddressRow]| {
+        let mut a: Vec<AddressRow> = rows.iter().copied().filter(|a| a.luid == overlay).collect();
+        a.sort_unstable();
+        a
+    };
+    let existing_addresses = mine(&now.addresses);
+    let target_addresses = mine(&desired.addresses);
+
+    RoutePlan {
+        adds,
+        deletes,
+        addresses: AddressPlan {
+            adds: target_addresses
+                .iter()
+                .copied()
+                .filter(|row| !existing_addresses.iter().any(|e| e.address == row.address))
+                .collect(),
+            deletes: existing_addresses
+                .iter()
+                .copied()
+                .filter(|row| !target_addresses.iter().any(|d| d.address == row.address))
+                .collect(),
+            interface_metric: desired.interface_metric,
+        },
+    }
+}
+
 /// The rows a contract implies, both families, sorted.
 #[must_use]
 pub fn desired_rows(contract: &NetworkContract, overlay: InterfaceLuid) -> Vec<RouteRow> {
@@ -674,6 +732,98 @@ mod tests {
         restored.sort_unstable();
 
         assert_eq!(restored, before.ours());
+    }
+
+    #[test]
+    fn a_rollback_diffs_from_what_the_os_holds_now_and_not_from_the_forward_plan() {
+        // R5: reversible "including after an unclean process exit". Inverting
+        // the forward plan assumes the host is still where that plan left it;
+        // after a crash, or after a third-party tool has touched the table, it
+        // is not.
+        let before = InstalledRoutes {
+            rows: vec![RouteRow {
+                luid: OVERLAY,
+                destination: v4([10, 0, 0, 0], 8),
+                next_hop: None,
+                metric: 0,
+                protocol: RouteProtocol::NetMgmt,
+            }],
+            addresses: Vec::new(),
+            interface_metric: PerFamily::new(Some(25), Some(30)),
+        };
+
+        // What the host actually holds now: neither the previous state nor what
+        // the forward plan would have produced. One of our routes is gone (a
+        // cleanup tool), and one nobody planned has appeared (a crashed retry).
+        let now = InstalledRoutes {
+            rows: vec![
+                RouteRow {
+                    luid: OVERLAY,
+                    destination: v4([0, 0, 0, 0], 1),
+                    next_hop: None,
+                    metric: 0,
+                    protocol: RouteProtocol::NetMgmt,
+                },
+                RouteRow {
+                    luid: OVERLAY,
+                    destination: v4([192, 0, 2, 0], 24),
+                    next_hop: None,
+                    metric: 0,
+                    protocol: RouteProtocol::NetMgmt,
+                },
+            ],
+            addresses: Vec::new(),
+            interface_metric: PerFamily::new(Some(1), Some(1)),
+        };
+
+        let back = plan_to_state(&now, &before, OVERLAY);
+        back.validate(OVERLAY).expect("valid");
+
+        // Apply it and the host is exactly `before` — including the route the
+        // forward plan never knew about.
+        let mut rows = now.ours();
+        rows.retain(|r| !back.deletes.iter().any(|d| same_route(d, r)));
+        rows.extend(back.adds.iter().copied());
+        rows.sort_unstable();
+        assert_eq!(rows, before.ours());
+        assert_eq!(
+            *back.addresses.interface_metric.get(AddressFamily::V4),
+            Some(25)
+        );
+    }
+
+    #[test]
+    fn a_rollback_never_touches_a_row_somebody_else_owns() {
+        let foreign = RouteRow {
+            luid: OVERLAY,
+            destination: v4([172, 16, 0, 0], 12),
+            next_hop: None,
+            metric: 0,
+            protocol: RouteProtocol::Other(2),
+        };
+        let now = InstalledRoutes {
+            rows: vec![foreign],
+            ..InstalledRoutes::default()
+        };
+        let back = plan_to_state(&now, &InstalledRoutes::default(), OVERLAY);
+        assert!(back.is_noop(), "{back:?}");
+        back.validate(OVERLAY).expect("valid");
+    }
+
+    #[test]
+    fn rolling_back_to_the_state_the_host_is_already_in_changes_nothing() {
+        let now = InstalledRoutes {
+            rows: vec![RouteRow {
+                luid: OVERLAY,
+                destination: v4([10, 0, 0, 0], 8),
+                next_hop: None,
+                metric: 0,
+                protocol: RouteProtocol::NetMgmt,
+            }],
+            addresses: Vec::new(),
+            interface_metric: PerFamily::new(Some(1), Some(1)),
+        };
+        assert!(plan_to_state(&now, &now, OVERLAY).is_noop());
     }
 
     #[test]

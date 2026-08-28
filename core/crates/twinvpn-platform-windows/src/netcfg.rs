@@ -513,12 +513,19 @@ impl WindowsNetworkConfig {
             .resolver()
             .apply(&dns::restore_plan(&point, &currently_ours))?;
 
+        // Diffed from what the OS holds **now**, not from inverting the forward
+        // plan. Inverting assumes the host is still exactly where that plan left
+        // it, which is true in the happy case and false after a crash, after a
+        // third-party tool has touched the table, or after two generations. R5
+        // requires reversibility "including after an unclean process exit", and
+        // the only state a fresh process can trust is the one it read back.
         let now = self.system.routes().read(overlay)?;
-        let forward = route::plan(&entry.routes, &entry.contract, overlay);
-        let _ = now;
-        self.system
-            .routes()
-            .apply(&route::invert_with_metric(&forward, &entry.routes))?;
+        let back = route::plan_to_state(&now, &entry.routes, overlay);
+        back.validate(overlay).map_err(|defect| {
+            tracing::error!(defect = %defect, "a rollback plan violated its own invariants");
+            PlatformError::RouteProgrammingDenied(None)
+        })?;
+        self.system.routes().apply(&back)?;
 
         // Enforcement last, and never removed: KS-17 has two rulesets and no
         // third value.
