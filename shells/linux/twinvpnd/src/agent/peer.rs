@@ -190,13 +190,30 @@ pub struct GroupSource {
     /// `(group name, member account names, gid)`.
     entries: Vec<(String, Vec<String>, u32)>,
     authoritative: bool,
+    /// Whether [`GroupSource::member_of`] may consult NSS.
+    ///
+    /// **`true` only for the real `/etc/group`.** A source loaded from another
+    /// path is a *substituted group database* — that is the only reason to load
+    /// one — and asking NSS would silently override it with the host's own
+    /// answer, which is not what the caller asked for. The component tests
+    /// depend on this: `mi_roundtrip`'s fixture puts the runner in
+    /// `twinvpn-operators`, and a build that consulted NSS anyway would answer
+    /// "no" and leave every test asserting a scope-denied path it did not mean
+    /// to exercise.
+    consults_nss: bool,
 }
 
 impl GroupSource {
-    /// Reads `/etc/group`.
+    /// Reads the host's group database.
+    ///
+    /// This is the only constructor whose result consults NSS, because it is the
+    /// only one reading the host's real `/etc/group`.
     #[must_use]
     pub fn load() -> Self {
-        Self::from_path(Path::new(GROUP_FILE))
+        Self {
+            consults_nss: true,
+            ..Self::from_path(Path::new(GROUP_FILE))
+        }
     }
 
     /// Reads a group database from a path. Separated so the parser is testable
@@ -208,36 +225,109 @@ impl GroupSource {
             return Self {
                 entries: Vec::new(),
                 authoritative: false,
+                consults_nss: false,
             };
         };
         Self {
             entries: parse_group_file(&text),
-            // `nsswitch.conf` naming anything but `files` for `group` means this
-            // view is partial. Detected rather than assumed, and reported.
+            // `nsswitch.conf` naming anything but `files` for `group` means the
+            // FILE's view is partial. Detected rather than assumed. It no longer
+            // means the *agent's* view is partial — `member_of` asks NSS — but it
+            // is still the fact `load()` reports, because a source that cannot
+            // consult NSS is exactly as partial as it always was.
             authoritative: nss_group_is_files_only(),
+            consults_nss: false,
         }
     }
 
     /// Whether this view of group membership is complete for this host.
     ///
-    /// `false` means an LDAP/SSSD/`nss-systemd` membership will not be seen and
-    /// the principal will hold **fewer** scopes than the administrator intended.
-    /// The shell logs it at start; nothing silently widens.
+    /// Two ways to be complete, and the second is new: the file is the whole
+    /// database (`nsswitch.conf` says `group: files`), **or** this source may
+    /// consult NSS, in which case every configured source answers.
+    ///
+    /// A source that is neither — a substituted database on a host with a
+    /// directory service — is partial, and the agent says so at start rather
+    /// than letting a principal hold fewer scopes than intended for a reason
+    /// nobody can see.
     #[must_use]
     pub const fn is_authoritative(&self) -> bool {
-        self.authoritative
+        self.authoritative || self.consults_nss
     }
 
     /// Whether `uid` is a member of `group`.
+    ///
+    /// # NSS first, the file second, and why the order is that way round
+    ///
+    /// ADR-0016 PS-12a resolves an OS principal to a class by group membership,
+    /// and S-44 requires that membership to be "re-derived at every attach,
+    /// never cached across attaches". Wave 1 parsed `/etc/group` and nothing
+    /// else, because `getgrouplist(3)` needs `unsafe` and this crate carries
+    /// `#![forbid(unsafe_code)]`.
+    ///
+    /// That was resolved the same way the `flock` for PS-1 was: the syscall
+    /// lives in [`twinvpn_platform_linux::nss`], which is the DP-4 `unsafe`
+    /// allowlist member CB-1 designates for exactly this, and the shell binds a
+    /// safe function. **The policy stays here** — which groups mean which scopes
+    /// is PS-12a's and is decided in [`Principal::scopes`]; the adapter answers
+    /// only "which groups is this account in", which is an OS fact.
+    ///
+    /// The fallback is not a formality. `nss::is_member` returns `None` for a
+    /// lookup it could not *perform*, which is a different fact from "not a
+    /// member": on a host whose LDAP is briefly unreachable, treating the first
+    /// as the second would strip every scope from every principal at once — a
+    /// total authorization outage presented as a policy decision. So `None`
+    /// falls through to the file, which is stale but real, and only a definite
+    /// `Some(false)` is a denial.
     #[must_use]
     pub fn member_of(&self, group: &str, uid: u32) -> bool {
         let Some(name) = account_name(uid) else {
             return false;
         };
+        let Some((_, _, gid)) = self.entries.iter().find(|(g, _, _)| g == group) else {
+            // The group does not exist in this host's file at all. NSS might
+            // still know it, but resolving a *name* to a gid through NSS needs
+            // `getgrnam_r`, which this build does not bind — so the honest
+            // answer is the file's, and it is "no".
+            return false;
+        };
+        if self.consults_nss {
+            if let Some(answer) =
+                twinvpn_platform_linux::nss::is_member(&name, primary_gid(uid), *gid)
+            {
+                return answer;
+            }
+        }
+        // NSS could not answer. The file's view is partial but real.
         self.entries
             .iter()
             .any(|(g, members, _)| g == group && members.contains(&name))
     }
+}
+
+/// The account's primary gid, from `/etc/passwd`.
+///
+/// `getgrouplist(3)` includes the primary gid in its result whether or not any
+/// group file lists it, so supplying the right one is what makes a membership
+/// carried only by the passwd entry visible. `0` where it cannot be read, which
+/// is safe: an account whose primary group we cannot determine is answered from
+/// the supplementary list alone, i.e. with **fewer** memberships, never more.
+fn primary_gid(uid: u32) -> u32 {
+    let Ok(passwd) = std::fs::read_to_string("/etc/passwd") else {
+        return 0;
+    };
+    for line in passwd.lines() {
+        let mut fields = line.split(':');
+        let (Some(_name), Some(_pw), Some(entry_uid), Some(gid)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if entry_uid.parse::<u32>() == Ok(uid) {
+            return gid.parse().unwrap_or(0);
+        }
+    }
+    0
 }
 
 /// Parses `/etc/group`: `name:passwd:gid:member,member`.
@@ -321,6 +411,10 @@ mod tests {
         GroupSource {
             entries: parse_group_file(text),
             authoritative: true,
+            // A substituted database. `consults_nss` is false, so `member_of`
+            // answers from THIS text rather than from the host's own NSS —
+            // which is the only reason a test would supply a database at all.
+            consults_nss: false,
         }
     }
 
