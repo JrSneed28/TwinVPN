@@ -7,7 +7,7 @@
 //! # Why the socket is split
 //!
 //! A connection carries traffic in **both** directions at once: the client's
-//! requests, and the agent's unsolicited [`Event`] frames. Wave 1 had only the
+//! requests, and the agent's unsolicited [`crate::mi::wire::Event`] frames. Wave 1 had only the
 //! first, so one task owning the whole socket was enough.
 //!
 //! It is not enough now, and the reason is subtle enough to be worth stating:

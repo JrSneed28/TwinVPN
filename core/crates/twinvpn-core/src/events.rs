@@ -119,6 +119,95 @@ impl CoreEventKind {
             CoreEventKind::Compacted { .. } => Vec::new(),
         }
     }
+
+    /// The ADR-0017 §11.10 topic this event belongs to.
+    ///
+    /// **Authority:** ADR-0017 §11.10's topic list, MI-20 (*"one contract, two
+    /// carriages, never two contracts"*).
+    ///
+    /// # Why this is the core's fact and not a carriage's
+    ///
+    /// It lived in `shells/linux/twinvpnd` and nowhere else, which made a
+    /// carriage the author of a fact about the event. Two consequences, both
+    /// real rather than theoretical:
+    ///
+    /// 1. **The C ABI had no topic at all.** `tw_core_next_event` handed over
+    ///    the bare `encoded_payload` bytes, so a shell bound to the ABI held
+    ///    six different message types with no discriminator —
+    ///    [`CoreEventKind::Diagnostic`] and [`CoreEventKind::CommandRejected`]
+    ///    are byte-identical there.
+    /// 2. **`shells/windows` and `shells/macos` had no topic either**, and
+    ///    correspondingly no event stream: neither drains this queue.
+    ///
+    /// A total function of the variant, written with no `_` arm.
+    /// `CoreEventKind` is not `#[non_exhaustive]`, so this genuinely fails to
+    /// compile when a variant is added — which is the point: a new kind of
+    /// event is given a topic by a person, not defaulted into one.
+    #[must_use]
+    pub const fn topic(&self) -> &'static str {
+        match self {
+            CoreEventKind::Transition(_) => topics::TRANSITION,
+            CoreEventKind::SessionEvent(_) => topics::SESSION,
+            CoreEventKind::CommandCompleted { .. } => topics::COMMAND_COMPLETED,
+            CoreEventKind::CommandRejected { .. } => topics::COMMAND_REJECTED,
+            // The gap marker shares the `diagnostic` topic: it reaches a client
+            // as a `Compacted` body rather than as an event, so its topic is
+            // only ever used to COUNT it, never to route it.
+            CoreEventKind::Diagnostic(_) | CoreEventKind::Compacted { .. } => topics::DIAGNOSTIC,
+        }
+    }
+
+    /// **Which** operation, for the two variants that answer a submitted
+    /// command; `None` for the four that are not answers.
+    ///
+    /// A socket carriage does not need this on the wire — it holds the
+    /// submission's registration in memory and settles it locally. **The C ABI
+    /// does**, and that asymmetry is why the field exists: `tw_core_submit` is
+    /// fire-and-forget and returns no request id, so a shell on the far side of
+    /// the ABI has nothing to correlate a completion against. Without it,
+    /// F-5's *"including the completion of a submitted command"* arrives as
+    /// *"a command completed"*.
+    #[must_use]
+    pub const fn op(&self) -> Option<&'static str> {
+        match self {
+            CoreEventKind::CommandCompleted { op, .. }
+            | CoreEventKind::CommandRejected { op, .. } => Some(op),
+            CoreEventKind::Transition(_)
+            | CoreEventKind::SessionEvent(_)
+            | CoreEventKind::Diagnostic(_)
+            | CoreEventKind::Compacted { .. } => None,
+        }
+    }
+}
+
+/// The topics [ADR-0017](../../../../docs/adr/ADR-0017-local-management-interface.md)
+/// §11.10 names, and the only strings [`CoreEventKind::topic`] returns.
+///
+/// Declared here rather than in a shell because the topic is a property of the
+/// event, not an opinion of whatever forwards it. Every carriage — the Unix
+/// socket, the named pipe, XPC, and the C ABI — reads the same five strings
+/// from the same place.
+pub mod topics {
+    /// A `ConnectionState` transition.
+    pub const TRANSITION: &str = "transition";
+    /// One of `contract-matrix.md` §4.4's local session bodies.
+    pub const SESSION: &str = "session";
+    /// A `Diagnostic` was raised.
+    pub const DIAGNOSTIC: &str = "diagnostic";
+    /// A submitted command completed.
+    pub const COMMAND_COMPLETED: &str = "command.completed";
+    /// A submitted command was rejected.
+    pub const COMMAND_REJECTED: &str = "command.rejected";
+
+    /// Every topic, so a subscription filter and a resync snapshot walk one
+    /// list rather than two hand-maintained ones.
+    pub const ALL: [&str; 5] = [
+        TRANSITION,
+        SESSION,
+        DIAGNOSTIC,
+        COMMAND_COMPLETED,
+        COMMAND_REJECTED,
+    ];
 }
 
 /// One event on the stream.
@@ -428,5 +517,64 @@ mod tests {
         s.publish(diag(), Some("dana".to_owned()));
         let e = s.next_event(Duration::ZERO).expect("event");
         assert_eq!(e.actor_principal.as_deref(), Some("dana"));
+    }
+
+    #[test]
+    fn the_topic_list_matches_the_one_the_fanout_iterates() {
+        // `twinvpn-mgmt` is BELOW this crate in the graph and cannot name
+        // `topics::ALL`, so `fanout::TOPICS` carries the same five strings by
+        // value. That is a duplication, and this is the assertion that keeps it
+        // from becoming a divergence — the MI-9 snapshot iterates the fanout's
+        // copy, so a topic that existed only here would never appear in one.
+        assert_eq!(topics::ALL, twinvpn_mgmt::fanout::TOPICS);
+    }
+
+    #[test]
+    fn the_two_command_topics_are_the_ones_the_fanout_settles_on() {
+        // The ledger reads `event.topic` to decide whether an event answers a
+        // submission. A rename here that missed the fanout would leave every
+        // dispatcher waiting forever on a body that was published.
+        assert_eq!(
+            topics::COMMAND_COMPLETED,
+            twinvpn_mgmt::fanout::TOPIC_COMMAND_COMPLETED
+        );
+        assert_eq!(
+            topics::COMMAND_REJECTED,
+            twinvpn_mgmt::fanout::TOPIC_COMMAND_REJECTED
+        );
+    }
+
+    #[test]
+    fn every_kind_answers_topic_and_op_without_a_default_arm() {
+        // `topic()` and `op()` are total functions of the variant with no `_`
+        // arm; this walks all six so a variant added upstream is caught by the
+        // COMPILER here and by this test's coverage count in review.
+        let kinds = [
+            CoreEventKind::Transition(Box::default()),
+            CoreEventKind::SessionEvent(Box::default()),
+            CoreEventKind::Diagnostic(Box::default()),
+            CoreEventKind::CommandCompleted {
+                op: "tunnel.up",
+                result: Vec::new(),
+            },
+            CoreEventKind::CommandRejected {
+                op: "tunnel.down",
+                diagnostic: Box::default(),
+            },
+            CoreEventKind::Compacted {
+                up_to_seq: 3,
+                dropped: 1,
+            },
+        ];
+        for kind in &kinds {
+            assert!(
+                topics::ALL.contains(&kind.topic()),
+                "{} is not a registered topic",
+                kind.topic()
+            );
+        }
+        // Exactly the two command variants name an operation.
+        let named: Vec<_> = kinds.iter().filter_map(CoreEventKind::op).collect();
+        assert_eq!(named, vec!["tunnel.up", "tunnel.down"]);
     }
 }

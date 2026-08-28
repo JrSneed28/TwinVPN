@@ -77,14 +77,17 @@ pub const MATCH_ALL: &str = "";
 /// [`PlatformError::AdapterUnavailable`] if a prefix length is out of range for
 /// its family — which [`IpPrefix`] already refuses, so reaching it means an
 /// adapter defect rather than a bad contract.
-pub fn render(
-    contract: &NetworkContract,
-    tunnel_remote_address: &str,
-) -> Result<Value, PlatformError> {
+pub fn render(contract: &NetworkContract) -> Result<Value, PlatformError> {
     let mut doc = Map::new();
+    // **M-15.** This took the address as a separate `&str` the shell supplied,
+    // which is precisely the split `NetworkContract::tunnel_remote_address` was
+    // added to close: a value the shell holds and the core does not is a fact
+    // the two sides can disagree about. The derivation — including what
+    // `Blocked` renders and which case is a refusal — is the contract's, once,
+    // rather than this adapter's and `twinvpn-platform-ios`' separately.
     doc.insert(
         "tunnel_remote_address".to_owned(),
-        Value::String(tunnel_remote_address.to_owned()),
+        Value::String(addr_text(contract.tunnel_remote_for_settings()?)),
     );
     doc.insert("mtu".to_owned(), json!(contract.mtu));
     doc.insert("ipv4".to_owned(), render_v4(contract)?);
@@ -98,11 +101,8 @@ pub fn render(
 /// # Errors
 ///
 /// As [`render`].
-pub fn render_json(
-    contract: &NetworkContract,
-    tunnel_remote_address: &str,
-) -> Result<String, PlatformError> {
-    Ok(render(contract, tunnel_remote_address)?.to_string())
+pub fn render_json(contract: &NetworkContract) -> Result<String, PlatformError> {
+    Ok(render(contract)?.to_string())
 }
 
 fn render_v4(contract: &NetworkContract) -> Result<Value, PlatformError> {
@@ -286,7 +286,7 @@ mod tests {
         let mut c = contract(1);
         c.routes.v6.clear();
         c.addresses.v6.clear();
-        let doc = render(&c, "203.0.113.7").expect("renders");
+        let doc = render(&c).expect("renders");
         assert!(doc.get("ipv4").is_some());
         assert!(
             doc.get("ipv6").is_some_and(serde_json::Value::is_object),
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn every_route_reaches_the_document_and_none_is_dropped() {
         let c = full_tunnel_contract(2, Ruleset::Protected);
-        let doc = render(&c, "203.0.113.7").expect("renders");
+        let doc = render(&c).expect("renders");
         assert_eq!(route_counts(&doc), (2, 2));
         assert_eq!(families_in(&c).len(), 2);
     }
@@ -309,7 +309,7 @@ mod tests {
         // A /10 with host bits set — the exact shape `IpPrefix` could not carry
         // and `NEIPv4Settings(addresses:subnetMasks:)` needs.
         c.addresses.v4 = vec![iface_v4([100, 64, 0, 2], 10)];
-        let doc = render(&c, "203.0.113.7").expect("renders");
+        let doc = render(&c).expect("renders");
         assert_eq!(doc["ipv4"]["subnet_masks"][0], "255.192.0.0");
         assert_eq!(
             doc["ipv4"]["included_routes"][0]["subnet_mask"],
@@ -327,7 +327,7 @@ mod tests {
         // "No dnsSettings" leaves the host's resolvers alone; "a dnsSettings with
         // no servers" installs a resolver that answers nothing. Collapsing them is
         // how a tunnel comes up with name resolution silently dead.
-        let doc = render(&contract(1), "203.0.113.7").expect("renders");
+        let doc = render(&contract(1)).expect("renders");
         assert_eq!(doc["dns"], Value::Null);
     }
 
@@ -340,7 +340,7 @@ mod tests {
             split_domains: vec!["twin.internal".to_owned()],
             is_default_resolver: true,
         };
-        let doc = render(&c, "203.0.113.7").expect("renders");
+        let doc = render(&c).expect("renders");
         assert_eq!(doc["dns"]["match_domains"], json!([""]));
         assert_eq!(doc["dns"]["servers"], json!(["100.64.0.1", "fd7c::1"]));
         assert_eq!(doc["dns"]["search_domains"], json!(["twin.internal"]));
@@ -364,7 +364,7 @@ mod tests {
             ],
             is_default_resolver: false,
         };
-        let doc = render(&c, "203.0.113.7").expect("renders");
+        let doc = render(&c).expect("renders");
         assert_eq!(
             doc["dns"]["match_domains"],
             json!(["twin.internal", "notlocal"])
@@ -390,8 +390,7 @@ mod tests {
         // the seam carries one. Emitting an empty array — present, not absent —
         // is how Swift is told "there are none" rather than "decide for
         // yourself".
-        let doc =
-            render(&full_tunnel_contract(3, Ruleset::Blocked), "203.0.113.7").expect("renders");
+        let doc = render(&full_tunnel_contract(3, Ruleset::Blocked)).expect("renders");
         assert_eq!(doc["ipv4"]["excluded_routes"], json!([]));
         assert_eq!(doc["ipv6"]["excluded_routes"], json!([]));
     }
@@ -399,8 +398,8 @@ mod tests {
     #[test]
     fn the_document_is_deterministic_so_a_reconciler_sees_no_phantom_drift() {
         let c = full_tunnel_contract(4, Ruleset::Protected);
-        let a = render_json(&c, "203.0.113.7").expect("renders");
-        let b = render_json(&c, "203.0.113.7").expect("renders");
+        let a = render_json(&c).expect("renders");
+        let b = render_json(&c).expect("renders");
         assert_eq!(a, b);
         assert_eq!(address_families(&c.addresses.v4), vec![AddressFamily::V4]);
     }
@@ -410,10 +409,39 @@ mod tests {
         // The kill switch is pf's (ADR-0012 §11.6), not the settings object's. A
         // posture field here would be a second, weaker enforcement point that a
         // reader could mistake for the real one.
-        let blocked =
-            render(&full_tunnel_contract(5, Ruleset::Blocked), "203.0.113.7").expect("renders");
-        let protected =
-            render(&full_tunnel_contract(5, Ruleset::Protected), "203.0.113.7").expect("renders");
+        let blocked = render(&full_tunnel_contract(5, Ruleset::Blocked)).expect("renders");
+        let protected = render(&full_tunnel_contract(5, Ruleset::Protected)).expect("renders");
         assert_eq!(blocked, protected);
+    }
+
+    #[test]
+    fn the_remote_comes_from_the_contract_and_nowhere_else() {
+        // **M-15.** This renderer took the address as a separate parameter the
+        // shell supplied, so the shell and the core each held one and could
+        // disagree. It is the contract's now, and this is the assertion.
+        let doc = render(&full_tunnel_contract(1, Ruleset::Protected)).expect("renders");
+        assert_eq!(doc["tunnel_remote_address"], "198.51.100.7");
+    }
+
+    #[test]
+    fn a_blocked_generation_with_no_remote_renders_the_unspecified_address() {
+        // Not a placeholder: no path is validated in `Blocked`, so every side
+        // agrees there is no remote and `0.0.0.0` states that. It must render
+        // rather than refuse — the blocked posture is installed THROUGH a
+        // settings object on iOS, and a refusal would leave it uninstalled.
+        let mut c = full_tunnel_contract(1, Ruleset::Blocked);
+        c.tunnel_remote_address = None;
+        let doc = render(&c).expect("a blocked generation still renders");
+        assert_eq!(doc["tunnel_remote_address"], "0.0.0.0");
+    }
+
+    #[test]
+    fn a_protected_generation_with_no_remote_is_refused_by_name() {
+        // The one case that IS a defect: a protected generation asserts a
+        // validated path, and a validated path has a remote.
+        let mut c = full_tunnel_contract(1, Ruleset::Protected);
+        c.tunnel_remote_address = None;
+        let err = render(&c).expect_err("a protected generation must have a remote");
+        assert_eq!(err.reason_code().as_str(), "PLATFORM.ADAPTER_UNAVAILABLE");
     }
 }

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A notification small icon. Android renders these as a monochrome mask, so the
+  shape is the ONLY signal the platform preserves — the tint is applied by the
+  system. That is why `ServiceNotification` pairs every icon with the core's own
+  sentence: ADR-0019's accessibility contract, and the plain fact that a user
+  reading a monochrome shade gets no colour at all.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?android:attr/colorControlNormal">
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,2L4,5v6c0,5 3.4,9.7 8,11 4.6,-1.3 8,-6 8,-11V5zM11,16h2v2h-2zM12,7a3,3 0 0,0 -3,3h2a1,1 0 1,1 1,1c-0.6,0 -1,0.4 -1,1v2h2v-1.2A3,3 0 0,0 12,7z" />
+</vector>

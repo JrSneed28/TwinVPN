@@ -168,7 +168,7 @@ impl ProtectionAssertion {
 
 /// Everything the network configuration takes at construction (CD-2).
 pub struct NetworkConfigParts {
-    /// The system access. [`crate::sys::win::WindowsSystem`] in production.
+    /// The system access. `sys::win::WindowsSystem` in production.
     pub system: Arc<dyn SystemOps>,
     /// The enforcement facts the seam does not carry.
     pub enforcement: EnforcementConfig,

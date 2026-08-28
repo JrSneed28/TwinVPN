@@ -2,8 +2,8 @@
 //! it depend on.
 //!
 //! **Behind the `test-support` feature, and unreachable from a production
-//! build.** [`crate::WindowsPlatformAdapter::new`] constructs
-//! [`super::win::WindowsSystem`] unconditionally; the only way to bind this is
+//! build.** `WindowsPlatformAdapter::new` constructs
+//! `super::win::WindowsSystem` unconditionally; the only way to bind this is
 //! `with_system`, which is itself feature-gated.
 //!
 //! # What it models, and why each is load-bearing

@@ -84,7 +84,7 @@ pub use readback::{parse_installed, Installed, InstalledFilter};
 ///
 /// A newtype over the bytes rather than the `windows-sys` struct so that every
 /// key in this crate is a compile-time constant that exists on a Linux host.
-/// [`crate::sys::win`] converts to `GUID` at the one call site that needs one.
+/// `sys::win` converts to `GUID` at the one call site that needs one.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Guid(pub [u8; 16]);
 

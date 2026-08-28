@@ -36,3 +36,30 @@ ndk-context = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "io-util", "macros"] }
+twinvpn-platform = { workspace = true, features = ["mock"] }
+
+# CB-2's falsification test, run rather than asserted. `ownership.md` §10.5 rule
+# 1 requires every row of the mobile matrix that CAN be a host-runnable test over
+# the mock adapter to BE one, and three of those rows -- roaming producing
+# MIGRATING, a revoked peer, a restored connection -- are decisions the CORE
+# makes rather than translations this adapter performs. `tests/matrix.rs`
+# therefore drives the real `twinvpn-session` machine.
+#
+# No cycle: `twinvpn-session` depends on `twinvpn-platform`, the TRAIT crate, and
+# on no `twinvpn-platform-*` implementation, so the arrows of ADR-0018 §11.7 are
+# unchanged. Confined to a NON-Android cfg because the falsification test is a
+# host test by construction -- there is no device in `make test` -- which also
+# keeps `make cross-check` light.
+#
+# `twinvpn-core` is DELIBERATELY ABSENT, and the reason is a finding rather than
+# a preference. `twinvpn_core::session_loop::event_for_change` is the function
+# that turns a `NetworkChange` into an `EV_*`, and joining this crate's facts to
+# the machine's verdict in ONE test would need it. But `cargo run -p xtask --
+# lint` reads `cargo metadata`'s dependency list WITHOUT filtering on kind, so a
+# dev-dependency on `twinvpn-core` -- which names both planes -- fails CD-I5 for
+# this crate. `core/xtask` is `core-foundation`'s and is not this domain's to
+# change, so the test asserts the two halves separately and cites where the join
+# is already covered (`twinvpn-core`'s own `session_loop` tests). Reported.
+[target.'cfg(not(target_os = "android"))'.dev-dependencies]
+twinvpn-session = { workspace = true }
+twinvpn-env     = { workspace = true, features = ["test-support"] }

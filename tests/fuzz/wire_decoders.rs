@@ -393,3 +393,95 @@ fn the_address_family_decoder_never_guesses() {
     });
     assert_eq!(report.accepted, 2, "exactly IPv4 and IPv6, never a third");
 }
+
+// ---------------------------------------------------------------------------
+// The management-interface frame. `ownership.md` §9.6 X-4 and §10.8 M-1/M-2.
+//
+// These bytes come off a LOCAL socket -- a Unix stream on Linux, a named pipe
+// on Windows, an XPC message on macOS -- and now, since M-1, out of
+// `tw_core_next_event` as well. The sender is a local process, which is a lower
+// bar than a network peer and still not this agent: ADR-0017 MI-A1 makes the
+// connected process's authority a thing to be CHECKED, and a decoder that
+// panics does so before any check runs.
+//
+// It had no fuzz target at all until M-1's work, which is the more interesting
+// half: X-4 moved this codec into one crate so three shells stopped disagreeing
+// about it, and consolidating a decoder into one place makes fuzzing it worth
+// exactly three times as much.
+// ---------------------------------------------------------------------------
+
+/// A valid frame, for the mutator to work outward from.
+fn mgmt_frame() -> Vec<u8> {
+    use twinvpn_mgmt::envelope::{encode_frame, Body, Event, MgmtEnvelope, MI_VERSION};
+    encode_frame(&MgmtEnvelope {
+        mi_version: MI_VERSION,
+        request_id: vec![7u8; 16],
+        correlation_id: Vec::new(),
+        seq: 42,
+        idempotency_key: Vec::new(),
+        as_of_ms: 1_000,
+        body: Body::Event(Event {
+            topic: "transition".to_owned(),
+            payload: vec![1, 2, 3],
+            actor_principal: Some("dana".to_owned()),
+            op: None,
+        }),
+    })
+    .expect("a valid frame encodes")
+}
+
+#[test]
+fn the_mgmt_frame_decoder_is_total_over_arbitrary_bytes() {
+    let seeds = vec![mgmt_frame()];
+    let corpus = corpus(SEED ^ 0x4D47_4D54, ITERATIONS, 512, &seeds);
+    let report = fuzz("mgmt::envelope::decode_frame", &corpus, |b| {
+        outcome_of(&twinvpn_mgmt::envelope::decode_frame(b))
+    });
+    assert!(report.reached_accept(), "{report:?}");
+    assert!(report.reached_reject(), "{report:?}");
+}
+
+#[test]
+fn a_hostile_declared_length_is_refused_before_the_body_is_sliced() {
+    // §6 rule 9's exact shape, at the one place a length prefix is read. The
+    // cap is checked on the PREFIX, so an attacker's `0xFFFFFFFF` costs four
+    // bytes of reading and no allocation at all.
+    use twinvpn_mgmt::envelope::{declared_length, FrameError, MAX_ENVELOPE_BYTES};
+
+    let over = u32::try_from(MAX_ENVELOPE_BYTES).expect("the cap fits a u32") + 1;
+    assert!(matches!(
+        declared_length(over.to_be_bytes()),
+        Err(FrameError::TooLarge { .. })
+    ));
+    assert!(matches!(
+        declared_length(u32::MAX.to_be_bytes()),
+        Err(FrameError::TooLarge { .. })
+    ));
+    // Zero is its own answer and not a malformed body: `shells/macos`' reading,
+    // adopted in X-4, is that a zero-length frame is a DESYNCHRONISED STREAM,
+    // and saying so is more useful than reading nothing and then complaining
+    // the nothing did not parse.
+    assert!(matches!(
+        declared_length(0u32.to_be_bytes()),
+        Err(FrameError::Empty)
+    ));
+    // And the boundary itself is admitted, so the cap is a cap and not an
+    // off-by-one.
+    let at = u32::try_from(MAX_ENVELOPE_BYTES).expect("fits");
+    assert_eq!(declared_length(at.to_be_bytes()), Ok(MAX_ENVELOPE_BYTES));
+}
+
+#[test]
+fn a_truncated_frame_is_a_reject_and_never_a_read_past_the_end() {
+    use twinvpn_mgmt::envelope::decode_frame;
+    let whole = mgmt_frame();
+    // Every proper prefix of a valid frame, including the empty one.
+    for cut in 0..whole.len() {
+        let outcome = std::panic::catch_unwind(|| decode_frame(&whole[..cut]));
+        assert!(
+            matches!(outcome, Ok(Err(_))),
+            "a {cut}-byte prefix must be a typed reject, not a panic"
+        );
+    }
+    assert!(decode_frame(&whole).is_ok(), "and the whole frame decodes");
+}

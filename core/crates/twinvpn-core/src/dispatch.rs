@@ -15,7 +15,7 @@
 //! it is an exhaustive `match` over [`CoreCommand`] with **no wildcard arm**.
 //! Adding a variant does not silently acquire an empty implementation — it
 //! **fails to compile** until someone states, in this file, either that it
-//! executes or why it does not. [`execute`] is a second exhaustive match over
+//! executes or why it does not. `execute` is a second exhaustive match over
 //! the same enum.
 //!
 //! A `NotWired` arm carries the **reason**, and `submit` turns it into a named
@@ -27,7 +27,7 @@ use twinvpn_types::{codes, ReasonCode};
 /// Whether this build performs an operation, and if not, why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
-    /// The operation is performed by [`execute`].
+    /// The operation is performed by `execute`.
     Executes,
     /// The operation is refused by name. The reason is reported, never hidden.
     NotWired {

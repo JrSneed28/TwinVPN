@@ -117,6 +117,22 @@ impl AuditToken {
         Some(Self { val })
     }
 
+    /// The token back as the 32 bytes it arrived as, in the same host byte
+    /// order.
+    ///
+    /// For `SecCodeCopyGuestWithAttributes`, which takes the token as a
+    /// `CFData` and reads it as the `audit_token_t` the kernel wrote — so the
+    /// round trip must be byte-exact and must not swap, for the same reason
+    /// [`AuditToken::from_bytes`] does not.
+    #[must_use]
+    pub fn as_bytes(self) -> [u8; AUDIT_TOKEN_BYTES] {
+        let mut out = [0u8; AUDIT_TOKEN_BYTES];
+        for (chunk, word) in out.chunks_exact_mut(4).zip(self.val) {
+            chunk.copy_from_slice(&word.to_ne_bytes());
+        }
+        out
+    }
+
     /// The effective uid — **the principal**.
     #[must_use]
     pub const fn euid(self) -> u32 {

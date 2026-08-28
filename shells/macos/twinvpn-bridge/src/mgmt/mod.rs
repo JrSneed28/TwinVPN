@@ -31,13 +31,17 @@
 //! in the same crate (ADR-0017 A-12: the check becomes a **module**-graph one).
 
 pub mod audit;
+pub mod codesign;
 pub mod endpoint;
+pub mod events;
 pub mod peer;
 pub mod server;
 pub mod session;
 
 pub use audit::AuditToken;
+pub use codesign::{TeamIdPin, Verdict as CodesignVerdict};
 pub use endpoint::EndpointError;
+pub use events::Fanout;
 pub use peer::{scopes_for, GroupPolicy, PeerCredentials};
 pub use server::{serve, CommandSink, Ending, ServerContext};
 pub use session::Session;

@@ -38,3 +38,14 @@ system-configuration-sys = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "io-util", "macros"] }
+# CD-5's payoff, used as a CONFORMANCE ORACLE rather than as a stand-in: the
+# seam's own mock is a faithful implementation of every contract the traits
+# state, so `tests/matrix.rs` asserts this adapter is no laxer than it. "A mock
+# that is laxer than the contract lets the core pass tests it would fail on a
+# real adapter" - the inverse is the check this dependency buys.
+twinvpn-platform = { workspace = true, features = ["mock"] }
+# NOTE: deliberately NO `futures-util`. It is in `[workspace.dependencies]` and
+# would be legal to name, but nothing in this workspace reaches it yet, so adding
+# it here would move `core/Cargo.lock` - and that file is the integration lead's
+# (ownership.md 1). `tests/matrix.rs` polls the change stream through a local
+# no-op waker instead, which is a dozen lines and costs a domain nothing.

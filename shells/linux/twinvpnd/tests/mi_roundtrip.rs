@@ -791,6 +791,7 @@ async fn mi3_a_response_from_a_client_is_refused_and_the_connection_closes() {
             topic: "session.state".to_owned(),
             payload: Vec::new(),
             actor_principal: None,
+            op: None,
         }),
         ..hello
     };

@@ -329,7 +329,7 @@ fn a_published_settings_document_reaches_the_c_surface() {
     // The shape the wiring plugs into: the document is rendered by the adapter,
     // so Swift decides no family, no netmask and no match-domain set.
     let ext = TvbExt::new(CoreHandle::Unwired);
-    ext.publish_settings(&twinvpn_platform_macos::testkit::contract(1), "203.0.113.7")
+    ext.publish_settings(&twinvpn_platform_macos::testkit::contract(1))
         .expect("renders");
     let raw = Box::into_raw(Box::new(ext));
     let mut doc: *mut TvbBuf = core::ptr::null_mut();
@@ -339,7 +339,8 @@ fn a_published_settings_document_reaches_the_c_surface() {
     assert_eq!(rc, TVB_OK);
     assert!(err.is_null());
     let document = take_envelope(doc);
-    assert_eq!(document["tunnel_remote_address"], "203.0.113.7");
+    // M-15: the contract's own remote, not one this test handed the shell.
+    assert_eq!(document["tunnel_remote_address"], "198.51.100.7");
     assert!(document["ipv6"].is_object(), "ADR-0010 R1: both, always");
     release(raw);
 }

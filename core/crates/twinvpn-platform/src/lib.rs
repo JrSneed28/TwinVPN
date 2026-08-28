@@ -82,9 +82,10 @@ pub mod socket;
 pub mod mock;
 
 pub use config::{
-    ApplyBudget, BootEnforcement, ContractGeneration, Datapath, DnsConfig, EnforcementCustody,
-    LinkFacts, LinkState, NetworkConfig, NetworkContract, RouteCapabilities, RouteEntry, Ruleset,
-    RulesetCustody, TunnelDevice, TunnelHandle,
+    on_link_is_underlay_path, ApplyBudget, BootEnforcement, ContractGeneration, Datapath,
+    DnsConfig, EnforcementCustody, LinkFacts, LinkState, NetworkConfig, NetworkContract,
+    RouteCapabilities, RouteEntry, Ruleset, RulesetCustody, TunnelDevice, TunnelHandle,
+    SHARED_ADDRESS_SPACE_V4,
 };
 pub use custody::{
     IdentityAttestation, IdentityCustody, IdentityKeyRef, IdentityPublic, PeerPublicKey,

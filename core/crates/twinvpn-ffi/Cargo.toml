@@ -27,3 +27,7 @@ prost                 = { workspace = true }
 
 [dev-dependencies]
 twinvpn-core          = { workspace = true, features = ["test-support"] }
+# For the one M-1 test that reads the ABI's event frame the way a NON-RUST shell
+# reads it: as a length prefix and then plain JSON. Asserting that through
+# `twinvpn-mgmt`'s own types would only prove the encoder agrees with itself.
+serde_json            = { workspace = true }

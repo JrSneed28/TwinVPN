@@ -1461,6 +1461,7 @@ version = "0.1.0"
 dependencies = [
  "futures-core",
  "prost",
+ "serde_json",
  "twinvpn-core",
  "twinvpn-diag",
  "twinvpn-env",
@@ -1537,6 +1538,7 @@ dependencies = [
  "tracing",
  "twinvpn-env",
  "twinvpn-platform",
+ "twinvpn-session",
  "twinvpn-types",
  "zeroize",
 ]

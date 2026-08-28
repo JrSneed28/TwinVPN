@@ -20,7 +20,7 @@
 //! - `twinvpn-core` dispatches **this** enum. It cannot invent an operation,
 //!   because there is no other enum to invent it in.
 //! - `twinvpn-ffi`'s `tw_core_submit` carries **this** enum's encoding.
-//! - [`crate::catalogue`] is generated from **this** enum by an exhaustive
+//! - [`crate::catalogue()`] is generated from **this** enum by an exhaustive
 //!   `match`, so adding a variant without a catalogue row **fails to compile**.
 //!
 //! Declaring it in `twinvpn-core` instead would leave this crate free to write a

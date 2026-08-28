@@ -29,6 +29,7 @@
 //! | [`server`] | the whole frame loop, over any `AsyncRead + AsyncWrite` | the pipe itself |
 //! | [`logging`] | the level mapping | — |
 
+pub mod events;
 pub mod logging;
 pub mod peer;
 pub mod power;

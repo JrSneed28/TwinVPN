@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Entitlements for the NEPacketTunnelProvider.
+
+  Authority: ADR-0016 §11.2's hardening table's iOS/iPadOS row, verbatim:
+
+    com.apple.developer.networking.networkextension = [packet-tunnel-provider]
+    com.apple.developer.networking.vpn.api          = [allow-vpn]
+    shared keychain-access-groups and App Group for app+extension
+    extension memory budgeted to the 15 MB floor
+
+  ADR-0020 §11.3's iOS row explains why the two SHARED entitlements are shared
+  and not scoped tighter: `kSecAttrAccessGroup` is "the shared keychain access
+  group from the App ID; the vault file lives in the App Group container", and
+  the app and the extension are two processes of one app identity.
+
+  That sharing is a DECLARED RESIDUAL, not an oversight. ADR-0016 §11.4's
+  compromised-process table, iOS column: "use DeviceKey as signing oracle = Yes
+  — declared residual", because no privilege boundary on this platform can scope
+  below app identity. PS-24 condition 4 says the same from the other end: PS-1's
+  "sole holder of the key handle" clause is "on HC-2 only, a declared residual
+  rather than an enforceable property, tested as a declaration in P16."
+
+  STATUS: written, not compiled and not signed.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>packet-tunnel-provider</string>
+    </array>
+
+    <key>com.apple.developer.networking.vpn.api</key>
+    <array>
+        <string>allow-vpn</string>
+    </array>
+
+    <!-- Shared with the app. ADR-0020 §11.3's iOS row and ST-22's co-location:
+         the identity key, the SEK and the S-53 anchor all live in ONE access
+         group, under ONE accessibility class. -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)group.net.twinvpn.client</string>
+    </array>
+
+    <!-- ADR-0020 §11.9's iOS row: `store_root` is the App Group container,
+         opened by THE PROVIDER ONLY (ST-30's single opener). The app has the
+         same entitlement because it is one app identity, and refrains by
+         discipline rather than by sandbox — which is exactly why ST-30 exists as
+         a rule and PS-24 condition 2 assigns a writer per fact. -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.net.twinvpn.client</string>
+    </array>
+</dict>
+</plist>

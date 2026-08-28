@@ -17,7 +17,7 @@
 //!
 //! Proto3 cannot tell an empty repeated field from an absent one, so the schema
 //! carries `servers_declared_v4` / `servers_declared_v6` as **explicit presence
-//! bits**. [`validate`] treats either bit unset as **malformed**, never as "v6
+//! bits**. [`validate()`] treats either bit unset as **malformed**, never as "v6
 //! unconfigured" — §13.4 forbids expressing "v4 configured, v6 left to the OS",
 //! and this is the enforcement of that.
 //!
@@ -142,7 +142,7 @@ impl Dnspolicy {
     /// Whether fallback is blocked for `family`.
     ///
     /// Deny-shaped, so this is the **only** accessor and it never returns
-    /// "permitted" for an absent value: [`validate`] has already rejected a
+    /// "permitted" for an absent value: [`validate()`] has already rejected a
     /// policy whose bits were not supplied.
     #[must_use]
     pub fn block_fallback(&self, family: AddressFamily) -> bool {
@@ -255,7 +255,7 @@ pub fn validate(msg: &v1::DnsPolicy) -> Result<Dnspolicy, PolicyError> {
 }
 
 /// ADR-0008 N-3: a lower version is rejected and the rejection is a **security
-/// event**, because "a stale `DNSPolicy` [could] reintroduce a leak that a newer
+/// event**, because "a stale `DNSPolicy` \[could\] reintroduce a leak that a newer
 /// one closed".
 #[must_use]
 pub const fn accepts_version(current: u64, offered: u64) -> bool {

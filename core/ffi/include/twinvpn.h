@@ -366,7 +366,69 @@ int32_t tw_core_submit(tw_core *core, tw_slice command, tw_buf **err_out);
  * Returns TW_OK with *event_out set, TW_TIMEOUT (no event, or tw_core_wake was
  * called), or TW_ERR with *err_out set. Release *event_out with tw_buf_free.
  *
- * THE ONLY BLOCKING CALL IN THIS ABI. */
+ * THE ONLY BLOCKING CALL IN THIS ABI.
+ *
+ * ---------------------------------------------------------------------------
+ * THE BYTES IN *event_out. This paragraph is normative.
+ * ---------------------------------------------------------------------------
+ * One MANAGEMENT-INTERFACE FRAME, exactly as the Unix socket, the named pipe
+ * and XPC carry it: a 4-byte BIG-ENDIAN length prefix followed by that many
+ * bytes of UTF-8 JSON. MI-20 -- "one contract, two carriages, NEVER two
+ * contracts" -- and this ABI is one of the carriages, not an exception to it.
+ * The Rust declaration is `twinvpn_mgmt::envelope::MgmtEnvelope`; a shell in
+ * another language decodes the JSON and links NOTHING.
+ *
+ * The object has these members. `body.kind` is the DISCRIMINATOR: read it
+ * first, and treat an unknown value as a forward-compatible event to ignore,
+ * never as a parse failure.
+ *
+ *   mi_version      uint    the MI version this core speaks
+ *   request_id      []      ALWAYS EMPTY here -- see below
+ *   correlation_id  []      ALWAYS EMPTY: this is a PUSHED event (ADR-0017
+ *                           11.3), not an answer to a request
+ *   seq             uint    the core's own sequence number. STRICTLY
+ *                           INCREASING, and contiguous EXCEPT across a
+ *                           `compacted` body, which announces the gap it
+ *                           spans. A receiver that sees no `compacted` has
+ *                           missed nothing (MI-9a, MI-19).
+ *   idempotency_key []      ALWAYS EMPTY here
+ *   as_of_ms        uint    MI-16. The AGENT's stamp on the boot-time
+ *                           monotonic clock. A contiguous `seq` proves no
+ *                           event was LOST; this proves one was RECENT.
+ *   body            object  one of the two below
+ *
+ *   body.kind == "event"
+ *     topic            string   one of exactly five: "transition", "session",
+ *                               "diagnostic", "command.completed",
+ *                               "command.rejected" (ADR-0017 11.10)
+ *     payload          bytes    the frozen contract message for that topic:
+ *                               TransitionEvent, SessionEvent, or ErrorEnvelope
+ *                               for "diagnostic" and "command.rejected"; for
+ *                               "command.completed", the operation's own result
+ *                               bytes, which may be empty
+ *     actor_principal  string?  MI-18. The OS principal whose call caused this,
+ *                               or absent for an agent-internal or
+ *                               peer-initiated cause. "The tunnel went down"
+ *                               and "DANA took the tunnel down" are different
+ *                               facts, and this is the field that keeps them
+ *                               different.
+ *     op               string?  WHICH operation, on the two `command.*` topics;
+ *                               absent on the other three. It is on the wire
+ *                               BECAUSE OF THIS ABI: tw_core_submit is
+ *                               fire-and-forget and returns no request id, so a
+ *                               shell here has nothing else to correlate a
+ *                               completion against. A socket carriage holds
+ *                               that registration in memory and does not need
+ *                               it -- but carries it now too, because one
+ *                               vocabulary is the point.
+ *
+ *   body.kind == "compacted"                                         (MI-19)
+ *     up_to_seq        uint     bodies were dropped up to and including this
+ *     dropped_by_topic array    [topic, count] pairs
+ *
+ *   A DROP IS NEVER A SILENCE. The marker arrives IN ORDER, before any further
+ *   event, so "I missed something" and "I missed nothing" stay
+ *   distinguishable -- which is the whole of MI-9a. */
 int32_t tw_core_next_event(tw_core *core, uint32_t timeout_ms,
                            tw_buf **event_out, tw_buf **err_out);
 

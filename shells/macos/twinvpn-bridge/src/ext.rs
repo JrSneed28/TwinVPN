@@ -335,14 +335,14 @@ impl TvbExt {
     /// error: the oldest pending document is dropped, because a settings document
     /// is the current desired state and applying a stale one is worse than
     /// skipping it.
-    pub fn publish_settings(
-        &self,
-        contract: &NetworkContract,
-        tunnel_remote_address: &str,
-    ) -> Result<(), Diagnostic> {
-        let document =
-            twinvpn_platform_macos::nesettings::render_json(contract, tunnel_remote_address)
-                .map_err(|error| error.diagnostic(Component::RoutingEngine))?;
+    /// **M-15.** This took `tunnel_remote_address: &str` and passed it through,
+    /// so the address reached the settings document from the *shell* while the
+    /// contract carried its own copy — the disagreement the field exists to
+    /// prevent. The renderer reads the contract now, and this signature no
+    /// longer has anywhere to hold a second answer.
+    pub fn publish_settings(&self, contract: &NetworkContract) -> Result<(), Diagnostic> {
+        let document = twinvpn_platform_macos::nesettings::render_json(contract)
+            .map_err(|error| error.diagnostic(Component::RoutingEngine))?;
         // `try_send` rather than `send`: blocking here would block whatever
         // computed the contract, and the core's reconciler is not something to
         // stall on a Swift task that is slow to read.

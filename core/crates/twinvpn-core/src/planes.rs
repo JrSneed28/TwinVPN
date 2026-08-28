@@ -22,7 +22,7 @@
 //! [`ControlPlanePort`] implements `twinvpn_cp_client::ControlPlaneStore` and can
 //! **only write**. [`DataPlaneView`] can **only read**. They share one
 //! [`Shared`] cache and a pending-write queue; the `Store` itself is owned by
-//! [`StoreBridge`], which is driven by the composition root's own task.
+//! [`crate::bridge::StoreBridge`], which is driven by the composition root's own task.
 //!
 //! Three things follow that a shared `Arc<Mutex<Store>>` would not give:
 //!
@@ -41,7 +41,7 @@
 //!
 //! `ControlPlaneStore`'s doc comment says ADR-0009 R-9 requires the high-water
 //! mark to be **durable before** the document it admits is acted on. A queued
-//! write is not durable when `put_document` resolves. [`StoreBridge::flush`] is
+//! write is not durable when `put_document` resolves. [`crate::bridge::StoreBridge::flush`] is
 //! what makes it durable, and the composition root calls it **before** admitting
 //! the document's effects, so the ordering R-9 requires is preserved — but the
 //! obligation moved from the port to the caller. That is a real weakening of the

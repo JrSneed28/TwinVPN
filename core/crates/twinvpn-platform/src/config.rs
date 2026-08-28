@@ -316,6 +316,118 @@ pub struct NetworkContract {
     pub tunnel_remote_address: Option<IpAddr>,
 }
 
+/// RFC 6598 shared address space, `100.64.0.0/10`.
+///
+/// **It is two things at once, and that collision is `ownership.md` §9.6 X-9.**
+/// ADR-0010 §11.1 / AP-1 carve TwinNet's overlay IPv4 space out of it, so every
+/// adapter's Tier-1 baseline names it as *protected* — and RFC 6598 assigned it
+/// for **carrier-grade NAT**, so a subscriber behind CGNAT holds an underlay
+/// address in the very same `/10`.
+///
+/// Address alone therefore cannot tell an overlay peer from the host's own
+/// upstream. The disambiguator is the **interface**: overlay traffic egresses
+/// the overlay interface and underlay traffic does not, which is why Tier 2 is
+/// interface-scoped in the first place.
+pub const SHARED_ADDRESS_SPACE_V4: ([u8; 4], u32) = ([100, 64, 0, 0], 10);
+
+/// Whether an on-link prefix is the host's **own underlay path** rather than a
+/// local LAN — the X-9 case.
+///
+/// # What this is for
+///
+/// A renderer accepts on-link prefixes off the overlay interface under ADR-0012
+/// **KS-4**, whose `local_network_access` setting the user may set to DENY. That
+/// is right for a local physical LAN: refusing it costs the user their printer
+/// and protects their traffic.
+///
+/// It is **wrong** for a prefix inside [`SHARED_ADDRESS_SPACE_V4`]. A host
+/// behind CGNAT has an on-link prefix there, and it is not the user's LAN — it
+/// is the path every packet leaves by. Denying it does not protect anything,
+/// because the overlay's own traffic still egresses the overlay interface and is
+/// unaffected; it only severs the underlay. ADR-0010 §11.5 clause 5 already
+/// makes exactly this argument for DHCP — *"blocking them breaks the underlay
+/// itself"* — and DHCP is accepted by port for that reason. This is the same
+/// class of traffic reached by address instead of by port.
+///
+/// So a colliding on-link prefix is accepted off-overlay **unconditionally**,
+/// and every other on-link prefix stays under KS-4's gate. KS-4 is not widened:
+/// the set this exempts is bounded by what the OS reports as on-link on a
+/// non-overlay interface, it is recomputed on every network-change event, and it
+/// never includes a destination reachable only via a router.
+///
+/// # Why it is here and not in each adapter
+///
+/// X-9 was recorded as *"open, and deliberately not worked around by one
+/// platform alone"* — Linux and macOS behave identically and each would
+/// otherwise grow its own copy of the rule. This is the one definition both
+/// read, beside the contract they render.
+#[must_use]
+pub fn on_link_is_underlay_path(prefix: IpPrefix) -> bool {
+    let (octets, len) = SHARED_ADDRESS_SPACE_V4;
+    let IpAddr::V4(address) = prefix.address() else {
+        // The v6 half of the overlay is the product ULA `fd7c:9e5d:2a10::/48`,
+        // which is ours alone: no carrier assigns out of it, so there is no
+        // collision to resolve and no exemption to make.
+        return false;
+    };
+    if prefix.prefix_len() < len {
+        // A prefix WIDER than the shared space is not "an address inside it";
+        // accepting it would exempt more than the collision costs.
+        return false;
+    }
+    let host = u32::from_be_bytes(address.octets());
+    let base = u32::from_be_bytes(octets);
+    let mask = u32::MAX << (32 - len);
+    host & mask == base & mask
+}
+
+impl NetworkContract {
+    /// The address `NEPacketTunnelNetworkSettings(tunnelRemoteAddress:)` takes,
+    /// **derived from this contract and from nothing else**.
+    ///
+    /// # Why this rule lives here and not in each Apple adapter
+    ///
+    /// `ownership.md` §10.8 **M-15**: the field above was added so a settings
+    /// document could be built from the contract alone, and then *neither*
+    /// Apple adapter read it — `twinvpn-platform-macos::nesettings::render` and
+    /// `twinvpn-platform-ios::settings::render` both kept taking it as a
+    /// separate parameter the shell supplied, which is the split the field
+    /// exists to close. Two adapters needing the same derivation is exactly the
+    /// shape X-4 found in the MI envelope, so it is written once, here, beside
+    /// the data it derives from.
+    ///
+    /// # The three cases, and why only one of them is an error
+    ///
+    /// - **A remote, on any ruleset.** Rendered as given. This is the fact the
+    ///   field exists to carry, and the reason the shell no longer holds a
+    ///   second copy of it.
+    /// - **No remote, in [`Ruleset::Blocked`].** `Ok`, as the family's
+    ///   unspecified address. This is **not** the placeholder the field's
+    ///   documentation forbids: a placeholder stands in for a fact nobody
+    ///   knows, and here every side agrees there is no remote — no path is
+    ///   validated in that posture, so `0.0.0.0` *states* that rather than
+    ///   guessing at it. It matters that this is not an error: on iOS the
+    ///   blocked posture is installed **through** a settings object, so
+    ///   refusing to render one would leave the kill-switch uninstalled, which
+    ///   is the one direction O-18 forbids.
+    /// - **No remote, in [`Ruleset::Protected`].** `Err`. A protected
+    ///   generation asserts a validated path, and a validated path has a
+    ///   remote; a contract carrying both claims at once is a core defect and
+    ///   is refused **by name** rather than rendered against a substitute.
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError::AdapterUnavailable`] for the third case above.
+    pub fn tunnel_remote_for_settings(&self) -> Result<IpAddr, PlatformError> {
+        match (self.tunnel_remote_address, self.ruleset) {
+            (Some(address), _) => Ok(address),
+            // Stating "there is no remote", not guessing at one.
+            (None, Ruleset::Blocked) => Ok(IpAddr::V4(twinvpn_types::V4Addr::UNSPECIFIED)),
+            (None, Ruleset::Protected) => Err(PlatformError::AdapterUnavailable(None)),
+        }
+    }
+}
+
 /// One route to install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteEntry {
@@ -560,3 +672,68 @@ pub trait TunnelDevice: Send + Sync {
 /// the deadline itself is always the core's, on the injected monotonic clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApplyBudget(pub Duration);
+#[cfg(test)]
+mod x9_tests {
+    //! `ownership.md` §9.6 **X-9**: RFC 6598 is both the overlay's address
+    //! space and carrier-grade NAT space, so a CGNAT subscriber's own underlay
+    //! prefix sits inside the range every adapter's Tier-1 baseline protects.
+
+    use super::on_link_is_underlay_path;
+    use twinvpn_types::{IpAddr, IpPrefix, V4Addr, V6Addr};
+
+    fn v4(octets: [u8; 4], len: u32) -> IpPrefix {
+        IpPrefix::new(IpAddr::V4(V4Addr::from_octets(octets)), len).expect("prefix")
+    }
+
+    #[test]
+    fn a_cgnat_subscribers_own_prefix_is_the_underlay_path() {
+        // The case X-9 names. Without this the Tier-2 deny takes the host's
+        // route to its own upstream whenever KS-4 is DENY.
+        assert!(on_link_is_underlay_path(v4([100, 64, 0, 0], 24)));
+        assert!(on_link_is_underlay_path(v4([100, 96, 0, 0], 12)));
+        assert!(on_link_is_underlay_path(v4([100, 127, 255, 0], 24)));
+    }
+
+    #[test]
+    fn an_ordinary_lan_is_not_and_stays_under_ks4() {
+        // KS-4 is not widened. A printer on 192.168.1.0/24 is still the user's
+        // to deny, which is the whole point of the setting.
+        for prefix in [
+            v4([192, 168, 1, 0], 24),
+            v4([10, 0, 0, 0], 8),
+            v4([172, 16, 0, 0], 12),
+            v4([100, 63, 255, 0], 24),
+            v4([100, 128, 0, 0], 24),
+        ] {
+            assert!(!on_link_is_underlay_path(prefix), "{prefix:?}");
+        }
+    }
+
+    #[test]
+    fn a_prefix_wider_than_the_shared_space_is_not_exempted() {
+        // "An address inside the shared space" is the fact; a supernet of it is
+        // not, and exempting one would pass more than the collision costs.
+        assert!(!on_link_is_underlay_path(v4([0, 0, 0, 0], 0)));
+        assert!(!on_link_is_underlay_path(v4([100, 0, 0, 0], 8)));
+        // The boundary itself is the shared space and IS exempt.
+        assert!(on_link_is_underlay_path(v4([100, 64, 0, 0], 10)));
+    }
+
+    #[test]
+    fn the_v6_half_has_no_collision_to_resolve() {
+        // The overlay's v6 space is the product ULA, which is ours alone: no
+        // carrier assigns out of it, so there is no exemption to make and this
+        // must not become a general "pass on-link v6" hole.
+        let ula = IpPrefix::new(
+            IpAddr::V6(
+                V6Addr::prefix_base([
+                    0xfd, 0x7c, 0x9e, 0x5d, 0x2a, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ])
+                .expect("v6"),
+            ),
+            48,
+        )
+        .expect("prefix");
+        assert!(!on_link_is_underlay_path(ula));
+    }
+}

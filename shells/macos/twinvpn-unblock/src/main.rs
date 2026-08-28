@@ -106,6 +106,50 @@ const CONFIRM_FLAG: &str = "--confirm-unprotected";
 const UNBLOCK_RECORD: &str = "/Library/Application Support/TwinVPN/unblock-record.json";
 
 /// ADR-0017 §11.12's exit codes, the four this binary can produce.
+/// **MI-13(1) / KS-21: an interactive local act, not merely a privileged one.**
+///
+/// # The gap this closes, and the gap it does not
+///
+/// MI-13(1) is explicit that *"'privileged' means an authenticated
+/// administrator act, not merely 'runs as root'"*, and ADR-0012 KS-21 asks for
+/// *"a **local interactive action** on the device itself"*. This binary used to
+/// check privilege and nothing else, so **a root cron job satisfied it** —
+/// recorded as `ownership.md` §9.6 **X-14**, against both this shell and the
+/// other one, in the same words.
+///
+/// A controlling terminal is the one thing available to a
+/// `#![forbid(unsafe_code)]` binary on both platforms that separates the two.
+/// A human at a console or over `ssh` has one. A `cron` job, a `systemd` timer,
+/// a `launchd` job, an `at` job and a daemon that has been compromised into
+/// spawning this **do not** — and, decisively, neither does a control plane:
+/// KS-22's rule is *"no remote actor, including a compromised control plane"*,
+/// and a control plane cannot produce a local terminal. That is the same
+/// property KS-21a leans on when it admits an authenticated local shell on
+/// `HC-3`, applied one layer down.
+///
+/// **What it is not.** It is not re-authentication. `polkit` on Linux and
+/// Authorization Services on Darwin would prompt for a credential; this does
+/// not, and an operator already at a root shell is not asked to prove it again.
+/// So the residual is narrower than X-14's but real, and it is stated here
+/// rather than closed by assertion: *this establishes that a human is present,
+/// not which human.*
+///
+/// **Headless hosts are not locked out.** ADR-0012 **KS-21a** is the host-class
+/// rule for exactly this: on `HC-3` there is no interactive session, and *"a
+/// caller on the local management socket, authenticated by kernel-supplied peer
+/// credentials to an administrator principal, satisfies this clause"*. That
+/// path is the agent's management interface, which authenticates its peer, and
+/// it is unaffected by this check. KS-20's *"blocked must not mean bricked"*
+/// therefore still holds — the refusal below names the alternative rather than
+/// leaving an operator to find it.
+fn has_interactive_local_principal() -> bool {
+    // Standard input specifically. An interactive invocation has a terminal on
+    // it; a scheduled one is handed a pipe or `/dev/null`. Output is not
+    // checked, because `twinvpn-unblock --confirm-unprotected | tee log` is a
+    // human act and redirecting it must not be read as automation.
+    std::io::IsTerminal::is_terminal(&std::io::stdin())
+}
+
 mod exit {
     /// The anchor was emptied and the removal was confirmed against the kernel.
     pub const OK: u8 = 0;
@@ -156,6 +200,22 @@ fn run(args: &[String]) -> u8 {
              Run:  twinvpn-unblock {CONFIRM_FLAG}"
         );
         return exit::USAGE;
+    }
+
+    if !has_interactive_local_principal() {
+        eprintln!(
+            "twinvpn-unblock: MGMT.DISARM_NO_LOCAL_AUTHORITY: this command is a\n\
+             local interactive act (ADR-0017 MI-13(1), ADR-0012 KS-21) and there\n\
+             is no terminal on standard input, so it will not run from cron, a\n\
+             timer, a service unit or any other automation.\n\
+             \n\
+             Run it from a console or an ssh session.\n\
+             \n\
+             On a headless host with no interactive session at all, disarm goes\n\
+             through the agent's management interface instead, which authenticates\n\
+             its caller by kernel-supplied peer credentials (ADR-0012 KS-21a)."
+        );
+        return exit::UNAUTHORIZED;
     }
 
     if !is_privileged() {
@@ -351,6 +411,34 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
+    /// **X-14.** The ceremony is an interactive local act, and a test runner is
+    /// automation — which is exactly the caller MI-13(1) means to exclude.
+    ///
+    /// `cargo test` gives its children a piped stdin, so this asserts the
+    /// refusal from inside the condition it describes rather than by
+    /// simulating it. If it ever passes, the check has stopped distinguishing
+    /// a human from a scheduler and the whole of X-14 is back.
+    #[test]
+    fn a_non_interactive_caller_has_no_local_principal() {
+        assert!(
+            !has_interactive_local_principal(),
+            "a piped stdin is automation; MI-13(1) excludes it"
+        );
+    }
+
+    /// The refusal names the registered code and the way out, not just "no".
+    ///
+    /// KS-20: *"blocked must not mean bricked"*. An operator refused here on a
+    /// headless host must be told where disarm actually lives (KS-21a's
+    /// management-interface path) rather than left to find it.
+    #[test]
+    fn the_refusal_names_the_code_and_the_alternative() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().expect("a first half");
+        assert!(production.contains("MGMT.DISARM_NO_LOCAL_AUTHORITY"));
+        assert!(production.contains("KS-21a"));
+    }
+
     use super::*;
 
     #[test]

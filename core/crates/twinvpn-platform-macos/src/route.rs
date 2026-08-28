@@ -11,7 +11,7 @@
 //!
 //! The whole point of this module is that "which routes does generation 7 want,
 //! and what exactly undoes it" is answerable **without a kernel**. [`programme`]
-//! turns a [`NetworkContract`] into a list of [`RouteOp`], [`inverse`] turns an
+//! turns a [`NetworkContract`] into a list of [`RouteOp`], [`RouteProgramme::inverse`] turns an
 //! applied list into the list that undoes it, and both are pure — so the
 //! transactional property ADR-0010 R5 requires is a checked property on this Linux
 //! host rather than an operational one on a Mac.
@@ -29,7 +29,7 @@
 //! Under the second, [`programme`] still computes the same list — it is the input
 //! to [`crate::nesettings`] — and the *applied* programme is empty, because the
 //! OS installs the routes when it accepts the settings object. A carrier that
-//! reported an applied route it did not install would make [`inverse`] try to
+//! reported an applied route it did not install would make [`RouteProgramme::inverse`] try to
 //! delete a route the OS owns.
 //!
 //! # Known gap: macOS `route(8)` has no metric

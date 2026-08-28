@@ -167,7 +167,15 @@ impl Session {
                 Self::reply(context, Body::HelloAck(Box::new(ack)))
             }
             Body::Request(request) if self.attached => {
-                let response = server::handle(&request, &self.granted, &self.credentials, context);
+                // **The XPC carriage carries no event stream, and says so.**
+                // Swift owns the listener and hands this crate one message at a
+                // time through the C ABI, so there is no place to push an
+                // unsolicited frame from — §11.10's stream is the socket
+                // carriage's. `None` is therefore the truth, and `event.resync`
+                // on this carriage is refused by its own name rather than
+                // answered with a snapshot of a stream the client is not on.
+                let response =
+                    server::handle(&request, &self.granted, &self.credentials, None, context);
                 Self::reply(context, Body::Response(response))
             }
             Body::Goodbye => self.close_with(

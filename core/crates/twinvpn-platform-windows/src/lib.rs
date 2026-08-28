@@ -44,7 +44,7 @@
 //! # CB-3 and DP-4
 //!
 //! This crate is on the `unsafe` allowlist and is one of the few permitted
-//! `#[cfg(target_os)]`. It uses both only inside [`sys::win`], and every `unsafe`
+//! `#[cfg(target_os)]`. It uses both only inside `sys::win`, and every `unsafe`
 //! block there carries a `// SAFETY:` comment naming its invariant. Everything
 //! else in the crate is safe, portable Rust.
 //!

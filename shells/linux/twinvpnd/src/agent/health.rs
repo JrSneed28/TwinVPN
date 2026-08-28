@@ -20,7 +20,7 @@
 //! | Channel | Where it is |
 //! |---|---|
 //! | syslog/journald at ERROR and CRITICAL, `reason_code` as a structured field | [`super::logging`], and every `tracing` call in this crate carries `reason_code =` |
-//! | the health file, one parse-stable line | **here** ([`write`]) |
+//! | the health file, one parse-stable line | **here** ([`write()`]) |
 //! | `twinvpn status get --output json` as an exec check | `twinvpnctl`, keying on `class` per EM-37 |
 //! | `sd_notify(STATUS=…)` and systemd `OnFailure=` | **here** ([`notify`]) and `packaging/twinvpnd.service` |
 //! | in-band push to the Owner's paired admin devices | the control plane's, and **not** in this build (W-12) |

@@ -11,7 +11,7 @@
 //! `twinvpn.h`'s F-9 vtable offers `set_ruleset` with **no getter**, so a shell
 //! bound only to the C ABI cannot produce a `ProtectionAssertion` — W-24. This
 //! adapter is bound as a Rust crate, so it does not have that limit:
-//! [`crate::netcfg::MacosNetworkConfig::installed_ruleset`] runs `pfctl` and reads
+//! [`twinvpn_platform::NetworkConfig::installed_ruleset`] runs `pfctl` and reads
 //! the posture out of **pf's own answer**. Nothing here is cached and nothing has
 //! a default: the reconciler's job is to notice that something else changed the
 //! rules, and a cache cannot.

@@ -101,6 +101,7 @@ fn context(env: &Env, adapter: &Arc<MockAdapter>) -> Arc<ServerContext> {
             os_version: "10.0.26100".to_owned(),
         },
         submission: Arc::new(tokio::sync::Mutex::new(())),
+        fanout: Arc::new(twinvpnsvc::service::events::Fanout::new()),
     })
 }
 
@@ -603,4 +604,305 @@ fn the_gap_a_resume_reports_comes_from_the_suspend_inclusive_clock() {
         "the elapsed clock is absolute since boot and the monotonic one zeroes \
          at construction: elapsed={elapsed} monotonic={monotonic}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// §11.10's event stream. `ownership.md` §10.8 M-12.
+//
+// This service built a core and never called `next_event`. Every test below
+// failed outright before the drain existed, because there was nothing to drain:
+// no client could be told that anything had changed, `event.resync` refused
+// unconditionally, and every `Response.result` was empty.
+// ---------------------------------------------------------------------------
+
+use twinvpnsvc::service::events as server_events;
+
+/// The drain, on its own thread, exactly as the service runs it.
+///
+/// Returned as a handle the test joins, so a leaked thread cannot make a later
+/// test flaky by draining its core.
+fn spawn_drain(context: &Arc<ServerContext>) -> std::thread::JoinHandle<()> {
+    let core = Arc::clone(&context.core);
+    let fanout = Arc::clone(&context.fanout);
+    std::thread::spawn(move || {
+        server_events::drain(&core, &fanout, std::time::Duration::from_millis(20));
+    })
+}
+
+/// The topics a subscribing client names. §11.10 has no wildcard.
+fn all_topics() -> Vec<String> {
+    twinvpn_mgmt::fanout::TOPICS
+        .iter()
+        .map(|t| (*t).to_owned())
+        .collect()
+}
+
+fn cli_scopes() -> Vec<String> {
+    twinvpnsvc::mi::CLI_REQUESTED_SCOPES
+        .iter()
+        .map(|s| s.name().to_owned())
+        .collect()
+}
+
+/// Stops the drain and joins it, so no test leaks a thread onto the next.
+fn stop(context: &Arc<ServerContext>, drain: std::thread::JoinHandle<()>) {
+    context.fanout.close();
+    context.core.begin_shutdown();
+    drain.join().expect("the drain thread joined");
+}
+
+#[test]
+fn a_subscribed_client_receives_the_events_the_core_publishes() {
+    // **F-5 end to end on Windows.** "All state changes arrive as events on
+    // exactly one totally ordered stream per instance" — and until M-12's work
+    // that stream stopped inside the core, because nothing read it.
+    let env = env();
+    let adapter = Arc::new(MockAdapter::new(&MockOptions::default()));
+    let context = context(&env, &adapter);
+    let drain = spawn_drain(&context);
+
+    block_on(async {
+        let (client_side, mut server_side) = tokio::io::duplex(64 * 1024);
+        let served = tokio::spawn({
+            let context = Arc::clone(&context);
+            async move { server::serve(context, operator(), &mut server_side).await }
+        });
+
+        let mut client =
+            Client::attach_subscribed(client_side, "gui", "0.1.0", &cli_scopes(), &all_topics())
+                .await
+                .expect("the attach succeeds");
+
+        // A transition the core publishes on its own, with MI-18's actor.
+        // `Default::default()`: this shell has no `twinvpn-schema` dependency
+        // and must not acquire one (CB-2).
+        #[allow(clippy::default_trait_access)]
+        context
+            .core
+            .publish_transition(Default::default(), Some("dana".to_owned()));
+
+        let frame = client.next_event().await.expect("an event arrives");
+        let twinvpn_mgmt::Body::Event(event) = frame.body else {
+            panic!("an event, not a marker")
+        };
+        assert_eq!(event.topic, "transition");
+        // **MI-18.** "The tunnel went down" and "Dana took the tunnel down" are
+        // different facts, and the attribution survives the whole path: core,
+        // drain, fan-out, envelope, socket, client.
+        assert_eq!(event.actor_principal.as_deref(), Some("dana"));
+
+        drop(client);
+        let _ = served.await.expect("the task joined");
+    });
+
+    stop(&context, drain);
+}
+
+#[test]
+fn an_unsubscribed_client_is_not_sent_events_it_did_not_ask_for() {
+    // The other half: §11.10 has no wildcard, so a client that named no topic
+    // is on no stream. Without this, "subscribed" would not be a state.
+    let env = env();
+    let adapter = Arc::new(MockAdapter::new(&MockOptions::default()));
+    let context = context(&env, &adapter);
+    let drain = spawn_drain(&context);
+
+    block_on(async {
+        let (client_side, mut server_side) = tokio::io::duplex(64 * 1024);
+        let served = tokio::spawn({
+            let context = Arc::clone(&context);
+            async move { server::serve(context, operator(), &mut server_side).await }
+        });
+        let mut client = Client::attach(client_side, "cli", "0.1.0", &cli_scopes())
+            .await
+            .expect("attaches");
+
+        #[allow(clippy::default_trait_access)]
+        context.core.publish_transition(Default::default(), None);
+
+        // The subscriber count is the fact itself rather than a proxy for it.
+        let _ = client.call("version.get", Vec::new(), None, Vec::new()).await;
+        assert_eq!(
+            context.fanout.subscriber_count(),
+            0,
+            "a client that named no topic is on no stream"
+        );
+
+        drop(client);
+        let _ = served.await.expect("the task joined");
+    });
+
+    stop(&context, drain);
+}
+
+#[test]
+fn a_submitted_command_answers_with_the_body_the_core_published() {
+    // Every `Response.result` on this platform was `Vec::new()`. `Core::submit`
+    // publishes the outcome as a `command.completed` event before it returns
+    // `Ok(())`, so a service that never drained the stream threw the answer away
+    // and reported `ok: true` with nothing in it.
+    let env = env();
+    let adapter = Arc::new(MockAdapter::new(&MockOptions::default()));
+    let context = context(&env, &adapter);
+    let drain = spawn_drain(&context);
+
+    block_on(async {
+        let (client_side, mut server_side) = tokio::io::duplex(64 * 1024);
+        let served = tokio::spawn({
+            let context = Arc::clone(&context);
+            async move { server::serve(context, operator(), &mut server_side).await }
+        });
+        let mut client = Client::attach(client_side, "cli", "0.1.0", &cli_scopes())
+            .await
+            .expect("attaches");
+
+        let response = client
+            .call("status.get", Vec::new(), None, Vec::new())
+            .await
+            .expect("status.get is implemented and permitted");
+        assert!(response.ok);
+        assert!(
+            !response.result.is_empty(),
+            "the core published a body and the service must forward it, not drop it"
+        );
+
+        drop(client);
+        let _ = served.await.expect("the task joined");
+    });
+
+    stop(&context, drain);
+}
+
+#[test]
+fn event_resync_answers_with_a_snapshot_instead_of_refusing() {
+    // It returned `MGMT.STREAM_COMPACTED` unconditionally, with a comment
+    // saying "this build has no subscribed-topic snapshot to take" — true, and
+    // the visible end of M-12.
+    let env = env();
+    let adapter = Arc::new(MockAdapter::new(&MockOptions::default()));
+    let context = context(&env, &adapter);
+    let drain = spawn_drain(&context);
+
+    block_on(async {
+        let (client_side, mut server_side) = tokio::io::duplex(64 * 1024);
+        let served = tokio::spawn({
+            let context = Arc::clone(&context);
+            async move { server::serve(context, operator(), &mut server_side).await }
+        });
+        let mut client =
+            Client::attach_subscribed(client_side, "gui", "0.1.0", &cli_scopes(), &all_topics())
+                .await
+                .expect("attaches");
+
+        #[allow(clippy::default_trait_access)]
+        context.core.publish_transition(Default::default(), None);
+        // Consume it, so the snapshot rather than the live stream is what
+        // answers below.
+        let _ = client.next_event().await.expect("the live event");
+
+        let response = client
+            .call("event.resync", Vec::new(), None, Vec::new())
+            .await
+            .expect("a subscribed client may resync");
+        assert!(response.ok, "no longer an unconditional refusal");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.result).expect("the snapshot is JSON");
+        assert!(
+            body["cursor"].as_u64().expect("a cursor") >= 1,
+            "MI-9's cursor is assigned inside the snapshot's lock"
+        );
+        assert!(
+            body["rows"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .any(|r| r["topic"] == "transition"),
+            "the latest event on each topic that has one"
+        );
+
+        drop(client);
+        let _ = served.await.expect("the task joined");
+    });
+
+    stop(&context, drain);
+}
+
+#[test]
+fn an_unsubscribed_resync_is_refused_by_its_own_name() {
+    // MI-9a: "the stream dropped events, resnapshot" and "your cursor cannot be
+    // serviced" are different recoveries. They were the same code until
+    // `registry_version` 2 registered `MGMT.RESYNC_REQUIRED` — X-1 called this
+    // pair the worst of the sixteen substitutions.
+    let env = env();
+    let adapter = Arc::new(MockAdapter::new(&MockOptions::default()));
+    let context = context(&env, &adapter);
+
+    block_on(async {
+        let (client_side, mut server_side) = tokio::io::duplex(64 * 1024);
+        let served = tokio::spawn({
+            let context = Arc::clone(&context);
+            async move { server::serve(context, operator(), &mut server_side).await }
+        });
+        let mut client = Client::attach(client_side, "cli", "0.1.0", &cli_scopes())
+            .await
+            .expect("attaches");
+
+        let refused = client
+            .call("event.resync", Vec::new(), None, Vec::new())
+            .await
+            .expect_err("a client on no stream has no gap to recover from");
+        let twinvpnsvc::mi::ClientError::Failed(diagnostic) = refused else {
+            panic!("a typed failure, not a transport error: {refused:?}")
+        };
+        assert_eq!(diagnostic.reason_code, "MGMT.RESYNC_REQUIRED");
+        assert_ne!(
+            diagnostic.reason_code, "MGMT.STREAM_COMPACTED",
+            "MI-9a's two conditions must stay two codes"
+        );
+
+        drop(client);
+        let _ = served.await.expect("the task joined");
+    });
+}
+
+#[test]
+fn ps3_still_holds_with_a_stream_attached() {
+    // The regression the whole of M-12's work could plausibly cause. PS-3: "Loss
+    // of the last management client MUST NOT change `session_intent`,
+    // enforcement mode, the installed rule set, or any `ConnectionState`." A
+    // subscriber is a queue, and unsubscribing removes a queue.
+    let env = env();
+    let adapter = Arc::new(MockAdapter::new(&MockOptions::default()));
+    let context = context(&env, &adapter);
+    let drain = spawn_drain(&context);
+
+    block_on(async {
+        let (client_side, mut server_side) = tokio::io::duplex(64 * 1024);
+        let served = tokio::spawn({
+            let context = Arc::clone(&context);
+            async move { server::serve(context, operator(), &mut server_side).await }
+        });
+        let client =
+            Client::attach_subscribed(client_side, "gui", "0.1.0", &cli_scopes(), &all_topics())
+                .await
+                .expect("attaches");
+        let generation = context.core.generation();
+
+        drop(client);
+        let _ = served.await.expect("the task joined");
+
+        assert_eq!(
+            context.fanout.subscriber_count(),
+            0,
+            "the queue is released"
+        );
+        assert_eq!(
+            context.core.generation(),
+            generation,
+            "and nothing else changed"
+        );
+        assert!(!context.core.is_poisoned());
+    });
+
+    stop(&context, drain);
 }

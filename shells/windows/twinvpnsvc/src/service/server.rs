@@ -92,6 +92,13 @@ pub struct ServerContext {
     /// `Core` is `Sync` because its interior state sits behind locks — so F-6 is
     /// a rule this shell has to keep, and this is where it keeps it.
     pub submission: Arc<tokio::sync::Mutex<()>>,
+    /// **§11.10's event stream.** One drain, N connections.
+    ///
+    /// Absent until `ownership.md` §10.8 **M-1**'s work: this service built a
+    /// core and never called `next_event`, so no client was ever told that
+    /// anything changed and every `Response.result` was empty. See
+    /// [`super::events`].
+    pub fanout: Arc<super::events::Fanout>,
 }
 
 impl ServerContext {
@@ -131,7 +138,7 @@ where
     // the kernel attested — never cached across attaches (S-44), because a
     // group membership change must take effect on the next attach.
     let held = principal.scopes(&context.sids);
-    let Some(granted) = negotiate(&context, stream, &held).await? else {
+    let Some((granted, wants_events)) = negotiate(&context, stream, &held).await? else {
         return Ok(());
     };
 
@@ -144,8 +151,62 @@ where
         "a management client attached"
     );
 
+    // §11.10's stream, if the client asked for it and holds `mgmt.events`.
+    //
+    // Registering the subscriber **at attach** rather than at the first
+    // published event is what makes "attached and has missed nothing" a real
+    // state: a subscriber registered later would silently start from a cursor
+    // the client never saw.
+    let subscription = (wants_events && granted.holds(Scope::Events))
+        .then(|| context.fanout.subscribe(twinvpn_mgmt::SUBSCRIBER_WATERMARK));
+
+    // Split, so the pump can write while the request loop is blocked in a read.
+    // Both halves are borrowed rather than owned, so neither needs `'static` and
+    // the whole thing still runs over `tokio::io::duplex` in a host test.
+    let (mut reader, writer) = tokio::io::split(stream);
+    let writer = Arc::new(tokio::sync::Mutex::new(writer));
+
+    let outcome = match subscription {
+        None => {
+            request_loop(&context, &principal, &granted, None, &mut reader, &writer).await
+        }
+        // **`select!` over the two LOOPS, never over `read_frame` itself.**
+        // Selecting on an individual read would drop bytes it had already
+        // buffered every time the other arm fired, and the other arm fires on
+        // every published event. Selecting over the loops cancels a read only
+        // when the pump has ended, which happens on a write failure or at
+        // shutdown — both of which are tearing this connection down anyway.
+        Some(id) => tokio::select! {
+            outcome = request_loop(
+                &context, &principal, &granted, subscription, &mut reader, &writer,
+            ) => outcome,
+            () = pump_events(&context, &writer, id) => Ok(()),
+        },
+    };
+
+    // PS-3: the only teardown is a queue. No `session_intent`, no enforcement
+    // mode, no installed rule set, no `ConnectionState`.
+    if let Some(id) = subscription {
+        context.fanout.unsubscribe(id);
+    }
+    outcome
+}
+
+/// The client → agent direction.
+async fn request_loop<R, W>(
+    context: &Arc<ServerContext>,
+    principal: &Principal,
+    granted: &Scopes,
+    subscription: Option<u64>,
+    reader: &mut R,
+    writer: &Arc<tokio::sync::Mutex<W>>,
+) -> Result<(), TransportError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     loop {
-        let request = match read_frame(stream).await {
+        let request = match read_frame(reader).await {
             Ok(envelope) => envelope,
             Err(TransportError::Closed) => {
                 // PS-3 and LC-20, made visible: the client going away is an
@@ -168,7 +229,7 @@ where
                         false,
                     )),
                 );
-                let _ = write_frame(stream, &reject).await;
+                let _ = write_frame(&mut *writer.lock().await, &reject).await;
                 return Err(error);
             }
         };
@@ -185,12 +246,14 @@ where
                     false,
                 )),
             );
-            write_frame(stream, &reject).await?;
+            write_frame(&mut *writer.lock().await, &reject).await?;
             return Ok(());
         }
 
         let response = match request.body {
-            Body::Request(ref call) => dispatch(&context, &principal, &granted, call).await,
+            Body::Request(ref call) => {
+                dispatch(context, principal, granted, subscription, call).await
+            }
             Body::Goodbye => return Ok(()),
             // A second `Hello` on one connection: §11.7 fixes the version "for
             // the life of the connection", so there is nothing to renegotiate,
@@ -201,7 +264,44 @@ where
 
         let mut reply = envelope(context.as_of_ms(), Body::Response(response));
         reply.correlation_id = request.request_id;
-        write_frame(stream, &reply).await?;
+        write_frame(&mut *writer.lock().await, &reply).await?;
+    }
+}
+
+/// The agent → client direction: §11.10's ordered event stream.
+///
+/// Ends when a write fails — which is what a closed peer looks like — or when
+/// the fan-out closes during shutdown.
+async fn pump_events<W>(context: &Arc<ServerContext>, writer: &Arc<tokio::sync::Mutex<W>>, id: u64)
+where
+    W: AsyncWrite + Unpin,
+{
+    loop {
+        // Drain everything queued before waiting again, so a burst costs one
+        // wake rather than one wake per event.
+        while let Some(delivery) = context.fanout.next_for(id) {
+            let body = match delivery {
+                super::events::Delivery::Event { seq, event } => {
+                    let mut framed = envelope(context.as_of_ms(), Body::Event(event));
+                    // MI-16: the core's own sequence number, carried unchanged.
+                    // A contiguous `seq` proves no event was lost.
+                    framed.seq = seq;
+                    framed
+                }
+                // MI-19's ordered gap marker, in the stream position the gap
+                // occupied.
+                super::events::Delivery::Compacted(marker) => {
+                    envelope(context.as_of_ms(), Body::Compacted(marker))
+                }
+            };
+            if write_frame(&mut *writer.lock().await, &body).await.is_err() {
+                return;
+            }
+        }
+        if context.fanout.is_closed() {
+            return;
+        }
+        context.fanout.wait().await;
     }
 }
 
@@ -212,7 +312,7 @@ async fn negotiate<S>(
     context: &ServerContext,
     stream: &mut S,
     held: &Scopes,
-) -> Result<Option<Scopes>, TransportError>
+) -> Result<Option<(Scopes, bool)>, TransportError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -221,6 +321,7 @@ where
         mi_version_min,
         mi_version_max,
         requested_scopes,
+        subscribe_topics,
         ..
     }) = hello.body
     else {
@@ -271,13 +372,22 @@ where
         withheld_scopes: withheld,
         // §11.7: "The catalogue, not the version, is the capability contract."
         catalogue_digest: twinvpn_mgmt::catalogue_digest_text(),
-        event_cursor: context.core.generation(),
+        // The fan-out's cursor, not `Core::generation()`. They answer
+        // different questions: a generation counts CONFIGURATION epochs, and
+        // MI-9's cursor is a position on the EVENT STREAM. A client that
+        // resynced from a generation would be asking for events from a number
+        // that never indexed one.
+        event_cursor: context.fanout.cursor(),
         protocol_epoch_range: epoch_range(),
         platform_ctx: context.platform_ctx.clone(),
     };
     let reply = envelope(context.as_of_ms(), Body::HelloAck(Box::new(ack)));
     write_frame(stream, &reply).await?;
-    Ok(Some(granted))
+    // An EMPTY topic list is "no stream", not "every topic": a client that
+    // wants events names them, and §11.10 has no wildcard. Any named topic
+    // subscribes to the stream — per-topic filtering is a client concern, and
+    // filtering here would make the agent the author of what a client sees.
+    Ok(Some((granted, !subscribe_topics.is_empty())))
 }
 
 /// VR-3's epoch **table**, read from the core rather than inferred.
@@ -294,11 +404,12 @@ async fn dispatch(
     context: &ServerContext,
     principal: &Principal,
     granted: &Scopes,
+    subscription: Option<u64>,
     call: &Request,
 ) -> Response {
     // MI-21's set, which has no core counterpart because each is about THE
     // CONNECTION. Answered here and never submitted.
-    if let Some(response) = transport_op(granted, &call.operation) {
+    if let Some(response) = transport_op(&context.fanout, granted, subscription, &call.operation) {
         return response;
     }
 
@@ -354,33 +465,93 @@ async fn dispatch(
     // Off the reactor, and one at a time. `Core::submit` is non-blocking at the
     // ABI (F-5) but the executor beneath it is not, and the F-6 lock is held
     // across the call so exactly one thread holds the core for mutation (S-47).
+    //
+    // **The registration goes in BEFORE the submission, under the same lock.**
+    // `Core::submit` publishes the operation's outcome as a `command.completed`
+    // event *synchronously, before returning `Ok(())`* — the result is not
+    // returned, it is published, and the drain is the only reader of that
+    // stream. A dispatcher that peeked at the queue would either race the drain
+    // or steal the event from it. `since` is the cursor read before the
+    // submission, so a completion still queued from an earlier call of the same
+    // operation is below it and is skipped by sequence number.
+    //
+    // Until M-1's work this whole block returned `Vec::new()` on success: every
+    // `status.get` answered `ok: true` with an empty body, because nothing
+    // drained the stream the answer was published on.
     let core = Arc::clone(&context.core);
     let guard = context.submission.lock().await;
+    let since = context.fanout.cursor();
+    let (registration, completion) = context.fanout.expect_completion(op.name(), since);
     let submitted = tokio::task::spawn_blocking(move || core.submit(&submission)).await;
     drop(guard);
 
     let Ok(submitted) = submitted else {
+        context.fanout.cancel_completion(registration);
         return failure("INTERNAL.UNEXPECTED_STATE", "FATAL", "CRITICAL", false);
     };
 
     match submitted {
         Ok(()) => Response {
             ok: true,
-            result: Vec::new(),
+            // There is no timeout on this wait and none is needed: `submit`
+            // returned `Ok`, so the event exists in the core's queue and the
+            // drain will reach it. A rejection, a gap that consumed it, and a
+            // shutdown each settle it too, so there is no path on which this
+            // await is abandoned. A dropped sender — which is what a closed
+            // fan-out looks like — resolves to an honest empty body rather than
+            // hanging the connection.
+            result: completion.await.unwrap_or_default(),
             diagnostic: None,
             committed_at_net_seq: None,
         },
-        Err(rejected) => Response {
-            ok: false,
-            result: Vec::new(),
-            diagnostic: Some(from_core(&rejected)),
-            committed_at_net_seq: None,
-        },
+        Err(rejected) => {
+            // Rejected before it could publish anything, so the registration
+            // would otherwise sit and match some later, unrelated call of the
+            // same operation.
+            context.fanout.cancel_completion(registration);
+            Response {
+                ok: false,
+                result: Vec::new(),
+                diagnostic: Some(from_core(&rejected)),
+                committed_at_net_seq: None,
+            }
+        }
+    }
+}
+
+/// `event.resync`'s body: the cursor, and the latest event per topic.
+///
+/// The same shape `shells/linux` serves, because MI-20's "one contract, two
+/// carriages" does not stop at the envelope — a client that could parse a
+/// resync on one platform and not the other would have two contracts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ResyncBody {
+    /// The stream position this snapshot is current as of.
+    ///
+    /// A client compares it against the cursor it last saw: equal means it has
+    /// missed nothing, greater means it has, and that comparison is the whole
+    /// reason the cursor is assigned inside the snapshot's lock.
+    pub cursor: u64,
+    /// The latest event on each topic that has one, in `TOPICS` order.
+    pub rows: Vec<crate::mi::wire::Event>,
+}
+
+impl From<super::events::Snapshot> for ResyncBody {
+    fn from(snapshot: super::events::Snapshot) -> Self {
+        Self {
+            cursor: snapshot.cursor,
+            rows: snapshot.rows.into_iter().map(|(_, event)| event).collect(),
+        }
     }
 }
 
 /// MI-21's closed set.
-fn transport_op(granted: &Scopes, operation: &str) -> Option<Response> {
+fn transport_op(
+    fanout: &super::events::Fanout,
+    granted: &Scopes,
+    subscription: Option<u64>,
+    operation: &str,
+) -> Option<Response> {
     // `version.get` is deliberately in BOTH sets: MI-21 splits that one
     // operation across the layers by name, and the MI half rides in the
     // `HelloAck` the client already has.
@@ -411,11 +582,55 @@ fn transport_op(granted: &Scopes, operation: &str) -> Option<Response> {
                 )
             }
         }
-        // MI-9 requires the snapshot to be taken under the agent's state lock
-        // with the cursor assigned INSIDE it. This build has no subscribed-topic
-        // snapshot to take, so it refuses rather than returning an empty
-        // snapshot a client would read as current truth — MI-9a's whole point.
-        TransportOp::EventResync => failure("MGMT.STREAM_COMPACTED", "TRANSIENT", "INFO", true),
+        // MI-9: the snapshot is taken under the agent's state lock with the
+        // cursor assigned INSIDE it, and `Fanout::resync` is that one lock.
+        //
+        // This used to refuse unconditionally — `MGMT.STREAM_COMPACTED`, always
+        // — with the comment *"this build has no subscribed-topic snapshot to
+        // take"*, which was true and was the visible end of M-1: nothing
+        // drained the core's stream, so there was never anything to snapshot.
+        //
+        // An empty `rows` is now a truthful answer and is distinguishable from a
+        // refusal: it means the agent has published nothing on any topic since
+        // it started, which is current truth on a freshly-started service. What
+        // MI-9a forbids is an empty snapshot that hides a GAP, and the cursor
+        // beside it is what tells a client whether one occurred.
+        TransportOp::EventResync => {
+            if !granted.holds(Scope::Events) {
+                return Some(failure(
+                    super::start::emitted_for("PLATFORM.PRIV.CLIENT_UNAUTHORIZED"),
+                    "POLICY",
+                    "ERROR",
+                    true,
+                ));
+            }
+            // A client that never subscribed has no gap to recover from, and
+            // answering with a snapshot would invite it to believe it is on a
+            // stream it never joined.
+            // `MGMT.RESYNC_REQUIRED` is what ADR-0017 spells here, and as of
+            // `registry_version` 2 it is emitted under its own name — it used
+            // to collapse onto `MGMT.STREAM_COMPACTED`, which made MI-9a's two
+            // conditions indistinguishable at exactly the point a client must
+            // tell them apart.
+            let Some(id) = subscription else {
+                return Some(failure(
+                    twinvpn_mgmt::codes::resync_required().as_str(),
+                    "PERSISTENT",
+                    "ERROR",
+                    true,
+                ));
+            };
+            let snapshot = fanout.resync(id);
+            match serde_json::to_vec(&ResyncBody::from(snapshot)) {
+                Ok(result) => Response {
+                    ok: true,
+                    result,
+                    diagnostic: None,
+                    committed_at_net_seq: None,
+                },
+                Err(_) => failure("INTERNAL.UNEXPECTED_STATE", "FATAL", "CRITICAL", false),
+            }
+        }
         TransportOp::Hello => failure("PROTO.UNPARSEABLE_ENVELOPE", "PERSISTENT", "ERROR", false),
         TransportOp::VersionGetMiHalf => unreachable!("filtered above"),
     })
@@ -606,20 +821,23 @@ mod tests {
 
     #[test]
     fn the_transport_set_is_mi21s_closed_four_less_the_split_version_get() {
+        let fanout = super::super::events::Fanout::new();
         let granted = Scopes::from_scopes([Scope::Status]);
-        assert!(transport_op(&granted, "mi.catalogue.get").is_some());
-        assert!(transport_op(&granted, "event.resync").is_some());
+        assert!(transport_op(&fanout, &granted, None, "mi.catalogue.get").is_some());
+        assert!(transport_op(&fanout, &granted, None, "event.resync").is_some());
         // `version.get` falls through to the core: MI-21 splits it by name and
         // the MI half rides in the `HelloAck` the client already has.
-        assert!(transport_op(&granted, "version.get").is_none());
-        assert!(transport_op(&granted, "status.get").is_none());
+        assert!(transport_op(&fanout, &granted, None, "version.get").is_none());
+        assert!(transport_op(&fanout, &granted, None, "status.get").is_none());
         twinvpn_mgmt::assert_closed().expect("MI-21 holds");
     }
 
     #[test]
     fn the_catalogue_needs_a_scope_and_is_refused_without_one() {
+        let fanout = super::super::events::Fanout::new();
         let nothing = Scopes::empty();
-        let refused = transport_op(&nothing, "mi.catalogue.get").expect("answered");
+        let refused =
+            transport_op(&fanout, &nothing, None, "mi.catalogue.get").expect("answered");
         assert!(!refused.ok);
         assert_eq!(
             refused.diagnostic.expect("named").reason_code,

@@ -15,7 +15,7 @@
 //! | Module | Job | Authority |
 //! |---|---|---|
 //! | [`tier`] | which of the three tiers a record is for, and what that implies | §11.1, §11.4 |
-//! | [`redact`] | emitter-side classification and per-bundle pseudonymization | §11.4, O-14 |
+//! | [`redact()`] | emitter-side classification and per-bundle pseudonymization | §11.4, O-14 |
 //! | [`ring`] | the bounded, always-on Tier-0 ledger, whose drops are reported | §11.1, `INTERNAL.BUFFER_OVERFLOW` |
 //! | [`event`] | the fourteen **local, device-authoritative** session events | contract-matrix §4.4 |
 //! | [`resolve`] | code + evidence + locale + platform → sentences and attributes | CB-4, F-10, LT-3 |

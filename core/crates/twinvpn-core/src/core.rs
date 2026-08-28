@@ -335,7 +335,7 @@ impl Core {
     /// **refused by name** — never a false success.
     ///
     /// **16 of the 47 catalogue operations execute; 31 are refused**, each with
-    /// a registered code and a stated reason ([`unimplemented`]). An operation
+    /// a registered code and a stated reason ([`unimplemented()`]). An operation
     /// that reports success with zero observable effects is itself reported as
     /// `INTERNAL.INVARIANT_VIOLATED`.
     ///

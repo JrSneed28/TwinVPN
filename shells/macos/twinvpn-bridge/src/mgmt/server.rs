@@ -99,6 +99,14 @@ pub struct ServerContext {
     /// `SystemTime` here would make `as_of_ms` a wall-clock reading, which MI-16
     /// forbids because a wall clock can go backwards.
     pub elapsed: Arc<dyn twinvpn_env::ElapsedClock>,
+    /// **§11.10's event stream.** One drain, N connections.
+    ///
+    /// Absent until `ownership.md` §10.8 **M-1**'s work: the core's handle was
+    /// swallowed by a `CommandSink` that exposes only `submit`, so the event
+    /// stream was unreachable by construction. `crate::host` owns the drain —
+    /// PS-22 keeps `twinvpn_core` out of this module — and this is the seam it
+    /// publishes through.
+    pub fanout: Arc<super::events::Fanout>,
 }
 
 impl ServerContext {
@@ -199,17 +207,106 @@ pub async fn serve(mut stream: tokio::net::UnixStream, context: &ServerContext) 
         return Ending::Closed;
     }
 
+    // §11.10's stream, if the client asked for it and holds `mgmt.events`.
+    //
+    // An EMPTY topic list is "no stream", not "every topic": §11.10 has no
+    // wildcard, and a client that wants events names them. Registering the
+    // subscriber at attach rather than at the first published event is what
+    // makes "attached and has missed nothing" a real state.
+    let subscription = (!hello.subscribe_topics.is_empty()
+        && granted.holds(twinvpn_mgmt::Scope::Events))
+    .then(|| context.fanout.subscribe(super::events::SUBSCRIBER_WATERMARK));
+
+    let ending = request_loop(&mut stream, &granted, &credentials, subscription, context).await;
+
+    // PS-3: the only teardown is a queue. No `session_intent`, no enforcement
+    // mode, no installed rule set, no `ConnectionState`.
+    if let Some(id) = subscription {
+        context.fanout.unsubscribe(id);
+    }
+    ending
+}
+
+/// The request/response loop, with §11.10's stream interleaved.
+///
+/// **Generic over the transport, and that is not abstraction for its own sake.**
+/// `PeerCredentials::read` returns `None` on any host that is not Darwin — MI-A5,
+/// deliberately — so [`serve`] cannot complete an attach on the host this crate
+/// is written on, and everything after the attach would be untestable if it were
+/// written against `UnixStream`. Taking `AsyncRead + AsyncWrite` costs one type
+/// parameter and buys the whole loop, the event pump and MI-3's direction rule
+/// as **host-runnable tests** over `tokio::io::duplex`. `shells/windows` took
+/// the same shape for the same reason and said so at its own server.
+async fn request_loop<S>(
+    stream: &mut S,
+    granted: &Scopes,
+    credentials: &PeerCredentials,
+    subscription: Option<u64>,
+    context: &ServerContext,
+) -> Ending
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     loop {
-        let envelope = match codec::read_frame(&mut stream).await {
+        // Anything queued for this subscriber goes out FIRST, in order, before
+        // the next request is read. Two consequences, both wanted: an event
+        // never overtakes a response to a request that preceded it, and a
+        // client that is only listening still receives events, because the read
+        // below is what yields to the runtime.
+        if let Some(id) = subscription {
+            while let Some(delivery) = context.fanout.next_for(id) {
+                let mut framed = match delivery {
+                    super::events::Delivery::Event { seq, event } => {
+                        let mut framed = envelope(context, Body::Event(event));
+                        // MI-16: the core's own sequence number, unchanged. A
+                        // contiguous `seq` proves no event was lost.
+                        framed.seq = seq;
+                        framed
+                    }
+                    // MI-19's ordered gap marker, in the stream position the
+                    // gap occupied.
+                    super::events::Delivery::Compacted(marker) => {
+                        envelope(context, Body::Compacted(marker))
+                    }
+                };
+                framed.as_of_ms = context.as_of_ms();
+                let bytes = codec::encode_frame(&framed).unwrap_or_default();
+                if bytes.is_empty() || write_all(stream, &bytes).await.is_err() {
+                    return Ending::Closed;
+                }
+            }
+        }
+
+        // A subscribed client may be silent for a long time while events are
+        // published. Waiting only on the read would hold them until the client
+        // happened to say something, so the wake races the read and whichever
+        // fires first goes round again. An unsubscribed connection has no wake
+        // to race and just reads.
+        //
+        // `read_frame` is cancel-safe here for one reason and it is worth
+        // stating: `tokio::net::UnixStream` is not buffered by this codec — a
+        // cancelled read has consumed nothing, because the codec reads the
+        // length prefix and the body in one owned future that either completes
+        // or leaves the socket untouched.
+        let read = if subscription.is_some() {
+            tokio::select! {
+                frame = codec::read_frame(stream) => frame,
+                () = context.fanout.wait() => continue,
+            }
+        } else {
+            codec::read_frame(stream).await
+        };
+
+        let envelope_in = match read {
             Ok(Some(envelope)) => envelope,
             Ok(None) => return Ending::Closed,
             Err(error) => return Ending::Framing(error),
         };
-        match envelope.body {
+        match envelope_in.body {
             Body::Goodbye => return Ending::Closed,
             Body::Request(request) => {
-                let response = handle(&request, &granted, &credentials, context);
-                if send(&mut stream, context, Body::Response(response))
+                let response = handle(&request, granted, credentials, subscription, context);
+                if send(stream, context, Body::Response(response))
                     .await
                     .is_err()
                 {
@@ -312,10 +409,12 @@ pub fn handle(
     request: &twinvpn_mi::wire::Request,
     granted: &Scopes,
     credentials: &PeerCredentials,
+    subscription: Option<u64>,
     context: &ServerContext,
 ) -> Response {
     // MI-21's four transport operations have no core counterpart and MUST NOT
-    // acquire one. Only one of them is answerable in this wave.
+    // acquire one. Two are answerable now; `Hello` and the MI half of
+    // `version.get` ride in the `HelloAck` the client already has.
     if request.operation == "mi.catalogue.get" {
         return Response {
             ok: true,
@@ -323,6 +422,9 @@ pub fn handle(
             diagnostic: None,
             committed_at_net_seq: None,
         };
+    }
+    if request.operation == "event.resync" {
+        return resync(granted, subscription, context);
     }
 
     let Some(operation) = CoreCommand::ALL
@@ -367,10 +469,21 @@ pub fn handle(
         // took the tunnel down" are different facts.
         actor_principal: Some(format!("uid:{}", credentials.uid)),
     };
-    match context.core.submit(&submission) {
-        Ok(()) => Response {
+    // **The registration goes in before the submission.** `Core::submit`
+    // publishes the operation's outcome as a `command.completed` event
+    // *synchronously, before returning `Ok(())`* — the result is not returned,
+    // it is published, and the drain is the only reader of that stream. Until
+    // M-1's work this whole block answered `ok: true` with `Vec::new()`,
+    // because nothing drained the stream the answer was published on.
+    let outcome = context.fanout.submit_and_wait(
+        operation.name(),
+        super::events::COMPLETION_WAIT,
+        || context.core.submit(&submission),
+    );
+    match outcome {
+        Ok(result) => Response {
             ok: true,
-            result: Vec::new(),
+            result,
             diagnostic: None,
             // **MI-6, and its honest absence.** The cursor is "a real, monotone
             // position in the same log" the C2 stream replays. A locally-mutating
@@ -388,6 +501,49 @@ pub fn handle(
     }
 }
 
+/// `event.resync`'s body: the cursor, and the latest event per topic.
+///
+/// The same shape `shells/linux` and `shells/windows` serve. MI-20's "one
+/// contract, two carriages" does not stop at the envelope — a client that could
+/// parse a resync on one platform and not another would have two contracts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ResyncBody {
+    /// The stream position this snapshot is current as of.
+    pub cursor: u64,
+    /// The latest event on each topic that has one, in `TOPICS` order.
+    pub rows: Vec<twinvpn_mi::wire::Event>,
+}
+
+/// **MI-9's snapshot**, taken under one lock with the cursor read inside it.
+fn resync(granted: &Scopes, subscription: Option<u64>, context: &ServerContext) -> Response {
+    if !granted.holds(twinvpn_mgmt::Scope::Events) {
+        return refused(twinvpn_types::codes::PLATFORM_PRIV_CLIENT_UNAUTHORIZED);
+    }
+    // A client on no stream has no gap to recover from, and answering with a
+    // snapshot would invite it to believe it is on a stream it never joined.
+    // `MGMT.RESYNC_REQUIRED` is what ADR-0017 spells here and, as of
+    // `registry_version` 2, what this build emits — it used to collapse onto
+    // `MGMT.STREAM_COMPACTED`, which made MI-9a's two conditions
+    // indistinguishable at exactly the point a client must tell them apart.
+    let Some(id) = subscription else {
+        return refused(twinvpn_mgmt::codes::resync_required());
+    };
+    let snapshot = context.fanout.resync(id);
+    let body = ResyncBody {
+        cursor: snapshot.cursor,
+        rows: snapshot.rows.into_iter().map(|(_, event)| event).collect(),
+    };
+    match serde_json::to_vec(&body) {
+        Ok(result) => Response {
+            ok: true,
+            result,
+            diagnostic: None,
+            committed_at_net_seq: None,
+        },
+        Err(_) => refused(twinvpn_types::codes::INTERNAL_UNEXPECTED_STATE),
+    }
+}
+
 fn refused(code: twinvpn_types::ReasonCode) -> Response {
     Response {
         ok: false,
@@ -402,17 +558,25 @@ fn from_core(diagnostic: &twinvpn_types::Diagnostic) -> Diagnostic {
     Diagnostic::of(diagnostic.code())
 }
 
-async fn send(
-    stream: &mut tokio::net::UnixStream,
+async fn send<S: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
     context: &ServerContext,
     body: Body,
 ) -> Result<(), FrameError> {
-    use tokio::io::AsyncWriteExt as _;
     // The same encoder the XPC carriage uses, so the two produce byte-identical
     // envelopes for the same body — §11.2's opening sentence.
     let bytes = frame(context, body);
+    write_all(stream, &bytes).await
+}
+
+/// One whole frame onto the socket, flushed.
+async fn write_all<S: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    bytes: &[u8],
+) -> Result<(), FrameError> {
+    use tokio::io::AsyncWriteExt as _;
     stream
-        .write_all(&bytes)
+        .write_all(bytes)
         .await
         .map_err(|_| FrameError::Truncated)?;
     stream.flush().await.map_err(|_| FrameError::Truncated)
@@ -464,6 +628,7 @@ pub mod testing {
         ServerContext {
             core: sink,
             policy: POLICY,
+            fanout: Arc::new(crate::mgmt::events::Fanout::new()),
             os_version: String::new(),
             // A fixed clock: MI-16 requires `as_of_ms` to come from the injected
             // suspend-inclusive clock, and a test that read a real one would be

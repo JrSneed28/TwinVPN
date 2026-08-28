@@ -27,7 +27,7 @@
 //! # The fake is not reachable from a production build
 //!
 //! [`fake`] is behind the `test-support` feature, and
-//! [`crate::WindowsPlatformAdapter::new`] constructs [`win::WindowsSystem`]
+//! `WindowsPlatformAdapter::new` constructs `win::WindowsSystem`
 //! unconditionally. There is no constructor a shell can call that would bind an
 //! in-memory enforcement engine to a real host — an "installed" ruleset that
 //! lives in a `HashMap` is exactly the belief ADR-0012 K12 forbids, and the way
@@ -118,7 +118,7 @@ pub trait RouteTable: Send + Sync {
     ///
     /// **All-or-nothing.** IP Helper has no transaction, so an implementation
     /// must undo what it managed before reporting the failure — see
-    /// [`win::ip`]'s own note on what that costs and what it cannot guarantee.
+    /// `win::ip`'s own note on what that costs and what it cannot guarantee.
     fn apply(&self, plan: &RoutePlan) -> Result<(), PlatformError>;
 
     /// The underlay's current facts.

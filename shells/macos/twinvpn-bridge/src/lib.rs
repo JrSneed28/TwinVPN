@@ -662,6 +662,38 @@ pub unsafe extern "C" fn tvb_mgmt_open(
                 )
             };
         }
+        // **X-13.** ADR-0017 §11.2's macOS row gives this carriage "XPC audit
+        // token -> `SecCodeCheckValidity` against a Team-ID-pinned code
+        // requirement", and it was not done: the token was decoded, the
+        // principal derived from it, and the client's *code signature* never
+        // checked — so any local process whose euid/egid landed in a TwinVPN
+        // group could attach, not only a Team-signed one.
+        //
+        // It is checked here, at attach, before a `SessionHandle` exists. MI-A5
+        // is the rule for what happens when it fails: close, and never
+        // substitute a default principal. `Unavailable` refuses with the rest,
+        // because O-18 makes an assertion that cannot be made fail toward
+        // UNKNOWN rather than toward trusted.
+        let verdict = crate::mgmt::codesign::check(token, configured_team_id_pin().as_ref());
+        if !verdict.admits() {
+            log::counted(CALL, "codesign_refused", 1, &CorrelationId::absent());
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::MGMT_PRINCIPAL_UNVERIFIABLE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        }
+        if verdict == crate::mgmt::codesign::Verdict::Unpinned {
+            // Not a refusal: a development build has no Team ID and must stay
+            // usable. But a SHIPPED build that reaches this has lost its pin,
+            // which is a packaging defect, so it is reported every time rather
+            // than being the quiet default.
+            log::counted(CALL, "codesign_unpinned", 1, &CorrelationId::absent());
+        }
         let session = Box::into_raw(Box::new(SessionHandle::new(token.principal())));
         // SAFETY: `out` is non-null by the branch above and writable by this
         // function's contract. Ownership passes to the caller, who releases it
@@ -828,3 +860,24 @@ pub unsafe extern "C" fn tvb_buf_free(buf: *mut TvbBuf) {
 
 #[cfg(test)]
 mod tests;
+
+/// The Team ID this build pins clients to, from `TWINVPN_MACOS_TEAM_ID` at
+/// **compile** time.
+///
+/// # Why `option_env!` and not configuration
+///
+/// A code requirement is the thing that decides whether a stranger may attach,
+/// so it must not be settable by anything the attacker could also set. A
+/// runtime environment variable is readable and writable by whoever launched
+/// the process; a build-time constant is fixed by whoever signed it, which is
+/// the same authority the requirement is about. `packaging/SIGNING.md` is where
+/// the value comes from.
+///
+/// `None` — an unsigned development build — produces
+/// [`crate::mgmt::codesign::Verdict::Unpinned`], which admits and is reported
+/// on every attach. That is deliberate: a build with no signing identity must
+/// stay usable, and a SHIPPED build that reaches it has a packaging defect the
+/// operator needs told about rather than a connection to drop silently.
+fn configured_team_id_pin() -> Option<crate::mgmt::codesign::TeamIdPin> {
+    option_env!("TWINVPN_MACOS_TEAM_ID").and_then(crate::mgmt::codesign::TeamIdPin::new)
+}

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Activity theme. Compose owns everything visible; this exists so the window
+  has a background and a status-bar treatment before the first frame, which is
+  what stops a white flash on a dark device.
+-->
+<resources>
+    <style name="Theme.TwinVPN" parent="android:Theme.Material.DayNight.NoActionBar">
+        <item name="android:windowBackground">?android:attr/colorBackground</item>
+        <item name="android:statusBarColor">?android:attr/colorBackground</item>
+        <item name="android:navigationBarColor">?android:attr/colorBackground</item>
+    </style>
+</resources>

@@ -5,30 +5,51 @@
 //! never raw internal errors"), CF-4 (no message string on the wire), ADR-0002
 //! §11.11, ADR-0009 §11, `contracts/registry/reason_codes.json`.
 //!
-//! # Two codes ADR-0008 asks for that the frozen registry does not declare
+//! # Two codes ADR-0008 asks for, and the half of them Amendment 1 registered
 //!
 //! [ADR-0008](../../../../docs/adr/ADR-0008-idempotency.md) §11.2 requires of
-//! ADR-0003 "a `precondition_failed` **and** a `duplicate_replayed` outcome in
-//! the `reason_code` registry". Neither exists: the registry's 201 codes contain
-//! no precondition-failure code in any domain, and no duplicate-replay code.
+//! **ADR-0003** — the *network* contract, which is this service's wire — "a
+//! `precondition_failed` **and** a `duplicate_replayed` outcome in the
+//! `reason_code` registry".
 //!
-//! This is the same shape as `ownership.md` §8 **W-11** — a name an ADR uses
-//! that the frozen registry does not carry — and it is dispositioned the same
-//! way, because the freeze forbids patching `contracts/`:
+//! Registry version 1 declared neither. **Amendment 1 (`registry_version` 2,
+//! 201 -> 454 codes) declared both, in the `MGMT` domain, and the registry says
+//! at `MGMT.DUPLICATE_REPLAYED` that it "supplies the *local half* of ADR-0008
+//! §11.2's `duplicate_replayed` requirement".** That is exact and it is the
+//! whole point: both new codes are
+//! [ADR-0017](../../../../docs/adr/ADR-0017-local-management-interface.md)'s,
+//! §11's MI table owns them, and they answer for the agent's **local**
+//! management interface. ADR-0008 §11.2 addresses **ADR-0003**. The remote half
+//! — a conditional-write refusal a *control-plane client* receives — is still
+//! not declared in any domain a control-plane response may carry.
 //!
-//! - `duplicate_replayed` needs no code at all. `MutationResult.idempotent_replay`
-//!   is a **success** flag on a successful response; a reason code would imply a
-//!   failure. It is emitted as the structured event ADR-0008 §10.2 asks for
+//! So the disposition below is unchanged in substance, and the reason it is
+//! unchanged has moved from "the code does not exist" to "the code that exists
+//! is the other half". Both halves are stated rather than hidden:
+//!
+//! - `duplicate_replayed` needs no code at all **here**.
+//!   `MutationResult.idempotent_replay` is a **success** flag on a successful
+//!   response; a reason code would imply a failure. It is emitted as the
+//!   structured event ADR-0008 §10.2 asks for
 //!   (`twinvpn_cp_idempotent_replay_total` plus an `INFO` line) and nothing on
 //!   the wire changes. **No defect in practice.**
-//! - `precondition_failed` has no such escape. It is mapped onto
+//! - `precondition_failed` has no such escape, and
+//!   **`MGMT.PRECONDITION_FAILED` is not the repoint the tripwire was written
+//!   to catch, for two independent reasons.** (1) Its declared evidence list is
+//!   **empty**, so `offered_epoch` and `high_water_epoch` would be attached and
+//!   then silently dropped — the exact W-6 failure mode [`carries`] exists to
+//!   prevent — leaving a client told only *"someone else changed this"* with no
+//!   version to re-read from. (2) `MGMT` on a control-plane response asserts to
+//!   a remote client that the failure came from its own local agent, which is a
+//!   worse lie than a wrong condition. It is therefore still mapped onto
 //!   [`PRECONDITION_FAILED`] = `AUTH.TRUST_EPOCH_ROLLBACK`, whose declared
 //!   evidence (`offered_epoch`, `high_water_epoch`) is exactly the pair a
-//!   precondition failure carries. The cost is real and is stated rather than
-//!   hidden: a caller cannot distinguish "you raced another writer on a device
-//!   label" from "you tried to roll the trust epoch back", and ADR-0015 §11.2's
+//!   precondition failure carries. The cost is real and unchanged: a caller
+//!   cannot distinguish "you raced another writer on a device label" from "you
+//!   tried to roll the trust epoch back", and ADR-0015 §11.2's
 //!   prefix-degradation story degrades a *consistency* failure into an *auth*
-//!   one. **Reported to the integration lead.**
+//!   one. **Still reported to the integration lead; Amendment 1 narrowed it
+//!   rather than closing it.**
 
 use twinvpn_service_common::ServiceError;
 use twinvpn_types::{codes, EvidenceValue, ReasonCode};
@@ -37,10 +58,11 @@ use crate::COMPONENT;
 
 /// ADR-0008 N-2's conditional-write refusal.
 ///
-/// See the module docs: the registry declares no `precondition_failed` code, so
-/// this is the interim mapping and it is deliberately a single named constant
-/// rather than a literal at every call site — when the registry gains the code,
-/// one line changes.
+/// See the module docs: the registry declares no `precondition_failed` code
+/// **that a control-plane response may carry** — Amendment 1 added ADR-0017's
+/// local-MI pair and nothing for ADR-0003's wire — so this is still the interim
+/// mapping, and it is deliberately a single named constant rather than a literal
+/// at every call site: when the registry gains the remote half, one line changes.
 pub const PRECONDITION_FAILED: ReasonCode = codes::AUTH_TRUST_EPOCH_ROLLBACK;
 
 /// ADR-0009 R-4's fork detector, applied at the writer.
@@ -276,22 +298,66 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_registry_still_declares_no_precondition_failure_code() {
-        // The finding this module documents. If this test starts failing, the
-        // registry gained the code ADR-0008 §11.2 asked for and
-        // `PRECONDITION_FAILED` should be repointed at it.
-        // `NET.SESSION.RETRY_PRECONDITION_MET` also contains "PRECONDITION"
-        // and is a different thing entirely, so the check is on the CONDITION
-        // segment rather than on a substring.
-        let found = twinvpn_types::ReasonCode::all().find(|c| {
+    /// Every registered code whose CONDITION segment is one of the two names
+    /// ADR-0008 §11.2 asks for.
+    ///
+    /// `NET.SESSION.RETRY_PRECONDITION_MET` also contains "PRECONDITION" and is
+    /// a different thing entirely, so the match is on the condition segment
+    /// rather than on a substring.
+    fn adr_0008_named_codes() -> impl Iterator<Item = twinvpn_types::ReasonCode> {
+        twinvpn_types::ReasonCode::all().filter(|c| {
             let condition = c.as_str().rsplit('.').next().unwrap_or("");
             condition == "PRECONDITION_FAILED" || condition == "DUPLICATE_REPLAYED"
-        });
+        })
+    }
+
+    #[test]
+    fn the_registry_still_declares_no_precondition_failure_code_for_this_wire() {
+        // The finding this module documents, NARROWED by Amendment 1 rather
+        // than closed by it.
+        //
+        // Amendment 1 registered `MGMT.PRECONDITION_FAILED` and
+        // `MGMT.DUPLICATE_REPLAYED`. Both are ADR-0017's, both answer for the
+        // agent's LOCAL management interface, and the registry says so itself
+        // at `MGMT.DUPLICATE_REPLAYED` ("the local half"). ADR-0008 §11.2
+        // addresses ADR-0003 -- this service's wire. So the tripwire is
+        // inverted rather than removed: it now fires the day a code lands in a
+        // domain a control-plane RESPONSE may actually carry, which is the day
+        // `PRECONDITION_FAILED` should be repointed.
+        let found = adr_0008_named_codes().find(|c| c.as_str().split('.').next() != Some("MGMT"));
         assert!(
             found.is_none(),
-            "the registry now declares {:?}; repoint PRECONDITION_FAILED",
+            "the registry now declares {:?} outside MGMT; repoint PRECONDITION_FAILED",
             found.map(twinvpn_types::ReasonCode::as_str)
         );
+    }
+
+    #[test]
+    fn the_mgmt_half_still_cannot_carry_the_version_pair() {
+        // The SECOND reason `MGMT.PRECONDITION_FAILED` is not the repoint, and
+        // the one that would survive even if the domain objection were waived:
+        // its registry entry declares NO evidence, so `offered_epoch` and
+        // `high_water_epoch` would be attached by the constructor and dropped
+        // by the builder -- W-6, which `carries` exists to prevent. A client
+        // would be told "someone else changed this" with no version to re-read
+        // from.
+        //
+        // If Amendment 2 gives it the pair, this fails and the domain objection
+        // becomes the only one left to argue.
+        let mgmt: Vec<_> = adr_0008_named_codes()
+            .filter(|c| c.as_str().split('.').next() == Some("MGMT"))
+            .collect();
+        assert!(
+            !mgmt.is_empty(),
+            "Amendment 1's MGMT half vanished; the module docs are now wrong"
+        );
+        for code in mgmt {
+            assert!(
+                !code.declares_evidence("offered_epoch")
+                    && !code.declares_evidence("high_water_epoch"),
+                "{} now declares the version pair; re-argue the repoint",
+                code.as_str()
+            );
+        }
     }
 }

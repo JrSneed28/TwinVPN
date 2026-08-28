@@ -85,21 +85,52 @@ pub fn substituted(specified: &str) -> Option<ReasonCode> {
 /// `MGMT.OP_UNKNOWN`, substituted.
 ///
 /// Returned when a client calls an operation absent from the catalogue. §11.7:
-/// *"**Never** a parse error, never a hang, never a generic failure."* It is a
-/// typed rejection naming the operation, which is what this discharges even
-/// though the namespace is wrong.
+/// *"**Never** a parse error, never a hang, never a generic failure."*
+///
+/// **No longer substituted.** This returned `PROTO.CAPABILITY_MISSING` while
+/// `MGMT.OP_UNKNOWN` was unregistered, which degraded *"this local interface
+/// does not have that operation"* into *"the peer protocol is wrong"* on an
+/// older client. `registry_version` 2 registered it.
 #[must_use]
 pub fn op_unknown() -> ReasonCode {
-    codes::PROTO_CAPABILITY_MISSING
+    codes::MGMT_OP_UNKNOWN
 }
 
-/// `MGMT.RESYNC_REQUIRED`, substituted. MI-9a — see the cost above.
+/// `MGMT.RESYNC_REQUIRED` — MI-9a's *"your cursor cannot be serviced"*.
+///
+/// **No longer substituted, and this was the worst of the sixteen.** It returned
+/// `MGMT.STREAM_COMPACTED`, which made MI-9a's two conditions indistinguishable
+/// at the exact point a client must tell them apart: *"the stream dropped
+/// events, resnapshot"* and *"your offered cursor is unserviceable"* are
+/// different recoveries. X-1 named this pair by name.
 #[must_use]
 pub fn resync_required() -> ReasonCode {
-    codes::MGMT_STREAM_COMPACTED
+    codes::MGMT_RESYNC_REQUIRED
 }
 
-/// `MGMT.NOT_READY` / `MGMT.SHUTTING_DOWN`, substituted.
+/// `MGMT.NOT_READY` — the agent is starting and is not yet answering.
+///
+/// **No longer substituted.** Both `MGMT.NOT_READY` and `MGMT.SHUTTING_DOWN`
+/// collapsed onto `MGMT.UNAVAILABLE`, which told a client "not now" without
+/// telling it *"try again in a moment"* or *"stop retrying, this agent is
+/// going away"*. Use [`shutting_down`] for the other direction.
+#[must_use]
+pub fn not_ready() -> ReasonCode {
+    codes::MGMT_NOT_READY
+}
+
+/// `MGMT.SHUTTING_DOWN` — the agent is going away and a retry will not help.
+#[must_use]
+pub fn shutting_down() -> ReasonCode {
+    codes::MGMT_SHUTTING_DOWN
+}
+
+/// The agent cannot be reached at all.
+///
+/// Kept distinct from [`not_ready`] and [`shutting_down`]: MI-A3 makes
+/// `MGMT.UNAVAILABLE` the answer a **client** synthesises when it connects to an
+/// absent agent, and that is a different fact from an agent that is present and
+/// declining.
 #[must_use]
 pub fn unavailable() -> ReasonCode {
     codes::MGMT_UNAVAILABLE
@@ -164,6 +195,39 @@ mod tests {
                 "{spelling} must now be emitted under its own name"
             );
         }
+    }
+
+    #[test]
+    fn no_helper_still_returns_a_substituted_code() {
+        // The residual X-1 did not catch. `SUBSTITUTIONS` was emptied and the
+        // table's tripwire inverted, but these three FUNCTIONS kept returning
+        // the codes the table used to justify — so `substituted()` answered
+        // with the right name while `resync_required()` answered with the wrong
+        // one, in the same crate.
+        //
+        // Each pair below is (what the ADR spells, what this build emits), and
+        // they must be equal.
+        for (spelling, emitted) in [
+            ("MGMT.OP_UNKNOWN", op_unknown()),
+            ("MGMT.RESYNC_REQUIRED", resync_required()),
+            ("MGMT.NOT_READY", not_ready()),
+            ("MGMT.SHUTTING_DOWN", shutting_down()),
+            ("MGMT.UNAVAILABLE", unavailable()),
+        ] {
+            assert_eq!(
+                emitted.as_str(),
+                spelling,
+                "{spelling} is registered and must be emitted under its own name"
+            );
+        }
+    }
+
+    #[test]
+    fn mi_9a_two_conditions_stay_two_codes() {
+        // The distinction the substitution destroyed: "the stream dropped
+        // events, resnapshot" and "your offered cursor is unserviceable" are
+        // different recoveries and a client must be able to tell them apart.
+        assert_ne!(resync_required(), codes::MGMT_STREAM_COMPACTED);
     }
 
     #[test]

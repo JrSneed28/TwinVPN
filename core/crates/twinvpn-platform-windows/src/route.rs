@@ -152,7 +152,7 @@ pub struct AddressRow {
     /// and now that `NetworkContract::addresses` carries it too there is nothing
     /// to convert and nothing to mask.
     ///
-    /// [`AddressPlan::validate`] still refuses a non-host overlay prefix, for the
+    /// [`RoutePlan::validate`] still refuses a non-host overlay prefix, for the
     /// unchanged reason: a contract carrying one is expressing something
     /// ADR-0010 does not allocate.
     pub address: InterfaceAddress,

@@ -36,7 +36,8 @@
 //! bound only to the C ABI cannot produce one at all (W-24).
 //!
 //! This adapter is bound as a Rust crate, so it does not have that limit.
-//! [`LinuxEnforcement::installed`] runs `nft --json list table inet twinvpn` and
+//! [`twinvpn_platform::NetworkConfig::installed_ruleset`] runs
+//! `nft --json list table inet twinvpn` and
 //! reads the posture out of **the kernel's own answer**. Nothing is cached: the
 //! reconciler's job is to notice that something else changed the rules, and a
 //! cache cannot. If the query fails the answer is an error, never a remembered
@@ -399,6 +400,24 @@ pub fn render(contract: &NetworkContract, ruleset: Ruleset, config: &Enforcement
         "    oifname != \"{overlay}\" ip daddr 169.254.0.0/16 accept"
     );
     let _ = writeln!(s, "    oifname != \"{overlay}\" ip6 daddr fe80::/10 accept");
+
+    // **X-9.** An on-link prefix inside RFC 6598 shared address space is the
+    // host's own underlay path, not its LAN: a subscriber behind CGNAT holds an
+    // address in the very `/10` AP-1 carves the overlay out of. It is accepted
+    // off the overlay UNCONDITIONALLY, because KS-4's DENY is meant to cost the
+    // user their printer and not their internet — and because the overlay's own
+    // traffic egresses the overlay interface and is untouched either way.
+    // `twinvpn_platform::on_link_is_underlay_path` carries the reasoning, once,
+    // for this adapter and `twinvpn-platform-macos` both.
+    for prefix in &config.on_link_prefixes {
+        if twinvpn_platform::on_link_is_underlay_path(*prefix) {
+            let _ = writeln!(
+                s,
+                "    oifname != \"{overlay}\" ip daddr {} accept",
+                prefix_text(*prefix)
+            );
+        }
+    }
 
     // Classes 4 and 10 — the local physical LAN and link-local multicast, which
     // follow it. On-link prefixes ONLY, both families, and only when KS-4's
@@ -836,6 +855,51 @@ mod tests {
         // Its own counter, so the per-family canary counters stay symmetric.
         assert!(script.contains("counter name \"deny_dns\" drop"));
         assert!(script.contains("counter deny_dns { }"));
+    }
+
+    #[test]
+    fn x9_a_cgnat_underlay_prefix_is_passed_even_when_ks4_denies_the_lan() {
+        // **X-9.** A subscriber behind CGNAT holds an on-link address inside the
+        // very RFC 6598 /10 the Tier-1 baseline protects. Denying it does not
+        // protect anything — the overlay's own traffic leaves by the overlay
+        // interface either way — it only severs the underlay, which is the same
+        // argument ADR-0010 §11.5 clause 5 makes for DHCP.
+        let deny = EnforcementConfig {
+            local_network_access: false,
+            on_link_prefixes: vec![v4([100, 96, 0, 0], 12), v4([192, 168, 1, 0], 24)],
+            ..config()
+        };
+        let script = render(&contract(1, Ruleset::Blocked), Ruleset::Blocked, &deny);
+        assert!(
+            script.contains("oifname != \"twin0\" ip daddr 100.96.0.0/12 accept"),
+            "the underlay path is passed off-overlay regardless of KS-4"
+        );
+        // And KS-4 is NOT widened: the ordinary LAN is still denied.
+        assert!(
+            !script.contains("oifname != \"twin0\" ip daddr 192.168.1.0/24 accept"),
+            "KS-4 still costs the user their printer when they ask it to"
+        );
+        // The overlay space is still dropped off-overlay for everything else.
+        assert!(script.contains("counter name \"deny_v4\" drop"));
+    }
+
+    #[test]
+    fn x9_does_not_pass_the_overlay_space_out_of_the_overlay_interface() {
+        // The exemption is scoped to a prefix the HOST holds on a non-overlay
+        // interface, and it is `oifname != overlay`. A peer at 100.64.0.7 is
+        // still reached through the tunnel and nowhere else.
+        let deny = EnforcementConfig {
+            local_network_access: false,
+            on_link_prefixes: vec![v4([100, 96, 0, 0], 12)],
+            ..config()
+        };
+        let script = render(&contract(1, Ruleset::Blocked), Ruleset::Blocked, &deny);
+        for line in script.lines().filter(|l| l.contains("100.96.0.0/12")) {
+            assert!(
+                line.contains("oifname != \"twin0\""),
+                "every X-9 rule is off-overlay: {line}"
+            );
+        }
     }
 
     #[test]

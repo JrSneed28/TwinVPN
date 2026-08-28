@@ -56,7 +56,7 @@ pub struct DarwinOption {
     pub name: i32,
     /// The `int` value.
     pub value: i32,
-    /// A stable, non-localised tag for the call, for [`crate::oserr::OsDetail`].
+    /// A stable, non-localised tag for the call, for [`twinvpn_platform::OsDetail`].
     pub tag: &'static str,
 }
 

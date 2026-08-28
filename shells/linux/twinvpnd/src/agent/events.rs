@@ -56,19 +56,27 @@
 //! conditions are queue depth and a counter — transport facts about this
 //! connection, not facts about the network.
 //!
-//! # The topic of an event is derived, never authored here
+//! # The topic of an event is the core's fact, and is no longer authored here
 //!
-//! [`topic_of`] is a total function of [`twinvpn_core::CoreEventKind`]'s
-//! variant. There is no table of topic strings the shell maintains and no branch
-//! on what an event *means*; adding a variant upstream fails this crate's build
-//! (see `a_new_core_event_kind_must_be_given_a_topic`).
+//! It used to be: this module owned the five topic strings and the
+//! `topic_of` that produced them, which made a *carriage* the author of a fact
+//! about the event. Two things followed, and both were real:
+//! the C ABI had no topic at all and handed a shell six message types with no
+//! discriminator (`ownership.md` §10.8 **M-1**), and `shells/windows` and
+//! `shells/macos` had no topic either — which is part of why neither drains
+//! this stream.
+//!
+//! [`twinvpn_core::CoreEventKind::topic`] and [`twinvpn_core::events::topics`]
+//! are now the single declaration, and this module re-exports them so the
+//! transport below reads unchanged. Nothing about the derivation changed:
+//! it is still a total function of the variant with no `_` arm, so adding a
+//! variant upstream still fails this crate's build.
 
-use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use twinvpn_core::{CoreEvent, CoreEventKind};
 
-use crate::mi::wire::{Compacted, Event};
+use crate::mi::wire::Event;
 
 /// ADR-0017 §11.10's desktop watermark: 256 events per subscriber.
 ///
@@ -91,49 +99,19 @@ pub const ROUTER_WATERMARK: usize = 64;
 /// sides than continuing to count.
 pub const EVICTION_MULTIPLE: u64 = 4;
 
-/// The topics ADR-0017 §11.10 names, and the only strings this module emits.
-pub mod topics {
-    /// A `ConnectionState` transition.
-    pub const TRANSITION: &str = "transition";
-    /// One of `contract-matrix.md` §4.4's local session bodies.
-    pub const SESSION: &str = "session";
-    /// A `Diagnostic` was raised.
-    pub const DIAGNOSTIC: &str = "diagnostic";
-    /// A submitted command completed.
-    pub const COMMAND_COMPLETED: &str = "command.completed";
-    /// A submitted command was rejected.
-    pub const COMMAND_REJECTED: &str = "command.rejected";
-
-    /// Every topic, so `event.subscribe`'s filter and `event.resync`'s snapshot
-    /// walk one list.
-    pub const ALL: [&str; 5] = [
-        TRANSITION,
-        SESSION,
-        DIAGNOSTIC,
-        COMMAND_COMPLETED,
-        COMMAND_REJECTED,
-    ];
-}
+/// The topics ADR-0017 §11.10 names — **the core's declaration**, re-exported
+/// so `event.subscribe`'s filter and `event.resync`'s snapshot read one list
+/// rather than a second copy of it.
+pub use twinvpn_core::events::topics;
 
 /// The topic a core event belongs to.
 ///
-/// A total function of the variant, written as an exhaustive-in-spirit `match`
-/// with no `_` arm for the variants that exist today. `CoreEventKind` is not
-/// `#[non_exhaustive]`, so this genuinely fails to compile when a variant is
-/// added upstream — which is the point: a new kind of event must be given a
-/// topic by a person, not defaulted into one.
+/// A thin forward to [`twinvpn_core::CoreEventKind::topic`]. It stays as a
+/// named function because a dozen call sites below read better for it, and
+/// because deleting it would be a diff about nothing.
 #[must_use]
 pub fn topic_of(kind: &CoreEventKind) -> &'static str {
-    match kind {
-        CoreEventKind::Transition(_) => topics::TRANSITION,
-        CoreEventKind::SessionEvent(_) => topics::SESSION,
-        CoreEventKind::CommandCompleted { .. } => topics::COMMAND_COMPLETED,
-        CoreEventKind::CommandRejected { .. } => topics::COMMAND_REJECTED,
-        // The core's own gap marker shares the `diagnostic` topic: it reaches a
-        // client as a `Compacted` body rather than as an `Event`, so its topic
-        // is only ever used to count it, never to route it.
-        CoreEventKind::Diagnostic(_) | CoreEventKind::Compacted { .. } => topics::DIAGNOSTIC,
-    }
+    kind.topic()
 }
 
 /// The payload bytes a client receives for an event.
@@ -153,170 +131,38 @@ pub fn topic_of(kind: &CoreEventKind) -> &'static str {
 pub fn payload_of(kind: &CoreEventKind) -> Vec<u8> {
     kind.encoded_payload()
 }
-
-/// One frame a subscriber will receive.
+/// One frame a subscriber will receive — **the shared declaration**.
 ///
-/// Two shapes and no third: an event, or MI-19's ordered gap marker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Delivery {
-    /// An event, with the sequence number it had on the core's stream.
-    Event {
-        /// The core's `seq`. Contiguity proves nothing was lost (MI-16).
-        seq: u64,
-        /// The body.
-        event: Event,
-    },
-    /// MI-19's marker, emitted **before** any further event.
-    Compacted(Compacted),
-}
+/// Two shapes and no third: an event, or MI-19's ordered gap marker. Named
+/// `Delivery` here because a dozen call sites read better for it; it is
+/// [`twinvpn_mgmt::Frame`] and nothing else.
+pub use twinvpn_mgmt::Frame as Delivery;
 
 /// One subscriber's bounded queue, watermark and gap bookkeeping.
-#[derive(Debug)]
-pub struct Subscriber {
-    watermark: usize,
-    queue: VecDeque<Delivery>,
-    /// Set while a gap is outstanding, so the marker is emitted before any
-    /// further event rather than beside one.
-    pending_gap: Option<(u64, HashMap<String, u64>)>,
-    /// Total events dropped for this subscriber, for the eviction rung.
-    dropped_total: u64,
-    evicted: bool,
-}
-
-impl Subscriber {
-    /// A subscriber with `watermark` slots.
-    #[must_use]
-    pub fn new(watermark: usize) -> Self {
-        Self {
-            watermark: watermark.max(8),
-            queue: VecDeque::new(),
-            pending_gap: None,
-            dropped_total: 0,
-            evicted: false,
-        }
-    }
-
-    /// **MI-I5-2's non-blocking offer.** Never waits; returns `false` once the
-    /// subscriber has been evicted.
-    pub fn offer(&mut self, seq: u64, topic: &str, event: Event) -> bool {
-        if self.evicted {
-            return false;
-        }
-        if self.queue.len() >= self.watermark {
-            self.compact_oldest();
-            if self.dropped_total > EVICTION_MULTIPLE * self.watermark as u64 {
-                // Rung 3. The connection is closed by the caller; the queue is
-                // released here so an evicted subscriber costs nothing.
-                self.evicted = true;
-                self.queue.clear();
-                return false;
-            }
-        }
-        self.queue.push_back(Delivery::Event { seq, event });
-        let _ = topic;
-        true
-    }
-
-    /// Rung 1: evict the **oldest**, and count it under its own topic.
-    fn compact_oldest(&mut self) {
-        let Some(evicted) = self.queue.pop_front() else {
-            return;
-        };
-        let (seq, topic) = match evicted {
-            Delivery::Event { seq, ref event } => (seq, event.topic.clone()),
-            // A marker is never evicted: it is the record of an earlier
-            // eviction, and dropping it would turn a recorded gap back into a
-            // silence, which is exactly MI-19's prohibition. It is pushed back
-            // and the event after it goes instead.
-            Delivery::Compacted(_) => {
-                self.queue.push_front(evicted);
-                if let Some(Delivery::Event { seq, event }) = self.queue.remove(1) {
-                    self.record_gap(seq, &event.topic);
-                }
-                return;
-            }
-        };
-        self.record_gap(seq, &topic);
-    }
-
-    fn record_gap(&mut self, seq: u64, topic: &str) {
-        self.dropped_total += 1;
-        let (up_to, counts) = self
-            .pending_gap
-            .take()
-            .unwrap_or_else(|| (0, HashMap::new()));
-        let mut counts = counts;
-        *counts.entry(topic.to_owned()).or_insert(0) += 1;
-        self.pending_gap = Some((up_to.max(seq), counts));
-    }
-
-    /// The next frame, or `None` when the queue is empty.
-    ///
-    /// **Rung 2.** A pending gap is returned first, always, and is cleared by
-    /// being returned — so the marker appears exactly once and strictly before
-    /// the events that follow it.
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Option<Delivery> {
-        if let Some((up_to_seq, counts)) = self.pending_gap.take() {
-            let mut dropped_by_topic: Vec<(String, u64)> = counts.into_iter().collect();
-            // Sorted so the marker is byte-stable: a `HashMap`'s order is not,
-            // and a client diffing two markers would see spurious changes.
-            dropped_by_topic.sort_by(|a, b| a.0.cmp(&b.0));
-            return Some(Delivery::Compacted(Compacted {
-                up_to_seq,
-                dropped_by_topic,
-            }));
-        }
-        self.queue.pop_front()
-    }
-
-    /// Whether §11.10's third rung has fired for this subscriber.
-    #[must_use]
-    pub const fn is_evicted(&self) -> bool {
-        self.evicted
-    }
-
-    /// How many events this subscriber has missed.
-    #[must_use]
-    pub const fn dropped(&self) -> u64 {
-        self.dropped_total
-    }
-
-    /// How many frames are queued.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    /// Whether the queue is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-}
+pub use twinvpn_mgmt::Subscriber;
 
 /// The **MI-9 snapshot**: the latest event on each topic, and the cursor.
-///
-/// > The snapshot MUST be taken under the agent's state lock with the cursor
-/// > assigned **inside** it.
-///
-/// [`Fanout::resync`] takes one lock, copies the per-topic latest, reads the
-/// cursor, and releases — so the cursor a client receives is a position that
-/// this exact snapshot is current as of. A cursor read outside the lock would be
-/// a cursor for a different snapshot, which is the bug MI-9's wording is written
-/// to prevent.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Snapshot {
-    /// The stream position this snapshot is current as of.
-    pub cursor: u64,
-    /// The most recent event on each topic that has one, in `topics::ALL` order.
-    pub rows: Vec<(String, Event)>,
-}
+pub use twinvpn_mgmt::Snapshot;
 
 /// One drain, N subscribers, and the resync snapshot.
+///
+/// # What this is now, and what it used to be
+///
+/// It used to be the ladder as well: the watermarks, the eviction rungs, the
+/// gap bookkeeping, the marker ordering, the MI-9 snapshot and the
+/// pending-completion registry — roughly four hundred lines of the subtlest
+/// code in this shell, **and the only copy in the repository**. `X-4` found the
+/// MI *envelope* declared three times; the ladder that carries it was declared
+/// once, and the consequence was not drift but absence: `shells/windows` and
+/// `shells/macos` never drained the core's event stream at all.
+///
+/// The decisions now live in [`twinvpn_mgmt::fanout`], with the vocabulary they
+/// carry, and every carriage reads them from there. **What is left here is the
+/// wake** — a `Mutex` and a `Notify`, which are properties of this shell's
+/// runtime and belong in this shell.
 #[derive(Debug, Default)]
 pub struct Fanout {
-    inner: Mutex<FanoutInner>,
+    inner: Mutex<twinvpn_mgmt::Ledger>,
     /// Wakes the per-connection pumps.
     ///
     /// `notify_one` rather than `notify_waiters`, deliberately: it **stores a
@@ -330,25 +176,20 @@ pub struct Fanout {
     signal: tokio::sync::Notify,
 }
 
-#[derive(Debug, Default)]
-struct FanoutInner {
-    subscribers: HashMap<u64, Subscriber>,
-    latest: HashMap<String, Event>,
-    cursor: u64,
-    next_id: u64,
-    closed: bool,
-    /// Submissions waiting for their own `CommandCompleted`. See
-    /// [`Fanout::expect_completion`].
-    pending: Vec<Pending>,
-}
+/// A `oneshot` sender, as the ledger's runtime-free sink.
+///
+/// The ledger settles a registration without knowing what a `oneshot` is —
+/// `twinvpn-mgmt` has no runtime and must not acquire one — so the channel that
+/// carries the answer is supplied here, by the carriage that owns the runtime.
+struct OneshotSink(tokio::sync::oneshot::Sender<Vec<u8>>);
 
-/// One submission waiting for the outcome the core published for it.
-#[derive(Debug)]
-struct Pending {
-    id: u64,
-    op: &'static str,
-    since: u64,
-    slot: tokio::sync::oneshot::Sender<Vec<u8>>,
+impl twinvpn_mgmt::CompletionSink for OneshotSink {
+    fn settle(self: Box<Self>, result: Vec<u8>) {
+        // The receiver may already be gone — the client disconnected, and CD-2
+        // makes that "cancellation is dropping the future". A failed send is
+        // that case and is not an error.
+        let _ = self.0.send(result);
+    }
 }
 
 impl Fanout {
@@ -360,17 +201,13 @@ impl Fanout {
 
     /// Registers a subscriber and returns its handle.
     pub fn subscribe(&self, watermark: usize) -> u64 {
-        let mut inner = self.lock();
-        inner.next_id += 1;
-        let id = inner.next_id;
-        inner.subscribers.insert(id, Subscriber::new(watermark));
-        id
+        self.lock().subscribe(watermark)
     }
 
     /// Removes a subscriber. Idempotent — a connection that ends twice is a
     /// normal race, not an error.
     pub fn unsubscribe(&self, id: u64) {
-        self.lock().subscribers.remove(&id);
+        self.lock().unsubscribe(id);
     }
 
     /// Publishes one core event to every subscriber and to the snapshot.
@@ -379,198 +216,92 @@ impl Fanout {
     /// the caller can close their connections rather than leaving them attached
     /// to a stream they are no longer on.
     pub fn publish(&self, core_event: &CoreEvent) -> Vec<u64> {
-        let topic = topic_of(&core_event.kind);
+        // MI-19's marker is not an event and does not take the event path: it
+        // announces a gap the CORE's ring opened, upstream of this fan-out.
+        if let CoreEventKind::Compacted { up_to_seq, dropped } = &core_event.kind {
+            let mut inner = self.lock();
+            inner.publish_gap(
+                *up_to_seq,
+                &[(core_event.kind.topic().to_owned(), *dropped)],
+            );
+            drop(inner);
+            self.signal.notify_one();
+            return Vec::new();
+        }
+
         let event = Event {
-            topic: topic.to_owned(),
+            topic: core_event.kind.topic().to_owned(),
             payload: payload_of(&core_event.kind),
             // **MI-18.** The acting principal travels with the event, unchanged.
             // "The tunnel went down" and "Dana took the tunnel down" are
             // different facts, and this is the field that keeps them different.
             actor_principal: core_event.actor_principal.clone(),
+            // This carriage does not NEED `op` — the ledger settles the
+            // submission under the same lock — but it carries it, because a
+            // client reading `command.completed` off the socket should not know
+            // less than one reading it off the C ABI. One vocabulary.
+            op: core_event.kind.op().map(str::to_owned),
         };
 
         let mut inner = self.lock();
-        inner.cursor = inner.cursor.max(core_event.seq + 1);
-        inner.latest.insert(topic.to_owned(), event.clone());
-
-        // The dispatcher that submitted this operation is waiting for exactly
-        // this event, holding the F-6 lock. Resolving here — inside the same
-        // lock that assigns the cursor — is what makes `Response.result` a fact
-        // rather than a race.
-        match &core_event.kind {
-            CoreEventKind::CommandCompleted { op, result } => {
-                Self::settle(&mut inner, core_event.seq, op, result);
-            }
-            // A rejection settles it too, with an empty body: the diagnostic
-            // travels on the response's own `diagnostic` field, and leaving the
-            // dispatcher waiting would hang the connection.
-            CoreEventKind::CommandRejected { op, .. } => {
-                Self::settle(&mut inner, core_event.seq, op, &[]);
-            }
-            // A gap consumed events we cannot identify, so every outstanding
-            // registration is settled empty rather than left waiting for a body
-            // that has been dropped.
-            CoreEventKind::Compacted { .. } => Self::settle_all_empty(&mut inner),
-            _ => {}
-        }
-
-        let mut evicted = Vec::new();
-        for (id, subscriber) in &mut inner.subscribers {
-            if !subscriber.offer(core_event.seq, topic, event.clone()) && subscriber.is_evicted() {
-                evicted.push(*id);
-            }
-        }
-        for id in &evicted {
-            inner.subscribers.remove(id);
-        }
+        let evicted = inner.publish(core_event.seq, &event);
         drop(inner);
         self.signal.notify_one();
         evicted
     }
 
-    /// Waits for something to deliver.
-    ///
-    /// **This is the only wait in the shell that is not the core's**, and it is
-    /// not a timeout: it has no duration and expires on nothing. CD-2's
-    /// "cancellation is dropping the future" is what ends it — the pump's future
-    /// is dropped when the connection closes.
-    pub async fn wait(&self) {
-        self.signal.notified().await;
-    }
-
-    /// Registers interest in the `CommandCompleted` a submission is about to
-    /// publish, and returns the id to cancel it with plus the channel it will
-    /// arrive on.
-    ///
-    /// # Why this exists rather than a peek at the queue
-    ///
-    /// `Core::submit` publishes the operation's result as a `CommandCompleted`
-    /// event **synchronously, before returning `Ok(())`** — so the result is not
-    /// returned, it is published, and the only reader of the core's stream is the
-    /// drain thread. A dispatcher that peeked at the queue would either race the
-    /// drain (sometimes finding the event, sometimes not — non-determinism in a
-    /// client's `Response.result`, which is worse than an honest empty) or steal
-    /// it from the drain and break the one ordered stream.
-    ///
-    /// So the dispatcher **registers before submitting** and the drain resolves
-    /// it as the event passes. Two facts make the match exact:
-    ///
-    /// 1. The **F-6 submission lock** is held by the registering dispatcher, so
-    ///    no other submission is in flight.
-    /// 2. `since` is the cursor read **before** the submission, so an event from
-    ///    an earlier submission still queued is below it and is skipped by
-    ///    sequence number rather than by hope.
+    /// Registers a submission and returns its id and the channel its outcome
+    /// will arrive on.
     ///
     /// There is no timeout on the wait, and none is needed: the caller awaits
     /// only after `submit` returned `Ok`, which means the event exists in the
-    /// queue and the drain will reach it. A `CommandRejected`, a `Compacted`
-    /// marker that consumed it, and [`Fanout::close`] each resolve it too — so
-    /// there is no path on which the channel is silently abandoned.
+    /// queue and the drain will reach it. A rejection, a `Compacted` marker that
+    /// consumed it, and [`Fanout::close`] each resolve it too — so there is no
+    /// path on which the channel is silently abandoned.
     pub fn expect_completion(
         &self,
         op: &'static str,
         since: u64,
     ) -> (u64, tokio::sync::oneshot::Receiver<Vec<u8>>) {
         let (slot, receiver) = tokio::sync::oneshot::channel();
-        let mut inner = self.lock();
-        inner.next_id += 1;
-        let id = inner.next_id;
-        inner.pending.push(Pending {
-            id,
-            op,
-            since,
-            slot,
-        });
+        let id = self
+            .lock()
+            .expect_completion(op, since, Box::new(OneshotSink(slot)));
         (id, receiver)
     }
 
     /// Withdraws a registration whose submission was rejected before it could
     /// publish a completion.
-    ///
-    /// Without this, a rejected submission would leave an entry the drain would
-    /// match against some later, unrelated call of the same operation.
     pub fn cancel_completion(&self, id: u64) {
-        self.lock().pending.retain(|p| p.id != id);
-    }
-
-    /// Resolves every registration this event settles.
-    fn settle(inner: &mut FanoutInner, seq: u64, op: &str, result: &[u8]) {
-        let mut i = 0;
-        while i < inner.pending.len() {
-            let matched = inner.pending[i].op == op && seq >= inner.pending[i].since;
-            if matched {
-                let pending = inner.pending.remove(i);
-                // The receiver may already be gone — the client disconnected, and
-                // CD-2 makes that "cancellation is dropping the future". A failed
-                // send is that case and is not an error.
-                let _ = pending.slot.send(result.to_vec());
-            } else {
-                i += 1;
-            }
-        }
-    }
-
-    /// Resolves every registration with an empty body.
-    ///
-    /// The two cases that are not a completion: a gap consumed the event, and
-    /// shutdown closed the stream. Both are truthfully "no body", and both must
-    /// resolve rather than leave a dispatcher waiting on something that will
-    /// never arrive.
-    fn settle_all_empty(inner: &mut FanoutInner) {
-        for pending in inner.pending.drain(..) {
-            let _ = pending.slot.send(Vec::new());
-        }
+        self.lock().cancel_completion(id);
     }
 
     /// The next frame for one subscriber, or `None`.
     pub fn next_for(&self, id: u64) -> Option<Delivery> {
-        self.lock().subscribers.get_mut(&id)?.next()
+        self.lock().next_for(id)
     }
 
-    /// **MI-9's snapshot**, taken under one lock with the cursor assigned inside.
-    ///
-    /// An empty `rows` is a truthful answer and is distinguishable from a
-    /// refusal: it means the agent has published nothing on any subscribed topic
-    /// since it started, which is current truth on a freshly-started agent.
-    /// Wave 1 refused instead, on the reasoning that an empty snapshot would be
-    /// read as current truth — but it **is** current truth; what MI-9a forbids
-    /// is an empty snapshot that hides a gap, and the cursor beside it is what
-    /// tells a client whether one occurred.
+    /// **MI-9's snapshot**, taken under one lock with the cursor read inside it.
     #[must_use]
     pub fn resync(&self, id: u64) -> Snapshot {
-        let mut inner = self.lock();
-        // The resync discharges any outstanding gap for this subscriber: the
-        // snapshot IS the recovery the marker asked for, so replaying the marker
-        // afterwards would send the client round the loop again.
-        if let Some(subscriber) = inner.subscribers.get_mut(&id) {
-            subscriber.pending_gap = None;
-            subscriber.queue.clear();
-        }
-        let rows = topics::ALL
-            .iter()
-            .filter_map(|topic| {
-                inner
-                    .latest
-                    .get(*topic)
-                    .map(|event| ((*topic).to_owned(), event.clone()))
-            })
-            .collect();
-        Snapshot {
-            cursor: inner.cursor,
-            rows,
-        }
+        self.lock().resync(id)
     }
 
     /// The stream position, for `HelloAck.event_cursor`.
     #[must_use]
     pub fn cursor(&self) -> u64 {
-        self.lock().cursor
+        self.lock().cursor()
     }
 
     /// How many subscribers are attached.
     #[must_use]
     pub fn subscriber_count(&self) -> usize {
-        self.lock().subscribers.len()
+        self.lock().subscriber_count()
+    }
+
+    /// Waits for the next wake.
+    pub async fn wait(&self) {
+        self.signal.notified().await;
     }
 
     /// Closes the fan-out during shutdown. Idempotent.
@@ -579,14 +310,7 @@ impl Fanout {
     /// thread to unblock; it does not remove the installed ruleset, which stays
     /// in the OS's custody so that the core going away cannot drop protection.
     pub fn close(&self) {
-        let mut inner = self.lock();
-        inner.closed = true;
-        inner.subscribers.clear();
-        // Nothing more will be published, so anything still waiting for a body
-        // is waiting forever. CB-6 is untouched: this closes a queue, not the
-        // installed ruleset.
-        Self::settle_all_empty(&mut inner);
-        drop(inner);
+        self.lock().close();
         // Every pump wakes, finds the fan-out closed, and returns. Without this
         // a pump would sit in `wait()` forever and the connection task would
         // never join.
@@ -597,10 +321,10 @@ impl Fanout {
     /// Whether [`Fanout::close`] has been called.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.lock().closed
+        self.lock().is_closed()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, FanoutInner> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, twinvpn_mgmt::Ledger> {
         // A poisoned lock means a previous holder panicked while holding it. The
         // state behind it is a queue of events, not an invariant a panic can
         // corrupt into something unsafe, so the guard is taken rather than
@@ -652,6 +376,7 @@ mod tests {
             topic: topic.to_owned(),
             payload: Vec::new(),
             actor_principal: None,
+            op: None,
         }
     }
 
@@ -786,7 +511,7 @@ mod tests {
         // comes FIRST, not alongside.
         let mut subscriber = Subscriber::new(8);
         for seq in 1..=12 {
-            subscriber.offer(seq, topics::DIAGNOSTIC, event(topics::DIAGNOSTIC));
+            subscriber.offer(seq, event(topics::DIAGNOSTIC));
         }
         match subscriber.next().expect("a frame") {
             Delivery::Compacted(marker) => {
@@ -815,7 +540,7 @@ mod tests {
         // missed nothing. Without this assertion a build that emitted a marker
         // defensively would pass the test above and destroy the distinction.
         let mut subscriber = Subscriber::new(64);
-        subscriber.offer(1, topics::DIAGNOSTIC, event(topics::DIAGNOSTIC));
+        subscriber.offer(1, event(topics::DIAGNOSTIC));
         assert!(matches!(
             subscriber.next(),
             Some(Delivery::Event { seq: 1, .. })
@@ -828,14 +553,15 @@ mod tests {
         // "12 transitions not shown" rather than "something happened".
         let mut subscriber = Subscriber::new(8);
         for seq in 1..=6 {
-            subscriber.offer(seq, topics::TRANSITION, event(topics::TRANSITION));
+            subscriber.offer(seq, event(topics::TRANSITION));
         }
         for seq in 7..=14 {
-            subscriber.offer(seq, topics::SESSION, event(topics::SESSION));
+            subscriber.offer(seq, event(topics::SESSION));
         }
         match subscriber.next().expect("a frame") {
             Delivery::Compacted(marker) => {
-                let counts: HashMap<String, u64> = marker.dropped_by_topic.into_iter().collect();
+                let counts: std::collections::HashMap<String, u64> =
+                    marker.dropped_by_topic.into_iter().collect();
                 assert_eq!(counts.get(topics::TRANSITION), Some(&6));
                 assert_eq!(counts.len(), 1, "only the topics that actually dropped");
             }
@@ -850,7 +576,7 @@ mod tests {
         // compaction rung must not consume.
         let mut subscriber = Subscriber::new(8);
         for seq in 1..=200 {
-            subscriber.offer(seq, topics::DIAGNOSTIC, event(topics::DIAGNOSTIC));
+            subscriber.offer(seq, event(topics::DIAGNOSTIC));
         }
         assert!(
             subscriber.is_evicted() || matches!(subscriber.next(), Some(Delivery::Compacted(_)))
@@ -866,7 +592,7 @@ mod tests {
         let mut seq = 0;
         while !subscriber.is_evicted() && seq < 10_000 {
             seq += 1;
-            subscriber.offer(seq, topics::DIAGNOSTIC, event(topics::DIAGNOSTIC));
+            subscriber.offer(seq, event(topics::DIAGNOSTIC));
         }
         assert!(subscriber.is_evicted(), "the ladder must terminate");
         assert!(
@@ -874,7 +600,7 @@ mod tests {
             "eviction is the third rung, not the first"
         );
         assert!(subscriber.is_empty(), "an evicted subscriber costs nothing");
-        assert!(!subscriber.offer(seq + 1, topics::DIAGNOSTIC, event(topics::DIAGNOSTIC)));
+        assert!(!subscriber.offer(seq + 1, event(topics::DIAGNOSTIC)));
     }
 
     #[test]

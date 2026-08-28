@@ -91,13 +91,14 @@ fn the_settings_channel_carries_a_document_the_core_computed() {
     // both families are present and Swift decides nothing.
     let ext = TvbExt::new(CoreHandle::Unwired);
     let contract = twinvpn_platform_macos::testkit::contract(1);
-    ext.publish_settings(&contract, "203.0.113.7")
+    ext.publish_settings(&contract)
         .expect("renders");
     let bytes = ext
         .await_settings(Duration::from_millis(100))
         .expect("a document");
     let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
-    assert_eq!(doc["tunnel_remote_address"], "203.0.113.7");
+    // M-15: the contract's own remote, not one this test handed the shell.
+    assert_eq!(doc["tunnel_remote_address"], "198.51.100.7");
     assert!(doc["ipv4"].is_object());
     assert!(doc["ipv6"].is_object(), "ADR-0010 R1: both, always");
 }

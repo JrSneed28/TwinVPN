@@ -363,6 +363,24 @@ pub struct Event {
     /// > facts.
     #[serde(default)]
     pub actor_principal: Option<String>,
+    /// **Which** operation this answers, on the `command.completed` and
+    /// `command.rejected` topics; `None` on the other three.
+    ///
+    /// # Why a socket carriage does not need it and the C ABI does
+    ///
+    /// A socket carriage holds the submission's registration in memory and
+    /// settles it under the same lock that assigns the cursor, so it already
+    /// knows which command a completion answers and never needed the fact on
+    /// the wire. **The C ABI has no such memory:** `tw_core_submit` is
+    /// fire-and-forget and returns no request id, so a shell on the far side
+    /// holds a completion it cannot attribute. Without this field, F-5's
+    /// *"including the completion of a submitted command"* degrades to
+    /// *"a command completed"*.
+    ///
+    /// `#[serde(default)]`, so a peer that predates it decodes unchanged and
+    /// the socket carriages gain the fact rather than being broken by it.
+    #[serde(default)]
+    pub op: Option<String>,
 }
 
 /// §11.3's `Compacted` — MI-19's **ordered** gap marker.
@@ -618,6 +636,7 @@ mod tests {
                 topic: "session.state".to_owned(),
                 payload: Vec::new(),
                 actor_principal: None,
+                op: None,
             }),
             Body::Compacted(Compacted {
                 up_to_seq: 1,

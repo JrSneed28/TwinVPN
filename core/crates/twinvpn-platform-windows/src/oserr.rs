@@ -39,7 +39,7 @@
 //! mapping **compiles and its tests run on a Linux host**. That is the discipline
 //! `twinvpn-platform-linux`'s `nft.rs` establishes: the layer that decides what
 //! an error *means* has no reason to need the OS that produced it. The literals
-//! are asserted against `windows-sys`'s own constants in [`crate::sys::win`]
+//! are asserted against `windows-sys`'s own constants in `sys::win`
 //! under `#[cfg(windows)]`, so a drifted value fails `make cross-check` rather
 //! than silently mapping the wrong condition.
 

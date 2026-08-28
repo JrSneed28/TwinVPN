@@ -456,6 +456,30 @@ pub fn render(contract: &NetworkContract, ruleset: Ruleset, config: &Enforcement
          label \"twinvpn.linklocal.v6\""
     );
 
+    // ---- X-9: the host's own underlay path, where it collides with the
+    // overlay's address space -------------------------------------------------
+    // A subscriber behind CGNAT holds an on-link address inside the very RFC
+    // 6598 `/10` AP-1 carves the overlay out of. That prefix is not the user's
+    // LAN — it is the path every packet leaves by — so it is passed off the
+    // overlay UNCONDITIONALLY, and KS-4's DENY keeps costing the user their
+    // printer rather than their internet. The overlay's own traffic egresses
+    // the overlay interface and is untouched either way.
+    //
+    // `twinvpn_platform::on_link_is_underlay_path` carries the reasoning, once,
+    // for this adapter and `twinvpn-platform-linux` both. X-9 was recorded as
+    // "deliberately not worked around by one platform alone", and this is that
+    // one place.
+    for prefix in &config.on_link_prefixes {
+        if twinvpn_platform::on_link_is_underlay_path(*prefix) {
+            let _ = writeln!(
+                s,
+                "pass out quick on ! {overlay} inet from any to {} keep state \
+                 label \"twinvpn.underlay.cgnat\"",
+                prefix_text(*prefix)
+            );
+        }
+    }
+
     // ---- classes 4 and 10: the local physical LAN, and the link-local
     // multicast that follows it. On-link prefixes ONLY, both families, and only
     // when KS-4's `local_network_access` is ALLOW. The safety here is KS-4's own:

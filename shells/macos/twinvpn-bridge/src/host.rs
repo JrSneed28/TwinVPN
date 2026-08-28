@@ -164,7 +164,8 @@ impl Host {
         }
 
         // --- §11.6 (5): the core, ABI-checked first (VR-4) --------------------
-        let core = host_core(env.clone(), &adapter);
+        let fanout = Arc::new(crate::mgmt::Fanout::new());
+        let core = host_core(env.clone(), &adapter, &fanout);
         probes.with_core(core.is_some());
 
         // --- §11.6 (6): the MI endpoint (MI-A3) -------------------------------
@@ -184,6 +185,7 @@ impl Host {
             policy: config.groups,
             os_version: os_version(),
             elapsed,
+            fanout,
         };
         let host = Self {
             adapter,
@@ -298,9 +300,13 @@ impl Host {
 /// authority that accepted connections with nothing behind them would be
 /// reporting itself as running while answering nothing, which is exactly
 /// PS-18's condition.
-fn host_core(env: Env, adapter: &Arc<MacosPlatformAdapter>) -> Option<Arc<dyn CommandSink>> {
+fn host_core(
+    env: Env,
+    adapter: &Arc<MacosPlatformAdapter>,
+    fanout: &Arc<crate::mgmt::Fanout>,
+) -> Option<Arc<dyn CommandSink>> {
     /// The one edge from the management interface to the core (**PS-4**).
-    struct CoreSink(twinvpn_core::Core);
+    struct CoreSink(Arc<twinvpn_core::Core>);
 
     impl CommandSink for CoreSink {
         fn submit(&self, submission: &Submission) -> Result<(), Box<twinvpn_types::Diagnostic>> {
@@ -325,7 +331,101 @@ fn host_core(env: Env, adapter: &Arc<MacosPlatformAdapter>) -> Option<Arc<dyn Co
         event_capacity: twinvpn_core::events::DEFAULT_CAPACITY,
     })
     .ok()?;
+    let core = Arc::new(core);
+
+    // **§11.10's drain.** `ownership.md` §10.8 M-1: the handle used to be moved
+    // into `CoreSink` and lost, so the core's event stream was unreachable by
+    // construction — no client could be told anything had changed, and every
+    // `Response.result` was empty because `Core::submit` publishes an outcome as
+    // an EVENT before it returns `Ok(())`.
+    //
+    // It lives here rather than in `mgmt/` because **PS-22** keeps
+    // `twinvpn_core` out of that module: the conversion from a `CoreEvent` to
+    // the management vocabulary happens on this side of the seam, and the
+    // fan-out below it never learns what a core is.
+    //
+    // A `std::thread`, not a runtime task: `Core::next_event` blocks on a
+    // condvar, and blocking a runtime worker on a condvar is how a runtime
+    // deadlocks.
+    let drain_core = Arc::clone(&core);
+    let drain_fanout = Arc::clone(fanout);
+    if std::thread::Builder::new()
+        .name("twinvpn-mi-drain".to_owned())
+        .spawn(move || drain(&drain_core, &drain_fanout, DRAIN_TIMEOUT))
+        .is_err()
+    {
+        // A bridge that cannot spawn its drain would run with a bounded ring
+        // nobody empties, dropping events oldest-first with nothing to report
+        // the drop. Named rather than ignored.
+        tracing::error!(
+            target: "twinvpn.mi",
+            specified_code = "MGMT.UNAVAILABLE",
+            "the event drain thread could not be spawned; no client will receive \
+             events and every command result will be empty"
+        );
+    }
+
     Some(Arc::new(CoreSink(core)))
+}
+
+/// How long the drain thread sits in one `Core::next_event` call.
+///
+/// **Not a deadline for anything.** CD-3 makes timeouts the core's; this bounds
+/// how long the thread is unresponsive to a shutdown that has already been
+/// requested, which is a property of this thread and not of any protocol.
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Converts the core's stream into the management vocabulary and publishes it.
+///
+/// **The whole of PS-22's seam is this function.** Above it, `twinvpn_core`;
+/// below it, `(seq, Event)` and nothing that knows what a tunnel is.
+fn drain(
+    core: &Arc<twinvpn_core::Core>,
+    fanout: &Arc<crate::mgmt::Fanout>,
+    timeout: std::time::Duration,
+) {
+    use twinvpn_core::CoreEventKind;
+
+    loop {
+        if fanout.is_closed() {
+            return;
+        }
+        let Some(event) = core.next_event(timeout) else {
+            // Three outcomes share `None` — timeout, wake, closed — and the
+            // core says a caller distinguishes them "by asking again rather
+            // than by a sentinel".
+            continue;
+        };
+        // MI-19's marker is not an event: it announces a gap the CORE's ring
+        // opened, upstream of the fan-out.
+        if let CoreEventKind::Compacted { up_to_seq, dropped } = &event.kind {
+            fanout.publish_gap(
+                *up_to_seq,
+                &[(event.kind.topic().to_owned(), *dropped)],
+            );
+            continue;
+        }
+        let body = twinvpn_mi::wire::Event {
+            topic: event.kind.topic().to_owned(),
+            // **Forwarded, never encoded here.** `twinvpn-core` produces the
+            // frozen contract bytes; a shell that encoded one would be the
+            // second modeller MI-20 forbids.
+            payload: event.kind.encoded_payload(),
+            // **MI-18.** "The tunnel went down" and "Dana took the tunnel down"
+            // are different facts.
+            actor_principal: event.actor_principal.clone(),
+            op: event.kind.op().map(str::to_owned),
+        };
+        for id in fanout.publish(event.seq, &body) {
+            tracing::info!(
+                target: "twinvpn.mi",
+                subscriber = id,
+                specified_code = "MGMT.STREAM_COMPACTED",
+                "a subscriber fell more than four watermarks behind and was \
+                 evicted; §11.10's third rung"
+            );
+        }
+    }
 }
 
 /// This host's OS version, for MI-C3's `platform_ctx`.

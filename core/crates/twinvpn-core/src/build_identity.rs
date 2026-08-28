@@ -16,7 +16,7 @@
 //! function from one to another is wrong the first time a core release changes no
 //! wire behaviour. [`EPOCH_TABLE`] is therefore a literal array of rows keyed by
 //! `core_version`, [`protocol_epochs`] is a lookup, and
-//! [`tests::the_current_version_has_a_table_row`] fails the build if a release
+//! `the_current_version_has_a_table_row` fails the build if a release
 //! bumps the version without adding a row.
 //!
 //! # VR-2 is why [`CoreBuildIdentity::to_wire`] takes a tier

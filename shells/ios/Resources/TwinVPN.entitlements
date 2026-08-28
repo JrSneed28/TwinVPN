@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Entitlements for the containing app.
+
+  Authority: ADR-0016 §11.2's hardening table's iOS/iPadOS row; ADR-0016 §11.4
+  (the declared residual); ADR-0020 §11.3's iOS row and ST-30.
+
+  The app needs `vpn.api` to present the consent flow (ADR-0016 §11.2's iOS
+  table: "`NETunnelProviderManager` configuration and VPN-profile installation |
+  App | Only the app can present the consent flow"), and it shares the keychain
+  access group and the App Group with the extension because the two are one app
+  identity.
+
+  ===========================================================================
+  WHAT THE SHARING COSTS, DECLARED RATHER THAN GLOSSED
+  ===========================================================================
+
+  ADR-0016 §11.4's compromised-process table, iOS/iPadOS column: an attacker in
+  the APP process can "use DeviceKey as signing oracle = **Yes — declared
+  residual**", because `kSecAttrAccessGroup` cannot be scoped below app identity.
+  It cannot: obtain the tun descriptor, write the firewall, change routes or the
+  resolver, disarm enforcement, inject code into the provider, or export the
+  DeviceKey's private material — those are all OS-enforced.
+
+  PS-24 condition 4 states the consequence in terms: PS-1's "sole holder of the
+  key handle" clause is, "on HC-2 only, a declared residual rather than an
+  enforceable property, tested as a declaration in P16."
+
+  ADR-0020 ST-30's single-opener rule is likewise a DISCIPLINE here and not a
+  sandbox: the app holds the App Group entitlement and MUST NOT open the vault.
+  PS-24 condition 2's per-fact writer table is what makes that checkable.
+
+  STATUS: written, not compiled and not signed.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.developer.networking.vpn.api</key>
+    <array>
+        <string>allow-vpn</string>
+    </array>
+
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>packet-tunnel-provider</string>
+    </array>
+
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)group.net.twinvpn.client</string>
+    </array>
+
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.net.twinvpn.client</string>
+    </array>
+</dict>
+</plist>

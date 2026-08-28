@@ -60,6 +60,7 @@ pub mod catalogue;
 pub mod codes;
 pub mod command;
 pub mod envelope;
+pub mod fanout;
 pub mod transport;
 
 pub use catalogue::{
@@ -71,5 +72,9 @@ pub use envelope::{
     declared_length, decode_body, decode_frame, encode_frame, Body, Compacted, Diagnostic, Event,
     FrameError, Hello, HelloAck, MgmtEnvelope, PlatformCtx, Request, Response, LENGTH_PREFIX_BYTES,
     MAX_ENVELOPE_BYTES, MI_VERSION, MI_VERSION_MIN,
+};
+pub use fanout::{
+    CompletionSink, Frame, Ledger, Snapshot, Subscriber, EVICTION_MULTIPLE, ROUTER_WATERMARK,
+    SUBSCRIBER_WATERMARK,
 };
 pub use transport::{assert_closed, TransportOp};

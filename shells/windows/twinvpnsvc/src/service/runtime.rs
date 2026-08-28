@@ -44,7 +44,7 @@
 //! Windows can build an `Env` at all, and it says so at the call site; there is
 //! no path by which the service binary passes anything else.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use twinvpn_env::{
     ElapsedClock, Entropy, Env, EnvError, EnvParts, MonotonicClock, SystemRngSource,
@@ -156,9 +156,55 @@ pub struct Service {
     pub adapter: Arc<dyn PlatformAdapter>,
     /// The hosted core.
     pub core: Arc<twinvpn_core::Core>,
+    /// **§11.10's event stream**, and the thread that feeds it.
+    ///
+    /// The shutdown comment below described a drain thread from the day it was
+    /// written. There was none — `next_event` was called nowhere in this crate
+    /// — which is `ownership.md` §10.8 **M-12** as it landed on this platform.
+    pub fanout: Arc<super::events::Fanout>,
+    drain: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Service {
+    /// Assembles the service and **starts the drain**.
+    ///
+    /// The drain is a `std::thread` and not a runtime task: `Core::next_event`
+    /// blocks on a condvar, and blocking a runtime worker on a condvar is how a
+    /// runtime deadlocks. The core's own documentation says the same — *"called
+    /// from the shell's drain thread, which is not inside the core's runtime"*.
+    #[must_use]
+    pub fn start(env: Env, adapter: Arc<dyn PlatformAdapter>, core: twinvpn_core::Core) -> Self {
+        let core = Arc::new(core);
+        let fanout = Arc::new(super::events::Fanout::new());
+        let drain = std::thread::Builder::new()
+            .name("twinvpn-mi-drain".to_owned())
+            .spawn({
+                let core = Arc::clone(&core);
+                let fanout = Arc::clone(&fanout);
+                move || super::events::drain(&core, &fanout, DRAIN_TIMEOUT)
+            })
+            .ok();
+        if drain.is_none() {
+            // A service that cannot spawn its drain would run with a bounded
+            // ring nobody empties, dropping events oldest-first with nothing to
+            // report the drop. Named rather than ignored; the service is still
+            // useful for requests and says so.
+            tracing::error!(
+                target: "twinvpn.service",
+                specified_code = "PLATFORM.SERVICE.DRAIN_UNAVAILABLE",
+                "the event drain thread could not be spawned; no client will \
+                 receive events and every command result will be empty"
+            );
+        }
+        Self {
+            env,
+            adapter,
+            core,
+            fanout,
+            drain: Mutex::new(drain),
+        }
+    }
+
     /// Begins graceful shutdown, in the order `ownership.md` §6 rule 7 fixes.
     ///
     /// > the runtime stops accepting work, the event stream closes so a drain
@@ -178,6 +224,21 @@ impl Service {
             "shutting down: draining the write-behind journal, then closing the event stream"
         );
         self.core.begin_shutdown();
+        // §6 rule 7's middle step, which now exists: the event stream closes,
+        // the drain unblocks, and every subscriber and every outstanding
+        // completion is settled rather than left waiting on a body that will
+        // never arrive.
+        self.fanout.close();
+        if let Some(handle) = self
+            .drain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            // The thread is inside at most one `next_event` call, bounded by
+            // `DRAIN_TIMEOUT`, so this join is bounded too.
+            let _ = handle.join();
+        }
         tracing::info!(
             target: "twinvpn.service",
             custody_survives_exit = twinvpn_platform::NetworkConfig::enforcement_custody(
@@ -188,6 +249,13 @@ impl Service {
         );
     }
 }
+
+/// How long the drain thread sits in one `Core::next_event` call.
+///
+/// **Not a deadline for anything.** CD-3 makes timeouts the core's; this bounds
+/// how long the thread is unresponsive to a shutdown that has already been
+/// requested, which is a property of this thread and not of any protocol.
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[cfg(test)]
 mod tests {
@@ -281,5 +349,60 @@ mod tests {
             env.now_monotonic().as_micros(),
             env.now_elapsed().as_micros()
         );
+    }
+
+    #[test]
+    fn the_service_starts_a_drain_and_joins_it_on_shutdown() {
+        // The wiring `ownership.md` §10.8 M-12 found missing: `shutdown`'s own
+        // documentation described "the event stream closes so a drain thread
+        // unblocks", and there was no drain thread. This asserts the thread
+        // exists by observing what only a running drain can do — move an event
+        // from the core's queue onto the fan-out — and that `shutdown` joins
+        // it rather than leaking it.
+        use twinvpn_platform::mock::{MockAdapter, MockOptions};
+
+        let env = env();
+        let adapter = Arc::new(MockAdapter::new(&MockOptions::default()));
+        let core = build_core(
+            &env,
+            Arc::clone(&adapter) as Arc<dyn PlatformAdapter>,
+            false,
+            "core-held",
+        )
+        .expect("the ABI matches");
+
+        let service = Service::start(env, adapter as Arc<dyn PlatformAdapter>, core);
+        let id = service.fanout.subscribe(twinvpn_mgmt::SUBSCRIBER_WATERMARK);
+        // `Default::default()` rather than a named `TransitionEvent`: this
+        // shell has no `twinvpn-schema` dependency and must not acquire one —
+        // CB-2's "translate, don't model" is why the core encodes and this
+        // crate only forwards.
+        #[allow(clippy::default_trait_access)]
+        service
+            .core
+            .publish_transition(Default::default(), Some("dana".to_owned()));
+
+        // The drain blocks in `next_event`, so the event arrives on another
+        // thread's schedule. Bounded spin rather than a sleep: CD-3 keeps
+        // `tokio::time` out of this crate, and a spin that gives up is a test
+        // failure rather than a hang.
+        let mut delivered = None;
+        for _ in 0..2_000 {
+            if let Some(frame) = service.fanout.next_for(id) {
+                delivered = Some(frame);
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let Some(twinvpn_mgmt::Frame::Event { event, .. }) = delivered else {
+            panic!("the drain never delivered the event; is the thread running?")
+        };
+        assert_eq!(event.topic, "transition");
+        assert_eq!(event.actor_principal.as_deref(), Some("dana"));
+
+        // And shutdown joins it. A leaked drain would hold an `Arc<Core>` for
+        // the life of the process and keep publishing into a closed fan-out.
+        service.shutdown();
+        assert!(service.fanout.is_closed());
     }
 }

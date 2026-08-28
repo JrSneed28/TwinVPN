@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The launcher icon. Adaptive, because API 26 is this product's floor and 26 is
+  where adaptive icons arrived — a legacy bitmap would be masked inconsistently
+  across every launcher on the fleet.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/status_unknown" />
+    <foreground android:drawable="@drawable/ic_tile" />
+    <monochrome android:drawable="@drawable/ic_tile" />
+</adaptive-icon>

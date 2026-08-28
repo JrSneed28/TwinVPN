@@ -308,7 +308,7 @@ pub fn admit(ledger: &mut Ledger, gathered: &Gathered, now: MonotonicInstant) ->
 /// The probe body is deliberately opaque. `protocol.md` §10.4's authenticated
 /// disco exchange is `twinvpn-path`'s `DiscoAuth`, which needs a key this build
 /// has no binding for, so what leaves is a **bounded, keyless reachability
-/// datagram** and the candidate is marked [`Standing::Probed`] rather than
+/// datagram** and the candidate is marked `Standing::Probed` rather than
 /// validated. Marking it validated would be the authentication bypass ADR-0007
 /// N-4 forbids.
 ///

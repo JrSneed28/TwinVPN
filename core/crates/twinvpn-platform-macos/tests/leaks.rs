@@ -568,3 +568,60 @@ fn a_contract_with_no_routes_at_all_still_denies_both_families() {
         assert_eq!(installed.scope, PerFamily::new(1, 1));
     }
 }
+
+/// **X-9.** A subscriber behind CGNAT holds an on-link address inside the
+/// very RFC 6598 `/10` the Tier-1 baseline protects.
+///
+/// Denying it does not protect anything — the overlay's own traffic leaves
+/// by the overlay interface either way — it only severs the underlay, which
+/// is the same argument ADR-0010 §11.5 clause 5 makes for DHCP. So it is
+/// passed off-overlay regardless of KS-4, and KS-4 is not widened.
+#[test]
+fn x9_a_cgnat_underlay_prefix_is_passed_even_when_ks4_denies_the_lan() {
+    use twinvpn_types::{IpAddr, IpPrefix, V4Addr};
+
+    let cgnat =
+        IpPrefix::new(IpAddr::V4(V4Addr::from_octets([100, 96, 0, 0])), 12).expect("prefix");
+    let lan = IpPrefix::new(IpAddr::V4(V4Addr::from_octets([192, 168, 1, 0])), 24).expect("prefix");
+
+    let denied = EnforcementConfig {
+        local_network_access: false,
+        on_link_prefixes: vec![cgnat, lan],
+        ..testkit::enforcement()
+    };
+    let anchor = pf::render(
+        &testkit::full_tunnel_contract(1, Ruleset::Blocked),
+        Ruleset::Blocked,
+        &denied,
+    );
+
+    assert!(
+        anchor.contains("twinvpn.underlay.cgnat"),
+        "the underlay path is passed off-overlay regardless of KS-4"
+    );
+    assert!(
+        anchor.contains("100.96.0.0/12"),
+        "and it names the host's own prefix"
+    );
+    // KS-4 is NOT widened: the ordinary LAN is still denied. Checked on the
+    // `pass` lines rather than on the whole anchor, because the contract's own
+    // scope may legitimately NAME that prefix in a `block drop`.
+    assert!(
+        !anchor
+            .lines()
+            .filter(|l| l.trim_start().starts_with("pass "))
+            .any(|l| l.contains("192.168.1.0/24")),
+        "KS-4 still costs the user their printer when they ask it to"
+    );
+    // Every X-9 RULE is off-overlay: a peer at 100.64.0.7 is still reached
+    // through the tunnel and nowhere else. `table <...> persist { … }` lines
+    // are declarations, not rules, and carry no interface at all.
+    for line in anchor
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| l.starts_with("pass ") || l.starts_with("block "))
+        .filter(|l| l.contains("100.96.0.0/12"))
+    {
+        assert!(line.contains("on ! "), "off-overlay only: {line}");
+    }
+}

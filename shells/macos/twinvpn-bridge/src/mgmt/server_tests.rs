@@ -71,6 +71,7 @@ fn an_operation_the_catalogue_does_not_know_is_a_typed_rejection() {
         &request("/bin/sh"),
         &granted,
         &credentials(501),
+        None,
         &context(sink.clone()),
     );
     assert!(!response.ok);
@@ -90,6 +91,7 @@ fn a_scope_the_connection_was_not_granted_refuses_before_the_core_sees_it() {
         &request("session.connect"),
         &status_only,
         &credentials(501),
+        None,
         &context(sink.clone()),
     );
     assert!(!response.ok);
@@ -117,6 +119,7 @@ fn an_administer_operation_is_refused_rather_than_performed_on_a_scope_alone() {
             &request(op.name()),
             &everything,
             &credentials(501),
+            None,
             &context(sink.clone()),
         );
         assert!(!response.ok, "{} was performed", op.name());
@@ -139,6 +142,7 @@ fn an_unauthorised_operation_is_named_as_an_authorization_refusal() {
         &request("session.connect"),
         &status_only,
         &credentials(501),
+        None,
         &context(sink),
     );
     assert_eq!(
@@ -157,6 +161,7 @@ fn an_authorised_operation_reaches_the_core_carrying_its_actor() {
         &request("status.get"),
         &granted,
         &credentials(501),
+        None,
         &context(sink.clone()),
     );
     assert!(response.ok);
@@ -177,6 +182,7 @@ fn mi6_a_locally_mutating_operation_reports_no_net_seq_rather_than_a_fake_one() 
         &request("status.get"),
         &granted,
         &credentials(501),
+        None,
         &context(sink),
     );
     assert_eq!(response.committed_at_net_seq, None);
@@ -191,6 +197,7 @@ fn mi21_the_catalogue_operation_is_answered_without_reaching_the_core() {
         &request("mi.catalogue.get"),
         &Scopes::empty(),
         &credentials(501),
+        None,
         &context(sink.clone()),
     );
     assert!(response.ok);
@@ -236,5 +243,314 @@ fn the_catalogue_digest_is_the_catalogues_and_not_a_constant() {
     assert_eq!(
         twinvpn_mgmt::catalogue_digest(),
         twinvpn_mgmt::catalogue_digest()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §11.10's event stream. `ownership.md` §10.8 M-1.
+//
+// The bridge built a core, wrapped it in a `CommandSink` that exposes only
+// `submit`, and dropped the handle — so the event stream was unreachable BY
+// CONSTRUCTION: `next_event` appeared nowhere in this crate, no client could be
+// told anything had changed, and every `Response.result` was empty.
+//
+// **What these tests can and cannot reach on this host.** `serve` begins with
+// `PeerCredentials::read`, which returns `None` off Darwin — MI-A5, deliberately
+// — so the attach itself is not runnable here and neither is the `SO_PEERCRED`
+// half. Everything *after* the attach is, because `request_loop` is generic over
+// the transport for exactly this reason. What is asserted below is therefore the
+// loop, the pump, the ordering and the snapshot; what is not is the credential
+// read, which is `#[cfg(target_os = "macos")]` and has never executed.
+// ---------------------------------------------------------------------------
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a current-thread runtime")
+}
+
+fn ctx() -> ServerContext {
+    context(std::sync::Arc::new(RecordingSink::default()))
+}
+
+async fn read_one<S>(stream: &mut S) -> MgmtEnvelope
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    twinvpn_mi::codec::read_frame(stream)
+        .await
+        .expect("a frame")
+        .expect("not a clean close")
+}
+
+/// Drives [`request_loop`] over an in-memory duplex, with the client half
+/// returned so a test can read what the agent pushed.
+fn drive(
+    context: ServerContext,
+    subscription: Option<u64>,
+) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Ending>) {
+    let (client, mut server) = tokio::io::duplex(64 * 1024);
+    let granted = Scopes::from_scopes(twinvpn_mi::scope::GRANTABLE);
+    let credentials = credentials(501);
+    let handle = tokio::spawn(async move {
+        request_loop(&mut server, &granted, &credentials, subscription, &context).await
+    });
+    (client, handle)
+}
+
+#[test]
+fn a_subscribed_client_receives_the_events_the_fanout_publishes() {
+    // **F-5 end to end on the macOS socket carriage.** "All state changes arrive
+    // as events on exactly one totally ordered stream per instance" — and that
+    // stream used to stop inside the core, because nothing read it.
+    runtime().block_on(async {
+        let context = ctx();
+        let fanout = std::sync::Arc::clone(&context.fanout);
+        let id = fanout.subscribe(64);
+        let (mut client, served) = drive(context, Some(id));
+
+        fanout.publish(
+            7,
+            &twinvpn_mi::wire::Event {
+                topic: "transition".to_owned(),
+                payload: vec![1, 2, 3],
+                actor_principal: Some("dana".to_owned()),
+                op: None,
+            },
+        );
+
+        let frame = read_one(&mut client).await;
+        let Body::Event(event) = frame.body else {
+            panic!("an event, not a marker")
+        };
+        assert_eq!(event.topic, "transition");
+        assert_eq!(event.payload, vec![1, 2, 3]);
+        // **MI-18.** "The tunnel went down" and "Dana took the tunnel down" are
+        // different facts, and the attribution survives the whole path.
+        assert_eq!(event.actor_principal.as_deref(), Some("dana"));
+        // **MI-16.** The core's own sequence number, carried unchanged — a
+        // contiguous `seq` is what proves no event was lost.
+        assert_eq!(frame.seq, 7);
+        // **MI-16's stamp comes from the INJECTED clock**, which this testkit
+        // fixes at zero. Asserting the fixed value rather than "not zero" is
+        // the stronger check: a stamp read from the wall would be a large
+        // number here, and MI-16 forbids a wall clock because it can go
+        // backwards.
+        assert_eq!(frame.as_of_ms, 0, "stamped from the injected clock");
+
+        drop(client);
+        let _ = served.await.expect("the task joined");
+    });
+}
+
+#[test]
+fn a_gap_reaches_the_client_as_an_ordered_marker() {
+    // MI-19: a drop is a recorded gap, never a silence, and the marker keeps the
+    // `up_to_seq` that makes the gap resyncable. It used to be synthesized into
+    // a diagnostic on the C ABI and did not exist at all here.
+    runtime().block_on(async {
+        let context = ctx();
+        let fanout = std::sync::Arc::clone(&context.fanout);
+        let id = fanout.subscribe(64);
+        let (mut client, served) = drive(context, Some(id));
+
+        fanout.publish_gap(11, &[("transition".to_owned(), 4)]);
+
+        let frame = read_one(&mut client).await;
+        let Body::Compacted(marker) = frame.body else {
+            panic!("MI-19's marker is its own body, not a diagnostic")
+        };
+        assert_eq!(marker.up_to_seq, 11);
+        assert_eq!(marker.dropped_by_topic, vec![("transition".to_owned(), 4)]);
+
+        drop(client);
+        let _ = served.await.expect("the task joined");
+    });
+}
+
+#[test]
+fn a_client_on_no_stream_is_sent_nothing_and_still_answers_requests() {
+    // §11.10 has no wildcard: a client that named no topic is on no stream.
+    // Without this, "subscribed" would not be a state — and the loop must still
+    // serve requests, which is the regression the `select!` could cause.
+    use tokio::io::AsyncWriteExt as _;
+
+    runtime().block_on(async {
+        let context = ctx();
+        let fanout = std::sync::Arc::clone(&context.fanout);
+        let (mut client, served) = drive(context, None);
+
+        // Published with nobody subscribed: it must reach no wire at all.
+        fanout.publish(
+            1,
+            &twinvpn_mi::wire::Event {
+                topic: "transition".to_owned(),
+                payload: Vec::new(),
+                actor_principal: None,
+                op: None,
+            },
+        );
+
+        let request = twinvpn_mi::codec::encode_frame(&MgmtEnvelope {
+            mi_version: MI_VERSION,
+            request_id: vec![9],
+            correlation_id: Vec::new(),
+            seq: 0,
+            idempotency_key: Vec::new(),
+            as_of_ms: 0,
+            body: Body::Request(twinvpn_mi::wire::Request {
+                operation: "mi.catalogue.get".to_owned(),
+                params: Vec::new(),
+                if_version: None,
+            }),
+        })
+        .expect("encodes");
+        client.write_all(&request).await.expect("writes");
+
+        // The FIRST frame back is the response, not the event. If the pump had
+        // fired for an unsubscribed connection this would be an `Event`.
+        let frame = read_one(&mut client).await;
+        assert!(
+            matches!(frame.body, Body::Response(ref r) if r.ok),
+            "an unsubscribed client gets its answer and no stream: {:?}",
+            frame.body
+        );
+
+        drop(client);
+        let _ = served.await.expect("the task joined");
+    });
+}
+
+#[test]
+fn an_event_never_overtakes_the_response_to_an_earlier_request() {
+    // The ordering property the interleaving could break. A client that saw a
+    // state change before the acknowledgement of the command that caused it
+    // would have to reason about a future it had not been told about yet.
+    use tokio::io::AsyncWriteExt as _;
+
+    runtime().block_on(async {
+        let context = ctx();
+        let fanout = std::sync::Arc::clone(&context.fanout);
+        let id = fanout.subscribe(64);
+        let (mut client, served) = drive(context, Some(id));
+
+        let request = twinvpn_mi::codec::encode_frame(&MgmtEnvelope {
+            mi_version: MI_VERSION,
+            request_id: vec![9],
+            correlation_id: Vec::new(),
+            seq: 0,
+            idempotency_key: Vec::new(),
+            as_of_ms: 0,
+            body: Body::Request(twinvpn_mi::wire::Request {
+                operation: "mi.catalogue.get".to_owned(),
+                params: Vec::new(),
+                if_version: None,
+            }),
+        })
+        .expect("encodes");
+        client.write_all(&request).await.expect("writes");
+
+        let first = read_one(&mut client).await;
+        assert!(
+            matches!(first.body, Body::Response(_)),
+            "the response to a request that preceded any publish comes first"
+        );
+
+        fanout.publish(
+            2,
+            &twinvpn_mi::wire::Event {
+                topic: "session".to_owned(),
+                payload: Vec::new(),
+                actor_principal: None,
+                op: None,
+            },
+        );
+        let second = read_one(&mut client).await;
+        assert!(matches!(second.body, Body::Event(_)), "then the event");
+
+        drop(client);
+        let _ = served.await.expect("the task joined");
+    });
+}
+
+#[test]
+fn an_unsubscribed_resync_is_refused_by_its_own_name() {
+    // MI-9a: "the stream dropped events, resnapshot" and "your cursor cannot be
+    // serviced" are different recoveries. They were the same code until
+    // `registry_version` 2 registered `MGMT.RESYNC_REQUIRED` — X-1 called this
+    // pair the worst of the sixteen substitutions.
+    let granted = Scopes::from_scopes(twinvpn_mi::scope::GRANTABLE);
+    let response = handle(
+        &twinvpn_mi::wire::Request {
+            operation: "event.resync".to_owned(),
+            params: Vec::new(),
+            if_version: None,
+        },
+        &granted,
+        &credentials(501),
+        None,
+        &ctx(),
+    );
+    assert!(!response.ok);
+    let diagnostic = response.diagnostic.expect("named");
+    assert_eq!(diagnostic.reason_code, "MGMT.RESYNC_REQUIRED");
+    assert_ne!(
+        diagnostic.reason_code, "MGMT.STREAM_COMPACTED",
+        "MI-9a's two conditions must stay two codes"
+    );
+}
+
+#[test]
+fn a_subscribed_resync_answers_with_the_snapshot() {
+    // It refused unconditionally before, because there was no stream to
+    // snapshot. An empty `rows` is now a truthful answer and is distinguishable
+    // from a refusal; what MI-9a forbids is an empty snapshot that hides a gap,
+    // and the cursor beside it is what tells a client whether one occurred.
+    let context = ctx();
+    let id = context.fanout.subscribe(64);
+    context.fanout.publish(
+        3,
+        &twinvpn_mi::wire::Event {
+            topic: "transition".to_owned(),
+            payload: vec![9],
+            actor_principal: None,
+            op: None,
+        },
+    );
+    let granted = Scopes::from_scopes(twinvpn_mi::scope::GRANTABLE);
+    let response = handle(
+        &twinvpn_mi::wire::Request {
+            operation: "event.resync".to_owned(),
+            params: Vec::new(),
+            if_version: None,
+        },
+        &granted,
+        &credentials(501),
+        Some(id),
+        &context,
+    );
+    assert!(response.ok, "no longer an unconditional refusal");
+    let body: ResyncBody = serde_json::from_slice(&response.result).expect("the snapshot");
+    assert_eq!(body.cursor, 4, "MI-9's cursor, assigned inside the lock");
+    assert_eq!(body.rows.len(), 1);
+    assert_eq!(body.rows[0].topic, "transition");
+}
+
+#[test]
+fn the_xpc_carriage_carries_no_stream_and_says_so_by_name() {
+    // Swift owns the XPC listener and hands this crate one message at a time
+    // through the C ABI, so there is nowhere to push an unsolicited frame from.
+    // `None` is the truth rather than an omission, and a resync on that carriage
+    // is refused by name instead of answered with a snapshot of a stream the
+    // client is not on.
+    let source = executable_source(include_str!("session.rs"));
+    assert!(
+        source.contains("None,"),
+        "the XPC session must pass no subscription"
+    );
+    assert!(
+        !source.contains("fanout"),
+        "and must not acquire one: there is no place to push from"
     );
 }

@@ -140,6 +140,26 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
         client_version: &str,
         requested_scopes: &[String],
     ) -> Result<Self, ClientError> {
+        Self::attach_subscribed(stream, client_kind, client_version, requested_scopes, &[]).await
+    }
+
+    /// [`Client::attach`], also asking for §11.10's event stream.
+    ///
+    /// An **empty** topic list is "no stream", not "every topic": §11.10 has no
+    /// wildcard, and a client that wants events names them. Kept as a separate
+    /// constructor so the common case reads unchanged and so a caller that does
+    /// not want a stream cannot acquire one by forgetting an argument.
+    ///
+    /// # Errors
+    ///
+    /// [`Client::attach`]'s.
+    pub async fn attach_subscribed(
+        stream: S,
+        client_kind: &str,
+        client_version: &str,
+        requested_scopes: &[String],
+        subscribe_topics: &[String],
+    ) -> Result<Self, ClientError> {
         let mut stream = stream;
 
         let hello = MgmtEnvelope {
@@ -158,7 +178,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
                 client_kind: client_kind.to_owned(),
                 client_version: client_version.to_owned(),
                 requested_scopes: requested_scopes.to_vec(),
-                subscribe_topics: Vec::new(),
+                subscribe_topics: subscribe_topics.to_vec(),
             }),
         };
         write_frame(&mut stream, &hello)
@@ -281,6 +301,37 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
                 Body::Reject(d) => return Err(ClientError::Rejected(Box::new(d))),
                 // MI-3: the agent MUST NOT initiate a request. Receiving one is
                 // a protocol violation, not something to answer.
+                Body::Hello(_) | Body::HelloAck(_) | Body::Request(_) => {
+                    return Err(ClientError::Protocol)
+                }
+            }
+        }
+    }
+
+    /// Reads the next frame the **agent** pushed: §11.10's event, or MI-19's
+    /// ordered gap marker.
+    ///
+    /// Returns the whole envelope rather than the body alone, because MI-16's
+    /// `seq` and `as_of_ms` live on it and a client that wanted to prove it had
+    /// missed nothing would otherwise have to be told them twice.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Unavailable`] when the connection ends, and
+    /// [`ClientError::Protocol`] for anything MI-3 forbids the agent to send.
+    pub async fn next_event(&mut self) -> Result<MgmtEnvelope, ClientError> {
+        loop {
+            let frame = read_frame(&mut self.stream)
+                .await
+                .map_err(ClientError::Unavailable)?;
+            match frame.body {
+                Body::Event(_) | Body::Compacted(_) => return Ok(frame),
+                // A response to a call this caller is not awaiting. Skipping it
+                // keeps `next_event` usable on a connection that also makes
+                // ordinary calls, which is the shape §11.10 assumes.
+                Body::Response(_) => {}
+                Body::Goodbye => return Err(ClientError::Unavailable(TransportError::Closed)),
+                Body::Reject(d) => return Err(ClientError::Rejected(Box::new(d))),
                 Body::Hello(_) | Body::HelloAck(_) | Body::Request(_) => {
                     return Err(ClientError::Protocol)
                 }

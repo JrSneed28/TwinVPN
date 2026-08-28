@@ -1,0 +1,29 @@
+// The module map ADR-0018 §11.5's iOS row names: "Swift <- module map over
+// twinvpn.h + generated Swift wrapper".
+//
+// TWO modules, deliberately, because the two headers have entirely different
+// compatibility status and merging them would blur exactly the distinction
+// ownership.md §10.4 draws:
+//
+//   TwinVPNCore   — `twinvpn.h`, the ABI OF RECORD. Versioned (`abi_major` /
+//                   `abi_minor`), a compatibility obligation forever (F-1),
+//                   owned by `core-composition`. This shell consumes it and
+//                   never adds to it.
+//
+//   TwinVPNBridge — the INTERNAL bridge. Versionless, no compatibility
+//                   obligation, owned by `mobile-ios`, and permitted to carry
+//                   only bytes, counts and OS numbers (§10.4).
+//
+// `twinvpn.h` is staged into this directory at build time from
+// `core/ffi/include/twinvpn.h` — see `shells/ios/README.md`. It is not
+// committed here, because a second copy of an ABI of record is a second thing
+// that can drift from it.
+module TwinVPNBridge {
+    header "twinvpn_ios_bridge.h"
+    export *
+}
+
+module TwinVPNCore {
+    header "twinvpn.h"
+    export *
+}

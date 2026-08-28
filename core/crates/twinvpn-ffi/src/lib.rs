@@ -131,6 +131,15 @@ fn envelope_for(code: ReasonCode) -> *mut TwBuf {
     envelope(&Diagnostic::builder(code, Component::Diagnostics).build())
 }
 
+/// **MI-16's agent stamp**, on the boot-time monotonic clock ADR-0022 LC-8
+/// names — the same reading `shells/linux` puts on every envelope it emits.
+///
+/// > A contiguous `seq` proves **no event was lost**; it does not prove **any
+/// > event was recent**.
+fn as_of_ms(tw: &TwCore) -> u64 {
+    tw.core.env().now_elapsed().as_micros() / 1_000
+}
+
 // ---------------------------------------------------------------------------
 // Instance-free entry points
 // ---------------------------------------------------------------------------
@@ -496,7 +505,7 @@ pub unsafe extern "C" fn tw_core_next_event(
             {
                 Some(event) => (
                     TW_OK,
-                    TwBuf::into_raw(encode_event(&event)),
+                    TwBuf::into_raw(encode_event(&event, as_of_ms(tw))),
                     core::ptr::null_mut(),
                 ),
                 // Not a failure: a timeout and a wake are both normal, and F-4
@@ -513,37 +522,129 @@ pub unsafe extern "C" fn tw_core_next_event(
     rc
 }
 
-/// Encodes one event for the wire.
+/// Encodes one event for the wire, **in the MI envelope every other carriage
+/// uses**.
 ///
-/// F-8: structured data crosses as encoded bytes generated from the frozen
-/// contract artifacts. A transition and a session event already have frozen
-/// forms; a command outcome carries its envelope.
-fn encode_event(event: &twinvpn_core::CoreEvent) -> Vec<u8> {
+/// **Authority:** ADR-0018 F-5 and F-8; ADR-0017 §11.3, MI-18, MI-19, MI-20
+/// (*"one contract, two carriages, never two contracts"*); `ownership.md`
+/// §10.8 **M-1** and **M-2**.
+///
+/// # What this used to do, and why it was the largest defect of wave 3
+///
+/// It wrote the bare [`twinvpn_core::CoreEventKind::encoded_payload`] bytes and
+/// nothing else — **six different message types into one `tw_buf` with no
+/// discriminator**. A receiver could not tell which it held.
+/// `Diagnostic` and `CommandRejected` are both an `ErrorEnvelope` and were
+/// therefore byte-identical, so *"your command failed"* and *"here is an
+/// unsolicited diagnostic"* were the same bytes. `CommandCompleted` dropped
+/// `op`, so a shell could not tell **which** command completed. And because
+/// `seq` and `actor_principal` live on [`twinvpn_core::CoreEvent`] rather than
+/// on its `kind`, encoding only the kind dropped both: F-5's *"exactly one
+/// totally ordered stream"* crossed the ABI with its ordering removed, MI-19's
+/// `Compacted` marker lost the `up_to_seq` that makes a gap resyncable, and
+/// MI-18's *"'the tunnel went down' and 'Dana took the tunnel down' are
+/// different facts"* became unsayable.
+///
+/// # Why the envelope, and not a new contract message
+///
+/// M-2 dispositioned the wire half as needing a **generated contract message**,
+/// which would mean reopening the freeze. It does not, because
+/// [`twinvpn_mgmt::envelope::MgmtEnvelope`] already carries every field M-1
+/// names as lost — `seq`, the topic, `actor_principal`, and
+/// `Compacted { up_to_seq, dropped_by_topic }` — and it is length-prefixed
+/// JSON, which a Swift or Kotlin shell decodes **without linking a Rust type**.
+/// That was M-2's whole objection to the `twinvpn-mgmt` half, and it is
+/// answered by the encoding rather than by a second declaration. Using it here
+/// is MI-20 applied to the ABI: the C ABI is a *carriage*, and it now speaks the
+/// same vocabulary as the Unix socket, the named pipe and XPC.
+///
+/// # The four connection-scoped fields, stated rather than fabricated
+///
+/// `MgmtEnvelope` frames a **connection**, and the ABI is in-process and has
+/// none. Each of those fields takes its documented not-applicable value and no
+/// invented one:
+///
+/// - `request_id` is empty. MI-2 makes it unique per emission on a carriage that
+///   has requests; this one does not — `tw_core_submit` is fire-and-forget and
+///   returns no id, which is precisely why `op` has to travel on the event.
+/// - `correlation_id` is empty, which §11.3 already specifies for a **pushed**
+///   event on every carriage.
+/// - `mi_version` is [`twinvpn_mgmt::envelope::MI_VERSION`], the version this
+///   core speaks. It is not negotiated here because ADR-0018 §11.16 (o) keeps
+///   `Hello`/`HelloAck` off the ABI: there is no peer to negotiate with.
+/// - `as_of_ms` is stamped from the caller's [`twinvpn_env::Env`] elapsed clock
+///   exactly as `shells/linux` stamps it, because MI-16 makes it the **agent's**
+///   assertion and a contiguous `seq` proves nothing was lost without proving
+///   anything was recent.
+///
+/// # Why a `Compacted` body rather than a diagnostic
+///
+/// The previous code synthesized an `INTERNAL.BUFFER_OVERFLOW` envelope for a
+/// gap, which made MI-19's **ordered marker** indistinguishable from an
+/// ordinary diagnostic and threw `up_to_seq` away. `Body::Compacted` is the
+/// marker MI-19 asks for, and it carries both numbers.
+fn encode_event(event: &twinvpn_core::CoreEvent, as_of_ms: u64) -> Vec<u8> {
     use twinvpn_core::CoreEventKind as K;
-    let mut buf = Vec::new();
-    match &event.kind {
-        K::Transition(t) => {
-            let _ = prost::Message::encode(&**t, &mut buf);
-        }
-        K::SessionEvent(e) => {
-            let _ = prost::Message::encode(&**e, &mut buf);
-        }
-        K::Diagnostic(d) | K::CommandRejected { diagnostic: d, .. } => {
-            let _ = prost::Message::encode(&**d, &mut buf);
-        }
-        K::CommandCompleted { result, .. } => buf.extend_from_slice(result),
-        K::Compacted { dropped, .. } => {
-            // MI-19: a drop is a recorded gap. It crosses as the registered
-            // `INTERNAL.BUFFER_OVERFLOW` with its declared `dropped` evidence,
-            // so a consumer sees a NAMED gap rather than a silent one.
-            let d = Diagnostic::builder(codes::INTERNAL_BUFFER_OVERFLOW, Component::Diagnostics)
-                .evidence("dropped", twinvpn_types::EvidenceValue::Uint(*dropped))
-                .build();
-            let emitter = twinvpn_diag::Emitter::new(Component::Diagnostics, Tier::LocalLedger);
-            let _ = prost::Message::encode(&emitter.error_envelope(&d, None), &mut buf);
-        }
-    }
-    buf
+    use twinvpn_mgmt::envelope::{self, Body, Compacted, Event, MgmtEnvelope};
+
+    let body = match &event.kind {
+        K::Compacted { up_to_seq, dropped } => Body::Compacted(Compacted {
+            up_to_seq: *up_to_seq,
+            // The core counts a gap as one total rather than per topic, so the
+            // one bucket it can honestly fill is filled and no other is
+            // invented. A per-topic breakdown a carriage made up would be worse
+            // than a total that is true.
+            dropped_by_topic: vec![(event.kind.topic().to_owned(), *dropped)],
+        }),
+        kind => Body::Event(Event {
+            topic: kind.topic().to_owned(),
+            payload: kind.encoded_payload(),
+            actor_principal: event.actor_principal.clone(),
+            op: kind.op().map(str::to_owned),
+        }),
+    };
+
+    let framed = MgmtEnvelope {
+        mi_version: envelope::MI_VERSION,
+        request_id: Vec::new(),
+        correlation_id: Vec::new(),
+        seq: event.seq,
+        idempotency_key: Vec::new(),
+        as_of_ms,
+        body,
+    };
+
+    // `encode_frame`'s only failure is the size cap, which is checked on the
+    // SEND side so this agent cannot emit a frame it would itself refuse. A
+    // payload over the cap is a defect in whatever produced it, and it crosses
+    // as a NAMED refusal rather than as a truncation or a silent drop —
+    // `ownership.md` §6 rule 9.
+    envelope::encode_frame(&framed).unwrap_or_else(|_| {
+        let d = Diagnostic::builder(codes::PROTO_SIZE_EXCEEDED, Component::Diagnostics).build();
+        let emitter = twinvpn_diag::Emitter::new(Component::Diagnostics, Tier::LocalLedger);
+        let refusal = MgmtEnvelope {
+            mi_version: envelope::MI_VERSION,
+            request_id: Vec::new(),
+            correlation_id: Vec::new(),
+            seq: event.seq,
+            idempotency_key: Vec::new(),
+            as_of_ms,
+            body: Body::Event(Event {
+                topic: twinvpn_core::events::topics::DIAGNOSTIC.to_owned(),
+                payload: {
+                    let mut buf = Vec::new();
+                    let _ = prost::Message::encode(&emitter.error_envelope(&d, None), &mut buf);
+                    buf
+                },
+                actor_principal: None,
+                op: None,
+            }),
+        };
+        // The refusal carries no payload of the caller's, so it cannot itself
+        // exceed the cap; if it somehow did, an empty frame is a decode error
+        // at the reader rather than a panic here (F-3).
+        envelope::encode_frame(&refusal).unwrap_or_default()
+    })
 }
 
 /// `void tw_core_wake(tw_core *);` — callable from **any** thread.
@@ -586,6 +687,203 @@ pub unsafe extern "C" fn tw_buf_bytes(buf: *const TwBuf) -> TwSlice {
 pub unsafe extern "C" fn tw_buf_free(buf: *mut TwBuf) {
     // SAFETY: the caller's contract, above; `release` handles null.
     unsafe { TwBuf::release(buf) };
+}
+
+#[cfg(test)]
+mod event_encoding {
+    //! **M-1.** The six shapes on the ABI's event stream, each asserted to be
+    //! distinguishable from the other five.
+    //!
+    //! Every one of these failed before `encode_event` framed through the MI
+    //! envelope, and each fails again the day it stops.
+
+    use twinvpn_core::{CoreEvent, CoreEventKind};
+    use twinvpn_mgmt::envelope::{decode_frame, Body, MgmtEnvelope};
+    use twinvpn_schema::v1;
+
+    use super::encode_event;
+
+    const AS_OF: u64 = 4_242;
+
+    fn event(seq: u64, kind: CoreEventKind, actor: Option<&str>) -> CoreEvent {
+        CoreEvent {
+            seq,
+            kind,
+            actor_principal: actor.map(str::to_owned),
+        }
+    }
+
+    fn roundtrip(e: &CoreEvent) -> MgmtEnvelope {
+        decode_frame(&encode_event(e, AS_OF)).expect("the ABI emits a decodable MI frame")
+    }
+
+    fn envelope() -> Box<v1::ErrorEnvelope> {
+        Box::new(v1::ErrorEnvelope {
+            reason_code: "INTERNAL.INVARIANT_VIOLATED".to_owned(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_diagnostic_and_a_command_rejection_are_no_longer_the_same_bytes() {
+        // THE defect. Both carry an `ErrorEnvelope`, so before the envelope
+        // they were byte-identical and "your command failed" and "here is an
+        // unsolicited diagnostic" could not be told apart.
+        let diagnostic = roundtrip(&event(1, CoreEventKind::Diagnostic(envelope()), None));
+        let rejected = roundtrip(&event(
+            2,
+            CoreEventKind::CommandRejected {
+                op: "tunnel.up",
+                diagnostic: envelope(),
+            },
+            None,
+        ));
+
+        let (Body::Event(d), Body::Event(r)) = (&diagnostic.body, &rejected.body) else {
+            panic!("both are events");
+        };
+        assert_eq!(d.topic, "diagnostic");
+        assert_eq!(r.topic, "command.rejected");
+        assert_ne!(d.topic, r.topic, "the two are distinguishable");
+        // The payloads still agree, which is correct: the DISCRIMINATOR is the
+        // topic, not a difference in the contract message.
+        assert_eq!(d.payload, r.payload);
+    }
+
+    #[test]
+    fn a_completion_says_which_command_completed() {
+        let framed = roundtrip(&event(
+            7,
+            CoreEventKind::CommandCompleted {
+                op: "peer.disconnect",
+                result: vec![9, 9, 9],
+            },
+            None,
+        ));
+        let Body::Event(e) = &framed.body else {
+            panic!("an event")
+        };
+        assert_eq!(e.topic, "command.completed");
+        assert_eq!(e.op.as_deref(), Some("peer.disconnect"));
+        assert_eq!(e.payload, vec![9, 9, 9], "the result is forwarded whole");
+    }
+
+    #[test]
+    fn ordering_survives_the_crossing() {
+        // F-5: "exactly one totally ordered stream". `seq` lives on CoreEvent
+        // and encoding only the KIND dropped it, so the stream crossed with its
+        // ordering removed.
+        for seq in [0, 1, 2, u64::MAX] {
+            let framed = roundtrip(&event(seq, CoreEventKind::Diagnostic(envelope()), None));
+            assert_eq!(framed.seq, seq);
+        }
+    }
+
+    #[test]
+    fn mi_18_survives_the_crossing_and_absence_stays_absence() {
+        // "The tunnel went down" and "Dana took the tunnel down" are different
+        // facts. Both directions asserted: a named actor arrives named, and an
+        // agent-internal cause arrives with no actor rather than an empty one.
+        let by_dana = roundtrip(&event(
+            1,
+            CoreEventKind::Transition(Box::default()),
+            Some("dana"),
+        ));
+        let Body::Event(e) = &by_dana.body else {
+            panic!("an event")
+        };
+        assert_eq!(e.actor_principal.as_deref(), Some("dana"));
+
+        let internal = roundtrip(&event(2, CoreEventKind::Transition(Box::default()), None));
+        let Body::Event(e) = &internal.body else {
+            panic!("an event")
+        };
+        assert_eq!(e.actor_principal, None);
+    }
+
+    #[test]
+    fn a_gap_is_an_ordered_marker_that_keeps_its_up_to_seq() {
+        // MI-19. Before, a gap was synthesized into an INTERNAL.BUFFER_OVERFLOW
+        // diagnostic -- indistinguishable from an ordinary one, with `up_to_seq`
+        // thrown away, so a receiver could not resync from it.
+        let framed = roundtrip(&event(
+            12,
+            CoreEventKind::Compacted {
+                up_to_seq: 11,
+                dropped: 5,
+            },
+            None,
+        ));
+        let Body::Compacted(c) = &framed.body else {
+            panic!("MI-19's marker is its own body, not a diagnostic");
+        };
+        assert_eq!(c.up_to_seq, 11);
+        assert_eq!(c.dropped_by_topic, vec![("diagnostic".to_owned(), 5)]);
+    }
+
+    #[test]
+    fn every_kind_lands_on_its_own_topic_and_the_five_are_the_registered_five() {
+        let kinds = [
+            CoreEventKind::Transition(Box::default()),
+            CoreEventKind::SessionEvent(Box::default()),
+            CoreEventKind::Diagnostic(envelope()),
+            CoreEventKind::CommandCompleted {
+                op: "x",
+                result: Vec::new(),
+            },
+            CoreEventKind::CommandRejected {
+                op: "x",
+                diagnostic: envelope(),
+            },
+        ];
+        let mut seen = Vec::new();
+        for (i, kind) in kinds.into_iter().enumerate() {
+            let framed = roundtrip(&event(i as u64, kind, None));
+            let Body::Event(e) = &framed.body else {
+                panic!("an event")
+            };
+            assert!(
+                twinvpn_core::events::topics::ALL.contains(&e.topic.as_str()),
+                "{} is not a registered topic",
+                e.topic
+            );
+            seen.push(e.topic.clone());
+        }
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 5, "five kinds, five distinct topics");
+    }
+
+    #[test]
+    fn the_connection_scoped_fields_are_empty_rather_than_invented() {
+        // The ABI is in-process and has no connection. Each of these takes its
+        // documented not-applicable value, and `twinvpn.h` says so normatively.
+        let framed = roundtrip(&event(3, CoreEventKind::Diagnostic(envelope()), None));
+        assert!(framed.request_id.is_empty(), "no requests on this carriage");
+        assert!(
+            framed.correlation_id.is_empty(),
+            "a pushed event answers nothing"
+        );
+        assert!(framed.idempotency_key.is_empty());
+        assert_eq!(framed.mi_version, twinvpn_mgmt::envelope::MI_VERSION);
+        assert_eq!(framed.as_of_ms, AS_OF, "MI-16 is the AGENT's stamp");
+    }
+
+    #[test]
+    fn the_frame_is_length_prefixed_so_a_foreign_shell_can_read_it_without_rust() {
+        // M-2's objection: a Swift or Kotlin shell cannot link a Rust type. It
+        // does not have to -- the frame is a big-endian length and then JSON.
+        let bytes = encode_event(
+            &event(1, CoreEventKind::Diagnostic(envelope()), None),
+            AS_OF,
+        );
+        let declared = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert_eq!(declared, bytes.len() - 4, "the prefix describes the body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes[4..]).expect("the body is plain JSON");
+        assert_eq!(json["body"]["kind"], "event");
+        assert_eq!(json["body"]["topic"], "diagnostic");
+    }
 }
 
 #[cfg(test)]

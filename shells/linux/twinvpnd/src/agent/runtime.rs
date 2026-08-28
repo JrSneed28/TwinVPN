@@ -284,7 +284,7 @@ pub fn arm_owner_tagged_ruleset(
 
 /// The running agent: one `Env`, one adapter, one core.
 ///
-/// **S-47**: "exactly **one process** [holds] a mutating core handle at a time",
+/// **S-47**: "exactly **one process** \[holds\] a mutating core handle at a time",
 /// and one adapter object, "because a core that assembled its platform from six
 /// independently-supplied pieces could not state which adapter it was talking
 /// to".
