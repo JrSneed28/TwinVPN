@@ -30,7 +30,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
 use crate::service::peer::{Principal, SessionKind};
 
-use super::{token, OwnedHandle};
+use super::{token, Failure, OwnedHandle};
 
 /// An active impersonation, reverted on drop.
 ///
@@ -52,26 +52,33 @@ impl Drop for Impersonation {
 
 /// The calling client's kernel-attested identity.
 ///
+/// # Safety
+///
+/// `pipe` must be a live, **connected** named-pipe handle, and must stay live
+/// for the duration of the call. An unconnected one makes
+/// `ImpersonateNamedPipeClient` fail, which is handled; a dangling one is
+/// undefined behaviour, which is what this contract exists to exclude.
+///
 /// # Errors
 ///
-/// `()` when the token cannot be read, which the server turns into
+/// [`Failure`] when the token cannot be read, which the server turns into
 /// `MGMT.PRINCIPAL_UNVERIFIABLE` and a close (MI-A5). There is no fallback
 /// principal and no anonymous tier.
-pub fn read_client_principal(pipe: HANDLE) -> Result<Principal, ()> {
+pub unsafe fn read_client_principal(pipe: HANDLE) -> Result<Principal, Failure> {
     // MI-A2: the pid is read for the log line and gates nothing.
     let mut pid: u32 = 0;
     // SAFETY: `pipe` is a live pipe handle the caller owns for the duration of
     // this call; `pid` is a live out-parameter.
     let ok = unsafe { GetNamedPipeClientProcessId(pipe, &raw mut pid) };
     if ok == 0 {
-        return Err(());
+        return Err(Failure::of("GetNamedPipeClientProcessId"));
     }
 
     // SAFETY: `pipe` is a live, connected pipe handle. On success this thread is
     // impersonating until the guard below is dropped.
     let ok = unsafe { ImpersonateNamedPipeClient(pipe) };
     if ok == 0 {
-        return Err(());
+        return Err(Failure::of("ImpersonateNamedPipeClient"));
     }
     let _revert = Impersonation;
 
@@ -89,12 +96,16 @@ pub fn read_client_principal(pipe: HANDLE) -> Result<Principal, ()> {
         )
     };
     if ok == 0 {
-        return Err(());
+        return Err(Failure::of("OpenThreadToken"));
     }
-    let token_handle = OwnedHandle::new(token_handle).ok_or(())?;
+    let token_handle =
+        OwnedHandle::new(token_handle).ok_or_else(|| Failure::of("OpenThreadToken"))?;
 
-    let user_sid = token::user_sid(token_handle.get())?;
-    let enabled_group_sids = token::enabled_group_sids(token_handle.get())?;
+    // SAFETY: `token_handle` was opened with `TOKEN_QUERY` immediately above and
+    // is live until it is dropped below.
+    let user_sid = unsafe { token::user_sid(token_handle.get()) }?;
+    // SAFETY: as above.
+    let enabled_group_sids = unsafe { token::enabled_group_sids(token_handle.get()) }?;
 
     // Everything is read. The handle closes here and the impersonation reverts
     // at the end of the function, both before the value below is used for

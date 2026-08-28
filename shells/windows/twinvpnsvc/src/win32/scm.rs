@@ -19,7 +19,7 @@ use windows_sys::Win32::System::Services::{
 
 use crate::service::scm::{wait_hint_ms, ServiceState};
 
-use super::wide;
+use super::{wide, Failure};
 
 /// Whether the SCM started this process (PS-11).
 ///
@@ -86,22 +86,28 @@ pub fn dispatch(service_name: &str, entry: LPSERVICE_MAIN_FUNCTIONW) -> bool {
 
 /// Registers the control handler.
 ///
+/// # Safety
+///
+/// `context` is handed to the SCM and passed back to `handler` on every control
+/// for the life of the service, so it must point at something that outlives the
+/// service — a leaked `Box`, not a stack local.
+///
 /// # Errors
 ///
-/// `()` when the SCM refuses, which is fatal: a service with no handler cannot
-/// be stopped and would hang every shutdown.
-pub fn register_handler(
+/// [`Failure`] when the SCM refuses, which is fatal: a service with no handler
+/// cannot be stopped and would hang every shutdown.
+pub unsafe fn register_handler(
     service_name: &str,
     handler: LPHANDLER_FUNCTION_EX,
     context: *mut core::ffi::c_void,
-) -> Result<SERVICE_STATUS_HANDLE, ()> {
+) -> Result<SERVICE_STATUS_HANDLE, Failure> {
     let name = wide(service_name);
     // SAFETY: `name` is a live NUL-terminated buffer for the duration of the
     // call. `context` is the caller's and must outlive the service, which the
     // caller guarantees by leaking it — see `main.rs`.
     let handle = unsafe { RegisterServiceCtrlHandlerExW(name.as_ptr(), handler, context) };
     if handle.is_null() {
-        Err(())
+        Err(Failure::of("RegisterServiceCtrlHandlerExW"))
     } else {
         Ok(handle)
     }
@@ -111,7 +117,12 @@ pub fn register_handler(
 ///
 /// The `SERVICE_STATUS` is built from the [`ServiceState`] the pure transition
 /// function produced, so the two cannot disagree about what a state means.
-pub fn report(handle: SERVICE_STATUS_HANDLE, state: ServiceState) {
+///
+/// # Safety
+///
+/// `handle` must be the value [`register_handler`] returned for this service,
+/// and must not have been invalidated by the service having stopped.
+pub unsafe fn report(handle: SERVICE_STATUS_HANDLE, state: ServiceState) {
     let (current, checkpoint, exit_code) = match state {
         ServiceState::StartPending { checkpoint } => (SERVICE_START_PENDING, checkpoint, 0),
         ServiceState::Running => (SERVICE_RUNNING, 0, 0),

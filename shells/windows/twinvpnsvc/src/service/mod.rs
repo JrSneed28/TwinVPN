@@ -33,8 +33,10 @@ pub mod logging;
 pub mod peer;
 pub mod power;
 pub mod privilege;
+#[cfg(feature = "core-host")]
 pub mod runtime;
 pub mod scm;
+#[cfg(feature = "core-host")]
 pub mod server;
 pub mod start;
 

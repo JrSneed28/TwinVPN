@@ -353,17 +353,26 @@ fn build_adapter(
     })?;
 
     let backend = custody::CngElement::probe();
-    Ok(twinvpn_platform_windows::WindowsPlatformAdapter::new(
-        WindowsAdapterParts {
-            enforcement: enforcement_config(),
-            stub: stub_addresses(),
-            store_root: store_root(),
-            restore_point_path: store_root().join("resolver.restore"),
-            identity_element: Arc::new(custody::CngElement::new(backend)),
-            tier1_backend: backend,
-            tunnel_driver: Arc::new(driver),
-        },
-    ))
+    // Fallible: `WindowsPlatformAdapter::new` opens the WFP engine, and PS-18
+    // makes an absent capability a **startup** failure rather than a
+    // degradation. ADR-0012 §8 is the other half — arming must never fail open,
+    // so a service that could not open the engine must not reach `ready`.
+    twinvpn_platform_windows::WindowsPlatformAdapter::new(WindowsAdapterParts {
+        enforcement: enforcement_config(),
+        stub: stub_addresses(),
+        store_root: store_root(),
+        restore_point_path: store_root().join("resolver.restore"),
+        identity_element: Arc::new(custody::CngElement::new(backend)),
+        tier1_backend: backend,
+        tunnel_driver: Arc::new(driver),
+    })
+    .map_err(|error| {
+        StartupRefusal::platform(
+            error.reason_code().as_str(),
+            "PLATFORM.PRIV.CAPABILITY_MISSING",
+            format!("the WFP engine could not be opened: {error}"),
+        )
+    })
 }
 
 /// The non-Windows answer.

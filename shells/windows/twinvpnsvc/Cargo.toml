@@ -29,19 +29,39 @@ path = "src/lib.rs"
 [[bin]]
 name = "twinvpnsvc"
 path = "src/main.rs"
-required-features = ["service"]
+required-features = ["core-host"]
 
 [features]
-default = ["service"]
-# The privileged half. Off for `twinvpnctl`, which needs only `mi`.
+default = ["service", "core-host"]
+
+# The privileged half that talks to WINDOWS: the SCM, the trimmed privilege
+# posture, the start sequence, the power events, the client-token check and the
+# pipe's DACL. Off for `twinvpnctl`, which needs only `mi`.
+#
+# Deliberately does NOT pull `twinvpn-core`, and the split is a verification
+# decision rather than a taste one. The core reaches `snow`, `snow` reaches
+# `ring`, and `ring`'s build script refuses a GNU compiler for
+# `x86_64-pc-windows-msvc` — so on a Linux host WITHOUT an MSVC-targeting C
+# toolchain, anything that links the core cannot be type-checked for Windows at
+# all. Splitting the feature means the whole Win32 surface still is:
+#
+#   cargo clippy -p twinvpnsvc --no-default-features --features service \
+#       --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+#
+# That command is the only compile proof this domain's `#[cfg(windows)]` service
+# code has, and without the split there would be none. See
+# `shells/windows/README.md` §7.19.
 service = [
-  "dep:twinvpn-core",
   "dep:twinvpn-platform",
   "dep:twinvpn-platform-windows",
   "dep:twinvpn-env",
   "dep:tracing-subscriber",
   "dep:clap",
 ]
+
+# Hosting the core: `service::runtime`, `service::server` and the binary. On by
+# default, so a real build is unchanged; separable, so the line above can run.
+core-host = ["service", "dep:twinvpn-core"]
 
 [dependencies]
 twinvpn-mgmt  = { workspace = true }

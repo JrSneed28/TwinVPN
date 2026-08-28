@@ -229,8 +229,9 @@ mod tests {
         // `Serialize` and the MI `Diagnostic` has no field for it.
         let correlation = Correlation::root(1);
         // A compile-time property, restated as a runtime one a reader can see:
-        // the only way out of this type is its two integers.
+        // the only way out of this type is its two integers, and its `Debug`
+        // names them rather than rendering something a log could carry off-box.
         assert_eq!(correlation.correlation_id, 1);
-        assert_eq!(format!("{correlation:?}").contains("correlation_id"), true);
+        assert!(format!("{correlation:?}").contains("correlation_id"));
     }
 }

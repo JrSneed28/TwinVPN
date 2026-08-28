@@ -26,14 +26,37 @@
 //! every signature, every struct layout and every constant name is right. It is
 //! **not** a proof that any of it does what it says: none of this has run.
 
-#![cfg(windows)]
-
 pub mod instance;
 pub mod pipe;
 pub mod scm;
 pub mod token;
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
+
+/// A Windows call that refused, carrying the status it refused with.
+///
+/// A type rather than `()`, because the whole of `oserr`'s discipline is that a
+/// number rides along with a name: a shim that lost the status would make the
+/// decision layer above it unable to say *why* a token could not be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the call `{call}` failed with status {:#010x}", .status.get())]
+pub struct Failure {
+    /// Which call.
+    pub call: &'static str,
+    /// What it reported.
+    pub status: twinvpn_platform_windows::oserr::Win32Error,
+}
+
+impl Failure {
+    /// The failure of `call`, with this thread's last error.
+    #[must_use]
+    pub fn of(call: &'static str) -> Self {
+        Self {
+            call,
+            status: last_error(),
+        }
+    }
+}
 
 /// A NUL-terminated UTF-16 buffer, for the `W` entry points.
 ///

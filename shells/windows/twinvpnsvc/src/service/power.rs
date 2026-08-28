@@ -222,6 +222,11 @@ pub fn classify_wake(
 }
 
 /// LC-24's five steps, as a value.
+// Four booleans, and each is a distinct step LC-24 orders. Collapsing them into
+// a bitflags type would make "how far did the resume get" a number a reader has
+// to decode, and `may_emit_a_packet`'s line — which falls between steps 2 and 3
+// — is exactly the distinction that would be lost.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ResumeSequence {
     /// (1) The wake was classified.

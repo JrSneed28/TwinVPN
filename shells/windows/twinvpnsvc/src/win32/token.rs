@@ -18,7 +18,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 
 use crate::service::privilege::{Privilege, TokenPrivilege, TokenPrivileges as Privileges};
 
-use super::{wide, OwnedHandle};
+use super::{wide, Failure, OwnedHandle};
 
 /// `SE_GROUP_ENABLED`.
 ///
@@ -61,15 +61,15 @@ fn known_name(name: &str) -> Privilege {
 }
 
 /// Opens this process's own token for reading.
-fn own_token() -> Result<OwnedHandle, ()> {
+fn own_token() -> Result<OwnedHandle, Failure> {
     let mut handle: HANDLE = std::ptr::null_mut();
     // SAFETY: `GetCurrentProcess` returns a pseudo-handle that needs no close,
     // and `handle` is a live, correctly-typed out-parameter this frame owns.
     let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut handle) };
     if ok == 0 {
-        return Err(());
+        return Err(Failure::of("OpenProcessToken"));
     }
-    OwnedHandle::new(handle).ok_or(())
+    OwnedHandle::new(handle).ok_or_else(|| Failure::of("OpenProcessToken"))
 }
 
 /// Queries one token-information class into a byte buffer.
@@ -78,7 +78,12 @@ fn own_token() -> Result<OwnedHandle, ()> {
 /// `ERROR_INSUFFICIENT_BUFFER` and reports the size, the second fills it.
 /// **The length is the OS's, not a guess**, so there is no fixed buffer here for
 /// a token with an unusual number of groups to overrun.
-fn query(token: HANDLE, class: i32) -> Result<Vec<u8>, ()> {
+/// The buffer is a `Vec<u64>` rather than a `Vec<u8>` for one reason: every
+/// `TOKEN_*` structure the caller casts to has an alignment of four or eight,
+/// and `Vec<u8>`'s allocation guarantees only one. A cast from an under-aligned
+/// pointer is undefined behaviour whatever the allocator happens to return, so
+/// the alignment is obtained from the element type instead of hoped for.
+unsafe fn query(token: HANDLE, class: i32) -> Result<AlignedBuffer, Failure> {
     let mut needed: u32 = 0;
     // SAFETY: a null buffer with a zero length is the documented size probe.
     // `needed` is a live out-parameter. The call is expected to fail.
@@ -86,11 +91,12 @@ fn query(token: HANDLE, class: i32) -> Result<Vec<u8>, ()> {
         GetTokenInformation(token, class, std::ptr::null_mut(), 0, &raw mut needed);
     }
     if needed == 0 {
-        return Err(());
+        return Err(Failure::of("GetTokenInformation(size probe)"));
     }
-    let mut buffer = vec![0u8; needed as usize];
-    // SAFETY: `buffer` is `needed` bytes long, which is the length the OS just
-    // asked for, and the pointer is valid for that whole length.
+    let mut buffer = AlignedBuffer::with_capacity(needed as usize);
+    // SAFETY: `buffer` is at least `needed` bytes long, which is the length the
+    // OS just asked for, and its pointer is valid for that whole length and
+    // aligned to eight.
     let ok = unsafe {
         GetTokenInformation(
             token,
@@ -101,32 +107,74 @@ fn query(token: HANDLE, class: i32) -> Result<Vec<u8>, ()> {
         )
     };
     if ok == 0 {
-        return Err(());
+        return Err(Failure::of("GetTokenInformation"));
     }
     Ok(buffer)
+}
+
+/// A byte buffer aligned to eight, for the `TOKEN_*` casts.
+pub struct AlignedBuffer {
+    words: Vec<u64>,
+    len: usize,
+}
+
+impl AlignedBuffer {
+    /// A zeroed buffer of at least `bytes` bytes, aligned to eight.
+    #[must_use]
+    fn with_capacity(bytes: usize) -> Self {
+        Self {
+            words: vec![0u64; bytes.div_ceil(core::mem::size_of::<u64>())],
+            len: bytes,
+        }
+    }
+
+    /// The writable pointer the OS fills.
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.words.as_mut_ptr().cast::<u8>()
+    }
+
+    /// The readable pointer, aligned to eight.
+    #[must_use]
+    fn as_ptr(&self) -> *const u8 {
+        self.words.as_ptr().cast::<u8>()
+    }
+
+    /// How many bytes the OS said it wrote.
+    #[must_use]
+    const fn len(&self) -> usize {
+        self.len
+    }
 }
 
 /// The privileges in a token.
 ///
 /// # Errors
 ///
-/// `()` when the token cannot be opened or queried, which
+/// [`Failure`] when the token cannot be opened or queried, which
 /// [`crate::service::privilege::Posture::read`] turns into
 /// `PrivilegeError::Unverifiable` — refused, never assumed.
-pub fn process_privileges() -> Result<Privileges, ()> {
+pub fn process_privileges() -> Result<Privileges, Failure> {
     let token = own_token()?;
-    privileges_of(token.get())
+    // SAFETY: `token` is this process's own token, opened just above and live
+    // until it is dropped at the end of this function.
+    unsafe { privileges_of(token.get()) }
 }
 
 /// The privileges in an arbitrary token.
 ///
+/// # Safety
+///
+/// `token` must be a live token handle opened with `TOKEN_QUERY`, and must stay
+/// live for the duration of the call.
+///
 /// # Errors
 ///
-/// `()` when the query fails.
-pub fn privileges_of(token: HANDLE) -> Result<Privileges, ()> {
-    let buffer = query(token, TokenPrivileges)?;
+/// [`Failure`] when the query fails.
+pub unsafe fn privileges_of(token: HANDLE) -> Result<Privileges, Failure> {
+    // SAFETY: the caller guarantees `token` is a live, queryable token handle.
+    let buffer = unsafe { query(token, TokenPrivileges) }?;
     if buffer.len() < core::mem::size_of::<TOKEN_PRIVILEGES>() {
-        return Err(());
+        return Err(Failure::of("TOKEN_PRIVILEGES (short buffer)"));
     }
     // SAFETY: the buffer was filled by `GetTokenInformation(TokenPrivileges)`,
     // which writes a `TOKEN_PRIVILEGES`, and its length was checked against that
@@ -139,7 +187,7 @@ pub fn privileges_of(token: HANDLE) -> Result<Privileges, ()> {
     let entries_offset = core::mem::offset_of!(TOKEN_PRIVILEGES, Privileges);
     let entry_size = core::mem::size_of::<windows_sys::Win32::Security::LUID_AND_ATTRIBUTES>();
     if entries_offset + count * entry_size > buffer.len() {
-        return Err(());
+        return Err(Failure::of("TOKEN_PRIVILEGES (count exceeds buffer)"));
     }
 
     let mut privileges = Vec::with_capacity(count);
@@ -198,13 +246,18 @@ fn privilege_name(luid: LUID) -> Option<String> {
 ///
 /// Enabled, not merely present — see [`SE_GROUP_ENABLED`].
 ///
+/// # Safety
+///
+/// `token` must be a live token handle opened with `TOKEN_QUERY`.
+///
 /// # Errors
 ///
-/// `()` when the query fails.
-pub fn enabled_group_sids(token: HANDLE) -> Result<Vec<String>, ()> {
-    let buffer = query(token, TokenGroups)?;
+/// [`Failure`] when the query fails.
+pub unsafe fn enabled_group_sids(token: HANDLE) -> Result<Vec<String>, Failure> {
+    // SAFETY: the caller guarantees `token` is a live, queryable token handle.
+    let buffer = unsafe { query(token, TokenGroups) }?;
     if buffer.len() < core::mem::size_of::<TOKEN_GROUPS>() {
-        return Err(());
+        return Err(Failure::of("TOKEN_GROUPS (short buffer)"));
     }
     // SAFETY: the buffer was filled by `GetTokenInformation(TokenGroups)`, which
     // writes a `TOKEN_GROUPS`, and its length was checked above.
@@ -213,7 +266,7 @@ pub fn enabled_group_sids(token: HANDLE) -> Result<Vec<String>, ()> {
     let entries_offset = core::mem::offset_of!(TOKEN_GROUPS, Groups);
     let entry_size = core::mem::size_of::<SID_AND_ATTRIBUTES>();
     if entries_offset + count * entry_size > buffer.len() {
-        return Err(());
+        return Err(Failure::of("TOKEN_GROUPS (count exceeds buffer)"));
     }
 
     let mut sids = Vec::with_capacity(count);
@@ -232,17 +285,22 @@ pub fn enabled_group_sids(token: HANDLE) -> Result<Vec<String>, ()> {
 
 /// The user SID in a token, as a string.
 ///
+/// # Safety
+///
+/// `token` must be a live token handle opened with `TOKEN_QUERY`.
+///
 /// # Errors
 ///
-/// `()` when the query fails.
-pub fn user_sid(token: HANDLE) -> Result<String, ()> {
-    let buffer = query(token, TokenUser)?;
+/// [`Failure`] when the query fails.
+pub unsafe fn user_sid(token: HANDLE) -> Result<String, Failure> {
+    // SAFETY: the caller guarantees `token` is a live, queryable token handle.
+    let buffer = unsafe { query(token, TokenUser) }?;
     if buffer.len() < core::mem::size_of::<TOKEN_USER>() {
-        return Err(());
+        return Err(Failure::of("TOKEN_USER (short buffer)"));
     }
     // SAFETY: filled by `GetTokenInformation(TokenUser)`, length checked above.
     let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
-    sid_to_string(user.User.Sid).ok_or(())
+    sid_to_string(user.User.Sid).ok_or_else(|| Failure::of("ConvertSidToStringSidW"))
 }
 
 /// A SID in its `S-1-…` form.
@@ -284,10 +342,11 @@ fn sid_to_string(sid: PSID) -> Option<String> {
 ///
 /// # Errors
 ///
-/// `()` when the token or the well-known SID cannot be obtained.
-pub fn running_as_local_system() -> Result<bool, ()> {
+/// [`Failure`] when the token or the well-known SID cannot be obtained.
+pub fn running_as_local_system() -> Result<bool, Failure> {
     let token = own_token()?;
-    let user = user_sid(token.get())?;
+    // SAFETY: `token` is this process's own token, live for the whole call.
+    let user = unsafe { user_sid(token.get()) }?;
     Ok(user == local_system_sid()?)
 }
 
@@ -297,7 +356,7 @@ pub fn running_as_local_system() -> Result<bool, ()> {
 /// down: `CreateWellKnownSid` is the same function every other component uses,
 /// so a comparison here cannot disagree with one elsewhere over a formatting
 /// difference.
-fn local_system_sid() -> Result<String, ()> {
+fn local_system_sid() -> Result<String, Failure> {
     let mut size: u32 = 0;
     // SAFETY: a null buffer with a zero size is the documented size probe.
     unsafe {
@@ -309,7 +368,7 @@ fn local_system_sid() -> Result<String, ()> {
         );
     }
     if size == 0 {
-        return Err(());
+        return Err(Failure::of("CreateWellKnownSid(size probe)"));
     }
     let mut buffer = vec![0u8; size as usize];
     // SAFETY: `buffer` is `size` bytes, which is what the probe asked for.
@@ -322,21 +381,24 @@ fn local_system_sid() -> Result<String, ()> {
         )
     };
     if ok == 0 {
-        return Err(());
+        return Err(Failure::of("CreateWellKnownSid"));
     }
-    sid_to_string(buffer.as_mut_ptr().cast::<core::ffi::c_void>()).ok_or(())
+    sid_to_string(buffer.as_mut_ptr().cast::<core::ffi::c_void>())
+        .ok_or_else(|| Failure::of("ConvertSidToStringSidW"))
 }
 
 /// The service's own SID, for the pipe DACL.
 ///
 /// # Errors
 ///
-/// `()` when the name cannot be resolved.
-pub fn service_sid(service_name: &str) -> Result<String, ()> {
+/// [`Failure`], always — see the body.
+pub fn service_sid(service_name: &str) -> Result<String, Failure> {
     // `NT SERVICE\<name>` is resolvable by `LookupAccountNameW`, but the SID is
     // also derivable from the name by a documented hash — and neither is
     // available without more surface than this shim needs. The **injected** form
     // is what CD-2 asks for anyway: the installer knows the SID it created.
     let _ = wide(service_name);
-    Err(())
+    Err(Failure::of(
+        "LookupAccountNameW (not implemented; the SID is injected)",
+    ))
 }

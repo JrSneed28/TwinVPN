@@ -27,6 +27,8 @@
 //! the power events — is `#[cfg(windows)]`, compiles under `make cross-check`,
 //! and **has never executed**.
 
+#![cfg(feature = "core-host")]
+
 use std::sync::Arc;
 
 use twinvpn_env::{Entropy, Env, EnvError};

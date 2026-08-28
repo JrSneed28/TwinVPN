@@ -267,12 +267,31 @@ impl Posture {
     /// queried. An unverifiable posture is refused, never assumed.
     #[cfg(windows)]
     pub fn read() -> Result<Self, PrivilegeError> {
-        let token = crate::win32::token::process_privileges()
-            .map_err(|()| PrivilegeError::Unverifiable)?;
+        // The shim's `Failure` carries the status; the decision layer names the
+        // condition. Both halves reach a support case: the code below, and the
+        // status in the log line the caller writes.
+        let token = crate::win32::token::process_privileges().map_err(|failure| {
+            tracing::warn!(
+                target: "twinvpn.service",
+                call = failure.call,
+                status = format_args!("{:#010x}", failure.status.get()),
+                "the service token could not be read"
+            );
+            PrivilegeError::Unverifiable
+        })?;
+        let is_local_system =
+            crate::win32::token::running_as_local_system().map_err(|failure| {
+                tracing::warn!(
+                    target: "twinvpn.service",
+                    call = failure.call,
+                    status = format_args!("{:#010x}", failure.status.get()),
+                    "the service account could not be determined"
+                );
+                PrivilegeError::Unverifiable
+            })?;
         Ok(Self {
             token,
-            is_local_system: crate::win32::token::running_as_local_system()
-                .map_err(|()| PrivilegeError::Unverifiable)?,
+            is_local_system,
             supervised: crate::win32::scm::started_by_scm(),
         })
     }

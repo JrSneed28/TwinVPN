@@ -187,6 +187,7 @@ impl FailureActions {
     /// restarted after a clean stop could never be stopped by an administrator,
     /// and a crash loop would be indistinguishable from an operator's
     /// intervention.
+    #[must_use]
     pub const fn restart_on_clean_exit() -> bool {
         false
     }
@@ -211,6 +212,12 @@ pub enum RecoveryAction {
 /// rather than interpreted: [`super::power`] classifies it into facts, and the
 /// core decides what they mean.
 #[must_use]
+// The `Stop` and `PreShutdown` arms are written out separately rather than
+// merged. They do the same thing today and they are different questions — one is
+// an administrator stopping a service, the other is the machine going down — and
+// ADR-0022 §11.4 gives them different SCM budgets. Merging them would hide the
+// day one of them gains a step.
+#[allow(clippy::match_same_arms)]
 pub fn on_control(state: ServiceState, control: Control) -> (ServiceState, Vec<Action>) {
     match (state, control) {
         // A stop while starting is honoured: the SCM may cancel a start, and a
@@ -430,8 +437,15 @@ mod tests {
         // ADR-0022 §11.4: T_LIFECYCLE_STOP = 2s, inside the 5s default
         // WaitToKillServiceTimeout. A hint longer than the kill timeout is a
         // promise Windows will not keep.
+        // The SCM's own default. Named as a value so the comparison below is a
+        // comparison and not a constant the compiler folds away.
+        let wait_to_kill_service_timeout_ms: u32 = 5_000;
         assert_eq!(STOP_WAIT_HINT_MS, 2_000);
-        assert!(STOP_WAIT_HINT_MS < 5_000);
+        assert!(
+            wait_hint_ms(ServiceState::StopPending { checkpoint: 1 })
+                < wait_to_kill_service_timeout_ms,
+            "a hint longer than the kill timeout is a promise Windows will not keep"
+        );
         assert_eq!(
             wait_hint_ms(ServiceState::StopPending { checkpoint: 1 }),
             STOP_WAIT_HINT_MS
@@ -448,7 +462,7 @@ mod tests {
         assert_eq!(FailureActions::RESET_PERIOD_SECS, 86_400);
         assert_eq!(FailureActions::FAILURES_BEFORE_QUARANTINE, 3);
         assert_eq!(
-            ladder.len() as u32,
+            u32::try_from(ladder.len()).expect("three rungs"),
             FailureActions::FAILURES_BEFORE_QUARANTINE,
             "the third failure is the one that reaches the quarantine rung"
         );
