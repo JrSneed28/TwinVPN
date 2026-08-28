@@ -89,5 +89,11 @@ prost                 = { workspace = true }
 # integration test as well as from a unit test (`core/README.md` §3).
 twinvpn-core          = { path = ".", features = ["test-support"] }
 proptest              = { workspace = true }
+# Deterministic ES256 fixture material — `FixtureIdentity::pkcs8_der()` and
+# `::spki_der()`. CD-I2 covers dev-dependencies, so the one keypair these tests
+# present to a control plane comes from the crate permitted to encode one, never
+# from a `p256` line here. `twinvpn-cp-client` carries the identical line for the
+# identical reason. Never enabled in a shipped build.
+twinvpn-crypto        = { workspace = true, features = ["test-support"] }
 twinvpn-platform      = { workspace = true, features = ["mock"] }
 twinvpn-env           = { workspace = true, features = ["test-support"] }

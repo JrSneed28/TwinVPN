@@ -131,13 +131,34 @@ is a change to another domain's crate.
 bridge stores verbatim and never decodes (ST-13, W-4). Returning a mark with
 invented band boundaries would make the client's staleness ladder run on fiction.
 
-### 5.3 `ControlTransport` has no production binding anywhere
+### 5.3 `ControlTransport` is bound — W-12 is closed
 
 `ownership.md` §8 **W-12** puts `rustls` in `twinvpn-crypto` and permits `quinn`
-in `twinvpn-cp-client`, with `twinvpn-core` wiring the two. Neither crate declares
-its half — `twinvpn-crypto` ships no TLS module and no `CryptoProvider`;
-`twinvpn-cp-client` ships the trait and scripted test doubles. Both are other
-domains' crates. **The composed core therefore has no L-CONTROL transport.**
+in `twinvpn-cp-client`, with `twinvpn-core` wiring the two. For the whole of
+wave 1 neither crate declared its half, so the composed core had no L-CONTROL
+transport and no device could speak to the control plane at all.
+
+`twinvpn-cp-client` now ships rung 1 in `src/quic/` — QUIC + TLS 1.3, mutual
+RFC 7250 raw-public-key auth against a **pinned** set with no learn-on-first-use
+variant, 0-RTT unreachable through three independent controls, Happy Eyeballs v2
+per ADR-0010 R1 — and [`cp_binding`] binds it, along with the `StatementVerifier`
+this section used to list beside it.
+
+W-12's split resolved to something slightly different from its literal reading,
+and the difference is worth stating: `twinvpn-crypto` still ships no TLS module,
+because it did not need to. `quinn` re-exports the `rustls` its own feature
+selection compiled, so the binding names `quinn::rustls::…`, adds no second
+`CryptoProvider` (ADR-0018 **DP-8**), and keeps `rustls` off every manifest in
+`core/` except through that re-export. Nothing in `twinvpn-core` names `quinn` or
+`rustls`; `cp_binding` re-exports the four types the composition root needs.
+
+**What is still missing**, so this section does not overclaim in the other
+direction: rungs 2–4 of the ADR-0002 §11.2 ladder are unimplemented anywhere, so
+a device that cannot reach UDP:443 has no control channel; `ServerPins`, the
+endpoint list and the `DeviceIdentity` are all **shell-injected**, because the
+store holds no enrolment record and CB-1 puts name resolution at the platform
+seam; and `software_key` remains a real CB-5/I4 hole on targets with no platform
+element, which this crate refuses to call but cannot stop a shell from using.
 
 ---
 
@@ -192,7 +213,7 @@ cluster into five causes, and none of them is this crate's to fix alone:
 
 | Cause | Operations |
 |---|---|
-| **W-12** — no `ControlTransport` exists in the workspace | `peer.*`, `policy.get`, `device.revoke`, `key.rotate`, `dns.preference.set`, `route.accept.set`, `exitnode.select` |
+| **the transport exists but `execute.rs` does not yet call it** — W-12 itself is closed (§5.3); what remains is the composition-root wiring | `peer.*`, `policy.get`, `device.revoke`, `key.rotate`, `dns.preference.set`, `route.accept.set`, `exitnode.select` |
 | **W-24** — F-9 has no `installed_ruleset` read-back, so the `ProtectionAssertion` cannot be produced | `killswitch.get`, `killswitch.exempt.get`, `killswitch.mode.set`, `diag.report` |
 | **D4-adjacent** — the operation is vault-backed and needs `open_store` | `settings.*`, `autostart.set`, `diag.bundle.create`, `diag.log.tail`, `diag.capture.set` |
 | **W-21** — `PairingOffer` appears nowhere in `contracts/` | `pair.*` |

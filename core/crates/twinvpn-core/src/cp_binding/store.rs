@@ -1,52 +1,18 @@
-//! Binding `twinvpn-cp-client` **to the store** — the first half of CD-I5.
+//! `ControlPlaneStore` → the store. The **only** path CD-I5 permits between the
+//! two planes, as a type.
 //!
-//! **Authority:** [ADR-0018](../../../../docs/adr/ADR-0018-shared-core-and-build-architecture.md)
-//! §11.7 CD-I5 and finding **W-12** in `docs/implementation/ownership.md` §8;
-//! `twinvpn_cp_client::ports`' own module docs ("Each trait below is a
-//! **request** to `core-security`, stated as a signature. When the real crates
-//! land, the composition root binds an adapter").
+//! **Authority:** [ADR-0018](../../../../../docs/adr/ADR-0018-shared-core-and-build-architecture.md)
+//! §11.7 CD-I5; [ADR-0009](../../../../../docs/adr/ADR-0009-consistency-and-state-convergence.md)
+//! R-4, R-6, R-9; `contracts/docs/idempotency.md` §5; finding **W-4** (octets
+//! are stored verbatim and never decoded here).
 //!
-//! This module is that adapter. It is compiled only under the `full` feature,
-//! because `core-lite` contains no control-plane client (§11.12).
+//! [`ControlPlaneBinding`] holds a [`crate::planes::ControlPlanePort`] and
+//! nothing else. The port is write-only and reaches no data-plane type, so
+//! "the control plane asked the data plane for something" is not expressible
+//! here rather than merely discouraged.
 //!
-//! # What is bound here, and what is not
-//!
-//! | `twinvpn-cp-client` port | Bound to | Status |
-//! |---|---|---|
-//! | `ControlPlaneStore` | [`crate::planes::ControlPlanePort`] → [`crate::bridge::StoreBridge`] → `twinvpn_store::Store` | **bound, here** |
-//! | `StatementVerifier` | `twinvpn_crypto::verify_cose_sign1` + `twinvpn_trust`'s anchor chain | **not bound** — see below |
-//! | `ControlTransport` | QUIC over TLS 1.3 with mutual raw-public-key auth | **not bound** — see below |
-//!
-//! ## `ControlTransport` has no production binding, and this crate cannot create
-//! one
-//!
-//! W-12 rules that `rustls` — the TLS implementation, the raw-public-key
-//! verifier, the cipher policy, the `CryptoProvider` — belongs to
-//! **`twinvpn-crypto`**, and that `quinn` may be declared by
-//! **`twinvpn-cp-client`**, with `twinvpn-core` wiring the two.
-//!
-//! Neither crate declares its half. `twinvpn-crypto` ships no TLS module and no
-//! `CryptoProvider`; `twinvpn-cp-client` declares `ControlTransport` as a trait
-//! and ships only scripted test implementations. Both are other domains' crates
-//! and `ownership.md` §2 forbids this domain to edit them, so the wiring W-12
-//! assigns to `twinvpn-core` has nothing on either end to wire.
-//!
-//! The consequence is stated rather than papered over: **the composed core has
-//! no L-CONTROL transport.** [`ControlPlaneBinding`] takes an
-//! `Arc<dyn ControlTransport>` from its caller, so the seam is real and the lab
-//! can drive it; what does not exist is a production implementation of that
-//! trait anywhere in the workspace.
-//!
-//! ## `StatementVerifier` is bindable and is deliberately left to the caller
-//!
-//! Unlike the transport, both halves of verification exist —
-//! `twinvpn_crypto::verify_cose_sign1` and `twinvpn_trust::AnchorChain`. What is
-//! missing is the mapping from `StatementKind` to the anchor a given statement
-//! must chain to, which is `twinvpn-trust`'s `Operation` table and is not
-//! exposed in the shape `StatementVerifier::verify` needs. Rather than
-//! re-deriving that mapping here — a second authority table, which is R-31's
-//! defect class — the binding takes the verifier as a parameter and the gap is
-//! reported.
+//! The other two ports are bound beside this one — see [`super`] for the table
+//! and for what W-12 resolved to.
 
 use futures_core::future::BoxFuture;
 use twinvpn_cp_client::ports::{ControlPlaneStore, StoreFailure};

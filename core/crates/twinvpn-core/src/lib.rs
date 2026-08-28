@@ -19,7 +19,9 @@
 //! |---|---|
 //! | [`planes`] | **CD-I5.** The control-plane client → the store → the data plane, in two one-directional ports |
 //! | [`bridge`] | The single owner of `twinvpn_store::Store`, and the durable flush |
-//! | [`cp_binding`] | `twinvpn-cp-client`'s `ControlPlaneStore`, bound to [`planes`] |
+//! | [`cp_binding`] | **All three** `twinvpn-cp-client` ports: `ControlPlaneStore` → [`planes`], `ControlTransport` → rung 1 QUIC, `StatementVerifier` → the Owner chain |
+//! | [`datapath`] | The userspace packet path — TUN in, tunnel out, and back (ADR-0018 §11.2 row 2.3) |
+//! | [`relay`] | The relay leg: `twinvpn-relay-client`'s decisions, given a socket to speak on |
 //! | [`journal`] | `twinvpn-session`'s `SessionJournal`, bound to the same store |
 //! | [`session_loop`] | The `Env`-driven timers and the platform events that fire `twinvpn-session`'s transitions |
 //! | [`events`] | **F-5.** One instance, one totally ordered event stream |
@@ -88,9 +90,9 @@ pub mod cp_binding;
 #[cfg(feature = "full")]
 pub mod datapath;
 #[cfg(feature = "full")]
-pub mod relay;
-#[cfg(feature = "full")]
 pub mod journal;
+#[cfg(feature = "full")]
+pub mod relay;
 #[cfg(feature = "full")]
 pub mod session_loop;
 

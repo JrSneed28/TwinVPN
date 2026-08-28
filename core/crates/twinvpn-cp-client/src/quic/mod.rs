@@ -12,10 +12,12 @@
 //!
 //! # What this closes
 //!
-//! `twinvpn-core`'s `cp_binding.rs` states the blocker in terms: *"the composed
-//! core has no L-CONTROL transport"*, and `shells/linux/twinvpnd`'s agent server
-//! refuses all five C1-mapping operations because of it. No device could speak
-//! to the control plane.
+//! Until this module existed, `twinvpn-core`'s `cp_binding` stated the blocker in
+//! terms — *"the composed core has no L-CONTROL transport"* — and
+//! `shells/linux/twinvpnd`'s agent server refused all five C1-mapping operations
+//! because of it. No device could speak to the control plane. That text is gone
+//! from `cp_binding` now; it is quoted here as the condition this module closed,
+//! not as a claim about the tree's present state.
 //!
 //! W-12 is what makes this module legal here, and it is worth restating because
 //! the manifest looks wrong otherwise. CD-I2 permits a cryptographic dependency
