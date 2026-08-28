@@ -55,11 +55,21 @@
 //! **different values**. "Truncated" selects the second reading: compute the
 //! full 256-bit keyed MAC, then take the leading eight bytes.
 //!
-//! Both readings are pinned in the unit test
-//! `the_frame_mac_truncates_and_is_not_a_short_output_blake2s`, with the
-//! rejected one named, because getting this wrong produces a relay that
-//! looks correctly configured and drops every frame — the exact failure mode
-//! `services/relay` refused to ship.
+//! Both readings are published as constants in [`vectors`] —
+//! [`vectors::FRAME_MAC_TAG`] and
+//! [`vectors::FRAME_MAC_TAG_SHORT_OUTPUT_REJECTED`] — so every consumer asserts
+//! the *discrimination* and not merely the happy answer. Getting this wrong
+//! produces a relay that looks correctly configured and drops every frame,
+//! which is the failure mode `services/relay` refused to ship.
+//!
+//! # The vectors are one artifact (W-33)
+//!
+//! [`vectors`] is a plain public module, not `#[cfg(test)]`. The §9.1 vector was
+//! previously replicated as source in four places, so each side failed
+//! separately and regenerating one did not fail the others. This crate's own
+//! tests import it like everyone else; there is no private copy here.
+
+pub mod vectors;
 
 use blake2::digest::{FixedOutput, KeyInit, Mac, Update};
 use blake2::{Blake2s256, Blake2sMac256};
@@ -164,14 +174,19 @@ pub fn hrw_weight_digest(
 
 #[cfg(test)]
 mod tests {
+    use super::vectors as v;
     use super::*;
 
-    fn hex_of(bytes: &[u8]) -> String {
-        use core::fmt::Write as _;
-        bytes.iter().fold(String::new(), |mut out, b| {
-            let _ = write!(out, "{b:02x}");
-            out
-        })
+    /// W-33: this crate holds **no private copy** of the vector. Everything
+    /// below reads `vectors`, exactly as `services/relay`,
+    /// `twinvpn-relay-client` and the `tests/` workspace do.
+    ///
+    /// This is the assertion that keeps the published module honest: if a
+    /// constant there ever disagreed with `frame_mac` or `hrw_weight_digest`,
+    /// every consumer would be pinned to a lie, and this fails first.
+    #[test]
+    fn the_published_vectors_agree_with_this_implementation() {
+        v::self_consistency();
     }
 
     /// **RFC 7693 Appendix B.** The published unkeyed BLAKE2s-256 vector for
@@ -179,95 +194,90 @@ mod tests {
     /// merely whatever `blake2` happens to compute.
     #[test]
     fn the_unkeyed_primitive_matches_rfc_7693_appendix_b() {
-        assert_eq!(
-            hex_of(&blake2s_256(b"abc")),
-            "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982"
-        );
+        assert_eq!(v::to_hex(&blake2s_256(b"abc")), v::RFC7693_ABC_HEX);
     }
 
-    /// **RFC 7693 Appendix E**, the keyed known-answer test: key
-    /// `00 01 … 1f`, empty input, and the same key over the single byte `0x00`.
+    /// **RFC 7693 Appendix E**, the keyed known-answer test: key `00 01 … 1f`
+    /// over the empty input, and the same key over the single byte `0x00`.
     ///
     /// This is the vector that proves the keyed mode is BLAKE2's own (RFC 7693
     /// §2.5) rather than HMAC-BLAKE2s, which is a different function that would
     /// produce a different wire tag.
     #[test]
     fn the_keyed_primitive_matches_the_rfc_7693_known_answer_test() {
-        let mut key = [0u8; 32];
-        for (i, b) in key.iter_mut().enumerate() {
-            *b = u8::try_from(i).unwrap_or(0);
-        }
         assert_eq!(
-            hex_of(&blake2s_256_keyed(&key, b"")),
-            "48a8997da407876b3d79c0d92325ad3b89cbb754d86ab71aee047ad345fd2c49"
+            v::to_hex(&blake2s_256_keyed(&v::RFC7693_KAT_KEY, b"")),
+            v::RFC7693_KEYED_EMPTY_HEX
         );
         assert_eq!(
-            hex_of(&blake2s_256_keyed(&key, &[0x00])),
+            v::to_hex(&blake2s_256_keyed(&v::RFC7693_KAT_KEY, &[0x00])),
             "40d15fee7c328830166ac3f918650f807e7e01e177258cdc0a39b11f598066f1"
         );
     }
 
-    /// A realistic ADR-0005 §9.1 `mac_input`, framed exactly as
-    /// `services/relay`'s `RelayFrame::mac_input` assembles it.
-    fn fixture_mac_input() -> Vec<u8> {
-        let mut v = Vec::new();
-        v.push(0x01); // type = DATA
-                      // ver = 1 in the high nibble, flags = 0 in the low nibble.
-        v.push(1 << 4);
-        v.extend_from_slice(&0x0102_0304_0506_0708u64.to_be_bytes()); // counter_full
-        v.extend_from_slice(&0xdead_beefu32.to_be_bytes()); // flow_id
-        v.extend_from_slice(&[0xab; 16]); // payload
-        v
+    /// The published MAC input is exactly what §9.1's field order produces.
+    ///
+    /// Built here from the individual field constants rather than copied from
+    /// [`v::FRAME_MAC_INPUT`], which is the same discipline a consumer follows
+    /// with its own assembler.
+    #[test]
+    fn the_published_mac_input_is_the_adr_field_order() {
+        let mut expected = Vec::new();
+        expected.push(v::FRAME_TYPE_DATA);
+        expected.push(v::FRAME_VER_FLAGS);
+        expected.extend_from_slice(&v::FRAME_COUNTER_FULL.to_be_bytes());
+        expected.extend_from_slice(&v::FRAME_FLOW_ID.to_be_bytes());
+        expected.extend_from_slice(&v::FRAME_PAYLOAD);
+        assert_eq!(expected, v::FRAME_MAC_INPUT);
+
+        // Nothing is length-prefixed: the input is exactly the sum of its
+        // fields, with the only variable-length one last.
+        assert_eq!(v::FRAME_MAC_INPUT.len(), 1 + 1 + 8 + 4 + 16);
     }
 
     /// **The frame-MAC golden vector, and the reading it fixes.**
     ///
     /// BLAKE2 parameterises output length inside its init block, so a
     /// short-output BLAKE2s is a *different function* from a truncated
-    /// full-length one. ADR-0005 §9.1 says "truncated", and this test pins that
-    /// reading by asserting the accepted value **and naming the rejected one**.
-    ///
-    /// Getting this wrong yields a relay that looks correctly configured and
-    /// drops every legitimate frame, which is the failure `services/relay`
-    /// refused to ship.
+    /// full-length one. ADR-0005 §9.1 says "truncated", and this pins that
+    /// reading by asserting the accepted value **and** the rejected one — both
+    /// over the published key and input, so neither assertion can pass for free.
     #[test]
     fn the_frame_mac_truncates_and_is_not_a_short_output_blake2s() {
-        let k_leg = [0x4b; FRAME_MAC_KEY_LEN];
-        let input = fixture_mac_input();
-
-        // The full keyed MAC, and the tag as the leading eight bytes of it.
+        // The full keyed MAC, of which the tag is the leading eight bytes.
         assert_eq!(
-            hex_of(&blake2s_256_keyed(&k_leg, &input)),
+            v::to_hex(&blake2s_256_keyed(&v::FRAME_MAC_KEY, &v::FRAME_MAC_INPUT)),
             "d04f9be2b57fc15b85c861133757746c1ec9788106c2093c2a7b4edc9775ad99"
         );
-        assert_eq!(hex_of(&frame_mac(&k_leg, &input)), "d04f9be2b57fc15b");
-
-        // The rejected reading — BLAKE2s parameterised to an 8-byte output —
-        // computed here so the difference is visible rather than asserted.
-        // `77 42 14 e9 63 46 c3 fa`. If a future change made `frame_mac` return
-        // that, this test fails.
+        let tag = frame_mac(&v::FRAME_MAC_KEY, &v::FRAME_MAC_INPUT);
+        assert_eq!(tag, v::FRAME_MAC_TAG);
         assert_ne!(
-            hex_of(&frame_mac(&k_leg, &input)),
-            "774214e96346c3fa",
+            tag,
+            v::FRAME_MAC_TAG_SHORT_OUTPUT_REJECTED,
             "the tag must be a truncated 256-bit MAC, not a short-output BLAKE2s"
         );
     }
 
     #[test]
     fn a_frame_mac_verifies_against_itself() {
-        let k_leg = [0x4b; FRAME_MAC_KEY_LEN];
-        let input = fixture_mac_input();
-        let tag = frame_mac(&k_leg, &input);
-        assert!(verify_frame_mac(&k_leg, &input, &tag));
+        assert!(verify_frame_mac(
+            &v::FRAME_MAC_KEY,
+            &v::FRAME_MAC_INPUT,
+            &v::FRAME_MAC_TAG
+        ));
     }
 
     /// **Attack test.** Off-path injection is what the MAC exists to stop, so a
     /// frame under a different `K_leg` must not verify.
     #[test]
     fn a_frame_under_another_leg_key_does_not_verify() {
-        let input = fixture_mac_input();
-        let tag = frame_mac(&[0x4b; 32], &input);
-        assert!(!verify_frame_mac(&[0x4c; 32], &input, &tag));
+        let mut other = v::FRAME_MAC_KEY;
+        other[0] ^= 0x01;
+        assert!(!verify_frame_mac(
+            &other,
+            &v::FRAME_MAC_INPUT,
+            &v::FRAME_MAC_TAG
+        ));
     }
 
     /// **Attack test.** Every byte of the MAC input is covered — the type, the
@@ -278,14 +288,11 @@ mod tests {
     /// oracle", so the eight-byte reconstructed counter is what is covered.
     #[test]
     fn every_byte_of_the_mac_input_is_covered() {
-        let k_leg = [0x4b; 32];
-        let input = fixture_mac_input();
-        let tag = frame_mac(&k_leg, &input);
-        for i in 0..input.len() {
-            let mut tampered = input.clone();
+        for i in 0..v::FRAME_MAC_INPUT.len() {
+            let mut tampered = v::FRAME_MAC_INPUT;
             tampered[i] ^= 0x01;
             assert!(
-                !verify_frame_mac(&k_leg, &tampered, &tag),
+                !verify_frame_mac(&v::FRAME_MAC_KEY, &tampered, &v::FRAME_MAC_TAG),
                 "a flip at offset {i} was not covered by the MAC"
             );
         }
@@ -296,34 +303,43 @@ mod tests {
     /// comparison would leak.
     #[test]
     fn a_tampered_tag_does_not_verify() {
-        let k_leg = [0x4b; 32];
-        let input = fixture_mac_input();
-        let tag = frame_mac(&k_leg, &input);
         for i in 0..FRAME_MAC_TAG_LEN {
-            let mut bad = tag;
+            let mut bad = v::FRAME_MAC_TAG;
             bad[i] ^= 0x01;
-            assert!(!verify_frame_mac(&k_leg, &input, &bad));
+            assert!(!verify_frame_mac(
+                &v::FRAME_MAC_KEY,
+                &v::FRAME_MAC_INPUT,
+                &bad
+            ));
         }
         // A tag matching every byte but the last is still a refusal.
-        let mut near = tag;
+        let mut near = v::FRAME_MAC_TAG;
         near[FRAME_MAC_TAG_LEN - 1] ^= 0xff;
-        assert!(!verify_frame_mac(&k_leg, &input, &near));
+        assert!(!verify_frame_mac(
+            &v::FRAME_MAC_KEY,
+            &v::FRAME_MAC_INPUT,
+            &near
+        ));
     }
 
     /// **Attack test.** Truncating or extending the input changes the MAC, so a
     /// short frame cannot be padded into a long one under one tag.
     #[test]
     fn a_lengthened_or_shortened_input_changes_the_mac() {
-        let k_leg = [0x4b; 32];
-        let input = fixture_mac_input();
-        let tag = frame_mac(&k_leg, &input);
-
-        let mut longer = input.clone();
+        let mut longer = v::FRAME_MAC_INPUT.to_vec();
         longer.push(0x00);
-        assert!(!verify_frame_mac(&k_leg, &longer, &tag));
+        assert!(!verify_frame_mac(
+            &v::FRAME_MAC_KEY,
+            &longer,
+            &v::FRAME_MAC_TAG
+        ));
 
-        let shorter = &input[..input.len() - 1];
-        assert!(!verify_frame_mac(&k_leg, shorter, &tag));
+        let shorter = &v::FRAME_MAC_INPUT[..v::FRAME_MAC_INPUT.len() - 1];
+        assert!(!verify_frame_mac(
+            &v::FRAME_MAC_KEY,
+            shorter,
+            &v::FRAME_MAC_TAG
+        ));
     }
 
     /// **The HRW golden vector.** Both ends of a pair and any directory ranking
@@ -331,22 +347,17 @@ mod tests {
     /// relays and never meet.
     #[test]
     fn the_hrw_weight_digest_is_blake2s_of_relay_id_then_pair_id() {
-        let relay_id = [0x11u8; HRW_RELAY_ID_LEN];
-        let pair_id = [0x22u8; HRW_PAIR_ID_LEN];
         assert_eq!(
-            hex_of(&hrw_weight_digest(&relay_id, &pair_id)),
-            "f0f13f7c6dff49dca104e8a82a46f1eb5f21d7f950ee9b94e6c2a261c1365aed"
+            hrw_weight_digest(&v::HRW_RELAY_ID, &v::HRW_PAIR_ID),
+            v::HRW_DIGEST
         );
 
         // And it is exactly BLAKE2s over the concatenation, assembled here
         // independently of the function under test.
         let mut expected_input = Vec::new();
-        expected_input.extend_from_slice(&relay_id);
-        expected_input.extend_from_slice(&pair_id);
-        assert_eq!(
-            hrw_weight_digest(&relay_id, &pair_id),
-            blake2s_256(&expected_input)
-        );
+        expected_input.extend_from_slice(&v::HRW_RELAY_ID);
+        expected_input.extend_from_slice(&v::HRW_PAIR_ID);
+        assert_eq!(v::HRW_DIGEST, blake2s_256(&expected_input));
     }
 
     /// The order is `relay_id ‖ pair_id`, not the reverse. Both are fixed-width
@@ -367,19 +378,18 @@ mod tests {
     /// pairs across the fleet.
     #[test]
     fn distinct_inputs_give_distinct_weights() {
-        let pair = [0x22u8; HRW_PAIR_ID_LEN];
         assert_ne!(
-            hrw_weight_digest(&[0x11; 8], &pair),
-            hrw_weight_digest(&[0x12; 8], &pair)
+            hrw_weight_digest(&[0x11; 8], &v::HRW_PAIR_ID),
+            hrw_weight_digest(&[0x12; 8], &v::HRW_PAIR_ID)
         );
-        let relay = [0x11u8; HRW_RELAY_ID_LEN];
         assert_ne!(
-            hrw_weight_digest(&relay, &[0x22; 16]),
-            hrw_weight_digest(&relay, &[0x23; 16])
+            hrw_weight_digest(&v::HRW_RELAY_ID, &[0x22; 16]),
+            hrw_weight_digest(&v::HRW_RELAY_ID, &[0x23; 16])
         );
     }
 
-    /// The declared widths are the contract's.
+    /// The declared widths are the contract's, and the published vector's
+    /// widths match them.
     #[test]
     fn the_declared_widths_match_the_wire_formats() {
         assert_eq!(BLAKE2S_LEN, 32);
@@ -387,5 +397,11 @@ mod tests {
         assert_eq!(FRAME_MAC_TAG_LEN, 8, "auth_tag is 64 bits (ADR-0005 §9.1)");
         assert_eq!(HRW_RELAY_ID_LEN, 8, "relay_id_bytes");
         assert_eq!(HRW_PAIR_ID_LEN, 16);
+
+        assert_eq!(v::FRAME_MAC_KEY.len(), FRAME_MAC_KEY_LEN);
+        assert_eq!(v::FRAME_MAC_TAG.len(), FRAME_MAC_TAG_LEN);
+        assert_eq!(v::HRW_RELAY_ID.len(), HRW_RELAY_ID_LEN);
+        assert_eq!(v::HRW_PAIR_ID.len(), HRW_PAIR_ID_LEN);
+        assert_eq!(v::HRW_DIGEST.len(), BLAKE2S_LEN);
     }
 }
