@@ -27,7 +27,10 @@ BASELINE   := $(CONTRACTS)/.baseline.binpb
         contracts-breaking contracts-freshness verify-bindings test-contracts \
         build lint test clean gate freeze freeze-scope build-rust lint-rust \
         test-rust fmt arch-lint doc-check cross-check infra-bootstrap infra-check infra-up \
-        infra-up-v6 infra-down budgets budgets-images redaction-check
+        infra-up-v6 infra-down budgets budgets-images redaction-check \
+        dev-issuer plane-up plane-up-v6 plane-probe plane-ceremony plane-status plane-down \
+        pg-up pg-down pg-reset \
+        lab-capabilities lab-conformance lab-fabric netlab-up netlab-down
 
 help:
 	@echo "TwinVPN"
@@ -49,6 +52,22 @@ help:
 	@echo "  make infra-up         bring the local plane up (dual stack); infra-up-v6 for IPv6-only"
 	@echo "  make infra-down       tear it down"
 	@echo "  make budgets          the ADR-0018 §11.9 artifact budgets"
+	@echo ""
+	@echo "  The host-native plane -- NO container runtime required:"
+	@echo "  make dev-issuer       (re)generate the development relay credentials"
+	@echo "  make plane-up         two real relays + two simulated peers as host processes"
+	@echo "  make plane-up-v6      the same, with every leg on IPv6"
+	@echo "  make plane-probe      one-shot: exit 0 iff a real leg binds a real relay"
+	@echo "  make plane-ceremony   one-shot: exit 0 iff a device ATTACHES to the control plane"
+	@echo "  make plane-status     what is running, and its metrics"
+	@echo "  make plane-down       stop everything plane-up started"
+	@echo "  make pg-up            a local PostgreSQL from pinned official binaries"
+	@echo "  make pg-down          stop it; pg-reset also DESTROYS the data directory"
+	@echo ""
+	@echo "  make lab-capabilities what TwinLab can realize on THIS host, probed"
+	@echo "  make lab-conformance  the §3.4.2 NAT-personality suite (rule L-1)"
+	@echo "  make lab-fabric       the twinnet fabric tests -- real namespaces, real middleboxes"
+	@echo "  make netlab-up        the simulated peers and the test network; netlab-down to stop"
 	@echo ""
 	@echo "  workspaces: $(WORKSPACES)"
 
@@ -204,7 +223,7 @@ build-rust:
 # ---------------------------------------------------------------------------
 # lint
 # ---------------------------------------------------------------------------
-lint: contracts-lint lint-rust redaction-check
+lint: contracts-lint lint-rust doc-check redaction-check
 	@echo "==> linting python"
 	@python3 -m compileall -q $(CONTRACTS)/tests >/dev/null
 	@echo "==> linting javascript"
@@ -243,14 +262,37 @@ lint-rust:
 # the same class from the doctest side and set `doctest = false` for the same
 # reason. Every other rustdoc warning, including the broken-intra-doc-link class
 # this target exists for, still fails the build.
-DOCFLAGS := -D warnings -A rustdoc::invalid_html_tags
+# `private_intra_doc_links` is allowed for the reason (1) below gives for
+# `--all-features`, and it is the same reason. A module header that explains an
+# unsafe mechanism by naming the private function that implements it --
+# `sock.rs` pointing at `read_pktinfo` and its two `copy_nonoverlapping`s,
+# `route.rs` pointing at `unwind` -- is CORRECT PROSE about code that exists.
+# These crates are internal artifacts nobody publishes to docs.rs, so the link's
+# public reachability is worth less than the navigation it gives the reader of
+# the unsafe code below it. The only way to green the lint is to demote each
+# link to a plain code span, which deletes that navigation from exactly the
+# documentation that most needs it.
+#
+# `--document-private-items` was tried first and is NOT the answer: it does not
+# suppress this lint, and it exposes private items whose own docs then fail it.
+# It took the count from 39 to 42.
+#
+# Every OTHER rustdoc warning, including the broken-intra-doc-link class this
+# target exists for, still fails the build.
+DOCFLAGS := -D warnings -A rustdoc::invalid_html_tags -A rustdoc::private_intra_doc_links
 
-# NOT yet a prerequisite of `lint`. On first run this target found 14 broken
-# intra-doc links across six crates owned by three domains -- precisely the drift
-# it exists to catch. It is a NAMED target rather than a silent skip, on the same
-# principle infrastructure applied to the arch-lint CI job while it was red: a
-# gate you intend to enforce should be visible and failing, not absent.
-# Wire it into `lint` once the six crates are clean.
+# A PREREQUISITE OF `lint` as of the wave-3 integration. On first run this target
+# found 14 broken intra-doc links across six crates owned by three domains --
+# precisely the drift it exists to catch -- and it was left as a NAMED target
+# rather than a silent skip, on the same principle infrastructure applied to the
+# arch-lint CI job while it was red: a gate you intend to enforce should be
+# visible and failing, not absent. The instruction it carried was "wire it into
+# `lint` once the six crates are clean".
+#
+# They are clean. The count peaked at 43 across nine crates once the earlier
+# failures stopped aborting each crate's doc build and revealed the ones behind
+# them; every one is now fixed at the link rather than suppressed, except the
+# single lint DOCFLAGS allows and argues for below.
 # --all-features, and the loop does not stop at the first failure. Both are
 # test-engineering's findings against the first version of this target:
 #
@@ -395,6 +437,107 @@ infra-up-v6: infra-check
 
 infra-down:
 	@docker compose down -v --remove-orphans
+
+# ---------------------------------------------------------------------------
+# The host-native plane, and the lab.
+#
+# RECONSTRUCTED. These fifteen targets were lost to a `git checkout -- Makefile`
+# that reverted the whole file rather than one edit, and are rebuilt here from
+# the artifacts that survived: `infra/scripts/local-plane.sh`'s and
+# `infra/scripts/local-postgres.sh`'s own usage blocks, `infra/README.md` §0 and
+# §9a, `lab/README.md` §4's tier table, and `.github/workflows/lab-t1.yml`,
+# which invokes six of them by name. Behaviour is the documented behaviour;
+# the wording of the comments is not the original wording.
+#
+# `docker compose` remains the supported topology. Everything in this section
+# exists because the part most worth reproducing -- a real Noise_IK leg
+# carrying a real COSE_Sign1 token, and a real device attaching to a real
+# control plane over QUIC -- needs no container at all, and this host cannot
+# run one (rootless podman needs `newuidmap`, which only root can install).
+# ---------------------------------------------------------------------------
+
+# The development relay credentials. Idempotent, and it never rotates an
+# existing seed: rotating would invalidate every token a running relay holds,
+# and the symptom -- binds refused for no visible reason -- is the hardest
+# failure here to diagnose.
+dev-issuer:
+	@bash infra/scripts/bootstrap-local.sh
+
+plane-up: infra-check
+	@bash infra/scripts/local-plane.sh up
+
+plane-up-v6: infra-check
+	@bash infra/scripts/local-plane.sh up --v6
+
+# One-shot, and the reason this target exists rather than a test.
+# `cargo test -p twinvpn-relay` was green while the shipped binary refused
+# EVERY legitimate token: `main.rs` handed the packet path a monotonic offset
+# from process start where a token's nbf/exp needs a wall clock, and the
+# in-crate harness injects a wall-clock constant so it never exercised the
+# clock the binary runs with. Only starting the real binary finds that.
+plane-probe:
+	@bash infra/scripts/local-plane.sh probe
+
+# The control-plane half: a simulated device completing a real rung-1 L-CONTROL
+# attach -- QUIC + TLS 1.3, mutual RFC 7250 raw public keys, the RFC 9266
+# tls-exporter channel binding read off the live connection, one real C1 round
+# trip. Needs `pg-up`.
+plane-ceremony:
+	@bash infra/scripts/local-plane.sh ceremony
+
+plane-status:
+	@bash infra/scripts/local-plane.sh status
+
+plane-down:
+	@bash infra/scripts/local-plane.sh down
+
+# A real PostgreSQL from the official binaries, pinned by version AND SHA-256,
+# run as an unprivileged user out of a cache directory. Loopback-bound on a
+# non-default port, which is the only reason `--auth=trust` is safe.
+pg-up:
+	@bash infra/scripts/local-postgres.sh up
+
+pg-down:
+	@bash infra/scripts/local-postgres.sh down
+
+# Stops it and DESTROYS the data directory.
+pg-reset:
+	@bash infra/scripts/local-postgres.sh reset
+
+# ---------------------------------------------------------------------------
+# TwinLab. NEVER SHIPPED (ADR-0018 §11.12).
+# ---------------------------------------------------------------------------
+
+# What this host can actually realize, PROBED rather than assumed. Run it
+# first: every other lab target's answer is conditional on this one.
+lab-capabilities:
+	@cd lab && $(CARGO) run -q -p twinlab-scenarios -- capabilities
+
+# testing-strategy.md §3.4.2's NAT-personality conformance suite, run against a
+# real middlebox by a prober that is not TwinVPN code.
+#
+# Rule L-1: no traversal, leak or relay test may run against a personality that
+# has not passed this, in the same lab instantiation, on the same day.
+lab-conformance:
+	@cd lab && $(CARGO) run -q -p twinlab-scenarios -- conformance
+
+# The fabric: real namespaces, real veth pairs, real userspace middleboxes,
+# real captures. T2 -- needs NET_ADMIN, `nft` and `conntrack`, and costs
+# minutes rather than seconds.
+lab-fabric:
+	@cd lab && $(CARGO) test -p twinnet
+
+# The lab overlay: `sim` (twinsim-alice/bob/gateway) and `netlab`
+# (netlab-nat, netlab-ns-carol, twinsim-carol). Two profiles, because they
+# answer different questions and cost different things -- `netlab` needs
+# NET_ADMIN, `nft` and `conntrack`; `sim` needs nothing beyond the base stack.
+netlab-up: infra-check
+	@docker compose -f docker-compose.yml -f infra/compose/netlab.yml \
+	  --profile sim --profile netlab up -d
+
+netlab-down:
+	@docker compose -f docker-compose.yml -f infra/compose/netlab.yml \
+	  --profile sim --profile netlab down -v --remove-orphans
 
 # ADR-0018 §11.9 artifact budgets. BM-4: a breach is a failure, not a re-run.
 budgets:
