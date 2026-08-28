@@ -398,7 +398,7 @@ on-demand privileged helpers are **rejected** for this product (§6 C). `ksd` is
 `SMAppService.daemon(plistName:)` on macOS 13+ and by `SMJobBless` on macOS 11–12, in both cases
 signed with the same Team ID and embedded in the app bundle.
 
-**Amendment PS-22 — how the core gets *into* the system extension, and why the daemon is not the
+**Amendment PS-25 — how the core gets *into* the system extension, and why the daemon is not the
 authority.** The paragraph above says the system extension is the authority. Wave 2's macOS
 implementation read `ownership.md` §8's **W-24/W-25** — `twinvpn.h`'s F-9 vtable carries no
 `installed_ruleset` read-back, no `current_generation`, no socket provider and no interface
@@ -428,15 +428,45 @@ put an IPC hop on every packet, and a second core handle where S-47 allows one.
 | the NE **system extension** | the core (linked as a Rust staticlib through the bridge), the platform adapter, the datapath, the key handle, the management interface over XPC with `audit_token_t` (§11.14 (a)) | — |
 | `ksd`, the `LaunchDaemon` | the KS-19 boot anchor, and the unblock command's local admin-authenticated invocation | **no core, no keys, no network sockets, no management interface** |
 
-**And the availability question this raises is already answered.** If the authority is the extension
-and the extension is started on demand, what answers the management interface when the tunnel is
-down? Nothing, and that is correct: **MI-A3** makes a client connecting to an absent agent receive
-`MGMT.UNAVAILABLE` — the one code ADR-0017 §11.12 has the client mint — rather than a hang, and
-`M-P17-17` names socket activation as the defect precisely because it would start the agent from a
-client connection. **MI-I5-5**'s "the management channel MUST still answer" is scoped to *"every
-phase in which a process exists at all"*, and PS-9 (2)'s stub is **the authority's own degraded
-form**, not a second process. No forwarding daemon is needed, and adding one would create the
-general-purpose privileged helper the paragraph above forbids.
+**The availability question this raises is answered for two of three rules, and the third needed a
+correction.** If the authority is the extension and the extension is started on demand, what answers
+the management interface when the tunnel is down?
+
+- **MI-A3 / M-P17-17 — answered.** A client connecting to an absent agent receives
+  `MGMT.UNAVAILABLE`, the one code ADR-0017 §11.12 has the client mint, rather than a hang. Socket
+  activation is named as the defect precisely because it would start the agent from a client
+  connection.
+- **MI-I5-5 — answered.** "The management channel MUST still answer" is scoped to *"every phase in
+  which a process exists at all"*.
+- **§11.14 (d) and PS-9 (2) — NOT answered, and an earlier draft of this amendment was wrong to
+  claim they were.** That draft said the quarantine stub is "the authority's own degraded form, not
+  a second process". On Linux and Windows it is. **On macOS it cannot be:** NE starts the provider
+  for a *tunnel*, not for a management request, so a quarantined authority is a process that does
+  not exist and cannot be supervised into a stub. §11.6's macOS row compounds it — the authority
+  "latches quarantine itself", and a latched authority is exactly the one that is not running.
+  Found by `desktop-macos` while implementing this amendment, which is the outcome an
+  implementation is for.
+
+**Rule PS-25a — on macOS, and only on macOS, `ksd` serves the degraded-state subset.** `ksd` MAY
+answer the management interface **when and only when the authority is absent**, and MAY answer
+**only** the read-only operations that report the authority's own lifecycle state — PS-9 (2)'s
+`PLATFORM.SERVICE.QUARANTINED`, `PLATFORM.SERVICE.UNAVAILABLE`, `PLATFORM.SERVICE.NOT_INSTALLED`
+and the S-40 restart counter §11.6 already requires it to keep durably. Every other operation MUST
+be refused by name.
+
+This is a **third accepted request**, added to the paragraph above's (a) and (b), and it is
+deliberately the narrowest one that discharges §11.14 (d):
+
+- It **performs no privileged effect and forwards nothing.** It reads durable state the authority
+  wrote and reports it. A daemon that proxied MI operations to a running authority would be the
+  general-purpose privileged helper §11.2 forbids, and would break §11.14 (a)'s credential chain by
+  putting a hop between the caller and the authority; this does neither.
+- It holds **no core, no keys and no network sockets**, so §11.2's "the second surface is close to
+  nil" survives.
+- It is **one contract, not two**: `ksd` answers over `twinvpn_mgmt::envelope` like every other
+  carriage, and MUST refuse anything outside the subset rather than implementing a second dialect.
+- Without it, `blocked` and `bricked` are indistinguishable on macOS — the failure `M-P17-18` names
+  — and KS-20's "blocked must not mean bricked" would hold on two desktops and not the third.
 
 **iOS and iPadOS, normatively.** The capability split follows
 [docs/networking.md](../networking.md) §5.4 and is normative here:
