@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  ADR-0016 PS-12a's ADMINISTER mechanism, and ADR-0017 §11.14's Linux row.
+
+  `auth_admin`, NOT `auth_admin_keep`: "so nothing is cached across actions
+  (ADR-0016 PS-12a)". ADR-0016 Q6 requires every ADMINISTER operation to be
+  authenticated PER ACTION and "never cached beyond it", and `auth_admin_keep`
+  is exactly the caching that rule forbids.
+
+  polkit is the AUTHENTICATION mechanism only. §11.2: "it is not the
+  privilege-acquisition mechanism, and there is no setuid binary in the
+  product." The daemon already holds CAP_NET_ADMIN; what this action gates is
+  whether it will act on a caller's request.
+
+  The consequence text lives HERE, in the policy file, because polkit's own
+  agent renders it and the client cannot substitute one: "A malicious client
+  would happily render a lying prompt" (ADR-0017 §11.14).
+
+  NOT YET WIRED. `src/agent/server.rs` refuses every ADMINISTER operation
+  outright rather than evaluating this action, because this wave has no polkit
+  client (a D-Bus dependency `core/Cargo.toml` does not declare). Refusing is
+  the safe direction and is reported; shipping the policy file now means the
+  action name and its message are fixed before anything depends on them.
+-->
+<policyconfig>
+  <vendor>TwinVPN</vendor>
+  <vendor_url>https://github.com/twinvpn/twinvpn</vendor_url>
+
+  <action id="net.twinvpn.administer">
+    <description>Administer TwinVPN</description>
+    <message>Authentication is required to change TwinVPN's protection settings, pair or revoke a device, or rotate its keys.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <!-- Per action. Never `auth_admin_keep`. -->
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <action id="net.twinvpn.disarm">
+    <description>Disarm TwinVPN's kill switch</description>
+    <!--
+      ADR-0012 KS-21(3) requires "a confirmation naming the consequence". This
+      is that sentence, and it names what the user loses rather than what they
+      are enabling.
+    -->
+    <message>Authentication is required to DISARM TwinVPN's kill switch. While it is disarmed, traffic that TwinVPN would have protected can leave this device unprotected.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

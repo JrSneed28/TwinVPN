@@ -11,9 +11,42 @@ repository.workspace   = true
 description = "the privileged Linux agent: hosts the core, owns the tun device, the routing table, nftables and resolv.conf (ADR-0016)"
 publish = false
 
+# A library AND a binary, for one reason: ADR-0017 MI-20 and ADR-0018 §11.16 (b)
+# require "one contract, two carriages, NEVER two contracts". The MI envelope,
+# its framing and its client are therefore declared ONCE, here, and `twinvpnctl`
+# consumes them with `default-features = false` — which excludes every agent
+# module, so the unprivileged CLI links no tun, no nftables and no netlink code.
+#
+# The alternative — a copy of the framing in each binary — is exactly the second
+# contract those rules forbid, and it would drift.
+[lib]
+name = "twinvpnd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "twinvpnd"
+path = "src/main.rs"
+required-features = ["agent"]
+
+[features]
+default = ["agent"]
+# The privileged half. Off for `twinvpnctl`, which needs only `mi`.
+agent = ["dep:twinvpn-core", "dep:twinvpn-platform", "dep:twinvpn-platform-linux", "dep:twinvpn-env", "dep:libc", "dep:tracing-subscriber", "dep:clap"]
+
 [dependencies]
-twinvpn-core  = { workspace = true }
+twinvpn-mgmt  = { workspace = true }
 twinvpn-types = { workspace = true }
+twinvpn-diag  = { workspace = true }
 thiserror     = { workspace = true }
 tokio         = { workspace = true }
 tracing       = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+
+twinvpn-core           = { workspace = true, optional = true }
+twinvpn-platform       = { workspace = true, optional = true }
+twinvpn-platform-linux = { workspace = true, optional = true }
+twinvpn-env            = { workspace = true, optional = true }
+libc                   = { workspace = true, optional = true }
+tracing-subscriber     = { workspace = true, optional = true }
+clap                   = { workspace = true, optional = true }

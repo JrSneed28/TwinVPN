@@ -1,6 +1,16 @@
 # twinvpnctl — the unprivileged Linux CLI over the local management interface (ADR-0017, ADR-0023)
 #
 # Owner: desktop-linux.
+#
+# NAMING DEVIATION, reported rather than papered over: ADR-0016 §11.2's process
+# table and ADR-0017 §11.12's command shape both name this binary `twinvpn`, not
+# `twinvpnctl` — and ADR-0023 EM-42's rendered `next_action` strings say
+# "run 'twinvpn peer disconnect nas-attic'". The skeleton the integration lead
+# placed here is `twinvpnctl`, and this domain does not rename a path it was
+# given. Raised for the integration lead: either the binary is renamed to
+# `twinvpn`, or a `twinvpn` symlink ships beside it, or ADR-0016 §11.2 is
+# amended. Until then the rendered next actions name a command that is not
+# installed under that name.
 [package]
 name    = "twinvpnctl"
 version.workspace      = true
@@ -12,8 +22,14 @@ description = "the unprivileged Linux CLI over the local management interface (A
 publish = false
 
 [dependencies]
-twinvpn-core  = { workspace = true }
+# The MI contract, from the ONE place it is declared (MI-20). `default-features
+# = false` excludes the whole `agent` feature, so this unprivileged binary links
+# no tun, no nftables, no netlink and no core-hosting code.
+twinvpnd      = { path = "../twinvpnd", default-features = false }
+twinvpn-mgmt  = { workspace = true }
 twinvpn-types = { workspace = true }
+twinvpn-diag  = { workspace = true }
 thiserror     = { workspace = true }
 tokio         = { workspace = true }
-tracing       = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }

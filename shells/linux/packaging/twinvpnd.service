@@ -1,0 +1,83 @@
+# The TwinVPN authority (ADR-0016 PS-1).
+#
+# Every directive below is ADR-0016 §11.9's Linux row or §11.2's "Linux,
+# normatively" paragraph. Nothing here is a local preference: a directive that
+# fails to apply is PS-17's `PLATFORM.PRIV.SANDBOX_DEGRADED`, and the agent
+# verifies the *result* at startup (`src/agent/privilege.rs`) and REFUSES to run
+# with a posture wider than this file declares.
+#
+# THERE IS DELIBERATELY NO twinvpnd.socket COMPANION. ADR-0017 MI-A3 and §10.3
+# prohibit socket activation, for three reasons — the sharpest being that "the
+# activation socket outlives the agent, so a client connects successfully then
+# hangs instead of getting MGMT.UNAVAILABLE".
+
+[Unit]
+Description=TwinVPN authority
+Documentation=https://github.com/twinvpn/twinvpn
+# The KS-19 boot artifact is a SEPARATE, package-owned unit (PS-7). This one
+# wants it but is not ordered before anything on the boot path: §11.2 says the
+# authority unit "is not Before= anything on the boot path".
+Wants=twinvpn-killswitch.service
+After=twinvpn-killswitch.service network-pre.target
+# PS-9's containment. `StartLimitAction=none` and NEVER `reboot`: a crash loop
+# must be contained, not turned into a reboot loop.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+ExecStart=/usr/lib/twinvpn/twinvpnd
+Restart=always
+RestartSec=1s
+StartLimitAction=none
+OnFailure=twinvpn-quarantine.service
+
+# ---- §11.2: the privilege drop, performed BEFORE exec ---------------------
+# The agent therefore never runs as root at all, rather than running as root
+# briefly. `src/agent/privilege.rs` verifies the result and treats a wider
+# posture as PLATFORM.PRIV.DROP_FAILED — fatal, never "just this once".
+User=twinvpn
+# `tss` for /dev/tpmrm0 (§11.2). Harmless where no TPM exists.
+SupplementaryGroups=tss
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+# ---- §11.9: the hardening table -------------------------------------------
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DeviceAllow=/dev/net/tun rw
+DeviceAllow=/dev/tpmrm0 rw
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Q10, and §7: "normative … and not advisory".
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@module @mount @reboot @swap @debug @obsolete @raw-io
+UMask=0077
+
+# ---- the three directories ADR-0016 O8 and ADR-0017 MI-A3 require ---------
+# The RUNTIME directory is what MI-A3 requires the INIT SYSTEM to create: "The
+# agent MUST verify the directory's ownership and mode before binding and MUST
+# refuse to bind into a directory it does not own."
+RuntimeDirectory=twinvpn
+RuntimeDirectoryMode=0755
+StateDirectory=twinvpn
+StateDirectoryMode=0700
+ConfigurationDirectory=twinvpn
+
+[Install]
+# §11.2: "WantedBy=multi-user.target — never graphical.target." The authority's
+# lifetime is independent of any login session (Q2).
+WantedBy=multi-user.target
