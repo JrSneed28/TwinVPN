@@ -12,6 +12,39 @@ fn key(b: u8) -> LegKey {
     LegKey::from_array([b; 32])
 }
 
+/// Builds a frame of **any** type with a real MAC, including the relay-only ones
+/// `OutboundFrame::new` refuses to construct.
+///
+/// The MAC input is rewritten here rather than reached through the crate, so it
+/// is an independent restatement of ADR-0005 §9.1 that has to agree with the
+/// one under test.
+fn raw_frame(
+    kind: FrameType,
+    flags: u8,
+    flow_id: u32,
+    payload: &Bytes,
+    key: &LegKey,
+    counter_full: u64,
+) -> Bytes {
+    let mut mac_input = Vec::new();
+    mac_input.push(kind.to_wire());
+    mac_input.push((VERSION << 4) | (flags & 0x0F));
+    mac_input.extend_from_slice(&counter_full.to_be_bytes());
+    mac_input.extend_from_slice(&flow_id.to_be_bytes());
+    mac_input.extend_from_slice(payload);
+    let tag = twinvpn_crypto::frame_mac(key.as_array(), &mac_input);
+
+    let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
+    out.push(kind.to_wire());
+    out.push((VERSION << 4) | (flags & 0x0F));
+    #[allow(clippy::cast_possible_truncation)]
+    out.extend_from_slice(&(counter_full as u16).to_be_bytes());
+    out.extend_from_slice(&flow_id.to_be_bytes());
+    out.extend_from_slice(&tag);
+    out.extend_from_slice(payload);
+    Bytes::from(out)
+}
+
 fn data_frame(flow_id: u32, payload: &[u8]) -> OutboundFrame {
     OutboundFrame::new(FrameType::Data, 0, flow_id, Bytes::copy_from_slice(payload))
         .expect("a well-formed DATA frame")
@@ -61,6 +94,13 @@ fn the_mac_input_matches_twinvpn_cryptos_shared_golden_vector_byte_for_byte() {
     assert_eq!(input, expected);
 
     // And the tag this build puts on the wire is the golden one.
+    //
+    // **W-33.** This vector is replicated as source in four places and shared as
+    // a constant in none — `twinvpn-crypto`'s copy is `#[cfg(test)]` and so
+    // cannot be imported. Four independent copies of the one thing that makes
+    // the two ends of the relay wire provably agree is the shape that lets them
+    // drift. `core-security` is exposing it importably; when it lands, delete
+    // this literal and consume the shared constant.
     let wire = f.encode(&key(0x4b), 0x0102_0304_0506_0708);
     let tag: Vec<String> = wire[8..16].iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(
@@ -267,6 +307,173 @@ fn reserved_bits_are_ignored_on_receive_rather_than_rejected() {
     let wire = f.encode(&k, 0);
     let parsed = InboundFrame::parse(&wire).expect("flags do not make it unparseable");
     assert!(parsed.verify(&k, &mut window).is_ok());
+}
+
+/// Every frame type, so a type added later cannot slip past the direction rule
+/// by not appearing in a hand-written list.
+///
+/// The lesson from `test-engineering`'s own `HEADER_LEN` tripwire: it enumerated
+/// the *files* it scanned, a new file appeared, and it stayed green through
+/// exactly the change it existed to catch. Enumerate the property, not the
+/// instances you happen to remember.
+const ALL_FRAME_TYPES: [FrameType; 9] = [
+    FrameType::Data,
+    FrameType::Bind,
+    FrameType::Bound,
+    FrameType::Ping,
+    FrameType::Pong,
+    FrameType::Drain,
+    FrameType::RelayStatus,
+    FrameType::Caps,
+    FrameType::Rebind,
+];
+
+#[test]
+fn the_frame_type_list_this_file_tests_is_the_whole_enum() {
+    // The guard on the guard: if a tenth type is added, `from_wire` will accept
+    // a byte this list does not contain and this fails.
+    let known: Vec<u8> = (0u8..=255)
+        .filter(|b| FrameType::from_wire(*b).is_some())
+        .collect();
+    assert_eq!(
+        known.len(),
+        ALL_FRAME_TYPES.len(),
+        "a frame type exists that ALL_FRAME_TYPES does not list"
+    );
+    for kind in ALL_FRAME_TYPES {
+        assert!(known.contains(&kind.to_wire()));
+    }
+}
+
+#[test]
+fn a_device_refuses_an_inbound_frame_it_should_never_have_been_sent() {
+    // W-32. Direction was enforced on send and not on receive, so a device
+    // accepted and AUTHENTICATED a `BIND` arriving from its relay. Not a
+    // forgery — the frame is genuinely keyed — which is precisely why the MAC
+    // cannot catch it.
+    let k = key(0x4b);
+
+    for kind in ALL_FRAME_TYPES {
+        // Build the frame as the relay would: a real MAC under the real leg key.
+        let payload = Bytes::from_static(b"x");
+        let wire = raw_frame(kind, 0, 1, &payload, &k, 0);
+        let parsed = InboundFrame::parse(&wire).expect("parses regardless of direction");
+        let mut window = CounterWindow::new();
+        let outcome = parsed.verify(&k, &mut window);
+
+        if kind.device_may_receive() {
+            assert!(outcome.is_ok(), "{kind:?} is receivable and must verify");
+        } else {
+            assert_eq!(
+                outcome.unwrap_err(),
+                FrameError::WrongDirection,
+                "{kind:?} is a request a device makes OF a relay; receiving one \
+                 is the confused-deputy surface"
+            );
+            assert!(
+                !window.has_accepted_any(),
+                "{kind:?} was refused, so it must not have advanced the window — \
+                 otherwise a relay locks the device out by burning counters"
+            );
+        }
+    }
+}
+
+#[test]
+fn exactly_bind_and_rebind_are_refused_on_receive() {
+    // The rule stated as a set, so widening or narrowing it is a visible edit
+    // rather than a quiet one. BIND and REBIND are the only frames whose
+    // meaning is "admit me to your table".
+    let refused: Vec<FrameType> = ALL_FRAME_TYPES
+        .into_iter()
+        .filter(|k| !k.device_may_receive())
+        .collect();
+    assert_eq!(refused, vec![FrameType::Bind, FrameType::Rebind]);
+
+    // CAPS is deliberately NOT refused: ADR-0005 §10 calls it "a CAPS control
+    // frame EXCHANGED at leg setup", and an exchange has two halves. PING and
+    // PONG are symmetric leg liveness. Refusing either would produce a dead leg
+    // that looks like a network fault.
+    for kind in [FrameType::Caps, FrameType::Ping, FrameType::Pong] {
+        assert!(kind.device_may_receive(), "{kind:?}");
+    }
+}
+
+#[test]
+fn the_receive_rule_is_not_the_complement_of_the_send_rule() {
+    // The asymmetry that caused W-32 was encoding direction once and assuming it
+    // covered both sides. Most of the leg is genuinely bidirectional, so the two
+    // rules are different sets and that is deliberate.
+    let sendable: Vec<FrameType> = ALL_FRAME_TYPES
+        .into_iter()
+        .filter(|k| k.device_may_send())
+        .collect();
+    let receivable: Vec<FrameType> = ALL_FRAME_TYPES
+        .into_iter()
+        .filter(|k| k.device_may_receive())
+        .collect();
+    assert_ne!(sendable, receivable);
+
+    // Bidirectional: DATA, PING, PONG, CAPS.
+    for kind in [
+        FrameType::Data,
+        FrameType::Ping,
+        FrameType::Pong,
+        FrameType::Caps,
+    ] {
+        assert!(
+            kind.device_may_send() && kind.device_may_receive(),
+            "{kind:?}"
+        );
+    }
+    // Send-only: BIND, REBIND. Receive-only: BOUND, DRAIN, RELAY_STATUS.
+    for kind in [FrameType::Bind, FrameType::Rebind] {
+        assert!(
+            kind.device_may_send() && !kind.device_may_receive(),
+            "{kind:?}"
+        );
+    }
+    for kind in [FrameType::Bound, FrameType::Drain, FrameType::RelayStatus] {
+        assert!(
+            !kind.device_may_send() && kind.device_may_receive(),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn a_wrong_direction_frame_that_fails_the_mac_is_reported_as_a_forgery() {
+    // Order matters for the diagnostic. A wrong-direction frame under the WRONG
+    // key is an ordinary forgery; only one that PASSES the MAC is a misbehaving
+    // relay. Reporting every forged BIND as "your relay is misbehaving" would
+    // bury the real signal.
+    let mut window = CounterWindow::new();
+    let wire = raw_frame(FrameType::Bind, 0, 1, &Bytes::from_static(b"x"), &key(1), 0);
+    assert_eq!(
+        InboundFrame::parse(&wire)
+            .unwrap()
+            .verify(&key(2), &mut window)
+            .unwrap_err(),
+        FrameError::AuthenticationFailed,
+        "the MAC is checked before direction"
+    );
+}
+
+#[test]
+fn a_wrong_direction_frame_surfaces_a_registered_code() {
+    // `ownership.md` §6 rule 12: a registered reason_code, never a raw error.
+    let code = FrameError::WrongDirection.reason_code();
+    assert!(
+        twinvpn_types::ReasonCode::lookup(code.as_str()).is_some(),
+        "the emitted code must be in the frozen registry"
+    );
+    // And the spelling this actually wants is recorded as absent, not silently
+    // approximated.
+    assert!(
+        twinvpn_types::ReasonCode::lookup("RELAY.FRAME_WRONG_DIRECTION").is_none(),
+        "RELAY.FRAME_WRONG_DIRECTION is now registered — emit it and remove the \
+         substitution in twinvpn-relay-client::codes"
+    );
 }
 
 #[test]

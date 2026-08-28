@@ -25,3 +25,4 @@ bytes                 = { workspace = true }
 proptest              = { workspace = true }
 twinvpn-env           = { workspace = true, features = ["test-support"] }
 twinvpn-platform      = { workspace = true, features = ["mock"] }
+twinvpn-crypto        = { workspace = true }

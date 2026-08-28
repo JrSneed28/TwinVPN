@@ -1,11 +1,11 @@
-//! The `RELAY.*` codes, and the seventeen ADR-0005/0006 name that the frozen
+//! The `RELAY.*` codes, and the eighteen this domain needs that the frozen
 //! registry does not carry.
 //!
 //! **Authority:** ADR-0006 §11.13, ADR-0005 §11.5, `docs/reliability.md` §3.4;
 //! `contracts/registry/reason_codes.json`.
 //!
-//! The registry carries eleven `RELAY.*` codes. ADR-0005, ADR-0006 and
-//! `docs/reliability.md` between them name at least seventeen more, including
+//! The registry carries twelve `RELAY.*` codes. ADR-0005, ADR-0006 and
+//! `docs/reliability.md` between them name seventeen more, and W-32 needs an eighteenth, including
 //! `RELAY.FLEET.UNREACHABLE` — which `docs/reliability.md` §3.4 lists as an
 //! adoption from ADR-0006 §11.13, T27 emits, §6.3's global brake reports, and
 //! §8.4 names as the total-unavailability condition.
@@ -25,8 +25,13 @@ pub struct Substitution {
     pub emitted: ReasonCode,
 }
 
-/// The seventeen. A test asserts each is genuinely absent.
+/// The eighteen. A test asserts each is genuinely absent.
 pub const UNREGISTERED: &[Substitution] = &[
+    Substitution {
+        specified: "RELAY.FRAME_WRONG_DIRECTION",
+        cited_by: "W-32; ADR-0005 §9.1 frame roles, §11's originated-frame rule",
+        emitted: reg::RELAY_MAP_UNVERIFIED,
+    },
     Substitution {
         specified: "RELAY.FLEET.UNREACHABLE",
         cited_by: "ADR-0006 §11.13; reliability §3.4, §4.5 T27, §6.3, §8.2, §8.4",

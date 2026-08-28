@@ -836,5 +836,5 @@ fn every_unregistered_relay_code_is_still_absent_from_the_frozen_registry() {
             s.cited_by
         );
     }
-    assert_eq!(UNREGISTERED.len(), 17);
+    assert_eq!(UNREGISTERED.len(), 18);
 }
