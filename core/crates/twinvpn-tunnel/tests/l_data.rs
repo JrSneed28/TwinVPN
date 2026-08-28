@@ -292,6 +292,81 @@ fn the_persistent_keepalive_runs_only_behind_nat_or_on_a_relay() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn the_window_starts_where_the_protocol_starts_and_accepts_counter_zero() {
+    // D-1's regression test. Every previous test in this file started at
+    // counter 1, so the seam between the sender's first counter and the
+    // receiver's window origin was the one place nobody looked.
+    let mut w = ReplayWindow::new();
+
+    // An empty window has accepted nothing — NOT "counter 0 has been seen".
+    assert!(
+        !w.has_accepted_any(),
+        "a fresh window must distinguish 'nothing received' from 'counter 0 received'"
+    );
+    assert!(
+        w.would_accept(0),
+        "a conforming peer sends counter 0 first; refusing it breaks every \
+         correct implementation regardless of what our own sender does"
+    );
+
+    assert!(w.accept(0), "the first record of every tunnel");
+    assert!(w.has_accepted_any());
+    assert_eq!(w.highest(), 0);
+
+    // And exactly once: counter 0 is a replay the second time.
+    assert!(
+        !w.accept(0),
+        "a duplicate counter 0 is still CRYPTO.REPLAY_DETECTED"
+    );
+    assert!(!w.would_accept(0));
+
+    // The sequence continues normally from there.
+    assert!(w.accept(1));
+    assert!(!w.accept(1));
+    assert_eq!(w.highest(), 1);
+    // ...and counter 0 is still remembered after the window slid forward.
+    assert!(!w.accept(0), "sliding the window must not forget counter 0");
+}
+
+#[test]
+fn a_sender_and_a_receiver_agree_from_the_very_first_record() {
+    // The end-to-end shape the tripwire used: one tunnel seals, its peer opens.
+    // Neither crate's suite ran a sender against a receiver before, which is
+    // why an off-by-one at the origin survived a green suite.
+    let z = Arc::new(AtomicUsize::new(0));
+    let mut sender = established(&z);
+    let mut receiver = established(&z);
+
+    for expected in 0u64..4 {
+        let mut wire = Vec::new();
+        let counter = sender.seal(b"payload", &mut wire).expect("seal");
+        assert_eq!(counter, expected, "the counter sequence is 0-based");
+        let mut plain = Vec::new();
+        receiver
+            .open(counter, &wire, &mut plain)
+            .unwrap_or_else(|e| panic!("record {counter} rejected: {e:?}"));
+    }
+
+    // And a replay of the first record is still refused.
+    let mut wire = Vec::new();
+    sender.seal(b"payload", &mut wire).expect("seal");
+    let mut plain = Vec::new();
+    assert_eq!(
+        receiver.open(0, &wire, &mut plain),
+        Err(TunnelError::Replay),
+        "replaying the first record must still be FATAL"
+    );
+}
+
+#[test]
+fn the_window_is_the_eight_thousand_one_hundred_ninety_two_adr_0001_specifies() {
+    // ADR-0001 §7.1: "64-bit nonce counter + 8192-bit sliding receive window
+    // (RFC 6479 style)". ADR-0013 §11.5 sizes per-peer memory against the same
+    // 8192-entry bitmap. This build shipped 2048 until D-1's fix.
+    assert_eq!(WINDOW_BITS, 8_192);
+}
+
+#[test]
 fn the_replay_window_refuses_a_duplicate_and_accepts_ordinary_reordering() {
     let mut w = ReplayWindow::new();
     assert!(w.accept(1));

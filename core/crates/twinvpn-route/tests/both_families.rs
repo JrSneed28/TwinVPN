@@ -154,6 +154,53 @@ fn a_one_family_exit_grant_blocks_the_other_family_rather_than_leaking_it() {
         "the ungranted family MUST be blocked, not left to egress locally"
     );
     assert!(!plan.is_family_asymmetric());
+
+    // D-3's regression: blocking without NAMING is a user told the wrong story
+    // about why their default route is gone. KS-6 requires both.
+    assert_eq!(
+        plan.single_family_grant,
+        Some(AddressFamily::V6),
+        "the uncovered family must be named on the plan"
+    );
+    let d = plan
+        .single_family_diagnostic()
+        .expect("an asymmetric grant carries a diagnostic");
+    assert_eq!(d.code().as_str(), "ROUTE.DEFAULT_SINGLE_FAMILY");
+    assert!(
+        d.code().declares_evidence("family"),
+        "the family is declared evidence, not prose"
+    );
+    assert!(d.evidence().get("family").is_some());
+}
+
+#[test]
+fn an_asymmetric_grant_is_named_in_both_directions_and_a_symmetric_one_is_silent() {
+    let exit = DeviceId::from_array([9u8; 32]);
+
+    for (granted, uncovered) in [
+        (PerFamily::new(true, false), AddressFamily::V6),
+        (PerFamily::new(false, true), AddressFamily::V4),
+    ] {
+        let mut i = inputs(RoutingMode::FullTunnel);
+        i.selected_exit_node = Some(exit);
+        i.exit_grant = granted;
+        let plan = compute(&i, ContractGeneration(11)).expect("the plan is still produced");
+        assert_eq!(
+            plan.single_family_grant,
+            Some(uncovered),
+            "the UNCOVERED family is the one named, not the granted one"
+        );
+        assert!(*plan.blocked_families.get(uncovered));
+        assert!(plan.single_family_diagnostic().is_some());
+    }
+
+    // A symmetric grant says nothing, because there is nothing to say.
+    let mut ok = inputs(RoutingMode::FullTunnel);
+    ok.selected_exit_node = Some(exit);
+    ok.exit_grant = PerFamily::new(true, true);
+    let plan = compute(&ok, ContractGeneration(12)).unwrap();
+    assert_eq!(plan.single_family_grant, None);
+    assert!(plan.single_family_diagnostic().is_none());
 }
 
 #[test]

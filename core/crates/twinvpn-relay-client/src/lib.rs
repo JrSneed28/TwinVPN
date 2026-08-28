@@ -53,6 +53,7 @@
 pub mod bind;
 pub mod codes;
 pub mod failover;
+pub mod frame;
 pub mod hrw;
 pub mod map;
 pub mod select;
@@ -60,6 +61,10 @@ pub mod standby;
 
 pub use bind::{BindRequest, BindResponse, Binding, RelayPairKeyed};
 pub use failover::{Attribution, FleetExhausted, Observation, RegionMoveTiming};
+pub use frame::{
+    CounterWindow, FrameError, FrameType, InboundFrame, LegKey, LegSendCounter, OutboundFrame,
+    Payload, VerifiedFrame,
+};
 pub use hrw::{HrwHash, Weight};
 pub use map::{AdminState, Carriage, DeviceCapability, Excluded, HealthState, Relay, RelayMap};
 pub use select::{Observations, Scored, Selection};

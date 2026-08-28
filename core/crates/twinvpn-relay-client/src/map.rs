@@ -22,9 +22,13 @@ use twinvpn_types::{Endpoint, PerFamily, RegionId, RelayId};
 /// Mirrors `twinvpn.v1.HealthState` one-for-one. **`twinvpn-types` does not
 /// carry this enum** — it exports `ConnectionState`, `PathClass` and
 /// `TrafficDisposition` from `connection.proto` and stops there — so it is
-/// modelled here rather than redeclared from nothing. Reported to the
-/// integration lead as a `core-foundation` gap: it belongs beside the other
-/// three.
+/// modelled here rather than redeclared from nothing.
+///
+/// **Finding W-20, accepted and routed to `core-foundation`:** this belongs in
+/// `twinvpn-types` beside the other three `connection.proto` enums. When it
+/// lands there, **delete this copy** and re-export the canonical one — two
+/// definitions of one wire enum is exactly the drift the frozen contracts exist
+/// to prevent.
 ///
 /// `docs/reliability.md` §4.1: it "is **not** a `ConnectionState`, shares only
 /// the name `DEGRADED` with one, and — decisively — **MUST NOT gate a connection

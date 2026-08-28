@@ -236,6 +236,197 @@ fn a_stale_map_is_used_never_blocked_on() {
 // -- selection ---------------------------------------------------------------
 
 #[test]
+fn every_measurement_floor_actually_fires() {
+    // D-2's regression test. `-x.max(-250)` parses as `-(x.max(-250))` with
+    // `x >= 0`, so the floors were inert and a single observation could drive
+    // the score arbitrarily far down. The old suite pinned the CONSTANT and
+    // never pinned the BEHAVIOUR.
+    let r = relay(1, "a", "eu");
+    let clean = select::score(&r, Observations::default());
+
+    for (label, obs, floor) in [
+        (
+            "rtt",
+            Observations {
+                ewma_rtt_ms: 5_000,
+                ..Observations::default()
+            },
+            select::RTT_FLOOR,
+        ),
+        (
+            "loss",
+            Observations {
+                loss_pct: 100,
+                ..Observations::default()
+            },
+            select::LOSS_FLOOR,
+        ),
+        (
+            "jitter",
+            Observations {
+                ewma_jitter_ms: 2_000,
+                ..Observations::default()
+            },
+            select::JITTER_FLOOR,
+        ),
+    ] {
+        let penalty = select::score(&r, obs) - clean;
+        assert_eq!(
+            penalty, floor,
+            "the {label} term must saturate at its declared floor, not run past it"
+        );
+    }
+
+    // All three at once still cannot exceed the declared total.
+    let everything = select::score(
+        &r,
+        Observations {
+            ewma_rtt_ms: 5_000,
+            loss_pct: 100,
+            ewma_jitter_ms: 2_000,
+            ..Observations::default()
+        },
+    ) - clean;
+    assert_eq!(everything, select::MAX_MEASUREMENT_PENALTY);
+}
+
+#[test]
+fn a_bad_measurement_can_no_longer_sink_a_relay_below_the_whole_fleet() {
+    // The consequence D-2's fix actually removes. With the floors inert a 5 s
+    // EWMA RTT cost −5000, which put one relay below every other candidate
+    // including a DRAINING one (−300) with an open breaker (−400) — so a single
+    // hostile or merely broken observation could reorder the fleet arbitrarily.
+    let good = relay(1, "a", "eu");
+    let awful = relay(2, "b", "eu");
+
+    let worst_measured = select::score(
+        &awful,
+        Observations {
+            ewma_rtt_ms: 5_000,
+            loss_pct: 100,
+            ewma_jitter_ms: 2_000,
+            ..Observations::default()
+        },
+    );
+    let draining_and_breakered = select::score(
+        &{
+            let mut r = good.clone();
+            r.admin_state = AdminState::Draining;
+            r
+        },
+        Observations {
+            breaker_penalty: select::BREAKER_FLOOR,
+            ..Observations::default()
+        },
+    );
+    assert!(
+        worst_measured > draining_and_breakered,
+        "a relay with the worst possible MEASUREMENTS ({worst_measured}) must \
+         still outrank a DRAINING one with an open breaker \
+         ({draining_and_breakered}): measurement is bounded at {} and those two \
+         structural penalties are not",
+        select::MAX_MEASUREMENT_PENALTY
+    );
+}
+
+#[test]
+fn health_state_is_bounded_against_measurement_exactly_as_the_table_weights_it() {
+    // §11.2 gives HealthState UNHEALTHY a −150 delta and floors measured RTT at
+    // −250, so the crossover sits at 150 ms and is deliberate: below it a
+    // measured relay wins, above it the report does. This pins the crossover so
+    // a future re-weighting has to be a decision rather than a drift.
+    let r = relay(3, "c", "eu");
+    let unhealthy = select::score(
+        &r,
+        Observations {
+            health: HealthState::Unhealthy,
+            ..Observations::default()
+        },
+    );
+    let mildly_slow = select::score(
+        &r,
+        Observations {
+            ewma_rtt_ms: 100,
+            health: HealthState::Healthy,
+            ..Observations::default()
+        },
+    );
+    assert!(
+        mildly_slow > unhealthy,
+        "inside the crossover a measured relay wins ({mildly_slow} vs {unhealthy})"
+    );
+
+    let very_slow = select::score(
+        &r,
+        Observations {
+            ewma_rtt_ms: 400,
+            health: HealthState::Healthy,
+            ..Observations::default()
+        },
+    );
+    assert!(
+        very_slow < unhealthy,
+        "and past it the report wins — §11.2's chosen weighting, not a defect"
+    );
+
+    // What S-10 forbids is GATING, and selection has no filter to gate with:
+    // the unhealthy relay is still in the total order.
+    let order = Selection::order(vec![
+        Scored {
+            id: r.id,
+            score: unhealthy,
+            breaker_open: false,
+        },
+        Scored {
+            id: RelayId::from_array([9; 8]),
+            score: very_slow,
+            breaker_open: false,
+        },
+    ]);
+    assert!(
+        order.is_total_over(2),
+        "a score delta never removes a candidate"
+    );
+}
+
+#[test]
+fn the_caller_supplied_deltas_are_clamped_to_their_declared_bounds() {
+    // The locality term and the breaker penalty arrive from other crates. An
+    // out-of-range value from either would break §11.2's composition rule just
+    // as thoroughly as an inert floor did, so both are clamped here.
+    let r = relay(4, "d", "eu");
+    let clean = select::score(&r, Observations::default());
+
+    let wild_locality = select::score(
+        &r,
+        Observations {
+            region_locality_penalty: -100_000,
+            ..Observations::default()
+        },
+    ) - clean;
+    assert_eq!(wild_locality, select::LOCALITY_FLOOR);
+
+    let wild_breaker = select::score(
+        &r,
+        Observations {
+            breaker_penalty: -100_000,
+            ..Observations::default()
+        },
+    ) - clean;
+    assert_eq!(wild_breaker, select::BREAKER_FLOOR);
+
+    // A positive value in a penalty slot cannot become a bonus either.
+    let bogus_bonus = select::score(
+        &r,
+        Observations {
+            breaker_penalty: 5_000,
+            ..Observations::default()
+        },
+    ) - clean;
+    assert_eq!(bogus_bonus, 0, "a penalty term must never add points");
+}
+
+#[test]
 fn a_hundred_millisecond_measured_advantage_outranks_any_server_preference() {
     // §11.2's composition rule: the server contributes at most +100 and the
     // measurement terms up to −410.

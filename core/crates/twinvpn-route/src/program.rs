@@ -25,7 +25,10 @@
 //! 'restore the default route' logic that can fail after a crash."
 
 use twinvpn_platform::{ContractGeneration, InterfaceIndex, RouteEntry};
-use twinvpn_types::{AddressFamily, IpAddr, IpPrefix, OverlayAddresses, PerFamily, V4Addr, V6Addr};
+use twinvpn_types::{
+    codes, AddressFamily, Component, Diagnostic, EvidenceValue, IpAddr, IpPrefix, OverlayAddresses,
+    PerFamily, V4Addr, V6Addr,
+};
 
 use crate::conflict::{self, Candidate, Resolution, Source};
 use crate::error::RouteError;
@@ -101,6 +104,18 @@ pub struct RoutePlan {
     pub blocked_families: PerFamily<bool>,
     /// Every conflict found, for P5's mandatory diagnostic.
     pub conflicts: Vec<conflict::Conflict>,
+    /// The family an asymmetric exit grant left **uncovered**, when one did.
+    ///
+    /// `Some` exactly when full tunnel was requested and the `ExitNode` granted
+    /// one family and not the other. The family is blocked (see
+    /// `blocked_families`) *and* named here, because ADR-0012 KS-6 requires both:
+    /// "the other family's protected scope MUST be blocked, the connection
+    /// enters `DEGRADED` (**never a silent success**), and … is emitted **with
+    /// the uncovered family named**."
+    ///
+    /// Blocking without naming is the defect this field exists to close: the
+    /// operator is otherwise never told which family was withheld or why.
+    pub single_family_grant: Option<AddressFamily>,
 }
 
 impl RoutePlan {
@@ -120,6 +135,22 @@ impl RoutePlan {
         let v4 = self.carries(AddressFamily::V4) || *self.blocked_families.get(AddressFamily::V4);
         let v6 = self.carries(AddressFamily::V6) || *self.blocked_families.get(AddressFamily::V6);
         v4 != v6
+    }
+
+    /// The `ROUTE.DEFAULT_SINGLE_FAMILY` diagnostic, when an asymmetric exit
+    /// grant left a family uncovered.
+    ///
+    /// `None` when the grant was symmetric. `Some` carries the **uncovered**
+    /// family as the code's declared `family` evidence, which is what lets the
+    /// operator be told *which* family was withheld rather than merely losing
+    /// their default route.
+    #[must_use]
+    pub fn single_family_diagnostic(&self) -> Option<Diagnostic> {
+        self.single_family_grant.map(|uncovered| {
+            Diagnostic::builder(codes::ROUTE_DEFAULT_SINGLE_FAMILY, Component::RoutingEngine)
+                .evidence("family", EvidenceValue::Family(uncovered))
+                .build()
+        })
     }
 }
 
@@ -165,10 +196,15 @@ pub fn default_route_halves(family: AddressFamily) -> Result<[IpPrefix; 2], Rout
 ///   core cannot express portably — a **named** refusal, never a downgrade.
 /// - [`RouteError::ScopeViolation`] when a non-`ExitNode` advertised a default
 ///   route (P6).
-/// - [`RouteError::DefaultSingleFamily`] when full tunnel is requested and
-///   exactly one family is granted **and** the other is not blocked — the leak
-///   `routing.proto` and `protocol.md` §13.3 forbid.
 /// - [`RouteError::Address`] from a prefix constructor.
+///
+/// An asymmetric exit grant is **not** an error here. `routing.proto` rejects a
+/// single-family default "**unless** the local kill-switch configuration
+/// explicitly blocks the unadvertised family", and this function always blocks
+/// it — so the plan is produced with `blocked_families` set and the condition
+/// named in [`RoutePlan::single_family_grant`]. [`RouteError::DefaultSingleFamily`]
+/// remains for `twinvpn-enforce`, which is the layer that knows whether the
+/// blocking rule is actually installed.
 // One function because ADR-0008 N-8 requires the desired state to be computed
 // WHOLE before any mutation; splitting it into stages that each return a
 // partial plan is the shape that rule exists to forbid.
@@ -284,6 +320,7 @@ pub fn compute(
     // §11.5(3) and protocol.md §13.3: a family we do not carry must be BLOCKED,
     // never left to egress locally.
     let mut blocked = PerFamily::new(false, false);
+    let mut single_family_grant: Option<AddressFamily> = None;
     if inputs.mode == RoutingMode::FullTunnel {
         for family in [AddressFamily::V4, AddressFamily::V6] {
             if !*inputs.exit_grant.get(family) {
@@ -292,15 +329,23 @@ pub fn compute(
         }
         let granted_v4 = *inputs.exit_grant.get(AddressFamily::V4);
         let granted_v6 = *inputs.exit_grant.get(AddressFamily::V6);
-        if granted_v4 != granted_v6
-            && !(*blocked.get(AddressFamily::V4) || *blocked.get(AddressFamily::V6))
-        {
-            return Err(RouteError::DefaultSingleFamily {
-                granted: if granted_v4 {
-                    AddressFamily::V4
-                } else {
-                    AddressFamily::V6
-                },
+        if granted_v4 != granted_v6 {
+            // Defect D-3 lived here. The old guard additionally required
+            // `!(blocked_v4 || blocked_v6)`, which the loop three lines above
+            // had just made false — so the condition was unreachable and
+            // `ROUTE.DEFAULT_SINGLE_FAMILY` could never be emitted.
+            //
+            // Refusing the plan would also have been the wrong shape.
+            // `protocol.md` §13.3 requires the client to **block** the ungranted
+            // family, and ADR-0012 KS-6 requires the connection to enter
+            // `DEGRADED` and emit a code — "never a silent success". A refusal
+            // would leave the device with no tunnel at all, which is worse than
+            // the condition it names. So the plan is produced, the family is
+            // blocked, and the condition is **named on the plan**.
+            single_family_grant = Some(if granted_v4 {
+                AddressFamily::V6
+            } else {
+                AddressFamily::V4
             });
         }
     }
@@ -309,6 +354,7 @@ pub fn compute(
         generation,
         addresses,
         routes,
+        single_family_grant,
         mtu: inputs.mtu.max(crate::plan::MTU_FLOOR),
         blocked_families: blocked,
         conflicts,
