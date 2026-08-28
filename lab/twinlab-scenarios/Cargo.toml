@@ -2,9 +2,9 @@
 #
 # Owner: test-engineering.
 #
-# INTEGRATION-LEAD ACTION REQUESTED: see the note at the top of
-# `lab/twinlab/Cargo.toml`. The core crates named here as path dependencies
-# should be promoted to `lab/Cargo.toml`'s `[workspace.dependencies]`.
+# INTEGRATION-LEAD ACTION APPLIED: see the note at the top of
+# `lab/twinlab/Cargo.toml`. Every core crate this workspace names now lives in
+# `lab/Cargo.toml`'s `[workspace.dependencies]`, and no member names one by path.
 [package]
 name    = "twinlab-scenarios"
 version.workspace      = true
@@ -21,5 +21,10 @@ thiserror     = { workspace = true }
 tracing       = { workspace = true }
 tracing-subscriber = { workspace = true }
 twinlab = { workspace = true }
+# The fabric. `twinlab` decides what a scenario means and what a verdict is;
+# `twinnet` moves the packets. Keeping the two apart is what lets `twinlab` stay
+# `#![forbid(unsafe_code)]` while the laboratory still has raw sockets.
+twinnet = { workspace = true }
+serde = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

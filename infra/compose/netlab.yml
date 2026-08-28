@@ -1,0 +1,317 @@
+# The simulated clients, gateways and test network.
+#
+#   docker compose -f docker-compose.yml -f infra/compose/netlab.yml \
+#     --profile sim --profile netlab up -d
+#
+# ===========================================================================
+# EVERY PATH HERE IS RELATIVE TO THE REPOSITORY ROOT, NOT TO THIS FILE
+# ===========================================================================
+# Compose resolves relative paths against the PROJECT DIRECTORY -- the
+# directory of the first `-f` file, which is `docker-compose.yml` at the repo
+# root -- and not against the directory of the file the path is written in.
+#
+# So `./infra/secrets/...` here means the same thing it means in the base file,
+# and `../../infra/secrets/...` (the intuitive spelling for a file that lives in
+# `infra/compose/`) resolves to `/home/infra/...`. That is not a warning: the
+# first real `docker compose up` died with
+# `making volume mountpoint for volume /home/infra/secrets/dev-issuer/seed.bin:
+# mkdir /home/infra: permission denied`.
+#
+# `build/verify/check-compose.py` now resolves overlay bind sources the way
+# compose does, so this cannot come back silently.
+#
+# ===========================================================================
+# WHY THIS IS AN OVERLAY AND NOT PART OF docker-compose.yml
+# ===========================================================================
+# Everything here is NEVER SHIPPED (ADR-0018 §11.12). A base file that started
+# simulators by default would make "is this a real device or a simulated one?"
+# a question an operator has to ask about a running stack, and the answer would
+# be in a label. Two `--profile` flags make it a question about the command that
+# started it.
+#
+# `sim` and `netlab` are separate profiles because they answer different
+# questions. `sim` is "does the plane carry traffic?" and needs no privilege at
+# all. `netlab` is "does it carry traffic THROUGH A NAT?" and needs NET_ADMIN,
+# a non-distroless image and a second network. Wanting the first should not
+# cost the second.
+#
+# ===========================================================================
+# WHAT HAS AND HAS NOT BEEN RUN
+# ===========================================================================
+# Read `infra/README.md` §0 first: nothing in this directory has been started
+# on a host with Docker. What HAS been exercised, on this host and without a
+# container runtime, is the whole of what the `sim` profile does — two relays,
+# two simulated devices, a real Noise_IK leg carrying a real COSE_Sign1 token,
+# a real pair_tag rendezvous and real DATA forwarding, on IPv4 and on IPv6.
+# `infra/scripts/local-plane.sh` is that path and it is the one to trust.
+#
+# The `netlab` profile has NOT been exercised anywhere: this host has neither
+# Docker nor `nft` nor `conntrack`, and `twinlab-scenarios capabilities` reports
+# all three unavailable. Every NAT-class claim it could make is therefore
+# `Unavailable`, which is an ABSENCE OF EVIDENCE and not a pass.
+
+# ===========================================================================
+# NETWORKS
+# ===========================================================================
+networks:
+  # The access network the natted peers live on.
+  #
+  # `internal: true` removes Docker's own route to the outside, which is the
+  # point: a peer here can reach the relays ONLY through `netlab-nat`. Without
+  # it the peer would have two paths, take the direct one, and every NAT
+  # scenario would silently report DIRECT.
+  netlab-access:
+    name: twinvpn-netlab-access
+    driver: bridge
+    internal: true
+    enable_ipv6: true
+    driver_opts:
+      com.docker.network.bridge.name: br-tvnetlab
+    ipam:
+      driver: default
+      config:
+        # Inside neither the compose underlay (172.31.240.0/24, fd00:7717:1::/64)
+        # nor the product's OVERLAY plan, which ADR-0010 §11 fixes at
+        # 100.64.0.0/10 and fd7c:9e5d:2a10::/48. A lab network that collided
+        # with the overlay would exercise an address plan the product forbids.
+        - subnet: 172.31.242.0/24
+          gateway: 172.31.242.1
+        - subnet: fd00:7717:2::/64
+          gateway: fd00:7717:2::1
+
+x-twinsim: &twinsim
+  build:
+    context: .
+    dockerfile: infra/docker/Dockerfile.twinsim
+    args:
+      SOURCE_COMMIT: ${TWINVPN_SOURCE_COMMIT:-unknown}
+      SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-1756252800}
+  image: twinvpn/twinsim:local
+  profiles: [sim]
+  # `no`, deliberately, exactly as the services are. A simulator that could
+  # not bind must stay visible in that state; a restart loop would destroy
+  # the evidence at the moment it became interesting.
+  restart: "no"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs:
+    - /tmp:size=8m,mode=1777
+  networks: [twinvpn]
+  volumes:
+    # Read-only, and only these two files. The seed is the issuer's signing
+    # key: a simulator needs it because it mints its own token, and no relay
+    # ever sees it. `twinsim issuer init` writes both, and neither is
+    # committed — infra/secrets/.gitignore covers the directory and
+    # check-compose.py asks git itself to confirm it.
+    - ./infra/secrets/dev-issuer/seed.bin:/run/secrets/twinsim/seed.bin:ro
+    - ./infra/secrets/dev-issuer/relay-map.json:/run/secrets/twinsim/relay-map.json:ro
+  environment: &twinsim-env
+    TWINSIM_RELAY_MAP: /run/secrets/twinsim/relay-map.json
+    TWINSIM_ISSUER_SEED: /run/secrets/twinsim/seed.bin
+    TWINSIM_ADMIN_ADDR: "[::]:9090"
+    TWINSIM_HEALTHCHECK_URL: http://127.0.0.1:9090/readyz
+    # `[::]:0` puts the leg on IPv6 and `0.0.0.0:0` on IPv4. That single
+    # value is what makes the v4-only and v6-only profiles exercise different
+    # code rather than differing only in the compose network's settings.
+    TWINSIM_LOCAL_ADDR: "[::]:0"
+    # A secret is required with NO DEFAULT, even though it is not a
+    # credential: two developers whose peers silently shared a default
+    # pair_tag secret would find their stacks meeting each other's flows on a
+    # shared relay. `${VAR:?}` makes it an explicit choice.
+    TWINSIM_PAIR_SECRET: ${TWINVPN_SIM_PAIR_SECRET:?TWINVPN_SIM_PAIR_SECRET must be set - it is the secret two simulated peers meet under. Any non-empty string; see infra/env.example}
+    OTEL_SERVICE_NAME: twinsim
+  depends_on:
+    relay-a: {condition: service_healthy}
+    relay-b: {condition: service_healthy}
+
+services:
+
+  # =========================================================================
+  # STATIC RELAY ADDRESSES — a requirement, not a convenience
+  # =========================================================================
+  # ADR-0011 DN-0 puts LITERAL ADDRESSES, never hostnames, in a relay endpoint,
+  # and ADR-0005 §10 makes an endpoint "per-instance and individually
+  # addressable" rather than a load-balanced VIP. A relay map that said
+  # `relay-a:41641` would violate both, and `twinsim`'s `RelayEntry::socket_addr`
+  # refuses to resolve one — deliberately, so the violation surfaces here rather
+  # than at a device.
+  #
+  # So the two relays get fixed addresses on the underlay, and the map
+  # `bootstrap-local.sh` writes names exactly these.
+  #
+  # ONE CONSEQUENCE, NAMED RATHER THAN DISCOVERED: this overlay is DUAL-STACK
+  # ONLY. `infra/compose/ipv4-only.yml` renumbers the network to 172.31.241.0/24
+  # and `ipv6-only.yml` to fd00:7717:6::/64, so combining either with this file
+  # asks Docker for an address outside its own subnet and the stack refuses to
+  # start. Exercising a simulator on one family is done with
+  # `TWINSIM_LOCAL_ADDR` — which is the family the LEG runs on, and is the
+  # variable that actually decides which code path is taken.
+  relay-a:
+    networks:
+      twinvpn:
+        ipv4_address: 172.31.240.20
+        ipv6_address: fd00:7717:1::20
+
+  relay-b:
+    networks:
+      twinvpn:
+        ipv4_address: 172.31.240.21
+        ipv6_address: fd00:7717:1::21
+
+  # =========================================================================
+  # SIMULATED PEERS — profile `sim`
+  # =========================================================================
+  # These make the plane do work. Without them the topology is seven services
+  # whose health checks are the only thing under test: no leg is established,
+  # no pair_tag is bound, no DATA frame is forwarded, and every dashboard reads
+  # zero.
+  #
+  # They publish NO host port. A simulator is reached from inside the network
+  # (Prometheus scrapes it) or with `docker compose exec`; publishing would put
+  # a lab instrument on the developer's LAN, and would also oblige every
+  # address-family override to cover it.
+  # The two halves of one pair. Both bind the SAME pair_tag, which is what
+  # makes the relay's §11.1(3) rendezvous complete and turn a PENDING slot into
+  # a BOUND flow. One simulator alone can only ever be PENDING.
+  twinsim-alice:
+    <<: *twinsim
+    container_name: twinvpn-twinsim-alice
+    environment:
+      <<: *twinsim-env
+      TWINSIM_RELAY_ID: ${TWINVPN_SIM_RELAY_A_ID:-aaaaaaaaaaaaaaaa}
+      TWINSIM_PEER_SEED: alice
+      TWINSIM_PAIRS: "1"
+      OTEL_RESOURCE_ATTRIBUTES: service.name=twinsim,twinvpn.sim.role=client
+
+  twinsim-bob:
+    <<: *twinsim
+    container_name: twinvpn-twinsim-bob
+    environment:
+      <<: *twinsim-env
+      TWINSIM_RELAY_ID: ${TWINVPN_SIM_RELAY_A_ID:-aaaaaaaaaaaaaaaa}
+      TWINSIM_PEER_SEED: bob
+      TWINSIM_PAIRS: "1"
+      OTEL_RESOURCE_ATTRIBUTES: service.name=twinsim,twinvpn.sim.role=client
+
+  # A simulated GATEWAY: one relay leg fronting many peers (ADR-0013).
+  #
+  # `TWINSIM_MAX_BINDS_PER_MIN` is raised because ADR-0006 §11.15(b) requires
+  # it to be raisable for a gateway-class device — at the device default of 30
+  # a gateway exhausts its own bind quota at roughly fifteen peers, which is
+  # the ceiling that rule exists to lift. Running with the device default here
+  # would make every gateway scenario a quota test.
+  twinsim-gateway:
+    <<: *twinsim
+    container_name: twinvpn-twinsim-gateway
+    environment:
+      <<: *twinsim-env
+      TWINSIM_RELAY_ID: ${TWINVPN_SIM_RELAY_B_ID:-bbbbbbbbbbbbbbbb}
+      TWINSIM_PEER_SEED: gateway
+      TWINSIM_PAIRS: ${TWINVPN_SIM_GATEWAY_PEERS:-8}
+      TWINSIM_MAX_BINDS_PER_MIN: "240"
+      OTEL_RESOURCE_ATTRIBUTES: service.name=twinsim,twinvpn.sim.role=gateway
+
+  # =========================================================================
+  # THE TEST NETWORK — profile `netlab`
+  # =========================================================================
+  # A real nftables NAT and a real netem impairment between a simulated peer
+  # and the relays. The rules come from `twinlab`, not from this file: see
+  # infra/netlab/entrypoint.sh.
+  netlab-nat:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.netlab
+      args:
+        TWINSIM_IMAGE: twinvpn/twinsim:local
+        SOURCE_COMMIT: ${TWINVPN_SOURCE_COMMIT:-unknown}
+    image: twinvpn/netlab:local
+    container_name: twinvpn-netlab-nat
+    profiles: [netlab]
+    restart: "no"
+    # NET_ADMIN and nothing else. `privileged: true` would also grant SYS_ADMIN
+    # and every other capability, and `nft` plus `tc` need exactly this one.
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    security_opt: [no-new-privileges:true]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+    networks:
+      # Both sides: the access network it translates FOR, and the underlay it
+      # translates ONTO.
+      netlab-access:
+        ipv4_address: 172.31.242.10
+        ipv6_address: fd00:7717:2::10
+      twinvpn: {}
+    environment:
+      # No default. A netlab container that came up with no personality is a
+      # transparent router, and a transparent router traverses everything —
+      # which reports DIRECT for a NAT class nothing applied. The entrypoint
+      # refuses to start without it; `${VAR:?}` refuses to even render.
+      TWINVPN_NETLAB_PERSONALITY: ${TWINVPN_NETLAB_PERSONALITY:?TWINVPN_NETLAB_PERSONALITY must name one of testing-strategy.md §3.3's classes, e.g. N-EIM-APDF. There is no default - see infra/netlab/entrypoint.sh}
+      TWINVPN_NETLAB_INTERNAL_CIDR: 172.31.242.0/24
+      TWINVPN_NETLAB_EXTERNAL_IF: eth1
+      # Optional. Absent means "no impairment", which the entrypoint says out
+      # loud rather than leaving to be inferred from a silent qdisc list.
+      TWINVPN_NETLAB_IMPAIRMENT: ${TWINVPN_NETLAB_IMPAIRMENT:-}
+    command: [run]
+
+  # The namespace the natted peer joins. One per natted peer; see the
+  # `gateway` mode in infra/netlab/entrypoint.sh for why this container exists
+  # at all rather than the peer setting its own route.
+  netlab-ns-carol:
+    image: twinvpn/netlab:local
+    container_name: twinvpn-netlab-ns-carol
+    profiles: [netlab]
+    restart: "no"
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    security_opt: [no-new-privileges:true]
+    networks:
+      netlab-access:
+        ipv4_address: 172.31.242.20
+        ipv6_address: fd00:7717:2::20
+    environment:
+      TWINVPN_NETLAB_GATEWAY_V4: 172.31.242.10
+      TWINVPN_NETLAB_GATEWAY_V6: fd00:7717:2::10
+    command: [gateway]
+    depends_on:
+      netlab-nat: {condition: service_started}
+
+  # A simulated device BEHIND the NAT. It shares `netlab-ns-carol`'s network
+  # namespace, so it has that container's address and, critically, that
+  # container's default route — through `netlab-nat`.
+  #
+  # `network_mode: service:` and `networks:` are mutually exclusive, which is
+  # why this service does not inherit the `x-twinsim` anchor.
+  twinsim-carol:
+    image: twinvpn/twinsim:local
+    container_name: twinvpn-twinsim-carol
+    profiles: [netlab]
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    network_mode: "service:netlab-ns-carol"
+    volumes:
+      - ./infra/secrets/dev-issuer/seed.bin:/run/secrets/twinsim/seed.bin:ro
+      - ./infra/secrets/dev-issuer/relay-map.json:/run/secrets/twinsim/relay-map.json:ro
+    environment:
+      TWINSIM_RELAY_MAP: /run/secrets/twinsim/relay-map.json
+      TWINSIM_ISSUER_SEED: /run/secrets/twinsim/seed.bin
+      TWINSIM_RELAY_ID: ${TWINVPN_SIM_RELAY_A_ID:-aaaaaaaaaaaaaaaa}
+      TWINSIM_PEER_SEED: carol
+      TWINSIM_PAIRS: "1"
+      TWINSIM_PAIR_SECRET: ${TWINVPN_SIM_PAIR_SECRET:?TWINVPN_SIM_PAIR_SECRET must be set - it is the secret two simulated peers meet under. Any non-empty string; see infra/env.example}
+      # A different admin port: this container shares carol's namespace, so it
+      # shares its port space with `netlab-ns-carol` too.
+      TWINSIM_ADMIN_ADDR: "[::]:9091"
+      TWINSIM_HEALTHCHECK_URL: http://127.0.0.1:9091/readyz
+      TWINSIM_LOCAL_ADDR: "[::]:0"
+      OTEL_SERVICE_NAME: twinsim
+      OTEL_RESOURCE_ATTRIBUTES: service.name=twinsim,twinvpn.sim.role=natted
+    depends_on:
+      netlab-ns-carol: {condition: service_started}

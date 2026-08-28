@@ -1,0 +1,306 @@
+name: T1 — lab and the local plane
+
+# ===========================================================================
+# TIER MAPPING.
+# ===========================================================================
+# docs/testing-strategy.md §6.1 defines T1 by when it runs and what it blocks:
+# every PR push and every commit on main, <= 15 min to first verdict, blocking
+# MERGE, on ephemeral runners with NO LAB AND NO REAL HARDWARE.
+#
+# That last clause is why this lane is shaped the way it is. A GitHub runner is
+# not a laboratory: it has no NAT hardware and, for the `nftables` classes, no
+# guarantee of the kernel modules. So this lane does NOT claim a NAT-class
+# result. It does three things a runner genuinely can do:
+#
+#   1. PROBE what the runner can realize, and publish the answer. §3.1's rule
+#      is that a facility the host does not provide yields `Unavailable`, never
+#      a pass, and the only way that rule can be honoured is if the probe runs
+#      on the machine that would have run the scenario.
+#   2. Run the whole relay path FOR REAL, with no container and no NAT: two
+#      relays and two simulated devices, a real Noise_IK leg carrying a real
+#      COSE_Sign1 token, a real pair_tag rendezvous, real DATA forwarding. That
+#      needs nothing a runner lacks.
+#   3. Assert that the RULES the container lab would apply are the ones twinlab
+#      defines, by diffing the emitted ruleset against the crate.
+#
+# ===========================================================================
+# WHY THIS LANE EXISTS AT ALL
+# ===========================================================================
+# It is the lane that would have caught the defect it was written alongside.
+# `services/relay/src/main.rs` passed the packet path a MONOTONIC offset from
+# process start where a token's `nbf`/`exp` needed a wall clock, so a correctly
+# configured relay refused every legitimate token — silently, because ADR-0005
+# §11.5 makes that refusal a zero-byte drop.
+#
+# `cargo test -p twinvpn-relay` was green throughout: the in-crate harness
+# injects `|| NOW_MS`, a wall-clock constant, and therefore never exercised the
+# clock the binary actually runs with. NOTHING SHORT OF STARTING THE REAL
+# BINARY FINDS THAT, which is what `make plane-probe` does.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t1-lab-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+
+  capabilities:
+    name: what this runner can actually realize
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lab
+
+      # Published as a log, not asserted. The set of facilities a runner
+      # provides is the runner's property and changes without our involvement;
+      # turning it into an assertion would make an image update look like a
+      # code regression. What IS asserted is that the probe runs and that it
+      # reports rather than guesses.
+      - name: probe
+        run: |
+          cd lab && cargo run --quiet -p twinlab-scenarios -- capabilities | tee "$GITHUB_STEP_SUMMARY"
+
+      # A scenario the runner cannot realize must plan as UNAVAILABLE, and that
+      # must be a distinct outcome from a pass. This asserts the distinction
+      # still exists rather than having been collapsed.
+      - name: an unrealizable scenario reports an ABSENCE OF EVIDENCE
+        run: |
+          cd lab
+          set -o pipefail
+          out=$(cargo run --quiet -p twinlab-scenarios -- list --family NAT | head -1 | awk '{print $1}')
+          [ -n "$out" ] || { echo "::error::no NAT scenarios in the catalogue"; exit 1; }
+          cargo run --quiet -p twinlab-scenarios -- plan "$out" | tee plan.txt
+          grep -qE 'verdict: (runnable|Unavailable|Void)' plan.txt \
+            || { echo "::error title=A verdict was collapsed::plan printed neither a runnable verdict nor an explicit non-pass one"; exit 1; }
+
+  local-plane:
+    name: a real leg, a real token, a real relay
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            lab
+            services
+
+      - name: lab workspace tests
+        run: cd lab && cargo test --workspace --locked
+
+      - name: clippy, denying warnings
+        run: cd lab && cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # THE lane. Builds the real relay, mints a real development credential,
+      # starts the relay as a real process, and drives a real device at it.
+      # Exits non-zero if the leg is refused.
+      - name: IPv4 — the relay admits a real token
+        run: make plane-probe
+
+      # ADR-0010 R1 makes IPv4 and IPv6 one story and infra/README.md §3 says a
+      # service that works on only one is broken. Both, or neither.
+      - name: IPv6 — the same, on the other family
+        run: bash infra/scripts/local-plane.sh probe --v6
+
+      # THE CONTROL-PLANE HALF, and it needs a database because ADR-0002 B-3
+      # makes the durable event log a table in the same transactional store as
+      # control-plane state — there is no persistence-free mode to reach for.
+      # `local-postgres.sh` supplies one as an unprivileged user, so this lane
+      # needs no service container and no root.
+      #
+      # What it proves that nothing else does: a device completes a real rung-1
+      # attach (QUIC + TLS 1.3, mutual RFC 7250 raw public keys), derives the
+      # RFC 9266 channel binding from the LIVE connection, and gets a real
+      # answer to a real C1 command. A control plane that is READY and refuses
+      # every device is invisible to a /readyz probe and visible here.
+      - name: IPv4 — a device attaches to the control plane and runs a C1 command
+        run: make plane-ceremony
+
+      - name: IPv6 — the same attach on the other family
+        run: bash infra/scripts/local-plane.sh ceremony --v6
+
+      - name: full plane up, both peers ready, then down
+        run: |
+          set -euo pipefail
+          make plane-up
+          make plane-status
+          # `plane-up` already waits on each simulator's OWN /readyz, so
+          # reaching here means the relay admitted both peers. This re-asserts
+          # it explicitly so the failure names the peer rather than the wait.
+          for port in 19190 19191; do
+            curl -fsS "http://127.0.0.1:${port}/readyz" >/dev/null \
+              || { echo "::error title=A simulated peer is not ready::port ${port}"; exit 1; }
+          done
+          # A bound flow means the pair_tag rendezvous completed: the SECOND
+          # BIND on a tag is what binds it (ADR-0005 §11.1(3)), so this is the
+          # only assertion that proves two peers actually met.
+          curl -fsS http://127.0.0.1:19190/metrics http://127.0.0.1:19191/metrics \
+            | grep -E 'twinsim_binds_total\{outcome="bound"' | grep -qv ' 0$' \
+            || { echo "::error title=No flow was ever bound::both peers bound, but neither reached BOUND - the pair_tag rendezvous did not complete"; exit 1; }
+          make plane-down
+
+      - name: logs on failure
+        if: failure()
+        run: |
+          for f in /tmp/twinvpn-local-plane/*.log /tmp/twinvpn-pgdata/pg.log; do
+            [ -f "$f" ] || continue
+            echo "::group::$f"; tail -50 "$f"; echo "::endgroup::"
+          done
+
+  lcontrol-constants:
+    name: the L-CONTROL binding agrees with the control plane
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # `lab/twinsim/src/lcontrol.rs` duplicates two constants across an
+      # artifact boundary: it cannot import `twinvpn-control-plane` (ADR-0018
+      # §11.2 makes the server a separate artifact), so ALPN and the RFC 9266
+      # exporter label are written out in both places.
+      #
+      # A mismatch is the worst kind of failure this system has: the handshake
+      # dies with no diagnosis on either side, and both ends blame the other.
+      # This is the check that a copied constant stays copied.
+      - name: ALPN and the exporter label match on both sides
+        run: |
+          set -euo pipefail
+          fail=0
+          for lit in '"twinvpn-c1/1"' '"EXPORTER-Channel-Binding"'; do
+            server=$(grep -c -F "$lit" services/control-plane/src/quic.rs || true)
+            client=$(grep -c -F "${lit//\"/}" lab/twinsim/src/lcontrol.rs || true)
+            echo "$lit: server=$server client=$client"
+          done
+          grep -q 'b"twinvpn-c1/1"' services/control-plane/src/quic.rs || fail=1
+          grep -q 'b"twinvpn-c1/1"' lab/twinsim/src/lcontrol.rs || fail=1
+          grep -q 'b"EXPORTER-Channel-Binding"' services/control-plane/src/quic.rs || fail=1
+          grep -q 'b"EXPORTER-Channel-Binding"' lab/twinsim/src/lcontrol.rs || fail=1
+          if [ "$fail" -ne 0 ]; then
+            echo "::error title=L-CONTROL constants diverged::ALPN or the RFC 9266 exporter label differs between services/control-plane/src/quic.rs and lab/twinsim/src/lcontrol.rs. A mismatch is a handshake that fails with no diagnosis on either side."
+            exit 1
+          fi
+
+      # RFC 7250 has no certificate, so a client that verified the peer
+      # signature through the X.509 path parses an SPKI as a certificate and
+      # fails with `BadEncoding` — from the client, about a server that did
+      # nothing wrong. That was a real hour lost; this keeps it lost once.
+      - name: the raw-key signature path is used, not the X.509 one
+        run: |
+          set -euo pipefail
+          grep -q 'verify_tls13_signature_with_raw_key' lab/twinsim/src/lcontrol.rs \
+            || { echo "::error title=RPK signature verification regressed::lcontrol.rs must use verify_tls13_signature_with_raw_key; the X.509 variant parses the SPKI as a certificate and fails with BadEncoding."; exit 1; }
+
+  netlab-rules:
+    name: the container lab applies twinlab's rules, not its own
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lab
+
+      # The failure this prevents: a shell script in the netlab image that
+      # re-typed §3.3's rules, drifting from the crate. A container labelled
+      # `N-EIM-APDF` that is actually stock masquerade produces a green
+      # traversal result for a class nothing realized.
+      - name: install nftables
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables conntrack
+
+      # ===================================================================
+      # EVERY PERSONALITY IS FED TO A REAL `nft`, NOT COMPARED TO A STRING.
+      # ===================================================================
+      # This is the check that did not exist, and its absence hid a defect in
+      # ALL EIGHT personalities: `Personality::ruleset()` emitted nft that does
+      # not parse. Every rule ran straight into its chain's closing `}` with no
+      # `;`, `N-NAT64` emitted `dnat ip to … map { }` which is not nft syntax at
+      # all, and the two port-range personalities omitted the transport-protocol
+      # match that `snat to <ip>:<lo>-<hi>` requires.
+      #
+      # None of it was caught because the in-crate tests assert that the emitted
+      # string CONTAINS an expected substring — which it did, while being
+      # unloadable. A ruleset nobody ever applied is a NAT class nobody ever
+      # realized, and a scenario behind it would have reported DIRECT.
+      #
+      # `-c` is a parse-and-validate pass; the load below is the real thing.
+      # Both run inside an unprivileged user+net namespace, so this needs no
+      # root and touches no host state.
+      - name: every §3.3 personality PARSES and LOADS
+        run: |
+          set -euo pipefail
+          cd lab
+          fail=0
+          for class in N-ROUTED N-EIM-EIF N-EIM-ADF N-EIM-APDF \
+                       N-APDM-APDF-RAND N-APDM-APDF-SEQ N-CGNAT N-NAT64; do
+            cargo run --quiet -p twinlab-scenarios -- \
+              nat-ruleset "$class" --external 203.0.113.1 --internal 10.10.0.0/24 > /tmp/rs.nft
+            echo "::group::$class"
+            cat /tmp/rs.nft
+            if unshare --user --map-root-user --net -- \
+                 sh -c 'nft -c -f /tmp/rs.nft && nft -f /tmp/rs.nft && nft list table inet twinlab_nat >/dev/null'; then
+              echo "  -> loads"
+            else
+              echo "::error title=$class does not load::twinlab emits a ruleset `nft` refuses. A personality whose ruleset never loads is a NAT class that is never realized, and a scenario behind it reports DIRECT."
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$fail"
+
+      - name: the entrypoint applies what twinlab prints, and nothing else
+        run: |
+          set -euo pipefail
+          # `nft` and `tc` may appear only as commands that CONSUME twinlab's
+          # output. A literal rule in the shell is the divergence this checks
+          # for, and grepping for the table name is how it shows up.
+          # A DEFINITION, not a query. `nft list table inet twinlab_nat` in
+          # `verify()` is the health check asking whether the table twinlab
+          # loaded is still there, which is the opposite of writing one; a
+          # pattern that caught it would have to be suppressed, and a
+          # suppressed check is not one. So the pattern anchors on the opening
+          # brace that only a definition has.
+          if grep -nE '^[[:space:]]*table[[:space:]]+(inet|ip6?)[[:space:]]+[a-z_]+[[:space:]]*\{' infra/netlab/entrypoint.sh; then
+            echo "::error title=A ruleset is written in shell::infra/netlab/entrypoint.sh contains a literal nft table. §3.3's rules live in twinlab::nat::Personality::ruleset and are applied from there; a second copy is the R-31 divergence CB-2 exists to prevent."
+            exit 1
+          fi
+          grep -q 'twinlab-scenarios nat-ruleset' infra/netlab/entrypoint.sh \
+            || { echo "::error::the entrypoint no longer asks twinlab for the ruleset"; exit 1; }
+
+      - name: an unrealizable ruleset is a FAILURE TO START, never a degraded mode
+        run: |
+          set -euo pipefail
+          # The single most important property of the netlab container: it must
+          # not come up as a transparent router. Asserted against the script's
+          # text, because the image cannot be built here.
+          grep -q 'transparent router' infra/netlab/entrypoint.sh \
+            || { echo "::error::the entrypoint no longer refuses to start without a personality"; exit 1; }
+          grep -q 'nft -c -f' infra/netlab/entrypoint.sh \
+            || { echo "::error title=A ruleset is loaded without a check pass::a partially applied ruleset is half a NAT, which is a class nobody named"; exit 1; }
+
+  shell-lint:
+    name: shellcheck the new scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -x infra/scripts/local-plane.sh infra/netlab/entrypoint.sh

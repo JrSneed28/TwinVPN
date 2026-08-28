@@ -40,6 +40,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod catalogue;
+pub mod runner;
 pub mod scenario;
 
 pub use catalogue::{all, by_id, families};

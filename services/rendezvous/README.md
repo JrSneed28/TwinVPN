@@ -49,6 +49,18 @@ cargo test --workspace
 cd .. && make test-contracts        # must remain 35801 checks, 0 failures
 ```
 
+### 2.1 What each test file is for
+
+| File | Subject |
+|---|---|
+| `tests/call_flow.rs` | the `CALL` ladder end to end, verbatim forwarding, supersede, admission |
+| `tests/hostile_input.rs` | B3: every malformed shape refused **without an answer** and without a state change |
+| `tests/frame_proptest.rs` | the parser's "never panics, never allocates unboundedly" property |
+| `tests/tls_binding.rs` | the channel: TLS 1.3, RFC 7250, and the one-channel-one-subject invariant |
+| `tests/derived_identity.rs` | §4.3 — a proven claim displaces a pinned one, a pinned one never displaces a proven one, and a key that cannot derive still binds |
+| `tests/address_families.rs` | IPv4, IPv6, and the dual-stack listener; the server-reflexive report on each |
+| `tests/connectivity_behavior.rs` | behaviour under adversity: duplicate signaling, stale candidates, peers that vanish and return, simultaneous attempts, restart, a saturated buffer, dependency outages, sustained abuse |
+
 Locally, with no container runtime:
 
 ```bash
@@ -196,16 +208,59 @@ it needs a long-lived connection to appear. `tests/tls_binding.rs::
 a_refused_sibling_connection_cannot_release_a_live_connections_hold` is the
 service-level guard, and it runs against real sockets on both families.
 
-**What this is not.** It is channel-pinned, not derived. It closes impersonation
-of a device that is attached or has attached within the binding TTL — which is
-every device in normal operation. It does **not** close *first-contact*
-impersonation: an attacker who attaches as D before the real D ever does holds
-the binding until it lapses.
+**A repeated `ATTACH` is a refresh, not a second hold.** `claim` increments a
+holder count that teardown decrements exactly once, and a *held* entry is
+neither swept at its TTL nor evictable for capacity — so an `ATTACH` that took a
+fresh hold every time let **one authenticated peer**, sending no flood and
+tripping no rate limit, fill the table with entries nothing could ever reclaim,
+after which every other device's first `ATTACH` was refused
+`CONTROL.ADMISSION_DEFERRED` for the life of the process. A re-claim of the
+subject this connection already holds therefore releases first, which leaves the
+count level and moves the TTL forward. RZ-13 in §9;
+`tests/connectivity_behavior.rs::a_repeated_attach_on_one_connection_refreshes_and_does_not_pin_the_table`
+is the guard, and it asserts on the table *after* the connection closes, because
+that is the only place the imbalance is visible.
 
-`derive_device_id_checked` is now reachable (`twinvpn-crypto`, RZ-7 closed), so
-the derived binding the `Binding` trait was written for is buildable — but a
-**derived-only** binding would lock out every device that has ever rotated its
-identity key, permanently. RZ-10 in §9 states why and what to build instead.
+### 4.3 Derived-preferred: a device can take its own name back
+
+**This service binds with [`DerivedPreferred`], not `ChannelPinned`** — RZ-10,
+closed. Channel-pinning alone leaves *first-contact* impersonation open: an
+attacker who attaches as D **before the real D ever does** holds the binding
+until it lapses. It cannot read the `CALL`s (Rule-B signed, opaque) and cannot
+answer them, but it can deny their delivery, which is the whole attack.
+
+A claim is **proven** when the `device_id` derived from the key the peer
+presented on TLS — `contracts/docs/identifiers.md` §2's derivation, over the key
+whose private half the peer proved possession of in the handshake — *is* the
+`device_id` it claims. A proven claim **takes the subject from a merely pinned
+holder**; a pinned claim never displaces a proven one.
+
+| This `ATTACH` | Current holder | Outcome |
+|---|---|---|
+| **proven** | none | accepted, proven |
+| **proven** | pinned, another channel | **accepted — the impostor is displaced** |
+| pinned | none | accepted, pinned |
+| pinned | pinned, another channel | refused |
+| pinned | **proven**, another channel | refused |
+
+**Why not simply require the derivation.** `device_id` pins the **generation-0**
+key, and ADR-0007 §11 is explicit that IK rotation creates a new
+`DeviceIdentity` while *"`device_id` does not change"*. A rotated device
+therefore presents a generation-N key that derives to something that is **not**
+its `device_id`, and checking it properly needs the `IdentitySuccession` chain —
+which this service does not hold and must not fetch per connection (**I5**).
+Derived-**only** would trade a bounded, first-contact-only window for an
+**unbounded lockout** of a growing fraction of the fleet, which is the
+fleet-wide-irreversible kind of wrong. So an unprovable key still binds by first
+claim, and `twinvpn_rendezvous_binding_unprovable_keys_total` counts it, because
+a silent downgrade to the weaker binding is the failure mode worth watching.
+
+**What is still open**, stated rather than hidden: first-contact impersonation
+of a **rotated** device. It cannot prove its way past an impostor, because it
+cannot derive. `tests/derived_identity.rs` asserts both halves of the rule and
+the rotated-device fallback.
+
+[`DerivedPreferred`]: ../twinvpn-service-common/src/binding/derived.rs
 
 ---
 
@@ -383,10 +438,12 @@ what I5 forbids. `tests/…::a_fabricated_target_is_indistinguishable_from_a_det
 | **RZ-5** | note | **Seven `TWINVPN_RZ_*` resource ceilings added** (§3.1), all with defaults, none in `infra/README.md` §4.3. A pre-authentication surface with no connection bound, no per-source rate bound and no partial-frame deadline is a descriptor- and memory-exhaustion primitive; these are not optional. Should be added to `infra/README.md` §4.3 when infrastructure next touches it. |
 | **RZ-7** | **closed by the integration lead** | The `device_id` derivation was unreachable from a service artifact. `derive_device_id_checked` now lives in `twinvpn-crypto`, which `services/Cargo.toml` already permits, and it proves RFC 8949 §4.2.1 canonicality and ES256 **before** hashing — the right variant for a key presented on a wire. Re-deriving it here would have been W-23 verbatim, and the corpus's answer was to move the hash rather than drag a trust engine into three server artifacts. **Superseded by RZ-10**, which is what stands between a reachable derivation and a shipped one. |
 | **RZ-8** | **closed by the integration lead** | `tls.rs` and `binding.rs` were byte-for-byte the same design in both services, and `relay-plane` would have been the third. Both now live in `twinvpn-service-common`; this domain's copies are deleted and both services consume the shared modules. Absorbing them **found a defect neither copy could see** — see RZ-11. |
-| **RZ-10** | **decision needed — do not ship a derived-only binding** | **A derived-only binding would permanently lock out every device that has ever rotated its identity key.** `device_id` pins the **generation-0** key; ADR-0007 §11 (lines 372–377) is explicit that IK rotation creates a new `DeviceIdentity` at `generation+1` while *"`device_id` does not change"*, and that after a rotation `device_id` is self-certifying **only transitively** — "a verifier checks the succession chain from generation 0 to the presented generation", which the ADR itself calls "a real cost of the design". A rotated device therefore presents a generation-N key on TLS that derives to something that is **not** its `device_id`, and this service holds no `IdentitySuccession` chain and must not fetch one per connection (**I5**). Shipping derived-only trades an unbounded first-contact window for an unbounded lockout, which is the worse trade and the fleet-wide-irreversible kind. **Recommended instead — derived-preferred, channel-pinned fallback, derived wins:** a claim whose presented key derives to the claimed `device_id` is *proven* and **takes the binding from a merely pinned holder**; a claim that does not derive falls back to first-claim pinning. That closes first-contact impersonation against every generation-0 device — all of them until they rotate — because an attacker can no longer *hold* a `device_id` against its rightful owner, while a rotated device still binds. **Where it belongs:** `service-common`, beside `ChannelPinned`. It needs an SPKI→dCBOR-COSE_Key conversion (the RFC 7250 channel identity is an SPKI; `derive_device_id_checked` takes a COSE_Key), and that is a specified encoding — exactly the thing RZ-8 just proved must not exist twice. I did not build it in two service crates for that reason. |
+| **RZ-10** | **closed — derived-preferred is what shipped** | The integration lead's derived-**only** ruling was refused and reversed, because a derived-only binding **permanently locks out every device that has ever rotated its identity key**: `device_id` pins the **generation-0** key and ADR-0007 §11 says a rotation creates a new `DeviceIdentity` while *"`device_id` does not change"*, so a rotated device presents a generation-N key that derives to something that is not its name, and checking it properly needs an `IdentitySuccession` chain this service must not fetch per connection (**I5**). What ships is **derived-preferred, channel-pinned fallback, derived wins**: a claim whose presented key derives to the claimed `device_id` is *proven* and **takes the binding from a merely pinned holder**, and an unprovable key still binds by first claim. That closes first-contact impersonation against every generation-0 device — all of them until they rotate — while a rotated device still binds. The SPKI→dCBOR-COSE_Key conversion it needs lives once, in `service-common`'s `binding::spki`, exactly as RZ-8 requires. **Both services now construct `DerivedPreferred`**; `tests/derived_identity.rs` asserts both halves of the rule, because either alone passes against an implementation that ignores provenance. Open, and stated rather than hidden: first-contact impersonation of a **rotated** device. |
 | **RZ-11** | **defect this domain shipped, fixed in the shared crate** | `release(&channel, now)` decremented the holder count of **every** entry the channel held, and both services called it at teardown — so a *refused* connection sharing a key with a live one dropped that connection's hold, after which one channel could speak for a second subject and a held binding became evictable for capacity. Self-scoped (the attacker must own the key) but it falsifies the invariant §4.2 states, and for `presence` it is one key publishing presence for two identities, which S-11 forbids. **The rendezvous carried a second form of it: it never called `release` at all**, so holder counts only ever went up and were reclaimed by the TTL — a slower path to the same table-at-capacity outcome. Both are fixed: `release` takes the subject, and this service calls it only on the accepted path. **Why neither copy's tests caught it, carried forward as the lesson:** both released from a single synthetic channel, so the bug needed a long-lived connection to appear. Two independent copies both passed their own tests. Service-level regression tests now exist in both. |
 | **RZ-9** | **closed** | The `aws-lc-rs` dev-dependency and `tests/common/keys.rs` are gone from both crates. Key material now comes from `twinvpn-service-common`'s `tls::testkit` behind its `test-support` feature, so there is one generator rather than two and no crypto crate named in a service manifest. |
-| **RZ-6** | note | **`services/Cargo.lock` now changes only subtractively**: migrating to the shared modules removes `rustls`, `rustls-pemfile`, `rustls-pki-types` and `aws-lc-rs` from **both** services' direct dependencies — 8 deletions, no crate added, no version moved. The earlier history, for the record: **`services/Cargo.lock` changed mechanically**, twice. First: `proptest` 1.11 as a **dev**-dependency plus 13 transitive dev-only entries — `ownership.md` §6 makes the B3 parser's "never panics, never allocates unboundedly" a **property**, and a property needs a property test. Second: the TLS work resolves `rustls`, `tokio-rustls`, `rustls-pemfile`, `rustls-pki-types`, `rustls-webpki`, `aws-lc-rs`/`aws-lc-sys` and their build-time helpers (`cc`, `cmake`, `jobserver`, `shlex`, `pkg-config`, `dunce`, `fs_extra`, `find-msvc-tools`, `getrandom`, `r-efi`, `ring`, `untrusted`, and the `windows-*` target shims). All follow from the three lines the lead added to the workspace manifest. **`aws-lc-sys` compiles C**, and it built on this host **without `cmake` installed** — worth knowing before a CI image is trimmed. No existing dependency changed version. The lockfile is the lead's to reconcile. |
+| **RZ-6** | note | **`services/Cargo.lock` now changes only subtractively**: migrating to the shared modules removes `rustls`, `rustls-pemfile`, `rustls-pki-types` and `aws-lc-rs` from **both** services' direct dependencies — 8 deletions, no crate added, no version moved. The earlier history, for the record: **`services/Cargo.lock` changed mechanically**, twice. First: `proptest` 1.11 as a **dev**-dependency plus 13 transitive dev-only entries — `ownership.md` §6 makes the B3 parser's "never panics, never allocates unboundedly" a **property**, and a property needs a property test. Second: the TLS work resolves `rustls`, `tokio-rustls`, `rustls-pemfile`, `rustls-pki-types`, `rustls-webpki`, `aws-lc-rs`/`aws-lc-sys` and their build-time helpers (`cc`, `cmake`, `jobserver`, `shlex`, `pkg-config`, `dunce`, `fs_extra`, `find-msvc-tools`, `getrandom`, `r-efi`, `ring`, `untrusted`, and the `windows-*` target shims). All follow from the three lines the lead added to the workspace manifest. **`aws-lc-sys` compiles C**, and it built on this host **without `cmake` installed** — worth knowing before a CI image is trimmed. No existing dependency changed version. The lockfile is the lead's to reconcile. || **RZ-12** | **defect this domain shipped, now fixed** | **A dual-stack listener told every IPv4 peer a reflexive address that peer's own contract rejects.** `TWINVPN_RZ_LISTEN_TCP` defaults to `[::]:443`, which is dual-stack, so an IPv4 client's `peer.ip()` reads `::ffff:a.b.c.d` — and `V6Addr::new` refuses the IPv4-mapped form outright (`TypeError::Ipv4MappedIpv6`). The `REFLEXIVE` frame was therefore an `Endpoint` **every conformant client must reject**, costing a dual-stack deployment its entire server-reflexive rung (ADR-0004 §5) — the one candidate class this service is the *source* of. It failed **silently**: no error, no metric, no log, just an ADR-0004 ladder permanently missing a rung. Fixed by unmapping to the family the peer actually used, which is emission of our own observation and not normalization of peer input — there are no peer bytes involved, the address came from the kernel. `encode_endpoint` now also validates its own output **through the frozen validator** before emitting, so "this service never emits an `Endpoint` a peer must reject" is proved against the contract rather than asserted against a copy of its rules; the residual case, a link-local source, is answered with silence and `twinvpn_rendezvous_reflexive_suppressed_total`, because the only alternative is inventing a zone index, which is a lie a peer would act on. `tests/address_families.rs` drives a real IPv4 client into a real `[::]` listener. **Why no test caught it:** every existing test bound a *specific* loopback address, so the v4 and v6 paths were each exercised on a single-family listener and the mapped form never arose. |
+| **RZ-13** | **defect this domain shipped, now fixed** | **A repeated `ATTACH` on one connection pinned a binding-table entry for the life of the process.** `claim` increments a holder count that teardown decrements exactly once, and a *held* entry is neither swept at its TTL nor evictable for capacity — so `ATTACH(D)` sent *n* times left *n−1* holds that nothing could ever reclaim. One authenticated peer, sending no flood and tripping no rate limit, could fill the table with unevictable entries, after which every other device's first `ATTACH` is refused `CONTROL.ADMISSION_DEFERRED` until the process restarts. **`presence` carried the identical defect on `BIND`** and it is fixed in both. The fix is local to the services rather than to the shared crate: a re-claim of the subject this connection already holds releases first, leaving the count level and moving the TTL forward. The tests assert on the table *after* the connection closes, which is the only place the imbalance is observable. |
+| **RZ-14** | note | **The binding table is now swept on the service's own timer**, not only as a side effect of the next `claim`. `ChannelPinned::claim` sweeps internally, so the table was bounded — but a *quiet* service kept lapsed `device_id`s in memory indefinitely, since nothing else would evict them. A `device_id` is personal data and `TWINVPN_RZ_BINDING_TTL_MS` is its whole retention policy; holding one past it because no unrelated traffic arrived is retention by inaction. Same change in `presence`. |
 
 ---
 
@@ -401,13 +458,17 @@ Stated here rather than discovered later.
    networks re-handshakes rather than migrating. `quinn` is in the workspace
    manifest, and the `tls.rs` `ServerConfig` is the one a QUIC endpoint would
    take, so this is a binding to add rather than a design to change.
-2. **First-contact impersonation is open** — RZ-10, and §4.2 says exactly what
-   that means. An attacker who attaches as a `device_id` *before* the real device
-   ever has holds the binding until it lapses. It cannot read the `CALL`s (Rule-B
-   signed, opaque) and cannot answer them, but it can deny delivery. The
-   derivation is now reachable; what is missing is the **derived-preferred**
-   design RZ-10 specifies, and one shared place to put the SPKI→COSE_Key
-   conversion it needs.
+2. **First-contact impersonation is closed for every device that has not rotated
+   its identity key, and open for those that have** — §4.3 and RZ-10. A device
+   whose TLS key derives to the `device_id` it claims takes that name back from
+   an impostor holding it. A **rotated** device presents a generation-N key that
+   derives to something else (ADR-0007 §11), cannot prove, and so cannot displace
+   an impostor that got there first; it holds the name until the binding lapses.
+   Closing that needs an `IdentitySuccession` chain, which this service does not
+   hold and must not fetch on the reconnect path (**I5**). Watch
+   `twinvpn_rendezvous_binding_unprovable_keys_total`: a rise with no rotation
+   campaign means keys of a shape the conversion does not handle are arriving,
+   which is a silent downgrade to the weaker binding.
 3. **No container has been built or run.** Docker is absent from this host
    (`infra/README.md` §9). Everything in §2 involving `docker compose` is
    unexercised. The tests run a **real** TLS 1.3 listener on loopback, over both
@@ -449,6 +510,10 @@ Stated here rather than discovered later.
 | `CONTROL.MAILBOX_OVERFLOW` | one target is being called faster than it attaches. Drop-oldest fired; the newest `CALL` survived |
 | `CONTROL.ADMISSION_DEFERRED` in a client's logs | that source exceeded its bucket. It carries `retry_after_ms` and must honour it |
 | a forwarded `CALL` lost a field | something decoded and re-encoded it. There is no such path in this crate; check the client (§6) |
+| `twinvpn_rendezvous_binding_displacements_total` climbing | a device proved a `device_id` an impostor was holding and took it back (§4.3). Every one is either an impersonation attempt that got as far as a binding or a device reconnecting after one. **Worth an alert; not an error** — nothing was refused |
+| `twinvpn_rendezvous_binding_unprovable_keys_total` climbing | claims are arriving on keys no `device_id` derives from, so they fall back to first-claim pinning. A rotation campaign explains it; nothing else should. Without one, something is presenting a key shape `binding::spki` does not convert — a silent downgrade of the binding |
+| `twinvpn_rendezvous_reflexive_suppressed_total` climbing | connections are arriving from source addresses with no canonical `Endpoint` — a link-local peer, in practice. Those clients get no server-reflexive candidate, by design (RZ-12); anything else here means the listener is reachable from somewhere it should not be |
+| clients report no server-reflexive candidate at all | before RZ-12 this was a dual-stack listener reporting `::ffff:` to v4 peers, which every client rejects. If it recurs, decode the `REFLEXIVE` body and run it through `twinvpn_schema::validate::endpoint` |
 
 ```bash
 RUST_LOG=twinvpn_rendezvous=debug cargo test -p twinvpn-rendezvous -- --nocapture

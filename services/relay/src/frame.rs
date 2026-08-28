@@ -152,10 +152,33 @@ pub enum FrameType {
     Caps,
     /// `0x17`.
     Rebind,
+    /// `0x18` — `Noise_IK` message 1, carrying the `RelayCapabilityToken`.
+    ///
+    /// **Allocated by this domain inside the space ADR-0005 §9.1 reserves.**
+    /// §9.1 assigns `0x10..0x1F` to control and names eight of the sixteen; the
+    /// leg handshake of §11.1(2) has to arrive in *some* datagram on the same
+    /// socket, and the alternatives were worse. Multiplexing it onto `CAPS`
+    /// would make one type mean two things at different points in a leg's life,
+    /// and a separate UDP port would be a fifth carriage nothing in ADR-0006's
+    /// map can describe. Recorded as a proposal for ADR-0005's owner, exactly as
+    /// [`crate::status`] records the `RELAY_STATUS` body.
+    HandshakeInit,
+    /// `0x19` — `Noise_IK` message 2. See [`FrameType::HandshakeInit`].
+    HandshakeResp,
+    /// `0x1A` — the stateless cookie challenge of ADR-0005 §11.5.
+    ///
+    /// "Above 20 handshakes/s from a source /24 (v4) or /48 (v6) it issues a
+    /// stateless cookie challenge first (the WireGuard MAC2 / QUIC Retry
+    /// pattern)." This is that frame.
+    CookieChallenge,
 }
 
 impl FrameType {
-    const fn from_wire(v: u8) -> Option<Self> {
+    /// Decodes a wire byte. `None` for a type this build does not know, which is
+    /// a silent drop (ADR-0014: an unknown *type* is not a forward-compatible
+    /// extension point the way a reserved *bit* is).
+    #[must_use]
+    pub const fn from_wire(v: u8) -> Option<Self> {
         match v {
             0x01 => Some(FrameType::Data),
             0x10 => Some(FrameType::Bind),
@@ -166,6 +189,9 @@ impl FrameType {
             0x15 => Some(FrameType::RelayStatus),
             0x16 => Some(FrameType::Caps),
             0x17 => Some(FrameType::Rebind),
+            0x18 => Some(FrameType::HandshakeInit),
+            0x19 => Some(FrameType::HandshakeResp),
+            0x1A => Some(FrameType::CookieChallenge),
             _ => None,
         }
     }
@@ -183,7 +209,44 @@ impl FrameType {
             FrameType::RelayStatus => 0x15,
             FrameType::Caps => 0x16,
             FrameType::Rebind => 0x17,
+            FrameType::HandshakeInit => 0x18,
+            FrameType::HandshakeResp => 0x19,
+            FrameType::CookieChallenge => 0x1A,
         }
+    }
+
+    /// Whether this frame is part of leg establishment and therefore **cannot**
+    /// carry a `K_leg` MAC, because no `K_leg` exists yet.
+    ///
+    /// The pump branches on this before it looks a leg up, so the one datagram
+    /// class that legitimately has no leg is not confused with the far larger
+    /// class that has none because it is unauthenticated.
+    #[must_use]
+    pub const fn is_leg_setup(self) -> bool {
+        matches!(
+            self,
+            FrameType::HandshakeInit | FrameType::HandshakeResp | FrameType::CookieChallenge
+        )
+    }
+
+    /// Whether a **device** may legitimately send this type to a relay.
+    ///
+    /// The mirror of `twinvpn_relay_client::FrameType::device_may_send`, and the
+    /// receive-side half of W-32's ruling: direction belongs on both sides.
+    /// `BOUND`, `DRAIN`, `RELAY_STATUS`, `PONG`, `HANDSHAKE_RESP` and
+    /// `COOKIE_CHALLENGE` are relay-to-device only; a device sending one is
+    /// either confused or probing, and either way the relay must not act on it.
+    #[must_use]
+    pub const fn device_may_send(self) -> bool {
+        matches!(
+            self,
+            FrameType::Data
+                | FrameType::Bind
+                | FrameType::Ping
+                | FrameType::Caps
+                | FrameType::Rebind
+                | FrameType::HandshakeInit
+        )
     }
 }
 

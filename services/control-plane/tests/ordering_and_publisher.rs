@@ -439,6 +439,7 @@ fn a_lease_less_writer_is_refused_rather_than_writing_optimistically() {
     let err = futures::executor::block_on(store.execute(twinvpn_control_plane::store::Request {
         twinnet_id: common::TWINNET,
         caller: dev(1),
+        caller_identity_key: None,
         now_ms: 0,
         now: std::time::Instant::now(),
         verifier: &owner(),

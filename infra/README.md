@@ -17,20 +17,145 @@ Read this first; everything below assumes it.
 |---|---|
 | `postgres`, `otel-collector`, `prometheus`, `tempo`, `loki`, `grafana` | Configured and structurally validated. |
 | `control-plane`, `rendezvous`, `presence`, `relay-a`, `relay-b`, `relay-directory`, `relay-health` | **All six are implemented.** An earlier revision of this section said they were skeletons that print a line and exit 1; that stopped being true when the four service domains landed. |
+| `twinsim-*` (profile `sim`) | Implemented, and **the relay path is exercised end to end without Docker** — see below. |
+| `netlab-*` (profile `netlab`) | Images build; every §3.3 NAT personality **loads into a real kernel nftables table**. |
 
 ```bash
 docker compose up -d
 ```
 
-**But nothing in this directory has ever been started.** Docker is not
-installed on the host this was authored on, so no image has been built, no
-container has run, and the healthcheck, the busybox shim and the distroless
-runtime are all unexercised. §9 says precisely what was and was not verified,
-and the CI lanes in `.github/workflows/` exist to close that gap on a runner
-that has Docker.
+**This directory has now been built and run**, under rootless **podman** with
+the `docker compose` front-end pointed at podman's Docker-compatible socket.
+The `sim` profile has been observed carrying real traffic: two simulated peers
+in containers, a real `Noise_IK` leg each, a `BOUND` flow on one `pair_tag`,
+and `DATA` frames forwarded both ways over IPv6 by the containerised relay.
+§9 says precisely what was and was not verified. Three findings came out of the
+first real build, and none of them could have come from anywhere else:
 
-Read every claim below as "this is what the configuration says", not "this was
-observed".
+1. **All eight §3.3 NAT personalities emitted nftables that does not parse.**
+   `twinlab::nat::Personality::ruleset()` had never been fed to `nft` — the
+   tests compared it to expected substrings — so every rule ran into its
+   chain's closing `}` with no `;`, `N-NAT64` emitted `dnat ip to … map { }`
+   which is not nft syntax at all, and the two port-range personalities omitted
+   the transport-protocol match `snat to <ip>:<lo>-<hi>` requires. **A ruleset
+   nobody applies is a NAT class nobody realizes**, and a scenario behind one
+   would have reported `DIRECT`. Fixed, and `lab-t1.yml` now loads every
+   personality into a real kernel table.
+2. **The image build context was 75 GB.** `COPY lab ./lab` and
+   `COPY core ./core` carried the `target/` directories, which breaks ADR-0018
+   BM-6 reproducibility (the artifact becomes a function of one machine's build
+   history), and it *raced*: a build failed with
+   `lstat …/libtwinnet-*.rlib: no such file or directory` because a concurrent
+   `cargo` replaced a file mid-copy. `.dockerignore` now excludes them, along
+   with `infra/secrets/` and `.env` — a layer is readable to anyone who can
+   pull the image, and a file deleted in a later layer is still in the earlier
+   one.
+3. **`docs/` is a build input, not documentation.** `twinlab::nat` does
+   `include_str!("../../../docs/networking.md")` and parses §3.2's
+   traversability matrix out of it at compile time, exactly as
+   testing-strategy.md §3.3 requires. The image build failed until the
+   Dockerfile copied it.
+
+### If you are using podman
+
+`docker compose` needs a Docker-compatible socket; `podman system service` provides
+one, and `DOCKER_HOST` points at it. Two things differ and both bite silently:
+
+- **Build with `--format docker`.** Podman defaults to the OCI image format,
+  which has no `HEALTHCHECK` field, and drops it with a warning. Every
+  `depends_on: {condition: service_healthy}` in this topology then waits on a
+  health state that can never arrive.
+- **Rootless podman needs `newuidmap`/`newgidmap`** (Debian/Ubuntu: `uidmap`).
+  They are setuid, so only root can install them. Without them a container
+  cannot start at all: with one UID mapped, `crun` cannot mount `devpts`, which
+  wants `gid=5`.
+- **On an nftables-only host, tell netavark so.** It defaults to the `iptables`
+  firewall driver, and without `iptables-nft` installed every container network
+  fails with `netavark: iptables: No such file or directory`. In
+  `~/.config/containers/containers.conf`:
+
+  ```toml
+  [network]
+  firewall_driver = "nftables"
+  ```
+
+- **`docker compose build` does not work against podman** — it boots a BuildKit
+  container, which podman does not provide. Build with `podman build --format
+  docker` and let compose only *run* the images. `docker compose config`,
+  `up`, `down` and `ps` all work normally.
+- **Periodic healthchecks do not fire for containers created through the API.**
+  Podman drives them with systemd transient timers, and a container compose
+  created stays `starting` forever even while `/readyz` answers 200 — so every
+  `depends_on: {condition: service_healthy}` waits on it. `podman healthcheck
+  run <container>` evaluates it once and flips the state. This is a podman /
+  compose integration gap, not a property of this topology; under Docker the
+  interval fires on its own.
+
+### Three things the first `up` found in this topology itself
+
+1. **The secrets were unreadable by the services that mount them.**
+   `bootstrap-local.sh` wrote `0700` directories and `0600` keys; every service
+   image is distroless `:nonroot` and runs as **uid 65532**, which owns none of
+   it. Every service died with
+   `Env(FileUnreadable { key: "TWINVPN_RELAY_ISSUER_KEYS_PATH" })`. This is not
+   a podman quirk — Docker behaves identically. The modes are now `0755`/`0644`
+   and the trade is written out at the top of that script: what is being
+   widened is per-machine, gitignored, development-only material, and **a
+   deployment must give the service's uid access by ownership or a secret
+   store, never by widening the mode**.
+2. **The relays could never become healthy.** Compose configured
+   `TWINVPN_RELAY_CARRIAGES=R-UDP,R-QUIC,R-TLS`; `services/relay/src/net.rs`
+   binds `R-UDP` and fails closed on the other two, and `main.rs` holds
+   readiness RED for any configured carriage it could not serve. `/readyz`
+   answered 503 forever and the simulated peers waited on a state that could
+   not arrive. `check-compose.py` now reads `net.rs` and fails the build if
+   compose names a carriage the relay does not bind.
+3. **The overlay's bind paths resolved outside the repository.** Compose
+   resolves relative paths against the **project directory** — the first
+   `-f` file's, which is the repo root — not against the file the path is
+   written in. `../../infra/secrets/...` in `infra/compose/netlab.yml` became
+   `/home/infra/...`. They are repo-root-relative now, matching the base file.
+
+### What HAS been observed, on this host, with no container runtime
+
+```bash
+make plane-up          # two relays + two simulated devices, as host processes
+make plane-probe       # one-shot: exit 0 iff a real leg binds a real relay
+make plane-ceremony    # one-shot: exit 0 iff a device ATTACHES to the control plane
+make plane-up-v6       # the same, with every leg on IPv6
+```
+
+`infra/scripts/local-plane.sh` runs the part of this environment that needs no
+container.
+
+**The data plane.** The **real** `twinvpn-relay` binary, twice, and two **real**
+relay peers from `lab/twinsim` — a real `Noise_IK` leg carrying a real
+COSE_Sign1 `RelayCapabilityToken`, a real `pair_tag` rendezvous, a `BOUND` flow
+and real bidirectional `DATA` forwarding. Verified on IPv4 and on IPv6.
+
+**The control plane.** The **real** `twinvpn-control-plane` binary against a
+**real PostgreSQL**, with a simulated device completing a real rung-1
+L-CONTROL attach: QUIC + TLS 1.3, mutual RFC 7250 raw public keys, the RFC 9266
+`tls-exporter` channel binding read off the live connection, and one real C1
+round trip. Verified on IPv4 and on IPv6, with the server key both **learned**
+and **pinned** — and a deliberately wrong pin refused.
+
+PostgreSQL comes from `infra/scripts/local-postgres.sh`, which runs the
+official binaries as an unprivileged user out of a cache directory, pinned by
+version **and by SHA-256**. `docker compose` remains the supported topology;
+this is what makes the control plane runnable on a host that cannot run a
+container at all — and this host is one, because rootless podman needs
+`newuidmap`, a setuid binary only root can install.
+
+That path is not a convenience. **It found a defect nothing else could.**
+`services/relay/src/main.rs` passed the packet path a *monotonic offset from
+process start* where a token's `nbf`/`exp` needed a wall clock (ADR-0018 CD-1
+puts validity windows on `WallClock`), so a correctly configured relay refused
+**every** legitimate token — silently, because ADR-0005 §11.5 makes an
+unauthorised handshake a zero-byte drop. `cargo test -p twinvpn-relay` was
+green throughout: the in-crate harness injects a wall-clock constant and so
+never exercised the clock the binary runs with. Only starting the real binary
+finds that, and `.github/workflows/lab-t1.yml` now does it on every push.
 
 ---
 
@@ -839,6 +964,143 @@ mode the wave-1 objective names in its last line.
   `topology-up` job in `t2-post-merge.yml` exists to close exactly this gap:
   it scrapes `otelcol_processor_*`, which only exists once the pipelines are
   live.
+
+---
+
+## 9a. The lab overlay — simulated peers and the test network
+
+`infra/compose/netlab.yml`, and everything it starts, is **never shipped**
+(ADR-0018 §11.12). Two profiles, because they answer different questions and
+cost different things.
+
+| Profile | What it starts | Needs |
+|---|---|---|
+| `sim` | `twinsim-alice`, `twinsim-bob`, `twinsim-gateway` | nothing beyond the base stack |
+| `netlab` | `netlab-nat`, `netlab-ns-carol`, `twinsim-carol` | `NET_ADMIN`, `nft`, `conntrack` |
+
+```bash
+make netlab-up      # both profiles
+make netlab-down
+```
+
+### The L-CONTROL binding, and the gap it closed
+
+`twinvpn-cp-client` declares `ControlTransport` as a **trait** and nothing in
+`core/` implements it. That is deliberate — ADR-0018 CB-1 puts the socket at the
+platform seam, and the crate's own documentation lists binding it as an
+outstanding integration item — but the consequence was that **no device could
+speak to the control plane at all**, so this environment could exercise the
+relay data path end to end and not one control-plane ceremony.
+
+`lab/twinsim/src/lcontrol.rs` is that binding, in the never-shipped lab. It is
+**not** the product's composition root and must not be mistaken for one: the
+product's belongs on the platform seam, per target, under CB-1; this one runs on
+Linux and holds a fixture identity rather than an enrolled `DeviceIdentityKey`.
+
+Two things it records rather than assumes:
+
+- **The framing decision `core/` does not make.** `ControlConnection::request`
+  takes a body and no command code, so something has to decide where the code
+  goes and no document says. The server does — `wire.rs` puts
+  `u16 command_code | u32 body_len | body` on the stream — so this binding
+  treats `request`'s argument as the complete C1 frame. A second binding that
+  split it differently would be silently incompatible and both would look right.
+- **`ServerKey::LearnOnFirstUse` is not pinning, and is named so.** A device pins
+  from its enrolment record (ADR-0001 §7.2). A lab client bootstrapping against
+  a freshly generated development key has nothing to pin from yet; every run
+  that learns a key prints it so the next run can pass it as `Trusted`.
+
+One defect surfaced in writing it, and the note is kept in the source because
+the failure is undiagnosable from either end: under RFC 7250 there is **no
+certificate**, so a client that verifies the peer signature through the X.509
+path parses the SPKI as a certificate and fails with `BadEncoding`. The client
+then blames the server and the server logs `CONTROL.HANDSHAKE_REJECTED` about a
+client that did nothing wrong. `rustls::crypto::verify_tls13_signature_with_raw_key`
+is the correct path, and `lab-t1.yml` fails the build if it is replaced.
+
+### Why the simulators exist
+
+Without them the topology is seven services whose *health checks* are the only
+thing under test. No leg is established, no `pair_tag` is bound, no `DATA`
+frame is forwarded, and every dashboard in §6.4 reads zero. `twinsim` is a real
+relay peer: real `Noise_IK`, a real COSE_Sign1 token, real MACed frames, a real
+socket. What the relay sees from it is what it would see from a device.
+
+**What it is not.** It is not a TwinVPN client. It runs no L-DATA tunnel, holds
+no device identity, completes no pairing ceremony and speaks to no control
+plane — because the L-CONTROL composition root does not exist in `core/` by
+design: `twinvpn-cp-client`'s transport is a trait (ADR-0018 CB-1 puts the
+socket at the platform seam), and binding it is listed there as an outstanding
+integration item. So this environment exercises **the data plane's relay path
+end to end**, and the control plane's **health, readiness, storage and
+observability** surfaces. It does not drive a control-plane ceremony from a
+device, and does not claim to.
+
+### The development credentials, and why the fail-closed default stays
+
+`bootstrap-local.sh` writes each relay an issuer key set with an **empty**
+`issuers` array, because "a relay that admitted flows because it had no issuer
+keys would be an open relay". That default is right and has not changed.
+
+Its consequence is that **no leg can be established at all** — so not one of
+ADR-0005's admission, quota, pairing or failover paths can be exercised. The
+same script therefore has a second, clearly separated step that populates it
+(`make dev-issuer`), and three structural properties keep that from becoming a
+production credential path:
+
+1. The signing seed is generated **per machine from OS entropy** into
+   `infra/secrets/dev-issuer/`, which `infra/secrets/.gitignore` covers and
+   `check-compose.py` asks **git itself** to confirm is unreachable. There is
+   no committed seed and no default seed; a malformed one is a hard error.
+2. The signer is `twinvpn_crypto::testkit`, behind the never-shipped
+   `test-support` feature (CD-5). No product artifact can link it.
+3. Its tokens are audienced to `local-operator`, and a relay refuses a key set
+   belonging to another operator group.
+
+The seed is **never mounted into a relay**. A relay that could sign the token
+it is supposed to verify could admit itself.
+
+### The relay map is unsigned, and that is stated rather than implied
+
+`infra/secrets/dev-issuer/relay-map.json` carries each relay's `relay_id`,
+literal endpoint and static Noise **public** key. It has no signature. It
+stands in for a *key distribution*, never for the Owner-signed `RelayMap` of
+ADR-0006 §11.2 — so **a `twinsim` bind is not evidence that map verification
+works**, because this simulator never verifies a map. That path is exercised by
+`twinvpn-relay-client`'s own tests and by nothing here.
+
+The endpoints are literal addresses, never hostnames (ADR-0011 DN-0), which is
+why `netlab.yml` pins `relay-a` and `relay-b` to fixed underlay addresses and
+why `twinsim` **refuses** to resolve a hostname rather than helpfully doing it.
+
+### The test network applies twinlab's rules, not its own
+
+`infra/netlab/entrypoint.sh` asks `twinlab-scenarios nat-ruleset` and
+`twinlab-scenarios impair-argv` for the `nft` ruleset and the `tc` argument
+vector, and applies what it gets. It never writes a rule. Re-typing §3.3's
+personalities in shell would be the R-31 divergence ADR-0018 CB-2 exists to
+prevent, and it would diverge in the one direction that matters: a container
+labelled `N-EIM-APDF` that is actually stock masquerade produces a green
+traversal result for a class nothing realized. `.github/workflows/lab-t1.yml`
+fails the build if a literal `table inet …` definition appears in that script.
+
+**A facility the host cannot provide is a failure to start, never a degraded
+mode.** If `nft` cannot load the ruleset, the container must not come up as a
+transparent router — a transparent router traverses everything, and the
+scenario would report `DIRECT` for a class that was never applied. That is
+`Verdict::Unavailable` reported as `Pass`, which twinlab's whole type design
+exists to prevent.
+
+### Why `netlab` is the one non-distroless image in this repository
+
+Because §3.1 requires a condition to be produced by a real mechanism, and the
+mechanism for a NAT class is a real `nftables` ruleset with real `conntrack`
+state, applied by `nft`. There is no way to run `nft` without something to run
+it from. The compensations are structural: it is never deployed, it holds no
+key material or credential of any kind, it appears in no profile a plain
+`docker compose up` reaches, and it carries `NET_ADMIN` and nothing else —
+`check-compose.py` fails the build on `privileged: true` or on any other
+capability.
 
 ---
 

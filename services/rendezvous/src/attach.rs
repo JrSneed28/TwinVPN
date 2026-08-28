@@ -1,4 +1,4 @@
-//! The live-delivery registry — ADR-0002 §11.5 path [1], S-25.
+//! The live-delivery registry — ADR-0002 §11.5 path \[1\], S-25.
 //!
 //! `ControlChannelAttachment` is `{device_id → {front-end node, connection
 //! epoch, expires_at}}`, `EVENTUAL`, **non-durable, TTL 90 s**, "highest

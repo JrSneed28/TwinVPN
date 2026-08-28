@@ -22,8 +22,10 @@ use prost::Message;
 use twinvpn_control_plane as cp;
 use twinvpn_control_plane::store::{Committed, ControlStore, Request};
 use twinvpn_control_plane::verify::testing::ScriptedVerifier;
+use twinvpn_control_plane::verify::Delegation;
 use twinvpn_control_plane::verify::{RefuseUnverifiable, StatementVerifier};
 use twinvpn_control_plane::{CommandCode, EventKind};
+use twinvpn_crypto::statements::OskPower;
 use twinvpn_schema::v1;
 use twinvpn_service_common::{Correlation, ServiceError};
 
@@ -60,6 +62,7 @@ impl Net {
         futures::executor::block_on(self.store.execute(Request {
             twinnet_id: TWINNET,
             caller,
+            caller_identity_key: None,
             now_ms,
             now: self.base + elapsed,
             verifier,
@@ -83,6 +86,7 @@ impl Net {
         futures::executor::block_on(self.store.execute(Request {
             twinnet_id: TWINNET,
             caller,
+            caller_identity_key: None,
             now_ms,
             now: self.base,
             verifier,
@@ -92,6 +96,52 @@ impl Net {
             code,
             body,
         }))
+    }
+
+    /// [`Net::run`] with a proven channel key behind the caller.
+    ///
+    /// This is what the transport supplies on a real connection
+    /// (`serve::Peer::identity_cose_key`): the COSE_Key form of the RFC 7250 raw
+    /// public key the peer proved possession of in the handshake. The tests that
+    /// need it are the ones about *which* key a claim is checked against —
+    /// enrolment binding, and a rotated device's successor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_with_channel_key(
+        &self,
+        caller: [u8; 32],
+        channel_key: &[u8],
+        code: CommandCode,
+        body: &[u8],
+        now_ms: u64,
+        elapsed: Duration,
+        verifier: &dyn StatementVerifier,
+    ) -> Result<Committed, ServiceError> {
+        futures::executor::block_on(self.store.execute(Request {
+            twinnet_id: TWINNET,
+            caller,
+            caller_identity_key: Some(channel_key),
+            now_ms,
+            now: self.base + elapsed,
+            verifier,
+            quorum_available: true,
+            correlation: Correlation::empty(),
+            coordination_endpoints: &self.endpoints,
+            code,
+            body,
+        }))
+    }
+
+    /// The `device_id` a presented identity currently resolves to.
+    pub fn device_for_identity(&self, identity_id: [u8; 32]) -> Option<[u8; 32]> {
+        futures::executor::block_on(self.store.device_for_identity(TWINNET, identity_id))
+            .expect("the lookup answers")
+    }
+
+    /// The stored record for `device_id`.
+    pub fn record(&self, device_id: [u8; 32]) -> Option<cp::model::DeviceRecord> {
+        self.store
+            .snapshot(TWINNET)
+            .and_then(|s| s.devices.get(&device_id).cloned())
     }
 
     /// The durable events after `from`.
@@ -125,16 +175,61 @@ impl Default for Net {
     }
 }
 
-/// A verifier that attributes every statement to the `Owner`.
+/// A delegation carrying `powers`, for an OSK named `osk_id`.
+///
+/// Real deployments decode these from ORK-signed `OwnerDelegation` statements;
+/// a test builds one directly so it can ask what happens when a power is
+/// **missing**, which is the case that matters.
+#[must_use]
+pub fn delegation(osk_id: &str, powers: &[OskPower]) -> Delegation {
+    Delegation {
+        osk_id: osk_id.to_owned(),
+        osk_pub_cose: vec![0xa5; 8],
+        powers: powers.to_vec(),
+        anchor_version: 1,
+        not_after_ms: 0,
+    }
+}
+
+/// A verifier that attributes every statement to the `Owner` **root**.
+///
+/// The ORK is unscoped by construction — it is the key every delegation chains
+/// to — so this double needs no powers for the statements it signs. It still
+/// has to *grant* `ENROLL` on the enrolment proof it presents, because
+/// `RegisterDevice`'s authorisation is the delegation inside the proof rather
+/// than whoever signed it.
 #[must_use]
 pub fn owner() -> ScriptedVerifier {
+    ScriptedVerifier::owner().granting(delegation("osk-enroll", &[OskPower::Enroll]))
+}
+
+/// An `Owner` verifier whose **signer** is an OSK holding exactly `powers`.
+///
+/// This is what a real deployment looks like: the root is offline and a
+/// per-device signing key does the work. A test that wants a refusal asks for a
+/// key without the power the operation needs.
+#[must_use]
+pub fn owner_osk(powers: &[OskPower]) -> ScriptedVerifier {
     ScriptedVerifier::owner()
+        .held_by(delegation("osk-1", powers))
+        .granting(delegation("osk-1", powers))
 }
 
 /// A verifier that attributes every statement to a device.
 #[must_use]
 pub fn device() -> ScriptedVerifier {
     ScriptedVerifier::device()
+}
+
+/// A device verifier that reports an attestation for ceremony `pairing_id`.
+///
+/// `CompletePairing` refuses an attestation that does not name the ceremony it
+/// is completing, so a double that reported none would make every completion
+/// fail — and a check that the double could not satisfy is a check no test could
+/// distinguish from a broken one.
+#[must_use]
+pub fn device_attesting(pairing_id: u8) -> ScriptedVerifier {
+    ScriptedVerifier::device().attesting_to([pairing_id; 16])
 }
 
 /// The fail-closed verifier this build ships.

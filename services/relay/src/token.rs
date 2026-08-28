@@ -293,6 +293,23 @@ pub(crate) mod testkit {
         b"BAD-cose-sign1-payload".to_vec()
     }
 
+    /// A [`VerifiedToken`] for a subject, without going through verification.
+    ///
+    /// Only for tests of things *downstream* of admission — the leg registry,
+    /// the pump's routing — which need a token-shaped value and are not testing
+    /// the token. Everything that tests admission itself goes through
+    /// [`super::verify`], because a constructor that skipped it would let the
+    /// checks be removed without a test noticing.
+    pub fn verified(subject: [u8; 16]) -> super::VerifiedToken {
+        super::VerifiedToken {
+            subject: crate::subject::RelaySub::from_verified_claim(subject),
+            epoch: 5,
+            not_after_ms: u64::MAX,
+            quota: Quota::default(),
+            renewed_by_relay: false,
+        }
+    }
+
     /// Claims a test can start from.
     pub fn claims() -> TokenClaims {
         TokenClaims {

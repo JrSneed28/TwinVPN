@@ -1,0 +1,94 @@
+# The test-network container: a real NAT and a real impairment, between a
+# simulated peer and a relay.
+#
+# ===========================================================================
+# THIS IMAGE IS NOT DISTROLESS, AND THAT IS THE POINT
+# ===========================================================================
+# Every other image in this repository is distroless with no shell, because a
+# service needs no shell and a shell is an attacker's first tool. This one is
+# the exception, and the exception is load-bearing: `docs/testing-strategy.md`
+# §3.1 requires a condition to be produced by "a mechanism with the same
+# observable semantics as the real thing", and the mechanism for a NAT class is
+# a real `nftables` ruleset with real `conntrack` state, applied by `nft`. There
+# is no way to run `nft` without something to run it from.
+#
+# The compensations are structural rather than aspirational:
+#   - It is never deployed. `io.twinvpn.never-shipped=true`, and it appears in
+#     no compose profile a `docker compose up` reaches without `--profile netlab`.
+#   - It holds no key material, no database credential and no TLS material. The
+#     only thing mounted into it is the ruleset it applies.
+#   - It carries NET_ADMIN and nothing else, and NET_ADMIN is exactly what
+#     `nft` and `tc` need. `docker-compose` grants it by `cap_add`, never by
+#     `privileged: true`.
+#
+# ===========================================================================
+# THE RULES COME FROM twinlab, NOT FROM A SHELL SCRIPT
+# ===========================================================================
+# `twinlab::nat::Personality::ruleset` is where §3.3's personalities are
+# written, and `twinlab::impair::Impairment::tc_argv` is where §3.4's
+# impairments are. The entrypoint asks the `twinlab-scenarios` binary for both
+# and applies what it gets. Re-typing the rules in shell would be the R-31
+# divergence ADR-0018 CB-2 exists to prevent, and it would diverge in the one
+# direction that matters: a container labelled `N-EIM-APDF` that is actually
+# stock masquerade produces a green traversal result for a class nothing
+# realized.
+
+ARG NETLAB_BASE=docker.io/library/debian:12.9-slim
+ARG TWINSIM_IMAGE=twinvpn/twinsim:local
+
+# The lab binaries are taken from the twinsim image rather than rebuilt, so the
+# rules this container applies are byte-identical to the ones the namespace lab
+# uses. Two builds of the same crate would be two chances to disagree.
+FROM ${TWINSIM_IMAGE} AS lab
+
+FROM ${NETLAB_BASE} AS runtime
+
+ARG SOURCE_COMMIT=unknown
+
+LABEL org.opencontainers.image.title="twinvpn-netlab"
+LABEL org.opencontainers.image.source="https://github.com/twinvpn/twinvpn"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.revision="${SOURCE_COMMIT}"
+LABEL io.twinvpn.service="netlab"
+LABEL io.twinvpn.plane="lab"
+LABEL io.twinvpn.never-shipped="true"
+
+# hadolint ignore=DL3008
+# Versions are NOT pinned here and the reason is recorded rather than hidden:
+# `infra/docker/base-images.lock` pins the BASE by digest, which fixes the
+# package set this apt-get resolves against. Pinning each package version on top
+# of a digest-pinned base adds a second thing to update in lockstep and breaks
+# the build every security update, for an image that is never deployed. If this
+# image ever leaves the lab, this decision has to be revisited.
+RUN apt-get update \
+ && apt-get install --no-install-recommends -y \
+      nftables \
+      iproute2 \
+      conntrack \
+      iputils-ping \
+      procps \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=lab /usr/local/bin/twinlab-scenarios /usr/local/bin/twinlab-scenarios
+COPY infra/netlab/entrypoint.sh /usr/local/bin/netlab-entrypoint
+RUN chmod 0755 /usr/local/bin/netlab-entrypoint
+
+# The personality and the impairment this instance realizes. Both are REQUIRED
+# and neither has a working default: a netlab container that silently came up
+# as "no NAT, no impairment" would be a transparent router that every scenario
+# would traverse, reported as a NAT class that was never applied.
+ENV TWINVPN_NETLAB_PERSONALITY=""
+ENV TWINVPN_NETLAB_IMPAIRMENT=""
+ENV TWINVPN_NETLAB_EXTERNAL_IF="eth0"
+ENV TWINVPN_NETLAB_INTERNAL_CIDR=""
+
+# Liveness only, and the asymmetry is deliberate. `netlab` is not a service: it
+# applies a ruleset and then forwards. It has no readiness question of its own,
+# and this image is excluded from check-compose.py invariant 5 for that reason
+# rather than being given a probe that returns 200 unconditionally — which
+# `ownership.md` rule 4 says is not a readiness probe.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+  CMD ["/usr/local/bin/netlab-entrypoint", "verify"]
+
+ENTRYPOINT ["/usr/local/bin/netlab-entrypoint"]
+CMD ["run"]

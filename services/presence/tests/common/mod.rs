@@ -164,6 +164,20 @@ impl Client {
     }
 }
 
+/// The `device_id` a `TestKey` **proves** — the derivation
+/// `contracts/docs/identifiers.md` §2 fixes, run over the key the peer presents
+/// on TLS, through the shared crate's own conversion rather than a second copy
+/// of it (RZ-8).
+#[must_use]
+pub fn proven_device_id(key: &TestKey) -> [u8; 32] {
+    use twinvpn_types::Identifier as _;
+    let channel = svc::tls::ChannelIdentity::new(&key.spki);
+    let derived = svc::binding::derive_device_id_for(&channel).expect("a real P-256 key derives");
+    let mut out = [0u8; 32];
+    out.copy_from_slice(derived.as_bytes());
+    out
+}
+
 /// Decodes a `PublishPresenceResponse`.
 #[must_use]
 pub fn response(body: &[u8]) -> twinvpn_schema::v1::PublishPresenceResponse {

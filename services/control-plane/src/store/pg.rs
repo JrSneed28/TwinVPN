@@ -36,7 +36,7 @@
 //!
 //! # The known cost, stated
 //!
-//! [`PgStore::load`] materialises the whole `TwinNet` slice per command. That is
+//! `PgStore::load` materialises the whole `TwinNet` slice per command. That is
 //! correct — one writer per `TwinNet`, everything under one lock — and it is
 //! O(devices + pairings) per command, so it does not scale to a very large
 //! `TwinNet`. It is the right first implementation for a design whose
@@ -587,6 +587,7 @@ impl ControlStore for PgStore {
 
             let ctx = Ctx {
                 caller: request.caller,
+                caller_identity_key: request.caller_identity_key,
                 twinnet_id: request.twinnet_id,
                 now_ms: request.now_ms,
                 verifier: request.verifier,
@@ -692,6 +693,28 @@ impl ControlStore for PgStore {
                 });
             }
             Ok(out)
+        })
+    }
+
+    fn device_for_identity<'a>(
+        &'a self,
+        twinnet_id: &'a str,
+        identity_id: crate::model::DeviceKey,
+    ) -> BoxFuture<'a, Result<Option<crate::model::DeviceKey>, ServiceError>> {
+        Box::pin(async move {
+            // `device_identity_unique` (migration 0004) makes this a
+            // single-row lookup: one presented key cannot name two devices.
+            // That index is a security control, not an optimisation — see the
+            // header of `0004_identity_index.sql`.
+            let row: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT device_id FROM device WHERE twinnet_id = $1 AND identity_id = $2",
+            )
+            .bind(twinnet_id)
+            .bind(identity_id.to_vec())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(store_error)?;
+            Ok(row.map(|d| key32(&d)))
         })
     }
 

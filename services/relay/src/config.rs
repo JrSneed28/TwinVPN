@@ -222,6 +222,40 @@ impl RelayConfig {
     /// their full per-subject allowance.
     pub const KEY_MAX_TOTAL_FLOWS: &'static str = "TWINVPN_RELAY_MAX_TOTAL_FLOWS";
 
+    /// The endpoints this instance should be enrolled in the relay map with.
+    ///
+    /// One entry per configured carriage listener, deduplicated. ADR-0005 §10:
+    /// "relay endpoints published in the relay map are **per-instance and
+    /// individually addressable**; a `Relay` MUST NOT be a load-balanced VIP
+    /// hiding N instances" — because a half-flow is bound to a 5-tuple and a
+    /// Noise leg and therefore cannot migrate between processes, and `pair_tag`
+    /// is invisible to an L4 balancer, so both peers must reach the *same* one.
+    ///
+    /// A wildcard bind (`[::]`, `0.0.0.0`) is **excluded**, not rewritten. A
+    /// wildcard is what the socket listens on, never an address a device can
+    /// dial; publishing one would enrol an unreachable relay that looks correct.
+    /// The operator supplies the routable address, and
+    /// [`crate::register::RelayDescriptor::build`] refuses a descriptor with no
+    /// endpoint at all rather than guessing one.
+    #[must_use]
+    pub fn published_endpoints(&self) -> Vec<SocketAddr> {
+        let mut out: Vec<SocketAddr> = Vec::new();
+        for (carriage, addr) in [
+            (Carriage::Udp, self.listen_udp),
+            (Carriage::Udp, self.listen_udp_443),
+            (Carriage::Quic, self.listen_quic),
+            (Carriage::Tls, self.listen_tls),
+        ] {
+            if !self.carriages.contains(&carriage) || is_wildcard(addr) {
+                continue;
+            }
+            if !out.contains(&addr) {
+                out.push(addr);
+            }
+        }
+        out
+    }
+
     /// Loads and validates every `TWINVPN_RELAY_*` variable.
     ///
     /// # Errors
@@ -406,6 +440,14 @@ fn frozen(l: &Loader<'_>, key: &'static str, expected: u64) -> Result<u64, Relay
         Ok(v)
     } else {
         Err(RelayConfigError::FrozenValueAltered { key, expected })
+    }
+}
+
+/// Whether an address is a wildcard bind rather than a dialable endpoint.
+fn is_wildcard(addr: SocketAddr) -> bool {
+    match addr.ip() {
+        std::net::IpAddr::V4(v4) => v4.is_unspecified(),
+        std::net::IpAddr::V6(v6) => v6.is_unspecified(),
     }
 }
 

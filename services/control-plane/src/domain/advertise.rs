@@ -99,7 +99,7 @@ pub fn put_route(
     check_prefixes(&ad.prefixes_v6)?;
 
     let octets = opaque(ad.signed.as_ref())?;
-    let signer = super::caller_key(tx, ctx)?.to_vec();
+    let signer = super::caller_key(tx, ctx)?;
     let verified = verify::admit(
         ctx.verifier,
         &octets,
@@ -150,7 +150,7 @@ pub fn withdraw_route(
         return Err(codes::bare(twinvpn_types::codes::AUTH_PEER_UNTRUSTED));
     }
     let octets = opaque(req.signed.as_ref())?;
-    let signer = super::caller_key(tx, ctx)?.to_vec();
+    let signer = super::caller_key(tx, ctx)?;
     verify::admit(
         ctx.verifier,
         &octets,
@@ -200,7 +200,7 @@ pub fn put_offer(
         return Err(codes::bare(twinvpn_types::codes::AUTH_PEER_UNTRUSTED));
     }
     let octets = opaque(offer.signed.as_ref())?;
-    let signer = super::caller_key(tx, ctx)?.to_vec();
+    let signer = super::caller_key(tx, ctx)?;
     let verified = verify::admit(
         ctx.verifier,
         &octets,
@@ -248,7 +248,7 @@ pub fn withdraw_offer(
         return Err(codes::bare(twinvpn_types::codes::AUTH_PEER_UNTRUSTED));
     }
     let octets = opaque(req.signed.as_ref())?;
-    let signer = super::caller_key(tx, ctx)?.to_vec();
+    let signer = super::caller_key(tx, ctx)?;
     verify::admit(
         ctx.verifier,
         &octets,

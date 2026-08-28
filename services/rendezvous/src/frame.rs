@@ -67,7 +67,7 @@ pub type DeviceId = [u8; DEVICE_ID_LEN];
 #[repr(u8)]
 pub enum Opcode {
     /// Client → service. Body: `device_id(32)`. Binds this connection as the
-    /// target's live delivery path (ADR-0002 §11.5 path [1], S-25).
+    /// target's live delivery path (ADR-0002 §11.5 path \[1\], S-25).
     Attach = 0x01,
     /// Client → service. Body: `target device_id(32) ‖ opaque C4 payload`.
     Call = 0x02,

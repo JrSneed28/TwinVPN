@@ -57,3 +57,21 @@ tokio      = { workspace = true }
 bytes      = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+
+# ===========================================================================
+# THE TEST DEVICE IS A REAL DEVICE, NOT A DOUBLE.
+# ===========================================================================
+# `twinvpn-crypto`'s `test-support` feature vends deterministic signing
+# fixtures, and it exists precisely so that a crate which may not name a
+# cryptographic dependency (CD-I2) can still produce a real signature in a test.
+#
+# That is what closes README §11's two remaining gaps at once. Until now the
+# admission policy was exercised against a `RelayCrypto` double because
+# producing a VALID RelayCapabilityToken needs a keypair this crate cannot sign
+# with; with this dev-dependency the integration tests mint a real COSE_Sign1
+# token, run a real Noise_IK leg handshake, and drive a real relay over real
+# sockets. Nothing in `tests/` is a stand-in for cryptography any more.
+#
+# It is a DEV-dependency: never in a shipped build.
+[dev-dependencies]
+twinvpn-crypto = { workspace = true, features = ["test-support"] }

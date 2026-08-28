@@ -27,7 +27,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::Notify;
 
 use twinvpn_service_common::transport::{
     Admission, BacklogWatermark, EventQueue, PushOutcome, TokenBucket,
@@ -77,18 +79,34 @@ impl Rung {
 /// what N-1 needs in order to close the older one.
 #[derive(Debug, Default)]
 pub struct Attachments {
-    epochs: Mutex<BTreeMap<DeviceKey, u64>>,
+    epochs: Mutex<BTreeMap<DeviceKey, Slot>>,
     next_epoch: AtomicU64,
 }
 
+/// One live attachment: its epoch, and the signal that displaces it.
+#[derive(Debug, Clone)]
+struct Slot {
+    epoch: u64,
+    superseded: Arc<Notify>,
+}
+
 /// The outcome of registering a new attachment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Attached {
     /// This connection's epoch. Highest wins.
     pub epoch: u64,
     /// Whether an older connection for this identity must now be closed with
     /// `CONTROL.SUPERSEDED_BY_NEW_ATTACH`.
     pub superseded_previous: bool,
+    /// Resolves when a **later** attach displaces this connection.
+    ///
+    /// N-1 says the older connection "MUST be closed", and a serving loop parked
+    /// on its next stream would otherwise not notice until one arrived — which,
+    /// for a device that is only listening on C2, is never. Polling would answer
+    /// it late and by accident; this answers it at the moment the displacement
+    /// happens, and the enforcement stays here rather than becoming a timer in
+    /// the transport.
+    pub superseded: Arc<Notify>,
 }
 
 impl Attachments {
@@ -115,11 +133,26 @@ impl Attachments {
     /// on past that would give one identity two C1 streams.
     pub fn attach(&self, device_id: DeviceKey) -> Attached {
         let epoch = self.next_epoch.fetch_add(1, Ordering::SeqCst);
+        let superseded = Arc::new(Notify::new());
         let mut map = self.epochs.lock().expect("attachment lock");
-        let previous = map.insert(device_id, epoch);
+        let previous = map.insert(
+            device_id,
+            Slot {
+                epoch,
+                superseded: Arc::clone(&superseded),
+            },
+        );
+        if let Some(previous) = previous.as_ref() {
+            // `notify_one` and not `notify_waiters`: it stores a permit, so a
+            // displaced connection that has not yet reached its wait still sees
+            // the displacement. `notify_waiters` would be lost in that race and
+            // would leave exactly the second live attachment N-1 forbids.
+            previous.superseded.notify_one();
+        }
         Attached {
             epoch,
             superseded_previous: previous.is_some(),
+            superseded,
         }
     }
 
@@ -137,7 +170,7 @@ impl Attachments {
             .lock()
             .expect("attachment lock")
             .get(device_id)
-            .copied()
+            .map(|slot| slot.epoch)
             == Some(epoch)
     }
 
@@ -148,7 +181,7 @@ impl Attachments {
     /// If the registry lock was poisoned. See [`Attachments::attach`].
     pub fn detach(&self, device_id: &DeviceKey, epoch: u64) {
         let mut map = self.epochs.lock().expect("attachment lock");
-        if map.get(device_id).copied() == Some(epoch) {
+        if map.get(device_id).map(|slot| slot.epoch) == Some(epoch) {
             map.remove(device_id);
         }
     }

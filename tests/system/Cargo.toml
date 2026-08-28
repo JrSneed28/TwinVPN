@@ -43,6 +43,12 @@ twinlab              = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# The control plane itself, for the two tests that drive its real revoke path
+# and its real store trait. A dev-dependency: no shipped crate gains it, and
+# CD-I5 is untouched because nothing here is a data-plane crate.
+twinvpn-control-plane = { workspace = true }
+twinvpn-service-common = { workspace = true }
+futures = "0.3"
 prost      = { workspace = true }
 bytes      = "1"
 # The control-plane client, for the C2 event decoder's fuzz target. A
@@ -97,9 +103,20 @@ path = "../e2e/composed_core.rs"
 name = "chaos_journal_write_behind"
 path = "../chaos/journal_write_behind.rs"
 
+# §2.13's database outage, injected at the control plane's real store seam.
+[[test]]
+name = "chaos_store_outage"
+path = "../chaos/store_outage.rs"
+
 [[test]]
 name = "integration_tunnel_wire_agreement"
 path = "../integration/tunnel_wire_agreement.rs"
+
+# A-06, which spans two crates that never link in production: the control plane
+# produces a revocation and `twinvpn-trust` on a device consumes one.
+[[test]]
+name = "integration_revocation_at_the_peer"
+path = "../integration/revocation_at_the_peer.rs"
 
 # ---------------------------------------------------------------------------
 # The fuzz level. Every decoder that reads bytes this device did not write.

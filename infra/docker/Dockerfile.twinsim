@@ -1,0 +1,99 @@
+# The simulated device / gateway image. ONE Dockerfile, as Dockerfile.service is.
+#
+# `twinsim` is a NEVER-SHIPPED lab artifact (ADR-0018 §11.12: `/lab/` is the
+# never-shipped path), so this image is deliberately NOT built from the same
+# base as a service: it must never be mistaken for one in a registry listing, in
+# a `docker ps`, or in a label query. `io.twinvpn.never-shipped=true` below is
+# the machine-readable form of that.
+#
+# Reproducibility inputs are the same as Dockerfile.service's (ADR-0018 §11.10
+# BM-6): remapped source roots, SOURCE_DATE_EPOCH as a build arg, base images
+# pinned by tag and by digest through infra/docker/base-images.lock, and
+# `--locked` against the committed lab/Cargo.lock.
+
+ARG RUST_IMAGE=docker.io/library/rust:1.90.0-bookworm
+ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot
+ARG BUSYBOX_IMAGE=docker.io/library/busybox:1.37.0-musl
+
+# The healthcheck shim, for exactly the reason Dockerfile.service has one: the
+# runtime is distroless, and a TCP probe is not a health check.
+FROM ${BUSYBOX_IMAGE} AS busybox
+
+FROM ${RUST_IMAGE} AS fetch
+WORKDIR /src
+# The lab workspace drives the core crates directly (lab/Cargo.toml names them
+# as path dependencies), and `twinvpn-schema` builds from contracts/, so all
+# three trees are needed to resolve. `services/` is NOT copied: twinsim does not
+# link the relay, and copying it would make that possible by accident.
+COPY rust-toolchain.toml ./
+COPY core ./core
+COPY lab ./lab
+COPY contracts ./contracts
+# `docs/` IS A BUILD INPUT, not documentation, and leaving it out is a build
+# failure rather than a missing README: `twinlab::nat` does
+# `include_str!("../../../docs/networking.md")` and PARSES §3.2's traversability
+# matrix out of it at compile time. docs/testing-strategy.md §3.3 requires
+# exactly that — "generated from docs/networking.md §3.2, so a change to the
+# matrix changes the lab" — so the prose is the source of a table the lab
+# depends on. Found by the first real image build; nothing else would.
+COPY docs ./docs
+WORKDIR /src/lab
+RUN cargo fetch --locked
+
+FROM fetch AS build
+ARG CARGO_PROFILE=release
+ARG SOURCE_DATE_EPOCH=1756252800
+ARG SOURCE_COMMIT=unknown
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ENV RUSTFLAGS="--remap-path-prefix=/src=/twinvpn --remap-path-prefix=/usr/local/cargo=/cargo"
+ENV CARGO_NET_OFFLINE=true
+WORKDIR /src/lab
+RUN cargo build --locked --offline --profile "${CARGO_PROFILE}" -p twinsim -p twinlab-scenarios \
+ && install -D "target/${CARGO_PROFILE}/twinsim" /out/twinsim \
+ && install -D "target/${CARGO_PROFILE}/twinlab-scenarios" /out/twinlab-scenarios \
+ && strip /out/twinsim /out/twinlab-scenarios || true
+
+FROM ${RUNTIME_IMAGE} AS runtime
+ARG SOURCE_COMMIT=unknown
+
+LABEL org.opencontainers.image.title="twinsim"
+LABEL org.opencontainers.image.source="https://github.com/twinvpn/twinvpn"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.revision="${SOURCE_COMMIT}"
+LABEL io.twinvpn.service="twinsim"
+# NOT a plane. A simulator is a test instrument that speaks to the data plane;
+# labelling it `data` would put it in the same query result as a relay.
+LABEL io.twinvpn.plane="lab"
+LABEL io.twinvpn.never-shipped="true"
+
+COPY --from=busybox /bin/busybox /busybox
+COPY --from=build /out/twinsim /usr/local/bin/twinsim
+COPY --from=build /out/twinlab-scenarios /usr/local/bin/twinlab-scenarios
+
+# The admin listener. ONE listener serving three paths, the same three every
+# service serves:
+#   /healthz  liveness  — "this process is running and its own invariants hold"
+#   /readyz   readiness — "the relay ADMITTED this peer: a leg, and a flow"
+#   /metrics  Prometheus, the ADR-0015 §9 label allowlist
+#
+# The two answers are genuinely different here, which is why both exist rather
+# than one being an alias of the other. A simulator whose relay is unreachable
+# is LIVE — restarting it will not help, and a restart loop would destroy the
+# evidence the run exists to collect — and NOT READY.
+#
+# Readiness deliberately includes PENDING; see lab/twinsim/src/admin.rs for why
+# requiring BOUND would deadlock `up --wait` on whichever half starts first.
+#
+# The admin listener is operator-facing and MUST NOT be published.
+ENV TWINSIM_ADMIN_ADDR="[::]:9090"
+ENV TWINSIM_HEALTHCHECK_URL="http://127.0.0.1:9090/readyz"
+ENV OTEL_SERVICE_NAME="twinsim"
+
+EXPOSE 9090/tcp
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
+  CMD ["/busybox", "sh", "-c", "/busybox wget -q -T 3 -O /dev/null \"$TWINSIM_HEALTHCHECK_URL\""]
+
+# PID 1 is the simulator, so SIGTERM reaches it directly. No shell wrapper.
+ENTRYPOINT ["/usr/local/bin/twinsim"]
+CMD ["peer"]

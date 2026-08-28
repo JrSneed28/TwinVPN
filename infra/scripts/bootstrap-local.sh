@@ -28,10 +28,49 @@ services=(control-plane rendezvous presence relay-a relay-b relay-directory)
 have_openssl=1
 command -v openssl >/dev/null 2>&1 || have_openssl=0
 
+# ---------------------------------------------------------------------------
+# MODES: 0755 directories and 0644 files, NOT 0700/0600, and this is a
+# deliberate trade rather than an oversight.
+#
+# ===========================================================================
+# WHY THE TIGHT MODES DID NOT WORK
+# ===========================================================================
+# Every service image is distroless `:nonroot` and runs as **uid 65532**. The
+# compose file bind-mounts these directories into it. A 0700 directory owned by
+# the developer's uid cannot be traversed by 65532, and a 0600 file cannot be
+# read by it, so every service died at startup with
+# `Env(FileUnreadable { key: "TWINVPN_RELAY_ISSUER_KEYS_PATH" })`.
+#
+# That is not a podman quirk. Docker behaves identically: the uid in the image
+# is the uid that opens the file, and it is not the uid that owns it. The
+# topology had simply never been started.
+#
+# ===========================================================================
+# WHY LOOSENING IS THE RIGHT END OF THE TRADE HERE, AND WHERE IT IS NOT
+# ===========================================================================
+# The alternatives were worse:
+#
+#   - `user: "${UID}:${GID}"` in compose discards the property the Dockerfile
+#     treats as structural ("distroless :nonroot ... there is no root user to
+#     start from"), for every service, to fix a file mode.
+#   - `userns_mode: keep-id` works on podman and not on Docker, so the
+#     documented topology would only run on one of them.
+#
+# What is being loosened is DEVELOPMENT key material: generated per machine
+# from OS entropy, covered by infra/secrets/.gitignore, verified unreachable by
+# git in build/verify/check-compose.py, and worthless anywhere else. The cost
+# is that another local user on the same machine can read it.
+#
+# THIS DOES NOT GENERALISE. A deployment must give the service's uid access
+# through ownership or a secret store, never by widening the mode -- and the
+# fact that this script is the only thing that writes these files is what keeps
+# the two situations apart.
+# ---------------------------------------------------------------------------
 echo "==> creating secret directories"
 for svc in "${services[@]}"; do
   mkdir -p "${secrets}/${svc}"
-  chmod 0700 "${secrets}/${svc}"
+  # 0755: the container's uid must be able to TRAVERSE this to reach the files.
+  chmod 0755 "${secrets}/${svc}"
 done
 
 # ---------------------------------------------------------------------------
@@ -78,7 +117,8 @@ if [ "${have_openssl}" -eq 1 ]; then
       -subj "/CN=${svc}.twinvpn.local" \
       -addext "subjectAltName=DNS:${svc},DNS:${svc}.twinvpn.local,DNS:localhost,IP:127.0.0.1,IP:::1" \
       >/dev/null 2>&1
-    chmod 0600 "${key}"
+    # Readable by the container's uid; see the modes note above.
+    chmod 0644 "${key}"
     chmod 0644 "${crt}"
     echo "    ${svc}: generated (ed25519, 90 days, DEVELOPMENT ONLY)"
   done
@@ -109,7 +149,8 @@ for svc in relay-a relay-b; do
   static="${secrets}/${svc}/static-noise.key"
   if [ ! -f "${static}" ]; then
     head -c 32 /dev/urandom > "${static}"
-    chmod 0600 "${static}"
+    # Readable by the container's uid; see the modes note above.
+    chmod 0644 "${static}"
     echo "    ${svc}: static Noise key generated (32 random bytes)"
   else
     echo "    ${svc}: static Noise key present, leaving alone"
@@ -174,13 +215,71 @@ mapkey="${secrets}/relay-directory/map-signing.key"
 if [ ! -f "${mapkey}" ]; then
   if [ "${have_openssl}" -eq 1 ]; then
     openssl genpkey -algorithm ed25519 -out "${mapkey}" >/dev/null 2>&1
-    chmod 0600 "${mapkey}"
+    chmod 0644 "${mapkey}"
     echo "    relay-directory: RelayMap signing key generated (ed25519)"
   else
     echo "!!  relay-directory: openssl absent, RelayMap signing key NOT generated"
   fi
 else
   echo "    relay-directory: RelayMap signing key present, leaving alone"
+fi
+
+# ---------------------------------------------------------------------------
+# The DEVELOPMENT relay-credential issuer, and the development relay map.
+#
+# ===========================================================================
+# WHY THIS DOES NOT CONTRADICT THE EMPTY ISSUER SET ABOVE
+# ===========================================================================
+# The stub written above is empty because an empty set is fail-closed and "a
+# relay that admitted flows because it had no issuer keys would be an open
+# relay". That is still true and is still the default for a relay that nobody
+# has deliberately given credentials to.
+#
+# What it also means is that NO LEG CAN BE ESTABLISHED in the local
+# environment at all — every BIND is refused for the same reason — so not one
+# of ADR-0005's admission, quota, pairing or failover paths can be exercised.
+# A development environment that cannot reach its own happy path reproduces
+# nothing.
+#
+# So this step is the explicit, separate act that populates it, and it OVERWRITES
+# the empty stub above on purpose. Three things keep it from becoming a
+# production credential path, and all three are structural:
+#
+#   1. The signing seed is generated per machine from OS entropy into
+#      infra/secrets/dev-issuer/, which infra/secrets/.gitignore covers and
+#      build/verify/check-compose.py asks GIT ITSELF to confirm is unreachable.
+#   2. The signer is `twinvpn_crypto::testkit`, behind the never-shipped
+#      `test-support` feature (ADR-0018 CD-5). No product artifact can link it.
+#   3. The tokens are audienced to `local-operator`, and a relay refuses a key
+#      set belonging to another operator group.
+#
+# It needs a Rust toolchain, so it is SKIPPED rather than failed when cargo is
+# absent: the TLS and relay material above is still useful without it.
+# ---------------------------------------------------------------------------
+echo "==> development relay credentials"
+# shellcheck disable=SC1091
+[ -f "${here}/../../build/toolchain/env.sh" ] && . "${here}/../../build/toolchain/env.sh" >/dev/null 2>&1
+if command -v cargo >/dev/null 2>&1; then
+  repo="$(cd "${here}/../.." && pwd)"
+  ( cd "${repo}/lab" && cargo build --quiet -p twinsim )
+  sim="${repo}/lab/target/debug/twinsim"
+
+  # Idempotent: an existing seed is reused and never rotated. Rotating would
+  # invalidate every token a running relay holds, and the symptom — binds
+  # refused for no visible reason — is the hardest one here to diagnose.
+  "${sim}" issuer init     --seed "${secrets}/dev-issuer/seed.bin"     --relay-secrets "${secrets}/relay-a"     --relay-secrets "${secrets}/relay-b"     --operator-group local-operator
+
+  # The endpoints are the COMPOSE ones. `local-plane.sh` rewrites the map with
+  # loopback endpoints for its own host-native run, because ADR-0011 DN-0
+  # requires a literal address and the two topologies do not share one.
+  "${sim}" map init     --out "${secrets}/dev-issuer/relay-map.json"     --operator-group local-operator     --relay "aaaaaaaaaaaaaaaa=[fd00:7717:1::20]:41641=local=domain-a=${secrets}/relay-a/static-noise.key"     --relay "bbbbbbbbbbbbbbbb=[fd00:7717:1::21]:41641=local=domain-b=${secrets}/relay-b/static-noise.key"
+else
+  mkdir -p "${secrets}/dev-issuer"
+  chmod 0700 "${secrets}/dev-issuer"
+  echo "!!  cargo not found - development relay credentials NOT generated."
+  echo "    Run 'make toolchains' then 'make dev-issuer'. Until then the"
+  echo "    relays will start and admit NOTHING, which is the fail-closed"
+  echo "    default and not a fault."
 fi
 
 echo

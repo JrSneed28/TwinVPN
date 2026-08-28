@@ -145,6 +145,26 @@ pub fn execute(
     Ok(outcome)
 }
 
+/// Extracts `MessageMetadata` from an untrusted C1 body.
+///
+/// The transport layer needs three things out of the envelope **before** the
+/// store is entered: the `TwinNet` scope the request is for, the RFC 9266
+/// channel binding to check against the live connection, and the correlation to
+/// put on the request span. [`crate::serve`] takes them from here rather than
+/// re-deriving a second decoder, so there is one arm table and not two.
+///
+/// The body is bounded before it is decoded, exactly as [`execute`] bounds it.
+///
+/// # Errors
+///
+/// `PROTO.UNPARSEABLE_ENVELOPE` or a cap violation.
+pub fn envelope_of(
+    code: CommandCode,
+    body: &[u8],
+) -> Result<Option<v1::MessageMetadata>, ServiceError> {
+    metadata_of(code, &retain(body)?)
+}
+
 /// Extracts `MessageMetadata` without running the handler.
 ///
 /// Every command has an arm: the metadata carries both the `idempotency_key`

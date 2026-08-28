@@ -24,6 +24,12 @@
 //! # What this crate does
 //!
 //! - [`config`] — every `TWINVPN_RELAY_*` variable, validated at startup.
+//! - [`leg`] — the `Noise_IK` responder, the stateless cookie, and the bounded
+//!   registry of established legs.
+//! - [`admit`] — leg admission and the `BIND`/`REBIND`/`CAPS`/`DRAIN` surface.
+//! - [`control`] — the control-frame bodies.
+//! - [`entropy`] — the platform CSPRNG, injected rather than reached for.
+//! - [`register`] — the ADR-0006 §11.2 record an operator enrols this instance with.
 //! - [`crypto`] — the injected primitive seam. The default provider refuses
 //!   everything, so an unconfigured relay is a closed relay.
 //! - [`provider`] — the production binding on `twinvpn-crypto` (ADR-0018 CD-I2,
@@ -69,23 +75,28 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod admit;
 pub mod claims;
 pub mod condition;
 pub mod config;
+pub mod control;
 pub mod crypto;
 pub mod drain;
 pub mod drr;
 pub mod engine;
+pub mod entropy;
 pub mod epoch;
 pub mod flow;
 pub mod forward;
 pub mod frame;
 pub mod issuer;
+pub mod leg;
 pub mod loop_udp;
 pub mod net;
 pub mod observe;
 pub mod provider;
 pub mod pump;
+pub mod register;
 pub mod replay;
 pub mod resource;
 pub mod status;
@@ -98,6 +109,7 @@ pub use config::{RelayConfig, RelayConfigError};
 pub use crypto::{FailClosed, LegKey, RelayCrypto, Statement};
 pub use engine::RelayEngine;
 pub use flow::{FlowId, PairTable, PairTag};
+pub use leg::{CookieJar, LegRegistry};
 pub use provider::CryptoProvider;
 pub use subject::RelaySub;
 

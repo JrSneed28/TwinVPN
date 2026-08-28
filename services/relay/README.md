@@ -1,8 +1,8 @@
 # `twinvpn-relay`
 
-The ciphertext-only relay data plane: `BIND`/`BOUND` keyed by `pair_tag`, opaque
-frame forwarding, offline `RelayCapabilityToken` admission, resource control, and
-herd-safe drain.
+The ciphertext-only relay data plane: authenticated `Noise_IK` legs,
+`BIND`/`BOUND` keyed by `pair_tag`, opaque frame forwarding, offline
+`RelayCapabilityToken` admission, resource control, and herd-safe drain.
 
 **Owner:** `relay-plane` ([`docs/implementation/ownership.md`](../../docs/implementation/ownership.md) §2).
 **Authority:** [ADR-0005](../../docs/adr/ADR-0005-relay-architecture.md) (the whole
@@ -23,11 +23,11 @@ relay's *entire* key inventory as a closed set of three items:
 
 | Key | Where it is here | Relationship to L-DATA |
 |---|---|---|
-| relay static X25519 | a **path** in [`config`](src/config.rs); this crate never loads it | not a party to `Noise_IKpsk2` |
+| relay static X25519 | a **path** in [`config`](src/config.rs); read once into the locked allocator by [`admit::LegSetup`](src/admit.rs) | not a party to `Noise_IKpsk2` |
 | issuer public-key set | [`issuer::IssuerKeySet`](src/issuer.rs) | verification-only, public |
 | per-leg `K_leg` | [`crypto::LegKey`](src/crypto.rs) | domain-separated; **MAC only** |
 
-Four checkable properties, in [`tests/cannot_decrypt.rs`](tests/cannot_decrypt.rs):
+Eight checkable properties, in [`tests/cannot_decrypt.rs`](tests/cannot_decrypt.rs):
 
 1. `the_key_inventory_is_exactly_three_items` — reads `src/crypto.rs` and
    `src/config.rs` and fails if a fourth key type appears anywhere.
@@ -41,7 +41,27 @@ Four checkable properties, in [`tests/cannot_decrypt.rs`](tests/cannot_decrypt.r
 4. `the_payload_survives_forwarding_byte_for_byte` — over a corpus including
    bytes that *would* decode as protobuf with an unknown field, which is W-4's trap.
 
-Properties 1–3 are **source assertions**, deliberately. A decrypt path is
+The leg handshake added four more, and they are the ones that had to be written
+the moment a `Noise_IK` responder landed here. A `Noise_IK` handshake naturally
+ends in a transport session holding two ChaCha20-Poly1305 keys — a **fourth**
+entry in §7.1's inventory, and one with an `open()` on it:
+
+5. `the_handshake_returns_a_mac_key_and_no_cipher` — the handshake is completed
+   inside `twinvpn-crypto`, and the only thing that crosses back is
+   [`CompletedLeg`](../../core/crates/twinvpn-crypto/src/relay_leg.rs), whose
+   entire surface is `k_leg`, `remote_static` and `payload`. Asserted on **both**
+   sides: no `TransportSession`, `into_transport`, `seal` or AEAD name appears in
+   this crate, and the producer never enters Noise transport mode.
+6. `the_relay_leg_is_a_different_protocol_from_l_data` — `Noise_IK_25519_ChaChaPoly_BLAKE2s`,
+   not L-DATA's `Noise_IKpsk2_…`. Different pattern, different prologue, **no psk
+   slot**, so `TwinNetPSK` cannot be an input; and this crate never imports the
+   L-DATA Noise driver at all.
+7. `the_relays_static_key_is_read_only_behind_the_leg_seam` — exactly four files
+   may name it, each for a reason a reviewer checks in one line.
+8. `the_handshake_payload_is_a_token_and_never_a_tunnel_key` —
+   [`TokenPresentation`](src/admit.rs)'s whole field set.
+
+Properties 1–3 and 5–8 are **source assertions**, deliberately. A decrypt path is
 something that must not *exist*, and only reading the source can assert absence.
 
 ---
@@ -130,7 +150,22 @@ source build/toolchain/env.sh
 cd services
 cargo build -p twinvpn-relay
 cargo test  -p twinvpn-relay
+
+# The benchmarks print a table; --release matters (§13).
+cargo test -p twinvpn-relay --release --test benchmarks -- --nocapture
 ```
+
+The test binaries, and what each is for:
+
+| Binary | What it holds |
+|---|---|
+| `--lib` | every module's unit tests: the framing, the limits, the DRR, the drain, the leg registry, the cookie |
+| [`tests/cannot_decrypt.rs`](tests/cannot_decrypt.rs) | §1's eight properties. **Read this one first** |
+| [`tests/privacy_and_persistence.rs`](tests/privacy_and_persistence.rs) | §2's minimisation claims, asserted from the source |
+| [`tests/leg_and_traffic.rs`](tests/leg_and_traffic.rs) | a real device: leg, bind, forward, reconnect, restart, malformed input, unauthorized clients, expired tokens |
+| [`tests/pressure_and_failover.rs`](tests/pressure_and_failover.rs) | abusive clients, overload, drain, cookies, loss, queue pressure, regional failover |
+| [`tests/benchmarks.rs`](tests/benchmarks.rs) | §13 |
+| [`tests/common`](tests/common/mod.rs) | the test device. **Nothing in it is a cryptographic stand-in** — real Ed25519 tokens, a real `Noise_IK` leg, real MACs, real sockets |
 
 The gate, exactly as it is run:
 
@@ -182,7 +217,9 @@ invents none. Loading goes through `twinvpn_service_common::config::Loader`, so
 | `TWINVPN_RELAY_RETAIN_PEER_PAIR` | `false` | **must stay false** | `true` is a **startup failure** (O-13) |
 | `TWINVPN_RELAY_METRICS_LABEL_ALLOWLIST` | ADR-0015 §9's five | frozen | any change is a **startup failure** |
 | `TWINVPN_RELAY_MAX_TOTAL_FLOWS` | `65536` | no | **added by this domain, not in §4.6** — see below |
-| `TWINVPN_RELAY_MAX_LEGS` | `65536` | fixed | **added by this domain**; a leg is created by an unauthenticated source, so the registry needs a ceiling (§6 rule 10) |
+| `TWINVPN_RELAY_MAX_LEGS` | `65536` | fixed | **added by this domain**; a leg is created by a source that was unauthenticated one round trip ago, so the registry needs a ceiling (§6 rule 10) |
+| *(compiled)* `MAX_LEGS_PER_PREFIX` | `1024` | fixed | **added by this domain**; the ceiling a global cap misses — see §8.1 |
+| *(compiled)* `LEG_IDLE_TIMEOUT_MS` | `900000` | fixed | **added by this domain**; the same 15 minutes §11.5 gives an idle half-flow |
 
 Plus every `twinvpn-service-common` variable (`TWINVPN_LOG_LEVEL`,
 `TWINVPN_ADMIN_ADDR`, `TWINVPN_SHUTDOWN_*`, `TWINVPN_LIMITS_PATH`, …).
@@ -343,6 +380,144 @@ the ADR, and [`token::PresentedToken`](src/token.rs) carries **only** the issuer
 key id and the COSE_Sign1 envelope — there are no decoded claims on it to be
 tempted by.
 
+---
+
+## 8.1 The leg — `Noise_IK`, and the fourth key that never crosses back
+
+ADR-0005 §11.1(2): the leg is **`Noise_IK`** (X25519 / ChaCha20-Poly1305 /
+BLAKE2s) for `R-UDP`. It lives in
+[`twinvpn_crypto::relay_leg`](../../core/crates/twinvpn-crypto/src/relay_leg.rs)
+— CD-I2 puts it there — and this crate drives it from [`leg`](src/leg.rs) and
+[`admit`](src/admit.rs).
+
+**The design decision worth reading twice.** A `Noise_IK` handshake ends in a
+transport session with two ChaCha20-Poly1305 keys. That would be a *fourth* entry
+in §7.1's three-item inventory, and one with an `open()` on it — so the handshake
+is **completed inside `twinvpn-crypto`**, and the only thing that crosses back is:
+
+```rust
+CompletedLeg { k_leg: [u8; 32], remote_static: [u8; 32], payload: Vec<u8> }
+```
+
+`K_leg = HKDF-Expand(HKDF-Extract("", h), "twinvpn relay leg v1", 32)` over the
+handshake hash — *not* either transport key, which is what lets the relay hold it
+in ordinary memory for the life of a leg. The label is the one §11.1(2) already
+fixes for `R-QUIC`/`R-TLS`'s RFC 8446 exporter, so all four carriages name one
+value rather than three. `LegResponder::respond` consumes `self`, so the `snow`
+state is dropped at the end of the call, and the private `finish` takes a
+**shared** reference to the handshake state rather than the owned value — with
+only `&HandshakeState` there is no way to complete into transport mode at all,
+which makes the absence a property of a signature rather than of remembering not
+to write a line.
+
+It is deliberately **not** L-DATA's handshake:
+
+```text
+L-DATA     Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s
+relay leg  Noise_IK_25519_ChaChaPoly_BLAKE2s
+```
+
+Different pattern, different prologue, and **no psk slot**, so `TwinNetPSK`
+cannot be an input. ADR-0005 §11.2 row ADR-0001(a) requires `RLK` to be
+non-derivable from an L-DATA key; the strongest available form of that is no
+shared key schedule at all.
+
+### The order of operations *is* the anti-amplification argument
+
+| # | Step | Cost to the relay | What it costs an attacker |
+|---|---|---|---|
+| 1 | length bounds | a comparison | — |
+| 2 | per-prefix handshake rate | a counter | — |
+| 3 | **cookie challenge** above the threshold | one 16-byte digest, ≤ 1 datagram | a round trip it can only complete from a real address |
+| 4 | the X25519 handshake | **the first asymmetric operation** — 198 µs | a completed round trip |
+| 5 | COSE_Sign1 token verification | the second — 30 µs | an Owner-signed token |
+| 6 | `cnf` against the proved `RLK` | a comparison | possession of the bound key |
+| 7 | bounded registry admission | an insert | — |
+
+Step 3 before step 4 is the whole of §11.5's "**no asymmetric operation for an
+unvalidated source address**". Steps 5 and 6 are §11.3's order, and step 6 is
+what makes a *stolen* token inert: `IK` proves which `RLK` the initiator holds,
+and `cnf` proves which one the token was issued for.
+
+The cookie is derived through `RelayCrypto::digest16` over
+`secret ‖ family ‖ address ‖ port ‖ window`, with a 120-second window and the
+previous one accepted for the edge. **The port is included**, because a NAT puts
+many devices behind one address and a cookie bound only to the address would let
+one of them mint challenges the others spend. The comparison is constant-time: a
+16-byte value compared against an attacker-supplied one with `==` is a
+prefix-matching oracle.
+
+**The cookie secret is not a fourth key**, and the distinction is not a word
+game: it authenticates nothing and decrypts nothing. Disclosing it costs exactly
+the anti-DoS property and no confidentiality, integrity or admission property
+anywhere — which is why it may live in ordinary memory and be regenerated at will.
+
+### The leg registry is bounded three ways
+
+| Ceiling | Bounds | Without it |
+|---|---|---|
+| `MAX_LEGS` = 65 536 | total memory | one attacker fills the table |
+| `MAX_LEGS_PER_PREFIX` = 1 024 | legs from one source /24 or /48 | **one attacker still fills it**, from one subnet, since a /64 is 2^64 addresses |
+| `LEG_IDLE_TIMEOUT_MS` = 900 000 | how long an abandoned leg holds a slot | a table that only grows |
+
+The second is the one a single global cap misses, and it is **an addition, stated
+as one**: §11.5 rate-limits handshakes per /24 and /48 but bounds no *occupancy*,
+so a rate limit alone only slows the fill down.
+
+---
+
+## 8.2 The control frames
+
+ADR-0005 §9.1 assigns `0x10..0x1F` to control and names eight of the sixteen.
+This build routes all eight and allocates three more inside that reserved space:
+
+| Type | Frame | Direction | Body |
+|---|---|---|---|
+| `0x01` | `DATA` | device ↔ device | opaque L-DATA, ≤ 1456 B |
+| `0x10` | `BIND` | device → relay | `pair_tag ‖ bucket ‖ carriage ‖ family` |
+| `0x11` | `BOUND` | relay → device | `state ‖ pending_ttl_ms` |
+| `0x12`/`0x13` | `PING`/`PONG` | device → relay | empty; answered **without** a bound flow |
+| `0x14` | `DRAIN` | relay → device | `deadline_ms ‖ ≤ 3 relay ids` |
+| `0x15` | `RELAY_STATUS` | relay → device | `reason_code ‖ retry_after_ms ‖ alternates` |
+| `0x16` | `CAPS` | device ↔ relay | version window ‖ capability bitmap ‖ payload ceiling |
+| `0x17` | `REBIND` | device → relay | as `BIND` (§11 item 7) |
+| **`0x18`** | `HANDSHAKE_INIT` | device → relay | `[cookie] ‖ Noise_IK msg 1` |
+| **`0x19`** | `HANDSHAKE_RESP` | relay → device | `Noise_IK msg 2`, carrying `CAPS` |
+| **`0x1A`** | `COOKIE_CHALLENGE` | relay → device | 16-octet cookie |
+
+**The three allocations are a proposal, recorded as one.** The leg handshake has
+to arrive in *some* datagram on the same socket, and the alternatives were worse:
+multiplexing it onto `CAPS` would make one type mean two things at different
+points in a leg's life, and a separate UDP port would be a fifth carriage nothing
+in ADR-0006's map can describe. The bodies are likewise proposed — §9.1 specifies
+none, and ADR-0003 R7 keeps B4 free of a serialization framework by design, so
+there is nothing to generate from. Each is versioned by the frame's `ver` nibble
+(the token presentation by its own first octet), so changing one is an ADR-0014
+event. See [`control`](src/control.rs) and [`admit`](src/admit.rs).
+
+**Direction is checked on receive, not only on send.** W-32 ruled that a device
+accepting a `BIND` *from* a relay is a confused deputy; the mirror holds here, and
+`FrameType::device_may_send` refuses `BOUND`, `PONG`, `DRAIN`, `RELAY_STATUS`,
+`HANDSHAKE_RESP` and `COOKIE_CHALLENGE` **before** the leg lookup — so a spoofed
+`RELAY_STATUS` reaches no state at all, even when correctly MACed.
+
+**`BIND` is authenticated by the leg, not by a second token check.** The token is
+verified once, in the handshake, and the `VerifiedToken` is held on the leg. A
+`BIND` on an established leg is already authenticated: its MAC verifies under
+`K_leg`, and `K_leg` exists only because that token verified and the device proved
+possession of the `RLK` it was issued for. Re-verifying per bind would put 30 µs
+of Ed25519 on a path a listening device uses at ADR-0006 §11.5's cadence — up to
+30 binds/min/subject by the frozen limit.
+
+**Both peers receive `BOUND{flow_id}`** (§11.1(4)). The half-flow that was already
+waiting is told through `Pump::pending_announcements`, drained by the caller — it
+is not a second reply to the received datagram but an announcement onto an
+already-bound, authenticated flow, the same class §11.5 permits for `DRAIN` and
+`RELAY_STATUS`. Making it a field rather than a hidden send is what keeps
+`Action`'s "at most one datagram" true.
+
+---
+
 ## 9. Reason codes
 
 Every refusal is a registered `reason_code` through
@@ -379,6 +554,10 @@ The runtime image has no shell, so `docker compose exec relay-a sh` will not wor
 | startup fails naming a frozen limit | a `limits.json`-derived value was overridden |
 | `/readyz` red, `carriages_bound` failing | `R-QUIC`/`R-TLS` are configured but not served in this build (§6) |
 | no flow is ever admitted | `issuer-keys.json` is the empty bootstrap stub, or no crypto provider is installed (§8). Both are fail-closed by design |
+| startup logs `outcome="no_legs"` | the static Noise key is unreadable or not 32 bytes / 64 hex chars, or `/dev/urandom` could not be opened. **No device can establish a leg**; see §8.1 |
+| every handshake gets a `COOKIE_CHALLENGE` and no leg forms | the device is not answering it. Above 20 handshakes/s per source /24 or /48 the challenge is mandatory (§11.5), and the relay does no public-key work until it is answered |
+| devices are refused with `RELAY.TOKEN_INVALID` on a token that looks fine | the map entry's `static_noise_public_key` does not match the key this process loaded, so `cnf` is being compared against a different `RLK`. Compare it against the `outcome="registration_record"` line this relay logs at startup (§8.1, `register`) |
+| legs form but no `BIND` ever binds | the two peers' `pair_tag` buckets are more than one apart — the relay answers `RELAY_STATUS`, it does not ignore them |
 | `RELAY.TOKEN_EPOCH_STALE` | the device's token predates the relay's `epoch_floor`. Defence in depth only — revocation is enforced at the peer |
 | a flow vanished after a restart | **that is the design.** S-29 is non-durable by requirement; the client migrates |
 | you want to trace one session across the relay | you cannot, and that is deliberate (ADR-0015 §13) |
@@ -389,60 +568,139 @@ The runtime image has no shell, so `docker compose exec relay-a sh` will not wor
 
 Stated here rather than discovered later.
 
-1. **No leg can be established.** `K_leg` comes from the Noise_IK handshake
-   (`R-UDP`) or an RFC 8446 exporter (`R-QUIC`/`R-TLS`) — ADR-0005 §11.1(2) —
-   and neither is implemented. [`pump::LegRegistry`](src/pump.rs) is therefore
-   empty in production and every received datagram is dropped with **zero bytes**
-   in reply. That is the fail-closed direction, it is asserted over a real socket
-   (§12), and a `WARN` at startup says so. **This is now the only thing between
-   the relay and a working data plane**: with legs supplied by a test, a real
-   frame traverses a real relay between two real sockets today.
-2. **`R-QUIC` and `R-TLS` are not served.** §6. `R-UDP` is, on all four address
-   configurations, with the receive loop running.
-3. **No container has been built or run.** Docker is absent from this host, as
+1. **`R-QUIC` and `R-TLS` are not served.** §6. `R-UDP` is, on all four address
+   configurations, with the receive loop running and legs establishing on it.
+2. **No container has been built or run.** Docker is absent from this host, as
    `infra/README.md` §9 records. Everything in §10 involving `docker compose` is
    unexercised.
-4. **The `RELAY_STATUS` body encoding is proposed, not frozen.** ADR-0005 §9.1
-   assigns the type byte but specifies no body, and B4 has no schema artifact by
-   design (ADR-0003 R7). [`status`](src/status.rs) contributes the smallest
-   encoding satisfying §11.5 and §11.7, versioned by the frame's `ver` nibble so
-   changing it is an ADR-0014 event. Recorded for ADR-0005's owner.
-5. **`BIND`, `BOUND`, `DRAIN`, `CAPS` and `REBIND` are not routed by the pump.**
-   They are the leg-setup and control surface and belong with the leg state
-   machine in (1); routing them on the forwarding path would put admission on the
-   packet path. `RelayEngine::bind` and `DrainPlan` implement the transitions and
-   are tested; what is missing is the frame parsing that feeds them.
-6. **`limits.json` has no B4 cap family.** [`frame::MAX_DATA_PAYLOAD_BYTES`](src/frame.rs)
+3. **Five control-frame bodies are proposed, not frozen** (§8.2), as is the
+   `HANDSHAKE_INIT`/`HANDSHAKE_RESP`/`COOKIE_CHALLENGE` type allocation and the
+   token-presentation envelope. ADR-0005 §9.1 assigns type bytes and specifies no
+   body, and B4 has no schema artifact by design (ADR-0003 R7), so there was
+   nothing to generate from. Each is versioned so that changing it is an ADR-0014
+   event. **Recorded for ADR-0005's owner.**
+4. **`limits.json` has no B4 cap family.** [`frame::MAX_DATA_PAYLOAD_BYTES`](src/frame.rs)
    is derived from ADR-0005 §9.2 and enforced first; the `Channel` handed to
    `Verbatim::from_opaque` is only an outer backstop. One visible consequence: a
    relay payload's `Verbatim` renders as `on c1_c2_c7`, which is an artefact of
    `Channel` having no B4 variant to name. Commented at the call site.
-7. **The COSE_Sign1 token path has no golden vector here.** It is exercised
-   against malformed input and against the real `twinvpn-crypto`, but producing a
-   *valid* token needs an Ed25519 keypair this build cannot sign with — the same
-   custody gap as the map issuer. The admission *policy* is fully tested against
-   a double.
+5. **The tests assert self-consistency, not interoperability.** The test device
+   in [`tests/common`](tests/common/mod.rs) re-derives the wire format from this
+   crate's own public constants, because `twinvpn-relay-client` is in the *other*
+   workspace and importing it would be a fourth edge into `/core` (ADR-0018
+   §11.2). The two ends therefore agree by construction here and have **not** been
+   run against each other. A cross-workspace interop test belongs in `tests/` or
+   `lab/`, and is the single highest-value thing still outstanding.
+6. **`twinvpn-relay-client` has no leg handshake yet.** This crate implements the
+   responder; the device side of `Noise_IK` is `core-dataplane`'s and does not
+   exist. Both ends can now be built from **one** implementation —
+   `twinvpn_crypto::relay_leg` vends `LegInitiator` as well as `LegResponder`,
+   deliberately, so the two cannot derive `K_leg` differently and fail as *every
+   frame dropped* with both sides looking correct.
+7. **`REBIND` is routed as a `BIND`.** ADR-0005 §9.1 assigns it a type byte and
+   specifies no distinct semantics, and ADR-0006 §11.9 describes migration in
+   terms a device drives. Treating it as a bind on a possibly-new `pair_tag` is
+   the smallest behaviour consistent with both; a genuinely distinct
+   move-this-flow semantic needs the ADR to say what it is.
+8. **A relay does not enrol itself in the directory**, and that is a decision
+   rather than a gap — see [`register`](src/register.rs). The relay map is
+   Owner-signed and is the root of relay trust for every device; a relay that
+   could write into it could add a relay of its choosing. What this build does is
+   make an operator's enrolment *exact*, by deriving the record — including the
+   **public** half of the static key the process actually loaded — and emitting it
+   at startup. `relay-directory`'s fleet is still populated by nothing, which is
+   that service's own gap.
+9. **`relay-health` still has no prober loop.** It builds an aggregate and serves
+   it; nothing fills it. Out of scope here, recorded because "relay health" is
+   only half-true without it.
 
 ## 12. What is actually exercised, and what is not
 
 | Property | How | Real? |
 |---|---|---|
-| the relay cannot decrypt | 4 source + behavioural assertions | **yes** |
-| bytes out equal bytes in, incl. protobuf-with-unknown-field | corpus test | **yes** |
+| **a real device establishes a leg, binds a pair and relays traffic** | `Noise_IK` + a real Ed25519-signed token + real sockets | **yes** |
+| the relay cannot decrypt | 8 source + behavioural assertions | **yes** |
+| the handshake yields `K_leg` and no cipher | source, both sides of the seam | **yes** |
+| the relay leg is a different protocol from L-DATA | parameter string, prologue, no psk | **yes** |
+| bytes out equal bytes in, incl. protobuf-with-unknown-field | corpus test, over a socket | **yes** |
 | protobuf framing refuses ciphertext, opaque framing carries it | both halves in one test | **yes** |
-| the payload bound clears the 1280 overlay floor | derivation + parse test | **yes** |
+| the payload bound clears the 1280 overlay floor | derivation + a 1456-byte frame end to end | **yes** |
 | the frame MAC is a truncation, not a short-output BLAKE2s | `twinvpn-crypto`'s imported vector, both readings | **yes** |
 | this crate's `mac_input` matches the imported `FRAME_MAC_INPUT` | byte-for-byte, built by this crate | **yes** |
-| the MAC covers type, flags, full counter, `flow_id`, payload | six negative assertions | **yes** |
-| a forged or cross-key tag is refused | real constant-time verify | **yes** |
-| **a real frame traverses a real relay between two real sockets** | UDP loopback, real MAC both legs | **yes** |
-| the forwarded tag verifies under the **egress** key and not the ingress one | same test | **yes** |
-| **zero bytes** for unsolicited or forged input | real UDP socket, v4 and v6 | **yes** |
-| the loop survives a flood and stops cleanly | 200 datagrams on loopback | **yes** |
+| **COSE_Sign1 token verification with a VALID token** | a real Ed25519 fixture issuer | **yes** — §11.7's old gap is closed |
+| `cnf` proof-of-possession | a stolen token presented by a device holding a different `RLK` | **yes** |
+| a replayed `jti` is refused | second leg, same token | **yes** |
+| an expired, not-yet-valid, wrong-audience or stale-epoch token | four separate tests | **yes** |
+| **an attacker with its own valid leg cannot touch another flow** | R-5, over sockets | **yes** |
+| a relay-only frame arriving *from* a device reaches nothing | W-32, correctly MACed | **yes** |
+| **zero bytes** for unsolicited, forged or malformed input | a 20-entry corpus on a real socket | **yes** |
+| the stateless cookie gates asymmetric work | flood + forged cookie + answered challenge | **yes** |
+| one source prefix cannot fill the leg table | three real legs from one loopback /24 | **yes** |
+| a subject cannot exceed its own flow ceiling | four binds, fourth refused **and told** | **yes** |
+| throttling emits `RELAY_STATUS`, never silence | registered code checked on the wire | **yes** |
+| a drain refuses new binds and keeps carrying | both halves in one test | **yes** |
+| a `DRAIN` is authenticated and names no endpoint | device verifies it; a bit-flip does not | **yes** |
+| a restart kills every flow | two instances, before and after | **yes** |
+| **one token admits at every relay in the operator group** | two instances, two regions, two failure domains | **yes** |
+| a pair re-rendezvouses at a second relay | new tag, new instance | **yes** |
+| a third bind on a bound tag is refused | `PAIR_COLLISION` degraded onto its registered code | **yes** |
+| a pending slot that never pairs is reclaimed | driven through the collector | **yes** |
+| loss does not wedge a flow; the relay never retransmits | 20 burned counters | **yes** |
+| a replayed `DATA` frame is dropped and the flow survives | identical datagram twice | **yes** |
+| a burst is carried in order without the queue growing | 32 frames | **yes** |
 | the daily `relay_sub` re-hash rotates | real HKDF-SHA-256 | **yes** |
 | a drain does not stampede | 10 000 draws, bucketed | **yes** |
 | two-tier DRR fairness | measured, and on the forwarding path | **yes** |
-| `RELAY_STATUS` on throttle | pump test, end to end through the engine | **yes** |
-| COSE_Sign1 token verification | real `twinvpn-crypto` | **partly** — malformed input yes, a valid token no (§11.7) |
-| a device establishing a leg | — | **no**: no handshake (§11.1) |
+| **performance, measured** | [`tests/benchmarks.rs`](tests/benchmarks.rs) | **yes** — see §13 |
+| a device speaking `twinvpn-relay-client` | — | **no**: §11 item 5 |
 | anything in a container | — | **no**: no Docker |
+| `R-QUIC` / `R-TLS` legs | — | **no**: §6 |
+
+---
+
+## 13. Performance
+
+[`tests/benchmarks.rs`](tests/benchmarks.rs) measures the paths ADR-0005 §9.4 and
+§11.5 make claims about, prints a table, and asserts only generous ceilings.
+
+```bash
+cd services && cargo test -p twinvpn-relay --release --test benchmarks -- --nocapture
+```
+
+`--release` matters: the debug numbers are roughly an order of magnitude worse
+and are not a baseline for anything.
+
+**Observed on the development host** (x86-64, `--release`, single core). These are
+a baseline for comparison, not a specification:
+
+| Operation | Per op | Rate |
+|---|---|---|
+| parse a 1456-byte `DATA` frame | ~10 ns | ~100 M/s |
+| assemble the §9.1 MAC input | ~45 ns | ~22 M/s |
+| verify the truncated BLAKE2s frame MAC | 1.7 µs | 577 k/s |
+| **`Pump::step` over a bound flow (1200 B)** | **3.3 µs** | **307 k/s ≈ 2.9 Gbit/s** |
+| `Noise_IK` responder handshake + `K_leg` | 198 µs | 5 k/s |
+| COSE_Sign1 / Ed25519 token verification | 30 µs | 33 k/s |
+| device → relay → peer over loopback UDP | 205–235 µs | ~4.5 k/s |
+
+Three things worth reading off that table rather than leaving implicit:
+
+1. **The per-packet path clears ADR-0005 §9.4's "sub-100 µs" budget by a factor
+   of thirty**, and the whole of it is one MAC verify (1.7 µs) plus one MAC
+   compute — the lookup, the replay window, the quota charge and both DRR
+   operations together are under a microsecond. §10's claim that "a relay's
+   binding constraint is bandwidth and packet rate, not memory or CPU" holds:
+   2.9 Gbit/s on one core is well past any link a single instance will terminate.
+2. **The handshake costs 60× a forwarded frame**, which is exactly why §11.5 puts
+   a cookie gate in front of it. At the frozen threshold of 20 handshakes/s per
+   source /24, an unvalidated prefix commands ≈ 4 ms of CPU per second — 0.4 % of
+   one core. Without the gate, the same source commands 100 % of it.
+3. **Token verification is once per *leg*, not per bind.** `crate::admit` holds
+   the `VerifiedToken` on the leg for this reason: a listening device re-`BIND`s
+   at ADR-0006 §11.5's cadence, up to 30 binds/min/subject, and 30 µs of Ed25519
+   on each would be an asymmetric operation on a path a device uses routinely.
+
+The assertions in that file are set two to three orders of magnitude above these
+numbers on purpose. What they catch is a **structural** regression — a lock
+convoy, a per-frame allocation, a lookup, or a control-plane call appearing on
+the packet path (which I5 forbids and which would show up here as milliseconds).

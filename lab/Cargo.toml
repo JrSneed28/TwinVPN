@@ -9,7 +9,7 @@
 # THIS MANIFEST IS OWNED BY THE INTEGRATION LEAD.
 [workspace]
 resolver = "2"
-members = ["twinlab", "twinlab-scenarios"]
+members = ["twinlab", "twinlab-scenarios", "twinnet", "twinsim"]
 
 [workspace.package]
 version      = "0.1.0"
@@ -20,6 +20,8 @@ repository   = "https://github.com/twinvpn/twinvpn"
 
 [workspace.dependencies]
 twinlab           = { path = "twinlab" }
+twinnet           = { path = "twinnet" }
+twinsim           = { path = "twinsim" }
 twinvpn-types     = { path = "../core/crates/twinvpn-types" }
 twinvpn-env       = { path = "../core/crates/twinvpn-env", features = ["test-support"] }
 twinvpn-schema    = { path = "../core/crates/twinvpn-schema" }
@@ -31,6 +33,10 @@ twinvpn-core      = { path = "../core/crates/twinvpn-core" }
 twinvpn-crypto    = { path = "../core/crates/twinvpn-crypto" }
 twinvpn-platform  = { path = "../core/crates/twinvpn-platform", features = ["mock"] }
 twinvpn-session   = { path = "../core/crates/twinvpn-session" }
+# The control-plane client, for `twinsim`'s L-CONTROL binding. Named here rather
+# than by path in the member so that `lab/` has ONE place that says where a core
+# crate lives -- which is the property the workspace-dependency table exists for.
+twinvpn-cp-client = { path = "../core/crates/twinvpn-cp-client" }
 
 thiserror  = "2.0"
 anyhow     = "1.0"

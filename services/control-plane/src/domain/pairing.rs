@@ -207,7 +207,7 @@ pub fn complete(
         .ok_or_else(|| codes::bare(codes::SIGNATURE_INVALID))?;
     let octets = verify::opaque_statement(bytes::Bytes::from(attestation.cose_sign1.clone()))
         .map_err(|r| ServiceError::from_reject(&r, crate::COMPONENT))?;
-    let signer = super::caller_key(tx, ctx)?.to_vec();
+    let signer = super::caller_key(tx, ctx)?;
     let verified = verify::admit(
         ctx.verifier,
         &octets,
@@ -215,6 +215,34 @@ pub fn complete(
         ctx.now_ms,
         verify::SignerKey::Device(&signer),
     )?;
+
+    // ==================================================================
+    // THE ATTESTATION MUST BE AN ATTESTATION FOR *THIS* CEREMONY.
+    // ==================================================================
+    // `PairingRequest` names no responder — ADR-0007 locates the joining device
+    // out of band — so this service cannot know in advance which second device
+    // is entitled to complete a pairing, and a check of the form
+    // `caller == responder` has nothing to compare against.
+    //
+    // What it can check is the binding the attestation itself carries. Without
+    // it, any registered device could complete any pending ceremony by signing
+    // an attestation of its own for some *other* pairing: the signature would
+    // verify (it is the caller's own key), the `pairing_id` in the request would
+    // select the victim's row, and the two would never be compared. That is
+    // trust injection by a member, and `pairing.proto` is explicit that the
+    // coordination service "TRANSPORTS attestations it CANNOT FORGE" precisely
+    // so that it cannot inject a `TrustedPeer`. Forging is not the only way to
+    // inject one; mis-routing a genuine attestation is the other, and this is
+    // where it is refused.
+    //
+    // A verifier that reports no `pairing_id` for a `PairingAttestation` fails
+    // this check rather than passing it: the check is fail-closed, so a binding
+    // that cannot be read is a binding that is not established.
+    if verified.pairing_id != Some(pairing_id) {
+        return Err(codes::bare(
+            twinvpn_types::codes::AUTH_PAIRING_NOT_AUTHORIZED,
+        ));
+    }
 
     let result_detail = v1::PairingResult {
         pairing_id: pairing_id.to_vec(),
@@ -272,6 +300,24 @@ pub fn cancel(
         .get(&pairing_id)
         .cloned()
         .ok_or_else(|| codes::bare(twinvpn_types::codes::AUTH_PAIRING_NOT_AUTHORIZED))?;
+
+    // Only the device that opened the ceremony may close it. Cancelling is not
+    // a harmless operation: it burns the `pairing_id` permanently (a cancelled
+    // id is terminal and a later `CompletePairing` on it is refused), so a
+    // member that could cancel another member's ceremony could deny pairing to
+    // the whole `TwinNet` one id at a time and leave a `PairingRejected` in the
+    // durable log attributing it to nobody.
+    //
+    // The initiator is the only participant this service knows: `PairingRequest`
+    // names no responder. A device that never sees its own row is refused with
+    // the same code as one asking about a ceremony that does not exist, which
+    // is deliberate — the existence of another device's pairing is not this
+    // caller's to learn.
+    if row.initiator != ctx.caller {
+        return Err(codes::bare(
+            twinvpn_types::codes::AUTH_PAIRING_NOT_AUTHORIZED,
+        ));
+    }
     if row.state.is_terminal() {
         return Err(terminal_error(row.state));
     }

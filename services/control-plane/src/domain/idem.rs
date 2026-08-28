@@ -166,6 +166,7 @@ mod tests {
     fn ctx(now_ms: u64) -> Ctx<'static> {
         Ctx {
             caller: [3u8; 32],
+            caller_identity_key: None,
             twinnet_id: "tn",
             now_ms,
             verifier: &V,
@@ -238,6 +239,7 @@ mod tests {
 
         let other = Ctx {
             caller: [4u8; 32],
+            caller_identity_key: None,
             ..ctx(0)
         };
         assert!(matches!(

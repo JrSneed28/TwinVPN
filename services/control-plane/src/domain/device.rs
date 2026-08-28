@@ -78,6 +78,39 @@ pub fn register(
     if identity.generation == 0 && device_id != identity_id {
         return Err(codes::bare(twinvpn_types::codes::AUTH_IDENTITY_MISMATCH));
     }
+
+    // ==================================================================
+    // A DEVICE ENROLS ITSELF, OR NOT AT ALL.
+    // ==================================================================
+    // `device_id` arrives in the body, and a body field is a CLAIM. The
+    // authenticated caller is the key the peer proved possession of in the
+    // handshake, and these two must be the same device.
+    //
+    // The enrolment proof alone does not close this. It proves an OSK with the
+    // ENROLL power approved *a* join; it does not say which device is joining,
+    // because it is issued before the joining device ever contacts this service.
+    // Without this check, any party holding a valid enrolment proof could enrol
+    // a record under a `device_id` derived from someone else's key — taking that
+    // device's name, its S-08 addresses and its place in the peer set before the
+    // real device ever connected. The address allocation is immutable, so that
+    // theft would be permanent.
+    if device_id != ctx.caller {
+        return Err(codes::bare(twinvpn_types::codes::AUTH_IDENTITY_MISMATCH));
+    }
+
+    // And the enrolled key must be the key on the wire. `identity_public_key` is
+    // what every later device-signed statement is verified against, so a record
+    // enrolled with somebody else's key would make this service verify that
+    // third party's signatures as though they were the caller's.
+    //
+    // Checked only when there is a connection to check against; a caller with no
+    // channel key behind it — a test, or a future admin path — is bound by the
+    // `device_id` check above, which is the pre-connection behaviour unchanged.
+    if let Some(channel) = ctx.caller_identity_key {
+        if channel != identity.identity_public_key.as_slice() {
+            return Err(codes::bare(twinvpn_types::codes::AUTH_IDENTITY_MISMATCH));
+        }
+    }
     if identity.identity_public_key.is_empty() {
         return Err(codes::bare(twinvpn_types::codes::AUTH_IDENTITY_MISSING));
     }
@@ -384,6 +417,40 @@ fn revoke_response(
     }
 }
 
+/// Checks a verified `IdentitySuccession` against the record it claims to move.
+///
+/// Three checks, all against **this service's own record** and none against the
+/// request: a succession that named another device, replaced an identity this
+/// device does not currently hold, or skipped a generation is refused rather
+/// than applied. ADR-0007 N-21 fixes "exactly old generation + 1" so a rotation
+/// cannot land a device on a key nobody witnessed being installed, and
+/// `identifiers.md` §2 fixes that `device_id` survives a rotation — moving one
+/// would move an immutable S-08 address allocation with it.
+///
+/// # Errors
+///
+/// `AUTH.BINDING_INVALID` when the statement carries no readable succession —
+/// fail-closed, because a successor that cannot be read is a rotation that
+/// cannot be applied; `AUTH.IDENTITY_MISMATCH` when it speaks about another
+/// device or another identity; `AUTH.TRUST_EPOCH_ROLLBACK` when the generation
+/// does not advance by exactly one.
+fn admit_succession(
+    current: &DeviceRecord,
+    succession: Option<&verify::Succession>,
+    next_generation: u32,
+) -> Result<verify::Succession, ServiceError> {
+    let succession = *succession.ok_or_else(|| codes::bare(codes::SIGNATURE_INVALID))?;
+    if succession.device_id != current.device_id
+        || succession.old_identity_id != current.identity_id
+    {
+        return Err(codes::bare(twinvpn_types::codes::AUTH_IDENTITY_MISMATCH));
+    }
+    if succession.generation != u64::from(next_generation) {
+        return Err(codes::bare(twinvpn_types::codes::AUTH_TRUST_EPOCH_ROLLBACK));
+    }
+    Ok(succession)
+}
+
 /// `RotateDeviceCredential` — `CEREMONY`, `MONOTONIC` per counter.
 ///
 /// Two distinct statements with different semantics (ADR-0007 N-21):
@@ -433,7 +500,7 @@ pub fn rotate_credential(
     // ADR-0007 N-21's dual signature. The NEW key's half is verified by the
     // peer that pins it; this service cannot, because it does not hold the
     // successor until this very command commits. Recorded in README.md §7.
-    let signer = super::caller_key(tx, ctx)?.to_vec();
+    let signer = super::caller_key(tx, ctx)?;
     let verified = verify::admit(
         ctx.verifier,
         &octets,
@@ -448,10 +515,20 @@ pub fn rotate_credential(
         .clone()
         .ok_or_else(|| codes::bare(twinvpn_types::codes::AUTH_IDENTITY_MISSING))?;
 
+    // The successor identity, for an `IdentitySuccession` only. Re-indexing the
+    // record onto it is what lets the rotated device's NEXT TLS connection still
+    // resolve to its own `device_id`: `device_id` is the hash of the
+    // generation-0 key, which the device no longer presents, so without this the
+    // rotation would lock the device out of the very service that authorised it.
+    let mut successor_identity_id = None;
+
     let (generation, tk_generation) = if kind == StatementKind::IdentitySuccession {
         {
             let next = current.generation + 1;
+            let succession = admit_succession(&current, verified.succession.as_ref(), next)?;
+            successor_identity_id = Some(succession.new_identity_id);
             identity.generation = next;
+            identity.identity_id = succession.new_identity_id.to_vec();
             // N-2/N-21: the successor keeps `device_id`. Changing it would break
             // S-08's immutable allocation on every rotation.
             identity.device_id = current.device_id.to_vec();
@@ -486,6 +563,14 @@ pub fn rotate_credential(
     tx.put_device(DeviceRecord {
         generation,
         tk_generation,
+        // The identity index moves with the succession; `device_id` does not.
+        // `identity_public_key` deliberately does NOT move: the succession
+        // statement names the successor's `identity_id` and carries no public
+        // key, and this service will not record a key it has not seen. The
+        // successor key never needs to be recorded: it arrives on the
+        // connection, and `domain::caller_key` accepts it precisely because it
+        // derives to the `identity_id` this succession just installed.
+        identity_id: successor_identity_id.unwrap_or(current.identity_id),
         version: device.version,
         encoded: {
             use prost::Message;

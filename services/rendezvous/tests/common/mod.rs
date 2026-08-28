@@ -76,7 +76,7 @@ pub async fn start_with(
             labels: rz::label::Labeller::default(),
         }),
         limiter: tokio::sync::Mutex::new(rz::admission::SourceLimiter::new(cfg.admission)),
-        bindings: tokio::sync::Mutex::new(Box::new(svc::binding::ChannelPinned::new(cfg.binding))),
+        bindings: tokio::sync::Mutex::new(svc::binding::DerivedPreferred::new(cfg.binding)),
         tls,
         connections: Arc::new(tokio::sync::Semaphore::new(cfg.max_connections)),
         config: cfg,
@@ -124,6 +124,22 @@ pub struct Client {
     stream: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
 }
 
+/// The `device_id` a `TestKey` **proves** — the derivation
+/// `contracts/docs/identifiers.md` §2 fixes, run over the key the peer actually
+/// presents on TLS.
+///
+/// Computed through the shared crate's own conversion rather than re-derived
+/// here: a second copy of a specified encoding that disagrees by one byte names
+/// a different device, which is RZ-8's whole finding.
+pub fn proven_device_id(key: &TestKey) -> [u8; 32] {
+    use twinvpn_types::Identifier as _;
+    let channel = svc::tls::ChannelIdentity::new(&key.spki);
+    let derived = svc::binding::derive_device_id_for(&channel).expect("a real P-256 key derives");
+    let mut out = [0u8; 32];
+    out.copy_from_slice(derived.as_bytes());
+    out
+}
+
 impl Harness {
     /// Connects with a fresh device identity.
     pub async fn client(&self) -> Client {
@@ -134,6 +150,23 @@ impl Harness {
     /// deliberately vary the authenticated key.
     pub async fn client_as(&self, key: &TestKey) -> Client {
         Client::connect_as(self.addr, key, &self.server_spki).await
+    }
+
+    /// Connects from a specific **local** address, so a test can present two
+    /// distinct source addresses to the per-source limiter. `127.0.0.0/8` is
+    /// entirely local on Linux, so `127.0.0.2` is a second real source.
+    pub async fn client_from(&self, local: IpAddr, key: &TestKey) -> Client {
+        let socket = tokio::net::TcpSocket::new_v4().expect("a v4 socket");
+        socket
+            .bind(SocketAddr::new(local, 0))
+            .expect("binding a loopback source address");
+        let tcp = socket.connect(self.addr).await.expect("connect");
+        let connector = tokio_rustls::TlsConnector::from(key.client_config(&self.server_spki));
+        let stream = connector
+            .connect(server_name(), tcp)
+            .await
+            .expect("the mutual raw-public-key handshake completes");
+        Client { stream }
     }
 
     /// Attempts a handshake presenting **no** client key.

@@ -13,17 +13,18 @@
 //! (`architecture.md` §5.2 R-DET-1), which is also what lets the loopback tests
 //! drive timing deterministically.
 
-#[cfg(test)]
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use tokio::net::UdpSocket;
 
+use crate::admit::LegSetup;
 use crate::crypto::RelayCrypto;
 use crate::drr::TwoTierDrr;
 use crate::engine::RelayEngine;
-use crate::pump::{Action, LegRegistry, Pump};
+use crate::leg::LegRegistry;
+use crate::pump::{Action, Pump};
 
 /// The largest datagram the loop reads: header plus the derived payload ceiling.
 ///
@@ -42,11 +43,17 @@ pub const RECV_BUFFER_BYTES: usize =
 pub struct RelayRuntime {
     /// The tables, limits and drain.
     pub engine: RelayEngine,
-    /// The established legs. **Empty until a handshake exists** — see
-    /// [`crate::pump`], which explains why and what that means operationally.
+    /// The established legs, populated by the `Noise_IK` responder in
+    /// [`crate::admit`].
     pub legs: LegRegistry,
     /// The two-tier scheduler, on the forwarding path.
     pub scheduler: TwoTierDrr,
+    /// The relay's static key, entropy and cookie secret.
+    ///
+    /// `None` is the fail-closed state of a relay with no static key: it serves,
+    /// it reports, and it establishes no leg. Stated as an `Option` rather than
+    /// discovered as a runtime error, so `main` can say so once at startup.
+    pub setup: Option<Arc<LegSetup>>,
 }
 
 impl std::fmt::Debug for RelayRuntime {
@@ -82,26 +89,49 @@ pub async fn serve_udp<F, S>(
             continue;
         };
 
-        let action = {
+        let now_ms = clock();
+        let (action, announcements) = {
             let Ok(mut rt) = runtime.lock() else {
                 return;
             };
+            let setup = rt.setup.clone();
             let RelayRuntime {
                 engine,
                 legs,
                 scheduler,
+                ..
             } = &mut *rt;
             let mut pump = Pump {
                 engine,
                 legs,
                 scheduler,
                 crypto: crypto.as_ref(),
+                setup: setup.as_deref(),
+                last_source: from,
+                pending_announcements: Vec::new(),
             };
-            pump.step(from, Bytes::copy_from_slice(&buf[..len]), clock())
+            let action = pump.step(from, Bytes::copy_from_slice(&buf[..len]), now_ms);
+            // The `BOUND` owed to the half-flow that was already waiting
+            // (§11.1(4)). Resolved while the lock is held and sent outside it, so
+            // the lock is still never held across an `.await`.
+            let pending_ttl = pump.engine.config().pending_slot_ttl_ms;
+            let announcements: Vec<(SocketAddr, Bytes)> = pump
+                .pending_announcements
+                .clone()
+                .into_iter()
+                .filter_map(|(waiting, _)| pump.announcement_datagram(waiting, pending_ttl))
+                .collect();
+            (action, announcements)
         };
 
         // At most one datagram, to exactly one peer. `Action` cannot express more.
         if let Action::Send { to, datagram } = action {
+            let _ = socket.send_to(&datagram, to).await;
+        }
+        // Announcements onto already-bound, authenticated flows — the class
+        // ADR-0005 §11.5 permits the relay to originate, alongside `DRAIN` and
+        // `RELAY_STATUS`. Never a reply to an unauthenticated datagram.
+        for (to, datagram) in announcements {
             let _ = socket.send_to(&datagram, to).await;
         }
     }
@@ -146,8 +176,9 @@ mod tests {
     fn runtime() -> Arc<Mutex<RelayRuntime>> {
         Arc::new(Mutex::new(RelayRuntime {
             engine: RelayEngine::new(relay_config(), empty_issuers(), 0),
-            legs: LegRegistry::new(1_024),
+            legs: LegRegistry::new(1_024, 1_024, 900_000),
             scheduler: TwoTierDrr::with_default_quantum(),
+            setup: None,
         }))
     }
 
@@ -352,9 +383,19 @@ mod tests {
         let _ = RelaySub::from_verified_claim([0; 16]);
 
         // The legs a handshake would have established.
-        let mut legs = LegRegistry::new(16);
-        assert!(legs.establish(alice_addr, LegKey::new(LEG_A)));
-        assert!(legs.establish(bob_addr, LegKey::new(LEG_B)));
+        let mut legs = LegRegistry::new(16, 16, 900_000);
+        assert!(legs.establish(
+            alice_addr,
+            LegKey::new(LEG_A),
+            crate::token::testkit::verified([1; 16]),
+            0
+        ));
+        assert!(legs.establish(
+            bob_addr,
+            LegKey::new(LEG_B),
+            crate::token::testkit::verified([1; 16]),
+            0
+        ));
 
         let socket = Arc::new(UdpSocket::bind("[::1]:0").await.expect("relay"));
         let relay_addr = socket.local_addr().expect("addr");
@@ -362,6 +403,7 @@ mod tests {
             engine,
             legs,
             scheduler: TwoTierDrr::with_default_quantum(),
+            setup: None,
         }));
         let (stop, rx) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn(serve_udp(
@@ -438,15 +480,21 @@ mod tests {
 
         let socket = Arc::new(UdpSocket::bind("[::1]:0").await.expect("relay"));
         let relay_addr = socket.local_addr().expect("addr");
-        let mut legs = LegRegistry::new(4);
+        let mut legs = LegRegistry::new(4, 4, 900_000);
         let client = UdpSocket::bind("[::1]:0").await.expect("client");
         let client_addr = client.local_addr().expect("addr");
-        legs.establish(client_addr, LegKey::new([0xA1; 32]));
+        legs.establish(
+            client_addr,
+            LegKey::new([0xA1; 32]),
+            crate::token::testkit::verified([1; 16]),
+            0,
+        );
 
         let runtime = Arc::new(Mutex::new(RelayRuntime {
             engine: RelayEngine::new(relay_config(), empty_issuers(), 0),
             legs,
             scheduler: TwoTierDrr::with_default_quantum(),
+            setup: None,
         }));
         let (stop, rx) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn(serve_udp(

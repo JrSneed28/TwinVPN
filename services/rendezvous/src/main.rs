@@ -57,9 +57,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             labels: rz::label::Labeller::default(),
         }),
         limiter: tokio::sync::Mutex::new(rz::admission::SourceLimiter::new(rz_cfg.admission)),
-        bindings: tokio::sync::Mutex::new(Box::new(svc::binding::ChannelPinned::new(
-            rz_cfg.binding,
-        ))),
+        // Derived-preferred, not merely channel-pinned: RZ-10. A device whose
+        // TLS key derives to the `device_id` it claims takes that name back from
+        // an impostor holding it, and a rotated device still binds.
+        bindings: tokio::sync::Mutex::new(svc::binding::DerivedPreferred::new(rz_cfg.binding)),
         tls: tokio_rustls::TlsAcceptor::from(server_tls.config()),
         connections: Arc::new(tokio::sync::Semaphore::new(rz_cfg.max_connections)),
         config: rz_cfg.clone(),

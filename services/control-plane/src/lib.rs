@@ -49,6 +49,8 @@
 //! | [`store`] | where does that state live, and how is the write serialised? |
 //! | [`verify`] | who signed this, and may they have signed it? |
 //! | [`quic`] | how does a device attach, and how is 0-RTT made unreachable? |
+//! | [`identity`] | which device is the key on this connection? |
+//! | [`serve`] | the accept loop: one connection, its C1 streams and its C2 stream |
 //! | [`session`] | how is one attached device served, drained and compacted? |
 //! | [`codes`] | which registered `reason_code` names this failure? |
 
@@ -74,8 +76,10 @@ pub mod config;
 pub mod dispatch;
 pub mod domain;
 pub mod event;
+pub mod identity;
 pub mod model;
 pub mod quic;
+pub mod serve;
 pub mod session;
 pub mod store;
 pub mod tx;

@@ -173,6 +173,42 @@ pub fn server_config(
     tls.max_early_data_size = 0;
     tls.send_half_rtt_data = false;
 
+    from_rustls(Arc::new(tls))
+}
+
+/// Applies this crate's rung-1 **transport** policy to an already-built TLS
+/// configuration.
+///
+/// The composition root builds the TLS half through
+/// [`twinvpn_service_common::tls::ServerTlsBuilder`] — the one home for RFC 7250
+/// raw-public-key termination in this workspace, so the four server artifacts
+/// cannot drift four copies of it — and this applies what is QUIC's and this
+/// service's: ALPN, the idle and keepalive timers, and the stream budgets.
+///
+/// 0-RTT is re-checked here rather than assumed: `assert_no_early_data` runs on
+/// a configuration this function did not build, which is exactly the case where
+/// "we left the default alone" would not be a property.
+///
+/// # Errors
+///
+/// `CONTROL.HANDSHAKE_REJECTED` when the configuration is not usable for QUIC —
+/// including a configuration that permits early data, which ADR-0001 R8 forbids
+/// absolutely.
+pub fn from_rustls(tls: Arc<rustls::ServerConfig>) -> Result<quinn::ServerConfig, ServiceError> {
+    let reject = |e: &dyn std::fmt::Display| {
+        let _ = e;
+        codes::bare(twinvpn_types::codes::CONTROL_HANDSHAKE_REJECTED)
+    };
+    twinvpn_service_common::tls::assert_no_early_data(&tls).map_err(|e| reject(&e))?;
+    if tls.alpn_protocols.iter().all(|p| p != ALPN) {
+        // RFC 9001 §8.1 makes ALPN mandatory for QUIC, and rung 1 shares
+        // UDP:443 with whatever else an operator runs there. A listener that
+        // did not name this protocol would accept a client speaking another.
+        return Err(codes::bare(
+            twinvpn_types::codes::CONTROL_HANDSHAKE_REJECTED,
+        ));
+    }
+
     let quic = quinn::crypto::rustls::QuicServerConfig::try_from(tls).map_err(|e| {
         ServiceError::new(
             twinvpn_types::codes::CONTROL_HANDSHAKE_REJECTED,
@@ -264,16 +300,32 @@ pub async fn accept(
         .build()
     })?;
 
-    let peer = connection
+    let peer = presented_key(&connection)?;
+    let device_id = identity.identify(&peer)?;
+    Ok((connection, device_id))
+}
+
+/// The raw public key the peer presented on a completed handshake.
+///
+/// With client authentication mandatory — which
+/// [`twinvpn_service_common::tls::ServerTlsBuilder`] sets and offers no way to
+/// unset — a completed handshake always has one; the `Result` keeps the
+/// impossible case visible rather than unwrapping it.
+///
+/// # Errors
+///
+/// `CONTROL.HANDSHAKE_REJECTED` when the connection carries no peer identity.
+pub fn presented_key(
+    connection: &quinn::Connection,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, ServiceError> {
+    connection
         .peer_identity()
         .and_then(|any| {
             any.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
                 .ok()
         })
-        .ok_or_else(|| codes::bare(twinvpn_types::codes::CONTROL_HANDSHAKE_REJECTED))?;
-
-    let device_id = identity.identify(&peer)?;
-    Ok((connection, device_id))
+        .map(|boxed| *boxed)
+        .ok_or_else(|| codes::bare(twinvpn_types::codes::CONTROL_HANDSHAKE_REJECTED))
 }
 
 /// The RFC 9266 `tls-exporter` value of this connection.

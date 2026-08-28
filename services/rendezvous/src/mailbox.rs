@@ -1,6 +1,6 @@
 //! The bounded, TTL'd `CALL` jitter buffer — and nothing else.
 //!
-//! ADR-0002 §11.5 path [3] and **N-9**:
+//! ADR-0002 §11.5 path \[3\] and **N-9**:
 //!
 //! > Rendezvous `CALL` and candidate-exchange payloads MUST NOT be written to
 //! > the durable log, MUST NOT be replayed from a cursor, and MUST NOT survive
@@ -24,8 +24,10 @@
 //! # The four ceilings
 //!
 //! An unauthenticated attacker must not be able to make this process allocate.
-//! Four bounds hold simultaneously, and every one of them is exercised by
-//! `tests/resource_bounds.rs`:
+//! Four bounds hold simultaneously. The per-payload bound is exercised at the
+//! socket by `tests/hostile_input.rs`; the other three, and the TTL, by this
+//! module's own tests and by `tests/connectivity_behavior.rs`, which drives them
+//! through a real listener:
 //!
 //! | Bound | Default | Authority |
 //! |---|---|---|

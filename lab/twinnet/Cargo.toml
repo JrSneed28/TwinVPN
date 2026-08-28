@@ -1,0 +1,63 @@
+# twinnet — the real network fabric TwinLab scenarios run on.
+#
+# Owner: test-engineering. NEVER SHIPPED (ADR-0018 §11.12: `/lab/` is the
+# never-shipped path).
+#
+# ===========================================================================
+# WHY THIS CRATE IS SEPARATE FROM `twinlab`
+# ===========================================================================
+# `twinlab` is `#![forbid(unsafe_code)]` and must stay that way: it is the crate
+# that decides verdicts, and a verdict crate with a raw-socket surface is a
+# verdict crate a reviewer cannot read in one sitting.
+#
+# This crate is the other half — the one that actually moves packets. It owns
+# the ONLY `unsafe` in `/lab/`, confined to `afpacket.rs` and `sandbox.rs`, and
+# every other module is `#![forbid(unsafe_code)]` by being in a crate whose
+# unsafe surface is two files a reviewer can enumerate.
+#
+# ===========================================================================
+# WHY THERE IS A USERSPACE NAT AT ALL
+# ===========================================================================
+# docs/testing-strategy.md §3.1: every condition MUST be produced by a mechanism
+# with the same observable semantics as the real thing, and a test MUST NOT be
+# able to detect the laboratory by inspecting the product's configuration.
+#
+# `nft` and `conntrack` are one realization of §3.3's personalities. They are not
+# the only one, and on a host without them the previous state of this laboratory
+# was that EVERY NAT-class scenario reported `Unavailable` forever. `natbox.rs`
+# is a second realization: a real middlebox process, forwarding real IP packets
+# between two real interfaces, holding a real mapping table with real RFC 4787
+# mapping and filtering behaviour and real timers. The system under test sees a
+# middlebox. It cannot see a flag, because there is none to see.
+[package]
+name    = "twinnet"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the real network fabric — namespaces, userspace middleboxes, impairment and packet-level observation"
+publish = false
+
+[lib]
+name = "twinnet"
+path = "src/lib.rs"
+
+[[bin]]
+name = "twinnet"
+path = "src/bin/twinnet.rs"
+
+[dependencies]
+libc       = "0.2"
+clap       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+
+[dev-dependencies]
+# The class-pair matrix, PARSED FROM `docs/networking.md` §3.2 rather than
+# restated. A dev-dependency: nothing this crate ships knows what a traversal
+# expectation is, and the direction of the dependency matters — `twinlab` owns
+# the document's meaning and `twinnet` owns the packets.
+twinlab = { workspace = true }

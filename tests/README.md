@@ -15,7 +15,7 @@ cross-domain defects turned out to be.
 ```bash
 source build/toolchain/env.sh
 cd tests
-cargo test --workspace          # 189 tests, ~12 s after the first build
+cargo test --workspace          # 198 tests, ~12 s after the first build
 ```
 
 `tests/` is a fifth cargo workspace and is in the `Makefile`'s `WORKSPACES`, so
@@ -40,6 +40,8 @@ kind of reason — see §7.
 | `integration/tunnel_wire_agreement.rs` | 6 — sender against receiver | 8 |
 | `chaos/outage_and_failover.rs` | 15 — chaos | 11 |
 | `chaos/journal_write_behind.rs` | 15 — chaos, **W-28** measured | 7 |
+| `chaos/store_outage.rs` | 15 — chaos, §2.13's database outage at the real store seam | 5 |
+| `integration/revocation_at_the_peer.rs` | 6 + 14 — integration, security: **A-06** | 4 |
 | `compatibility/golden_vectors.rs` | 3 + 19 — protocol, compatibility | 8 |
 | `e2e/scenario_matrix.rs` | 7 — the named scenario matrix (§8) | 24 |
 | `fuzz/wire_decoders.rs` | 13 — fuzzing, network-supplied decoders (§9) | 13 |
@@ -422,3 +424,61 @@ A decoder with no entry in `fuzz/` is a decoder nobody has fuzzed. Add a target
 beside its neighbours: build a corpus with `fuzz::corpus(seed, iterations,
 max_len, &valid_seeds)`, call `fuzz::fuzz(name, &corpus, |b| ...)`, and assert
 the report reached both paths.
+
+
+---
+
+## 8. The two suites that needed both sides of a wire
+
+§7 explains why `services/` was deliberately absent from this workspace's
+dependency list, and why the integration lead later added the server artifacts
+anyway: **no test in this repository could link a client crate and a server crate
+at the same time**, and that was the shared cause of the wave's cross-artifact
+defects. These two are what that change bought.
+
+### `integration/revocation_at_the_peer.rs` — assumption **A-06**
+
+> Device revocation is enforced at the **peer** and not solely at the control
+> plane, so revocation survives control-plane unavailability with a bounded
+> propagation delay. […] **P10** must be reframed as "revoked devices cannot
+> reconnect *while the control plane is reachable*", a materially weaker
+> property.
+
+`services/control-plane/tests/authorization.rs` proves the server half.
+`twinvpn-trust`'s own tests prove the device half. **Neither can show that the
+statement the server verified is the statement the device acts on**, because
+neither can link the other — and that is exactly the claim A-06 makes.
+
+The device half runs with no control plane in the process at all: not a mocked
+one, not an unreachable one. The `RevocationState` is constructed, the Owner's
+statement is applied, the peer is refused, in code that has never heard of
+`ControlStore`. That is what "survives control-plane unavailability" has to mean
+if it is to mean anything.
+
+### `chaos/store_outage.rs` — §2.13's database outage
+
+`PgStore` **has never been run** — no PostgreSQL, no Docker, and
+`services/control-plane/README.md` §9 says so. Killing a database that is not
+there would test nothing.
+
+What is real is the **seam**. `ControlStore` is the trait every command goes
+through, both stores implement it, and every rule an outage could break — the
+dedup log, `net_seq` allocation inside the mutating transaction, the
+never-shrinking revoked set — lives above it. So a store that starts failing
+takes the same refusal path, and the properties that matter are decidable: the
+refusal carries a **registered** code, the log head does not move, the durable
+log stays **dense** across the outage, and the identical command commits once the
+store returns without being served as a replay of one that never committed.
+
+Two outages are kept apart, because §3.4 and `infra/README.md` §5 keep them
+apart: an unreachable datastore, and a reachable one whose write lease this
+process cannot obtain.
+
+**One assertion in this file was wrong and the service was right.** It first
+asserted that a lease-less writer must report not-ready. It must not: mutations
+are refused with a `TRANSIENT`, retryable `CONTROL.WRITE_LEADER_UNAVAILABLE`, and
+taking every follower out of service during a normal leader handover would turn a
+handover into an outage. The test now asserts the contract the service
+documents — the condition must be **visible** in `lease_held`, and the follower
+must stay in service — and records that it was asserting a design its author
+assumed rather than the one that exists.

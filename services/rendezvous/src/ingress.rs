@@ -11,9 +11,9 @@
 //!         └─[4] none of the above                     ▶ CONTROL.CALL_UNDELIVERABLE
 //! ```
 //!
-//! **Rung [2] is not implemented in this wave.** A push gateway is an untrusted
+//! **Rung \[2\] is not implemented in this wave.** A push gateway is an untrusted
 //! third party (`trust-boundaries.md` §1) and no push credential store exists
-//! yet; a device with no live channel therefore falls straight to [3]. That is a
+//! yet; a device with no live channel therefore falls straight to \[3\]. That is a
 //! latency reduction that is missing, not a correctness hole — §11.5 says the
 //! initiator never blocks on delivery, and a `CALL` that never lands costs a
 //! fall back to `RELAYED`. It is recorded in `README.md` §9 rather than implied.
@@ -46,9 +46,9 @@ use crate::mailbox::{MailboxStore, Push};
 /// Where a `CALL` went.
 #[derive(Debug)]
 pub enum Disposition {
-    /// Rung [1]: handed to the target's live channel.
+    /// Rung \[1\]: handed to the target's live channel.
     Delivered(tokio::sync::mpsc::Sender<Egress>, Verbatim),
-    /// Rung [3]: queued in the jitter buffer. `overflowed` reports that
+    /// Rung \[3\]: queued in the jitter buffer. `overflowed` reports that
     /// drop-oldest fired, which is `CONTROL.MAILBOX_OVERFLOW`.
     Mailboxed {
         /// Whether an older entry was discarded to make room.
@@ -56,7 +56,7 @@ pub enum Disposition {
         /// The pseudonym for the target, for the informational answer.
         label: PeerLabel,
     },
-    /// Rung [4]: `CONTROL.CALL_UNDELIVERABLE`.
+    /// Rung \[4\]: `CONTROL.CALL_UNDELIVERABLE`.
     Undeliverable(PeerLabel),
 }
 

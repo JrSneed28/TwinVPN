@@ -1,0 +1,34 @@
+-- ---------------------------------------------------------------------------
+-- 0004: the identity index.
+--
+-- Authority: `contracts/docs/identifiers.md` §2 (`identity_id` is
+-- `SHA-256("TwinVPN/DeviceIdentity/v1" || 0x00 || dCBOR(COSE_Key(IK_pub)))`),
+-- ADR-0007 §11 and N-21 (rotation changes `identity_id` and does NOT change
+-- `device_id`), ADR-0001 §7.2 / N-32 (the `DeviceIdentityKey` IS the RFC 7250
+-- raw public key an mTLS peer presents).
+--
+-- WHY THIS INDEX IS A SECURITY CONTROL AND NOT AN OPTIMISATION
+--
+-- The peer-identity binding resolves a presented TLS key to a `device_id` by
+-- deriving `identity_id` from the key and looking the row up here
+-- (`PgStore::device_for_identity`). If two rows in one `TwinNet` could carry
+-- the same `identity_id`, that lookup would be AMBIGUOUS — one presented key
+-- would name two devices, and whichever the planner returned first would become
+-- the authenticated caller. `device_pubkey_unique` in 0001 makes the
+-- generation-0 case unambiguous; this makes it unambiguous after a rotation
+-- too, which is the case 0001 could not see because it predates the binding.
+--
+-- Forward-compatible: it adds a constraint that already holds. `identity_id` is
+-- a hash of a key, `identity_public_key` is already UNIQUE per `TwinNet`, and a
+-- succession re-indexes exactly one row to a successor no other row can hold.
+-- A database that violates it has a duplicate that must be found, not indexed
+-- around.
+--
+-- Reversible: yes. Dropping the index destroys no data and restores 0001's
+-- weaker guarantee.
+--
+-- Idempotent to re-run: IF NOT EXISTS.
+-- ---------------------------------------------------------------------------
+
+CREATE UNIQUE INDEX IF NOT EXISTS device_identity_unique
+    ON device (twinnet_id, identity_id);

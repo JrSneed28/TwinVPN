@@ -56,6 +56,18 @@ curl -s http://127.0.0.1:19003/metrics | grep twinvpn_presence
 
 ---
 
+### 2.1 What each test file is for
+
+| File | Subject |
+|---|---|
+| `tests/presence_flow.rs` | the heartbeat → `PresenceUpdated` path, S-11, LWW under reordering |
+| `tests/hostile_input.rs` | every malformed shape refused without a state change |
+| `tests/never_a_gate.rs` | the structural half of §1 — the connection path does not link this crate |
+| `tests/tls_binding.rs` | the channel, and the binding that makes S-11 enforceable |
+| `tests/hint_under_adversity.rs` | the behavioural half of §1: duplicate heartbeats, expired records reading as *unknown* rather than *offline*, publishers that vanish and return, restart, a table at its ceiling, an unreachable dependency, and a subscriber that never reads |
+
+---
+
 ## 3. Environment configuration
 
 | Variable | Type | Default | Required | If absent |
@@ -127,10 +139,32 @@ key could then publish presence for two identities. S-11 forbids exactly that.
 is the guard, over real sockets. See RZ-11 in `services/rendezvous/README.md` §9
 for why neither service's unit tests could see it.
 
-The binding is **channel-pinned, not derived**, with the same limitation as the
-rendezvous's. The derivation is now reachable, but a derived-**only** binding
-would permanently lock out any device that has rotated its identity key — see
-`services/rendezvous/README.md` §4.2 and **RZ-10**.
+**A repeated `BIND` is a refresh, not a second hold.** `claim` increments a
+holder count that teardown decrements exactly once, and a *held* entry is neither
+swept at its TTL nor evictable for capacity — so `BIND(D)` sent *n* times on one
+socket left *n−1* holds nothing could reclaim. One authenticated client could
+fill the table with unevictable entries, after which every other device's first
+`BIND` is refused for capacity — and under S-11 a device that cannot bind cannot
+speak for itself at all. A re-claim of the subject this connection already holds
+therefore releases first. RZ-13 in `services/rendezvous/README.md` §9, which
+carried the identical defect on `ATTACH`.
+
+**The binding is derived-preferred, not merely channel-pinned** — RZ-10, closed.
+A `BIND` whose TLS key derives to the claimed `device_id`
+(`contracts/docs/identifiers.md` §2) is **proven**, and a proven claim takes the
+subject from a merely pinned holder. That matters more here than anywhere: S-11
+says the device is authoritative for its **own** presence, and a binding that
+merely pins the first claimant makes *the first claimant* authoritative until the
+TTL lapses — an attacker who binds `D` before the real `D` ever does publishes
+`D`'s presence, which is precisely the override S-11 forbids. Now the rightful
+device takes its name back.
+
+A device that has **rotated** its identity key presents a generation-N key that
+derives to something other than its `device_id` (ADR-0007 §11) and so cannot
+prove; it still binds by first claim, because derived-**only** would lock it out
+permanently and this service holds no `IdentitySuccession` chain and must not
+fetch one per connection (**I5**). See `services/rendezvous/README.md` §4.3 for
+the full rule and the table.
 
 ---
 
@@ -261,7 +295,9 @@ nothing still connects.
 | **PR-4** | note | **`HeartbeatAck.revocation_epoch` and `pending_net_seq` are returned as 0.** Both are the control plane's to answer (ADR-0002 §11.4) and this service must not call it on this path (I5). `pending_net_seq` is described as "the main battery lever in the protocol", so a device that wants it must get it from the control plane's own C1 heartbeat, not from here. Worth a line in protocol.md §9.2 saying which endpoint answers it, since the same `Heartbeat`/`HeartbeatAck` pair is used in both places. |
 | **PR-5** | note | **`ReadinessPolicy::NoControlPlaneCalls`**, where `infra/README.md` §5 says `AnyDependency`. Same reasoning as the rendezvous's RZ-2: this service holds nothing durable, so there is no dependency whose absence could make its answer wrong, and reporting NOT READY on someone else's outage converts a latency degradation into a capability one. |
 | **PR-6** | note | **Five `TWINVPN_PRESENCE_*` ceilings added** (§3.1), all with defaults. |
-| **PR-7** | **closed by the integration lead** | `src/tls.rs` and `src/binding.rs` duplicated the rendezvous's exactly; both now live in `twinvpn-service-common` and this crate's copies are deleted. Absorbing them found the `release()` defect this service carried — RZ-11 in `services/rendezvous/README.md` §9. |
+| **PR-7** | **closed by the integration lead** | `src/tls.rs` and `src/binding.rs` duplicated the rendezvous's exactly; both now live in `twinvpn-service-common` and this crate's copies are deleted. Absorbing them found the `release()` defect this service carried — RZ-11 in `services/rendezvous/README.md` §9. || **PR-8** | **defect this domain shipped, now fixed** | **A repeated `BIND` on one connection pinned a binding-table entry for the life of the process** — the identical defect the rendezvous carried on `ATTACH`, recorded as RZ-13 in `services/rendezvous/README.md` §9. Fixed in both, in the services rather than in the shared crate: a re-claim of the subject this connection already holds releases first. Worth noting *why* it appeared in both — the two services were written from the same design, so a defect in that design is a defect in both copies, which is the same lesson RZ-8 and RZ-11 taught from the other direction. |
+| **PR-9** | note | **The binding table is now swept on this service's own timer**, beside the presence table, rather than only as a side effect of the next `BIND`. `docs/protocol.md` §6.1 is explicit about what infrastructure holding device history amounts to; a lapsed binding held because no unrelated traffic arrived is retention by inaction. |
+| **PR-10** | note | **`DerivedPreferred` adopted** (§4), closing RZ-10 here as well. Two counters follow it: `twinvpn_presence_binding_displacements_total` (a device took its own name back from an impostor — worth an alert, not an error, since nothing was refused) and `twinvpn_presence_binding_unprovable_keys_total` (claims on keys no `device_id` derives from, which fall back to pinning — a rotation campaign explains a rise, and nothing else should). |
 
 ---
 
@@ -269,12 +305,13 @@ nothing still connects.
 
 1. **QUIC is not bound** — same as the rendezvous's limitation 1, same cause.
    TLS 1.3 with mutual raw public keys is terminated; QUIC is a binding to add.
-2. **First-contact impersonation is open** — RZ-10 in the rendezvous README. An
-   attacker who binds a `device_id` before the real device ever does can publish
-   presence for it until the binding lapses. Presence is a hint and never a gate
-   (§1), so the blast radius is a wrong hint rather than a wrong decision — but
-   it is still wrong, and the fix is the derived-preferred design RZ-10 sets out,
-   in one shared place rather than two service crates.
+2. **First-contact impersonation is closed for every device that has not rotated
+   its identity key, and open for those that have** — §4, and RZ-10 in the
+   rendezvous README for the full rule. A rotated device cannot derive, so it
+   cannot displace an impostor that bound its `device_id` first, and that
+   impostor publishes presence for it until the binding lapses. Presence is a
+   hint and never a gate (§1), so the blast radius is a wrong hint rather than a
+   wrong decision — but under S-11 it is still the wrong device speaking.
 3. **No container has been built or run.** Docker is absent from this host. The
    tests run a real TLS 1.3 listener on loopback over IPv4 and IPv6.
 4. **No persistence, deliberately** (PR-1). A restart empties the table; every
@@ -298,6 +335,8 @@ nothing still connects.
 | Symptom | First thing to check |
 |---|---|
 | startup warns `unused_dependency` | `TWINVPN_DATABASE_URL` is set. It is deliberately unused — PR-1 |
+| `twinvpn_presence_binding_displacements_total` climbing | a device proved a `device_id` an impostor was holding and took it back (§4). Under S-11 each one is a device recovering the right to speak for itself. **Worth an alert; not an error** |
+| `twinvpn_presence_binding_unprovable_keys_total` climbing | `BIND`s are arriving on keys no `device_id` derives from and falling back to first-claim pinning. A rotation campaign explains it; without one, something is presenting a key shape the conversion does not handle |
 | a heartbeat is acked but nothing is stored | it was superseded, already expired, or claimed an expiry past `RECORD_TTL_MS`. `twinvpn_presence_heartbeats_ignored_total`. A loss is not an error (§6) |
 | `CONTROL.EVENT_WRONG_PUBLISHER` | a connection asserted presence for a `device_id` it did not bind. FATAL/CRITICAL — a **security event**, not a parse error |
 | `twinvpn_presence_frames_rejected_total` climbing | malformed C1. The `WARN` carries the registered code and the cap that fired |

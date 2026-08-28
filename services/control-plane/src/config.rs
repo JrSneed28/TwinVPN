@@ -82,6 +82,54 @@ pub struct ControlPlaneConfig {
     /// `TWINVPN_CP_DATABASE_MAX_CONNECTIONS`, default 16.
     pub database_max_connections: u32,
     /// `TWINVPN_CP_EVENT_BUS`, default `postgres-notify`.
+    /// Where devices reach this control plane, returned by `RegisterDevice`.
+    ///
+    /// **Names, not addresses** (ADR-0011 DN-0): GeoDNS is how a device reaches
+    /// the nearest front-end, and a literal address baked into a registration
+    /// response would pin every device that ever enrolled to one box. Resolved
+    /// in the bootstrap DNS scope.
+    ///
+    /// Empty by default and empty is legal: a device that already knows how it
+    /// got here does not need to be told again, and inventing a hostname would
+    /// be worse than saying nothing.
+    pub coordination_endpoints: Vec<String>,
+    /// The ORK-signed `OwnerDelegation` set, one base16 COSE_Sign1 per line.
+    ///
+    /// **This is what makes `Owner` power scoped.** ADR-0007 O5 keeps the
+    /// `OwnerRootKey` offline behind a recovery phrase and does routine work —
+    /// enrol, revoke, publish policy — with per-admin-device `OwnerSigningKey`s,
+    /// each delegated a subset of the powers. Without a delegation set this
+    /// service can admit only statements the **root itself** signed, which means
+    /// either the recovery phrase is reconstituted for every revocation, or an
+    /// operator puts OSKs in the anchor file and every admin key silently
+    /// carries every power.
+    ///
+    /// Absent is an **empty set**, not an error: a deployment that has not yet
+    /// delegated anything is a deployment whose root signs, and that is a
+    /// posture, not a misconfiguration. It is stated at startup rather than
+    /// discovered from a refusal.
+    pub owner_delegations_path: PathBuf,
+    /// The anchor generation delegations must name, or `0` to not check.
+    ///
+    /// S-32: "a delegation issued under an older anchor does not survive an
+    /// anchor advance by default." A mixed set means half an anchor rotation was
+    /// applied, so a non-zero value here refuses one at startup. Operator-supplied
+    /// for the same reason [`ControlPlaneConfig::shard_epoch`] is: a process that
+    /// could infer its own would infer whichever value made the file it was given
+    /// load.
+    pub owner_anchor_version: u64,
+    /// The fencing token this process presents on every write.
+    ///
+    /// ADR-0009 §11.2: a write is admitted only if it presents the current
+    /// `shard_epoch`, and the epoch is **bumped by the operator on failover** —
+    /// which is what stops a partitioned old leader, still believing it holds
+    /// the lease, from writing behind the new one. It is configuration and not a
+    /// value this process invents, because a process that could choose its own
+    /// fencing token could choose one high enough to win.
+    ///
+    /// Defaults to 1: the single-writer deployment that has never failed over.
+    pub shard_epoch: u64,
+    /// Which event bus the deployment selected.
     pub event_bus: String,
     /// `TWINVPN_CP_WRITE_LEASE_TTL_MS`, default 15 000. ADR-0002 N-4.
     pub write_lease_ttl: Duration,
@@ -100,6 +148,20 @@ pub struct ControlPlaneConfig {
     /// single-box topology (T2/T3), `≥1` the hosted one (T1). It is named here
     /// so a T1 deployment cannot silently run as a T2 one.
     pub quorum_replicas: u32,
+}
+
+/// Splits a comma-separated endpoint list, dropping blanks.
+///
+/// Blank-tolerant on purpose: `A,,B` and a trailing comma are what a templated
+/// compose file produces when one of its variables is unset, and a service that
+/// answered `RegisterDevice` with an empty hostname would send devices to a name
+/// that does not resolve.
+fn split_endpoints(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 impl ControlPlaneConfig {
@@ -131,6 +193,11 @@ impl ControlPlaneConfig {
                 "TWINVPN_CP_OWNER_ANCHOR_PATH",
                 "/run/secrets/control-plane/owner-anchors.hex",
             )),
+            owner_delegations_path: PathBuf::from(l.string(
+                "TWINVPN_CP_OWNER_DELEGATIONS_PATH",
+                "/run/secrets/control-plane/owner-delegations.hex",
+            )),
+            owner_anchor_version: l.u64("TWINVPN_CP_OWNER_ANCHOR_VERSION", 0)?,
             tls_cert_path: PathBuf::from(l.string(
                 "TWINVPN_CP_TLS_CERT_PATH",
                 "/run/secrets/control-plane/tls.crt",
@@ -147,6 +214,10 @@ impl ControlPlaneConfig {
                 key: "TWINVPN_CP_DATABASE_MAX_CONNECTIONS",
                 expected: "a u32",
             })?,
+            coordination_endpoints: split_endpoints(
+                &l.string("TWINVPN_CP_COORDINATION_ENDPOINTS", ""),
+            ),
+            shard_epoch: l.u64("TWINVPN_CP_SHARD_EPOCH", 1)?,
             event_bus: l.string("TWINVPN_CP_EVENT_BUS", "postgres-notify"),
             write_lease_ttl: l.duration_ms(
                 "TWINVPN_CP_WRITE_LEASE_TTL_MS",
@@ -234,6 +305,42 @@ impl ControlPlaneConfig {
             out.push(from_hex(line).ok_or(ConfigError::Invalid {
                 key: "TWINVPN_CP_OWNER_ANCHOR_PATH",
                 expected: "one base16 COSE_Key per line",
+            })?);
+        }
+        Ok(out)
+    }
+
+    /// Loads the ORK-signed `OwnerDelegation` set.
+    ///
+    /// One base16 COSE_Sign1 per line; blank lines and `#` comments ignored. An
+    /// absent file is an **empty set**, exactly as an absent anchor file is: the
+    /// posture "only the root may author", which is legal and is announced at
+    /// startup.
+    ///
+    /// The octets are **not** verified here — [`crate::verify::CryptoVerifier`]
+    /// does that against the pinned anchor, because verifying a delegation
+    /// without the key it chains to would be reading a file, not establishing an
+    /// authority.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] when a line is present but is not base16, for
+    /// the reason a malformed anchor line is a startup failure: a silently
+    /// skipped delegation produces a service that refuses operations a correct
+    /// one would admit.
+    pub fn load_owner_delegations(&self) -> Result<Vec<Vec<u8>>, ConfigError> {
+        let Ok(text) = std::fs::read_to_string(&self.owner_delegations_path) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            out.push(from_hex(line).ok_or(ConfigError::Invalid {
+                key: "TWINVPN_CP_OWNER_DELEGATIONS_PATH",
+                expected: "one base16 COSE_Sign1 OwnerDelegation per line",
             })?);
         }
         Ok(out)
@@ -401,6 +508,50 @@ mod tests {
         let cfg = ControlPlaneConfig::load(&minimal()).expect("loads");
         assert!(cfg.listen_quic.is_ipv6());
         assert!(cfg.listen_tcp.is_ipv6());
+    }
+
+    #[test]
+    fn coordination_endpoints_are_names_and_a_blank_is_never_one() {
+        // ADR-0011 DN-0: NAMES, so GeoDNS reaches the nearest front-end. `A,,B`
+        // and a trailing comma are what a templated compose file produces when
+        // one of its variables is unset, and answering `RegisterDevice` with an
+        // empty hostname would send a device to a name that does not resolve.
+        let env = minimal().with(
+            "TWINVPN_CP_COORDINATION_ENDPOINTS",
+            " cp1.twinvpn.example , ,cp2.twinvpn.example,",
+        );
+        let cfg = ControlPlaneConfig::load(&env).expect("loads");
+        assert_eq!(
+            cfg.coordination_endpoints,
+            vec![
+                "cp1.twinvpn.example".to_owned(),
+                "cp2.twinvpn.example".to_owned()
+            ]
+        );
+        // Unset is an empty list, and an empty list is legal: a device that
+        // already knows how it got here does not need to be told again.
+        assert!(ControlPlaneConfig::load(&minimal())
+            .expect("loads")
+            .coordination_endpoints
+            .is_empty());
+    }
+
+    #[test]
+    fn the_shard_epoch_is_configuration_and_defaults_to_the_single_writer() {
+        // ADR-0009 §11.2: the fencing token is bumped BY THE OPERATOR on
+        // failover. A process that could choose its own could choose one high
+        // enough to win against the leader that displaced it.
+        assert_eq!(
+            ControlPlaneConfig::load(&minimal())
+                .expect("loads")
+                .shard_epoch,
+            1
+        );
+        let env = minimal().with("TWINVPN_CP_SHARD_EPOCH", "7");
+        assert_eq!(
+            ControlPlaneConfig::load(&env).expect("loads").shard_epoch,
+            7
+        );
     }
 
     #[test]

@@ -190,6 +190,7 @@ impl ControlStore for MemStore {
 
             let ctx = Ctx {
                 caller: request.caller,
+                caller_identity_key: request.caller_identity_key,
                 twinnet_id: request.twinnet_id,
                 now_ms: request.now_ms,
                 verifier: request.verifier,
@@ -252,6 +253,30 @@ impl ControlStore for MemStore {
                 .take(max)
                 .cloned()
                 .collect())
+        })
+    }
+
+    fn device_for_identity<'a>(
+        &'a self,
+        twinnet_id: &'a str,
+        identity_id: crate::model::DeviceKey,
+    ) -> BoxFuture<'a, Result<Option<crate::model::DeviceKey>, ServiceError>> {
+        Box::pin(async move {
+            let nets = self.nets.lock().expect("store lock");
+            let Some(slot) = nets.get(twinnet_id) else {
+                return Ok(None);
+            };
+            // A revoked device is deliberately still resolvable. Refusing here
+            // would answer a revoked device's every command with
+            // AUTH.PEER_UNTRUSTED — the code for "who are you" — instead of
+            // AUTH.DEVICE_REVOKED, which is terminal and tells the device to
+            // stop. `domain::require_not_revoked` is where the refusal belongs.
+            Ok(slot
+                .state
+                .devices
+                .values()
+                .find(|d| d.identity_id == identity_id)
+                .map(|d| d.device_id))
         })
     }
 

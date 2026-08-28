@@ -87,6 +87,16 @@ sqlx = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# The RFC 7250 key material and the raw-public-key TLS clients that make an
+# END-TO-END authentication test writable. `test-support` is enabled here, on a
+# dev-dependency, and never on the dependency above (ADR-0018 CD-5): a shipped
+# build has no way to reach `tls::testkit`.
+#
+# This is also why `aws-lc-rs` does not appear in this manifest. Generating a
+# P-256 keypair for a test is `service-common`'s testkit's job, behind its own
+# feature, so this crate names no cryptographic dependency in either profile —
+# CD-I2 covers dev-dependencies too.
+twinvpn-service-common = { workspace = true, features = ["test-support"] }
 # Self-dependency so `cargo test` and the integration tests in `tests/` both see
 # `test-support`. The pattern `twinvpn-cp-client` uses for the same reason.
 twinvpn-control-plane = { path = ".", features = ["test-support"] }

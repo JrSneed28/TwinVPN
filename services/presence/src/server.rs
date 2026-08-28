@@ -27,7 +27,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use twinvpn_schema::{v1, Channel, Reject};
-use twinvpn_service_common::binding::{Binding, Claim, Refusal};
+use twinvpn_service_common::binding::{Binding, Claim, DerivedPreferred, Refusal};
 use twinvpn_service_common::tls::{self, ChannelIdentity, TlsError};
 use twinvpn_service_common::{Metrics, ServiceError, ShutdownHandle};
 
@@ -55,7 +55,17 @@ pub struct Shared {
     /// The connection ceiling.
     pub connections: Arc<Semaphore>,
     /// `device_id` ↔ authenticated channel identity.
-    pub bindings: Mutex<Box<dyn Binding<[u8; 32]>>>,
+    ///
+    /// **[`DerivedPreferred`], not `ChannelPinned`** — RZ-10. S-11 says the
+    /// device is authoritative for its **own** presence, and a binding that
+    /// merely pins the first claimant makes that "the first claimant is
+    /// authoritative" until the TTL lapses. Deriving the `device_id` from the key
+    /// the peer presented on TLS (`contracts/docs/identifiers.md` §2) makes the
+    /// rightful device able to take its own name back. A rotated device
+    /// (ADR-0007 §11) cannot derive and still binds by first claim, because
+    /// derived-only would lock it out and this service holds no succession
+    /// chain.
+    pub bindings: Mutex<DerivedPreferred<[u8; 32]>>,
     /// The TLS acceptor.
     pub tls: tokio_rustls::TlsAcceptor,
 }
@@ -87,9 +97,7 @@ impl Shared {
             labels: Mutex::new(Labeller::new(65_536)),
             updates,
             connections: Arc::new(Semaphore::new(config.max_connections)),
-            bindings: Mutex::new(Box::new(
-                twinvpn_service_common::binding::ChannelPinned::new(config.binding),
-            )),
+            bindings: Mutex::new(DerivedPreferred::new(config.binding)),
             tls,
             config,
             metrics,
@@ -111,6 +119,13 @@ pub mod counters {
     pub const HANDSHAKES_REFUSED: &str = "twinvpn_presence_tls_handshakes_refused_total";
     /// `BIND`s refused because the claimed device does not match the channel.
     pub const BINDING_MISMATCHES: &str = "twinvpn_presence_binding_mismatches_total";
+    /// Pinned holders displaced by a claim that **proved** the `device_id` from
+    /// the key it presented on TLS. Under S-11 each one is a device taking back
+    /// the right to speak for itself; worth an alert, not a reason code.
+    pub const BINDING_DISPLACEMENTS: &str = "twinvpn_presence_binding_displacements_total";
+    /// Claims on a key no `device_id` could be derived from, which fell back to
+    /// first-claim pinning. A rotated identity key is the expected cause.
+    pub const BINDING_UNPROVABLE_KEYS: &str = "twinvpn_presence_binding_unprovable_keys_total";
 }
 
 /// Wall-clock milliseconds. Evidence only, never a timer input (ADR-0018 CD-1).
@@ -275,11 +290,23 @@ where
                 // (`trust-boundaries.md` §4); a full table is
                 // `CONTROL.ADMISSION_DEFERRED`, because the subject is not
                 // contested, the server is.
-                let claim = shared
-                    .bindings
-                    .lock()
-                    .await
-                    .claim(&channel, device_id, Instant::now());
+                let now = Instant::now();
+                // A re-`BIND` of the same subject on the same connection is a
+                // refresh, not a second hold. `claim` increments a holder count
+                // that teardown decrements exactly once, and a held entry is
+                // never swept at its TTL and never evictable for capacity — so
+                // repeating `BIND(D)` on one socket pins D's entry for the life
+                // of the process, and repeating it enough times leaves the table
+                // full of unevictable entries and refuses every other device.
+                // Releasing first keeps the count level and moves the TTL on.
+                if bound == Some(device_id) {
+                    shared
+                        .bindings
+                        .lock()
+                        .await
+                        .release(&channel, &device_id, now);
+                }
+                let claim = shared.bindings.lock().await.claim(&channel, device_id, now);
                 if let Claim::Refused(refusal) = claim {
                     let e = refusal.to_error(crate::COMPONENT);
                     e.emit(&shared.metrics, "binding_refused");
@@ -418,16 +445,43 @@ pub async fn sweeper(shared: Arc<Shared>, handle: ShutdownHandle, interval: Dura
         tokio::select! {
             () = handle.draining() => return,
             _ = ticker.tick() => {
+                let now = Instant::now();
+                let labels = twinvpn_service_common::metrics::Labels::new;
                 let mut store = shared.store.lock().await;
-                store.sweep(Instant::now());
+                store.sweep(now);
+                shared
+                    .metrics
+                    .gauge(counters::RECORDS, "presence records held", labels())
+                    .set(i64::try_from(store.len()).unwrap_or(i64::MAX));
+                drop(store);
+                // The binding table is swept on the same timer as the presence
+                // table, not only when the next `BIND` happens to arrive. A
+                // `device_id` is personal data and protocol.md §6.1 is explicit
+                // about what infrastructure holding device history amounts to;
+                // an entry whose TTL has lapsed is retained data with no reason
+                // to exist, and a quiet service is exactly when nothing else
+                // would evict it.
+                let (displacements, unprovable) = {
+                    let mut bindings = shared.bindings.lock().await;
+                    bindings.sweep(now);
+                    (bindings.displacements(), bindings.unprovable_keys())
+                };
                 shared
                     .metrics
                     .gauge(
-                        counters::RECORDS,
-                        "presence records held",
-                        twinvpn_service_common::metrics::Labels::new(),
+                        counters::BINDING_DISPLACEMENTS,
+                        "pinned holders displaced by a proven claim",
+                        labels(),
                     )
-                    .set(i64::try_from(store.len()).unwrap_or(i64::MAX));
+                    .set(i64::try_from(displacements).unwrap_or(i64::MAX));
+                shared
+                    .metrics
+                    .gauge(
+                        counters::BINDING_UNPROVABLE_KEYS,
+                        "claims on a key no device_id could be derived from",
+                        labels(),
+                    )
+                    .set(i64::try_from(unprovable).unwrap_or(i64::MAX));
             }
         }
     }

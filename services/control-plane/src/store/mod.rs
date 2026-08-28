@@ -49,6 +49,9 @@ pub struct Request<'a> {
     pub twinnet_id: &'a str,
     /// The **authenticated** caller — the mTLS peer identity, not a body field.
     pub caller: DeviceKey,
+    /// The COSE_Key form of the raw public key the caller presented on this
+    /// connection. See [`crate::domain::Ctx::caller_identity_key`].
+    pub caller_identity_key: Option<&'a [u8]>,
     /// Wall-clock milliseconds. Evidence, and the two contract-defined windows.
     pub now_ms: u64,
     /// The monotonic instant the rate limiters take. **Not** the wall clock:
@@ -107,6 +110,36 @@ pub trait ControlStore: Send + Sync {
         from_net_seq: u64,
         max: usize,
     ) -> BoxFuture<'a, Result<Vec<StoredEvent>, ServiceError>>;
+
+    /// The `device_id` the identity `identity_id` currently names, if any.
+    ///
+    /// **The rotation seam.** A `device_id` is the hash of a device's
+    /// *generation-0* identity key (`identifiers.md` §2), so a device that has
+    /// rotated presents a generation-N key on TLS whose derivation is **not**
+    /// its `device_id` — and `service-common`'s [`DerivedPreferred`] binding
+    /// documents that closing that gap needs the succession chain, which the
+    /// rendezvous and presence may not fetch.
+    ///
+    /// This service **is** the chain: `RotateDeviceCredential` is one of its own
+    /// commands, and `device.identity_id` is re-indexed to the successor the
+    /// verified `IdentitySuccession` names. So the control plane can do the
+    /// strict thing the other services cannot — resolve a presented key to a
+    /// `device_id` through a record it wrote itself, rather than pinning a
+    /// claim.
+    ///
+    /// A miss is `Ok(None)`, not an error: an unregistered generation-0 key is
+    /// exactly what `RegisterDevice` arrives on.
+    ///
+    /// [`DerivedPreferred`]: twinvpn_service_common::binding::DerivedPreferred
+    ///
+    /// # Errors
+    ///
+    /// A store failure.
+    fn device_for_identity<'a>(
+        &'a self,
+        twinnet_id: &'a str,
+        identity_id: DeviceKey,
+    ) -> BoxFuture<'a, Result<Option<DeviceKey>, ServiceError>>;
 
     /// The current head position, for `LogHead` and the attach response.
     ///

@@ -138,6 +138,43 @@ impl StatementKind {
         }
     }
 
+    /// Which **OSK power** an `Owner`-authority signer must carry to author this.
+    ///
+    /// ADR-0007 O5 is a two-tier hierarchy: an offline, phrase-derived
+    /// `OwnerRootKey` and a hardware-resident, ORK-delegated `OwnerSigningKey`
+    /// per admin device, so that "routine operations (enroll, revoke, publish
+    /// policy) use a hardware-resident OSK" and "the common path has no phrase
+    /// and no ritual". **Every routine `Owner` operation is therefore OSK-signed,
+    /// and each names the power it needs** — §11 rows for `RevocationStatement`
+    /// ("`Owner` OSK with `REVOKE`"), policy ("one OSK signature with the
+    /// matching power") and enrolment ("an OSK device holding `ENROLL` power
+    /// approves").
+    ///
+    /// `None` for the device-authority kinds: an OSK power is not a thing a
+    /// device statement can carry, and a `None` here is what keeps
+    /// [`admit`]'s check total without inventing a power for them.
+    #[must_use]
+    pub const fn required_power(self) -> Option<twinvpn_crypto::statements::OskPower> {
+        use twinvpn_crypto::statements::OskPower as P;
+        match self {
+            StatementKind::RevocationStatement | StatementKind::PairingRevocation => {
+                Some(P::Revoke)
+            }
+            StatementKind::PolicyBundle => Some(P::Policy),
+            // The enrolment proof. The power is checked on the delegation the
+            // proof IS, not on whoever signed it — see [`admit`].
+            StatementKind::OwnerDelegation => Some(P::Enroll),
+            // ADR-0007 §11: the relay epoch floor is a TwinNet-wide
+            // administrative act, not an enrolment, a revocation or a policy.
+            StatementKind::RelayEpochFloor => Some(P::Administer),
+            StatementKind::PairingAttestation
+            | StatementKind::IdentitySuccession
+            | StatementKind::TunnelKeyBinding
+            | StatementKind::RouteAdvertisement
+            | StatementKind::ExitNodeOffer => None,
+        }
+    }
+
     /// The same type, as `twinvpn-crypto` names it.
     ///
     /// A total match, so a statement type added here without a crypto
@@ -189,6 +226,70 @@ pub enum SigningAuthority {
     Device,
 }
 
+/// One `OwnerSigningKey` and what the `Owner` delegated to it.
+///
+/// Decoded from an ORK-signed `OwnerDelegation` by `twinvpn-crypto`, which owns
+/// the CDDL, the closed [`OskPower`](twinvpn_crypto::statements::OskPower) enum
+/// and the rule that "an unrecognised power is a **rejection**, not an ignored
+/// entry". Nothing here re-derives any of that; this is the decoded result
+/// carried where the authority check can reach it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delegation {
+    /// The key's identifier, and the `osk_id` evidence field
+    /// `AUTH.UNEXPECTED_DELEGATION` declares.
+    pub osk_id: String,
+    /// COSE_Key octets for the OSK public half.
+    pub osk_pub_cose: Vec<u8>,
+    /// The powers, sorted and deduplicated by the decoder.
+    pub powers: Vec<twinvpn_crypto::statements::OskPower>,
+    /// Which anchor this delegation is bound to. "A delegation issued under an
+    /// older anchor does not survive an anchor advance by default."
+    pub anchor_version: u64,
+    /// Expiry, checked at **use** time and not at load: this process outlives
+    /// the delegations it loaded.
+    pub not_after_ms: u64,
+}
+
+impl Delegation {
+    /// Whether this delegation carries `power`.
+    #[must_use]
+    pub fn has(&self, power: twinvpn_crypto::statements::OskPower) -> bool {
+        self.powers.contains(&power)
+    }
+
+    /// The powers, rendered for a log line. Public identifiers, never secrets.
+    #[must_use]
+    pub fn powers_str(&self) -> String {
+        self.powers
+            .iter()
+            .map(|p| format!("{p:?}"))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+}
+
+/// The successor identity an `IdentitySuccession` names.
+///
+/// Carried out of verification because it is the **only** place the successor is
+/// available: `RotateDeviceCredentialRequest` has no field for a new public key,
+/// so the sole statement of "which identity this device becomes" is inside the
+/// signed payload. `domain::device::rotate_credential` re-indexes the device
+/// record onto `new_identity_id`, which is what lets the rotated device's next
+/// TLS connection still resolve to its own `device_id`
+/// ([`crate::store::ControlStore::device_for_identity`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Succession {
+    /// Unchanged across the rotation — ADR-0007 N-21, so S-08's immutable
+    /// address allocation survives it.
+    pub device_id: [u8; 32],
+    /// The identity being replaced.
+    pub old_identity_id: [u8; 32],
+    /// The replacement, and the value the device table re-indexes onto.
+    pub new_identity_id: [u8; 32],
+    /// Exactly the old generation + 1.
+    pub generation: u64,
+}
+
 /// A statement whose signature verified **over the received octets**.
 #[derive(Debug, Clone)]
 pub struct Verified {
@@ -204,6 +305,35 @@ pub struct Verified {
     pub not_before_ms: u64,
     /// `not_after_ms` from the signed payload.
     pub not_after_ms: u64,
+    /// The ceremony a `PairingAttestation` names, for that kind only.
+    ///
+    /// The attestation is the **only** thing that binds a completion to a
+    /// ceremony: `PairingRequest` names no responder, so the control plane
+    /// cannot know in advance which second device is entitled to complete one.
+    /// What it can check is that the attestation the caller signed is an
+    /// attestation *for this pairing* — see
+    /// [`crate::domain::pairing::complete`].
+    pub pairing_id: Option<[u8; 16]>,
+    /// The delegation the **signer** holds, when an OSK signed rather than the
+    /// ORK itself.
+    ///
+    /// `None` means the root signed: the ORK is unscoped by construction — it is
+    /// the key every delegation chains to — so there is no power to check
+    /// against it.
+    pub signer_delegation: Option<Delegation>,
+    /// The delegation this statement **is**, for `OwnerDelegation` only.
+    ///
+    /// The enrolment proof is itself an `OwnerDelegation`, so the power that
+    /// matters for `RegisterDevice` is the one *inside* the proof, not the one
+    /// its signer holds. Both are carried because both are checked, in different
+    /// places, for different reasons.
+    pub delegation: Option<Delegation>,
+    /// The succession this statement declares, for `IdentitySuccession` only.
+    ///
+    /// `None` for every other kind, and `None` for a succession whose payload
+    /// did not decode — a verifier reports what it read, and the handler decides
+    /// what a missing successor means rather than being handed a default.
+    pub succession: Option<Succession>,
 }
 
 /// Why verification failed.
@@ -341,6 +471,14 @@ impl StatementVerifier for RefuseUnverifiable {
 #[derive(Debug, Default)]
 pub struct CryptoVerifier {
     owner: Vec<twinvpn_crypto::PublicVerifyingKey>,
+    /// The ORK-signed `OwnerDelegation` set, verified at construction and held
+    /// as `(the OSK's verifying key, what it may do)`.
+    ///
+    /// **Verified once, at load, against the pinned ORK** — which is what makes
+    /// a delegation a delegation rather than a claim, and is why a delegation
+    /// that does not verify is a startup failure rather than a refusal nobody
+    /// sees until an operator tries to revoke a stolen laptop.
+    delegated: Vec<(twinvpn_crypto::PublicVerifyingKey, Delegation)>,
 }
 
 impl CryptoVerifier {
@@ -357,6 +495,42 @@ impl CryptoVerifier {
     /// a partially-loaded anchor set, because a partially-loaded set silently
     /// refuses statements a correctly-configured one would admit.
     pub fn new(owner_anchor_cose_keys: &[Vec<u8>]) -> Result<Self, ServiceError> {
+        Self::with_delegations(owner_anchor_cose_keys, &[], 0)
+    }
+
+    /// Binds a verifier to a pinned anchor key set **and its delegation chain**.
+    ///
+    /// Each entry in `delegations` is the COSE_Sign1 octets of an ORK-signed
+    /// `OwnerDelegation`. Every one is verified against `owner_anchor_cose_keys`
+    /// here, once, and decoded through `twinvpn-crypto` — so what this holds
+    /// afterwards is a set of keys the `Owner` demonstrably delegated to, and
+    /// the powers it gave each.
+    ///
+    /// `expected_anchor_version` is the operator's declared anchor generation.
+    /// When non-zero, a delegation naming a different one is refused at startup:
+    /// S-32 says "a delegation issued under an older anchor does not survive an
+    /// anchor advance by default", and a mixed set silently means half an anchor
+    /// rotation was applied. Zero disables the check, for a deployment that has
+    /// never advanced its anchor.
+    ///
+    /// # Errors
+    ///
+    /// `AUTH.ANCHOR_VERSION_UNSUPPORTED` when an anchor entry is not a parsable
+    /// COSE_Key of a supported algorithm, when a delegation names an unexpected
+    /// anchor version, or when a delegation is offered with **no** anchor to
+    /// verify it against. `AUTH.BINDING_INVALID` when a delegation does not
+    /// verify against the pinned set, or is not a decodable `OwnerDelegation`.
+    ///
+    /// Every one of these is a **startup failure** rather than a per-request
+    /// refusal, for the reason a malformed anchor line is: a partially-loaded
+    /// authority set produces a service that refuses operations a correctly
+    /// configured one would admit, which reads as an outage and is diagnosed as
+    /// one.
+    pub fn with_delegations(
+        owner_anchor_cose_keys: &[Vec<u8>],
+        delegations: &[Vec<u8>],
+        expected_anchor_version: u64,
+    ) -> Result<Self, ServiceError> {
         let mut owner = Vec::with_capacity(owner_anchor_cose_keys.len());
         for k in owner_anchor_cose_keys {
             owner.push(
@@ -367,7 +541,58 @@ impl CryptoVerifier {
                 .map_err(|_| codes::bare(twinvpn_types::codes::AUTH_ANCHOR_VERSION_UNSUPPORTED))?,
             );
         }
-        Ok(Self { owner })
+        if !delegations.is_empty() && owner.is_empty() {
+            // A delegation with nothing to chain to is not a weaker
+            // authorisation; it is none at all. Admitting it would make the
+            // delegation file itself the trust root.
+            return Err(codes::bare(
+                twinvpn_types::codes::AUTH_ANCHOR_VERSION_UNSUPPORTED,
+            ));
+        }
+
+        let mut delegated = Vec::with_capacity(delegations.len());
+        for octets in delegations {
+            let statement = owner
+                .iter()
+                .find_map(|anchor| {
+                    twinvpn_crypto::verify_cose_sign1(
+                        octets,
+                        twinvpn_crypto::StatementKind::OwnerDelegation,
+                        anchor,
+                    )
+                    .ok()
+                })
+                .ok_or_else(|| codes::bare(codes::SIGNATURE_INVALID))?;
+            let decoded = twinvpn_crypto::statements::decode_owner_delegation(&statement)
+                .map_err(|_| codes::bare(codes::SIGNATURE_INVALID))?;
+            if expected_anchor_version != 0 && decoded.anchor_version != expected_anchor_version {
+                return Err(codes::bare(
+                    twinvpn_types::codes::AUTH_ANCHOR_VERSION_UNSUPPORTED,
+                ));
+            }
+            let key = twinvpn_crypto::PublicVerifyingKey::from_cose_key(
+                &decoded.osk_pub_cose,
+                twinvpn_crypto::StatementKind::OwnerDelegation,
+            )
+            .map_err(|_| codes::bare(twinvpn_types::codes::AUTH_ANCHOR_VERSION_UNSUPPORTED))?;
+            delegated.push((
+                key,
+                Delegation {
+                    osk_id: decoded.osk_id,
+                    osk_pub_cose: decoded.osk_pub_cose,
+                    powers: decoded.powers,
+                    anchor_version: decoded.anchor_version,
+                    not_after_ms: decoded.not_after_ms,
+                },
+            ));
+        }
+        Ok(Self { owner, delegated })
+    }
+
+    /// The delegations this verifier admitted, for the startup posture line.
+    #[must_use]
+    pub fn delegations(&self) -> Vec<&Delegation> {
+        self.delegated.iter().map(|(_, d)| d).collect()
     }
 
     /// Whether any `Owner`-authority statement can be admitted at all.
@@ -409,7 +634,22 @@ impl StatementVerifier for CryptoVerifier {
         };
 
         let mut last = VerifyFailure::BadSignature;
-        for key in candidates {
+        // The ORK first, then every key it delegated to. Order matters only for
+        // reporting: a key cannot be both, because a delegation names an OSK and
+        // the ORK signs the delegation.
+        let delegated: Vec<(&twinvpn_crypto::PublicVerifyingKey, Option<&Delegation>)> =
+            match signer {
+                SignerKey::OwnerAnchors => candidates
+                    .iter()
+                    .map(|k| (k, None))
+                    .chain(self.delegated.iter().map(|(k, d)| (k, Some(d))))
+                    .collect(),
+                // A device statement chains to nothing: the candidate set is
+                // exactly the one key this service recorded for that device.
+                SignerKey::Device(_) => candidates.iter().map(|k| (k, None)).collect(),
+            };
+
+        for (key, holder) in delegated {
             match twinvpn_crypto::verify_cose_sign1(octets.as_bytes(), kind, key) {
                 Ok(statement) => {
                     return Ok(Verified {
@@ -419,6 +659,10 @@ impl StatementVerifier for CryptoVerifier {
                         octets: octets.clone(),
                         not_before_ms: 0,
                         not_after_ms: not_after_of(expected, &statement),
+                        pairing_id: pairing_id_of(expected, &statement),
+                        signer_delegation: holder.cloned(),
+                        delegation: delegation_of(expected, &statement),
+                        succession: succession_of(expected, &statement),
                     });
                 }
                 // Only a signature mismatch is worth trying the next anchor:
@@ -472,6 +716,94 @@ fn not_after_of(
         StatementKind::RevocationStatement
         | StatementKind::PairingRevocation
         | StatementKind::TunnelKeyBinding => 0,
+    }
+}
+
+/// Reads the delegation an `OwnerDelegation` **is**, and nothing else.
+///
+/// No wildcard arm, for the reason [`succession_of`] has none.
+fn delegation_of(
+    expected: StatementKind,
+    statement: &twinvpn_crypto::cose::VerifiedStatement,
+) -> Option<Delegation> {
+    match expected {
+        StatementKind::OwnerDelegation => {
+            twinvpn_crypto::statements::decode_owner_delegation(statement)
+                .ok()
+                .map(|d| Delegation {
+                    osk_id: d.osk_id,
+                    osk_pub_cose: d.osk_pub_cose,
+                    powers: d.powers,
+                    anchor_version: d.anchor_version,
+                    not_after_ms: d.not_after_ms,
+                })
+        }
+        StatementKind::PairingAttestation
+        | StatementKind::IdentitySuccession
+        | StatementKind::PolicyBundle
+        | StatementKind::RouteAdvertisement
+        | StatementKind::ExitNodeOffer
+        | StatementKind::RelayEpochFloor
+        | StatementKind::RevocationStatement
+        | StatementKind::PairingRevocation
+        | StatementKind::TunnelKeyBinding => None,
+    }
+}
+
+/// Reads the ceremony a `PairingAttestation` names, and nothing else.
+///
+/// No wildcard arm, for the reason [`succession_of`] has none.
+fn pairing_id_of(
+    expected: StatementKind,
+    statement: &twinvpn_crypto::cose::VerifiedStatement,
+) -> Option<[u8; 16]> {
+    match expected {
+        StatementKind::PairingAttestation => {
+            twinvpn_crypto::statements::decode_pairing_attestation(statement)
+                .ok()
+                .map(|a| a.pairing_id)
+        }
+        StatementKind::IdentitySuccession
+        | StatementKind::PolicyBundle
+        | StatementKind::OwnerDelegation
+        | StatementKind::RouteAdvertisement
+        | StatementKind::ExitNodeOffer
+        | StatementKind::RelayEpochFloor
+        | StatementKind::RevocationStatement
+        | StatementKind::PairingRevocation
+        | StatementKind::TunnelKeyBinding => None,
+    }
+}
+
+/// Reads the successor an `IdentitySuccession` names, and nothing else.
+///
+/// The match has no wildcard arm on purpose: a future statement kind that also
+/// carried a successor would have to be considered here rather than silently
+/// reported as carrying none.
+fn succession_of(
+    expected: StatementKind,
+    statement: &twinvpn_crypto::cose::VerifiedStatement,
+) -> Option<Succession> {
+    match expected {
+        StatementKind::IdentitySuccession => {
+            twinvpn_crypto::statements::decode_identity_succession(statement)
+                .ok()
+                .map(|s| Succession {
+                    device_id: s.device_id,
+                    old_identity_id: s.old_identity_id,
+                    new_identity_id: s.new_identity_id,
+                    generation: s.generation,
+                })
+        }
+        StatementKind::PairingAttestation
+        | StatementKind::PolicyBundle
+        | StatementKind::OwnerDelegation
+        | StatementKind::RouteAdvertisement
+        | StatementKind::ExitNodeOffer
+        | StatementKind::RelayEpochFloor
+        | StatementKind::RevocationStatement
+        | StatementKind::PairingRevocation
+        | StatementKind::TunnelKeyBinding => None,
     }
 }
 
@@ -543,7 +875,86 @@ pub fn admit(
     if now_ms < claim.not_before_ms {
         return Err(VerifyFailure::Expired.into_error());
     }
+    check_power(&claim, expected, now_ms)?;
     Ok(claim)
+}
+
+/// **The delegation-chain check** — S-32, and the difference between "the
+/// `Owner` chain signed this" and "a key carrying `REVOKE` signed this".
+///
+/// ADR-0007 O5 puts the `OwnerRootKey` offline behind a recovery phrase and does
+/// routine work with per-device `OwnerSigningKey`s, each delegated a subset of
+/// {`ENROLL`, `REVOKE`, `POLICY`, `DELEGATE`, `ADMINISTER`}. Without this check
+/// every OSK carries every power: an admin phone delegated only `ENROLL` could
+/// revoke every device in the `TwinNet` and publish a policy bundle. The
+/// delegation says what the `Owner` actually granted, and this is where that is
+/// enforced.
+///
+/// Two checks, and they are about different documents:
+///
+/// 1. **The signer's** delegation must carry the power the statement kind needs.
+///    Skipped when the ORK itself signed — the root is unscoped by construction,
+///    because it is the key every delegation chains to.
+/// 2. **The statement's own** delegation, for the `OwnerDelegation` that is an
+///    enrolment proof, must carry `ENROLL`. `RegisterDevice` presents a
+///    delegation as its authorisation; a delegation granting only `POLICY` is
+///    not an approval to join, however impeccably it is signed.
+///
+/// # Errors
+///
+/// `AUTH.CRED_EXPIRED` for a delegation past its own `not_after_ms` — checked
+/// here, at use, because this process outlives the file it loaded.
+/// `AUTH.UNEXPECTED_DELEGATION` carrying `osk_id` when the power is absent.
+fn check_power(claim: &Verified, expected: StatementKind, now_ms: u64) -> Result<(), ServiceError> {
+    let Some(required) = expected.required_power() else {
+        // A device-authority statement. There is no OSK power to check, and
+        // inventing one would be a check that always passes.
+        return Ok(());
+    };
+
+    // 1. Whoever signed. `None` is the ORK: unscoped, deliberately.
+    if let Some(signer) = claim.signer_delegation.as_ref() {
+        require_power(signer, required, now_ms)?;
+    }
+
+    // 2. The enrolment proof's own grant.
+    if expected == StatementKind::OwnerDelegation {
+        let proof = claim
+            .delegation
+            .as_ref()
+            // Fail-closed: a proof whose grant cannot be read is not a proof.
+            // `AUTH.BINDING_INVALID` and not a power failure, because what is
+            // wrong is the document rather than its scope.
+            .ok_or_else(|| codes::bare(codes::SIGNATURE_INVALID))?;
+        require_power(proof, required, now_ms)?;
+    }
+    Ok(())
+}
+
+/// One delegation, one power.
+fn require_power(
+    delegation: &Delegation,
+    required: twinvpn_crypto::statements::OskPower,
+    now_ms: u64,
+) -> Result<(), ServiceError> {
+    if delegation.not_after_ms != 0 && now_ms > delegation.not_after_ms {
+        return Err(codes::bare(twinvpn_types::codes::AUTH_CRED_EXPIRED));
+    }
+    if !delegation.has(required) {
+        // `osk_id` is the evidence field the registry declares for this code,
+        // and it is a public identifier: an operator needs to know WHICH admin
+        // key was asked to do something it was not delegated.
+        return Err(ServiceError::new(
+            twinvpn_types::codes::AUTH_UNEXPECTED_DELEGATION,
+            crate::COMPONENT,
+        )
+        .evidence(
+            "osk_id",
+            twinvpn_types::EvidenceValue::Text(delegation.osk_id.clone()),
+        )
+        .build());
+    }
+    Ok(())
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -571,6 +982,15 @@ pub mod testing {
         pub kind: Option<StatementKind>,
         /// The window every verified statement will carry.
         pub not_after_ms: u64,
+        /// The ceremony a `PairingAttestation` will be reported as naming.
+        pub pairing_id: Option<[u8; 16]>,
+        /// The delegation the signer will be reported as holding. `None` is the
+        /// ORK: unscoped, which is what an `owner()` double means by default.
+        pub signer_delegation: Option<super::Delegation>,
+        /// The delegation an `OwnerDelegation` will be reported as being.
+        pub delegation: Option<super::Delegation>,
+        /// The successor an `IdentitySuccession` will be reported as naming.
+        pub succession: Option<super::Succession>,
     }
 
     impl ScriptedVerifier {
@@ -581,6 +1001,10 @@ pub mod testing {
                 authority: SigningAuthority::Owner,
                 kind: None,
                 not_after_ms: 0,
+                pairing_id: None,
+                signer_delegation: None,
+                delegation: None,
+                succession: None,
             }
         }
 
@@ -591,6 +1015,10 @@ pub mod testing {
                 authority: SigningAuthority::Device,
                 kind: None,
                 not_after_ms: 0,
+                pairing_id: None,
+                signer_delegation: None,
+                delegation: None,
+                succession: None,
             }
         }
 
@@ -605,6 +1033,34 @@ pub mod testing {
         #[must_use]
         pub const fn expiring_at(mut self, not_after_ms: u64) -> Self {
             self.not_after_ms = not_after_ms;
+            self
+        }
+
+        /// Reports the ceremony a `PairingAttestation` names.
+        #[must_use]
+        pub const fn attesting_to(mut self, pairing_id: [u8; 16]) -> Self {
+            self.pairing_id = Some(pairing_id);
+            self
+        }
+
+        /// Reports the delegation the signer holds — an OSK rather than the ORK.
+        #[must_use]
+        pub fn held_by(mut self, delegation: super::Delegation) -> Self {
+            self.signer_delegation = Some(delegation);
+            self
+        }
+
+        /// Reports the delegation an `OwnerDelegation` statement carries.
+        #[must_use]
+        pub fn granting(mut self, delegation: super::Delegation) -> Self {
+            self.delegation = Some(delegation);
+            self
+        }
+
+        /// Reports the succession an `IdentitySuccession` names.
+        #[must_use]
+        pub const fn succeeding_to(mut self, succession: super::Succession) -> Self {
+            self.succession = Some(succession);
             self
         }
     }
@@ -630,6 +1086,10 @@ pub mod testing {
                 octets: octets.clone(),
                 not_before_ms: 0,
                 not_after_ms: self.not_after_ms,
+                pairing_id: self.pairing_id,
+                signer_delegation: self.signer_delegation.clone(),
+                delegation: self.delegation.clone(),
+                succession: self.succession,
             })
         }
     }
@@ -663,6 +1123,157 @@ mod tests {
         use twinvpn_crypto::emit::Item;
         let payload = Item::Map(vec![(Item::Uint(1), Item::Uint(7))]);
         opaque_statement(bytes::Bytes::from(id.sign(&payload))).expect("within cap")
+    }
+
+    /// A real ORK-signed `OwnerDelegation`, as wire octets.
+    ///
+    /// Built to `twinvpn-crypto`'s own `DELEGATION_SCHEMA`: labels 1..6 plus the
+    /// `crit` array at 7, which must name `powers`. Signed by `root` so the
+    /// chain this test exercises is the real one — an ORK signature over a
+    /// delegation naming an OSK — and not a double.
+    fn ork_signed_delegation(
+        root: &twinvpn_crypto::testkit::FixtureIdentity,
+        signing: &twinvpn_crypto::testkit::FixtureIdentity,
+        osk_id: &str,
+        powers: &[&str],
+        anchor_version: u64,
+        not_after_ms: u64,
+    ) -> Vec<u8> {
+        use twinvpn_crypto::emit::Item;
+        let payload = Item::Map(vec![
+            (Item::Uint(1), Item::Text("twn_test".to_owned())),
+            (Item::Uint(2), Item::Text(osk_id.to_owned())),
+            (Item::Uint(3), Item::Bytes(signing.cose_key())),
+            (
+                Item::Uint(4),
+                Item::Array(powers.iter().map(|p| Item::Text((*p).to_owned())).collect()),
+            ),
+            (Item::Uint(5), Item::Uint(anchor_version)),
+            (Item::Uint(6), Item::Uint(not_after_ms)),
+            (
+                Item::Uint(7),
+                Item::Array(vec![Item::Text("powers".to_owned())]),
+            ),
+        ]);
+        root.sign(&payload)
+    }
+
+    #[test]
+    fn a_real_delegation_chain_scopes_a_real_signature() {
+        // The whole point, with no doubles anywhere: an ORK signs a delegation
+        // granting an OSK only REVOKE; the OSK then signs a statement. The
+        // REVOKE-needing kind is admitted and the POLICY-needing kind is not,
+        // and both answers come from the same loaded chain.
+        let root = fixture(b"root");
+        let signing = fixture(b"osk-revoke-only");
+        let delegation = ork_signed_delegation(&root, &signing, "osk-revoke", &["REVOKE"], 1, 0);
+
+        let verifier = CryptoVerifier::with_delegations(&[root.cose_key()], &[delegation], 1)
+            .expect("the chain loads");
+        assert_eq!(verifier.delegations().len(), 1);
+        assert_eq!(verifier.delegations()[0].osk_id, "osk-revoke");
+
+        let statement = signed(&signing);
+        admit(
+            &verifier,
+            &statement,
+            StatementKind::RevocationStatement,
+            1_000,
+            SignerKey::OwnerAnchors,
+        )
+        .expect("the OSK carries REVOKE");
+
+        let err = admit(
+            &verifier,
+            &statement,
+            StatementKind::PolicyBundle,
+            1_000,
+            SignerKey::OwnerAnchors,
+        )
+        .expect_err("it does not carry POLICY");
+        assert_eq!(err.code().as_str(), "AUTH.UNEXPECTED_DELEGATION");
+    }
+
+    #[test]
+    fn an_undelegated_key_is_not_the_owner_however_well_it_signs() {
+        // The property the whole file rests on: a signature is not an
+        // authority. A key nobody delegated to verifies against nothing.
+        let root = fixture(b"root");
+        let stranger = fixture(b"not-delegated");
+        let verifier = CryptoVerifier::with_delegations(&[root.cose_key()], &[], 0).expect("loads");
+        let err = admit(
+            &verifier,
+            &signed(&stranger),
+            StatementKind::RevocationStatement,
+            1_000,
+            SignerKey::OwnerAnchors,
+        )
+        .expect_err("refused");
+        assert_eq!(err.code().as_str(), "AUTH.BINDING_INVALID");
+    }
+
+    #[test]
+    fn a_delegation_the_anchor_did_not_sign_fails_startup() {
+        // Loaded once, at startup, against the pinned root. An impostor
+        // delegation must not become a per-request refusal nobody sees until an
+        // operator tries to revoke a stolen laptop.
+        let root = fixture(b"root");
+        let impostor = fixture(b"impostor-root");
+        let signing = fixture(b"signing");
+        let forged = ork_signed_delegation(&impostor, &signing, "osk-forged", &["REVOKE"], 1, 0);
+        let err = CryptoVerifier::with_delegations(&[root.cose_key()], &[forged], 0)
+            .expect_err("the pinned root did not sign it");
+        assert_eq!(err.code().as_str(), "AUTH.BINDING_INVALID");
+    }
+
+    #[test]
+    fn a_delegation_from_a_superseded_anchor_fails_startup() {
+        // S-32: "a delegation issued under an older anchor does not survive an
+        // anchor advance by default." A mixed set means half a rotation landed.
+        let root = fixture(b"root");
+        let signing = fixture(b"signing");
+        let stale = ork_signed_delegation(&root, &signing, "osk-stale", &["REVOKE"], 1, 0);
+        let err = CryptoVerifier::with_delegations(&[root.cose_key()], &[stale], 2)
+            .expect_err("anchor version 1 is not 2");
+        assert_eq!(err.code().as_str(), "AUTH.ANCHOR_VERSION_UNSUPPORTED");
+    }
+
+    #[test]
+    fn a_delegation_with_no_anchor_to_chain_to_is_refused() {
+        // Otherwise the delegation file would itself be the trust root.
+        let root = fixture(b"root");
+        let signing = fixture(b"signing");
+        let orphan = ork_signed_delegation(&root, &signing, "signing", &["REVOKE"], 1, 0);
+        let err =
+            CryptoVerifier::with_delegations(&[], &[orphan], 0).expect_err("nothing to chain to");
+        assert_eq!(err.code().as_str(), "AUTH.ANCHOR_VERSION_UNSUPPORTED");
+    }
+
+    #[test]
+    fn every_owner_statement_kind_names_the_power_it_needs() {
+        // No Owner-authority kind may be power-less: one that was would be
+        // admitted on the signature alone, which is the gap this table closes.
+        use twinvpn_crypto::statements::OskPower as P;
+        for (kind, expected) in [
+            (StatementKind::RevocationStatement, Some(P::Revoke)),
+            (StatementKind::PairingRevocation, Some(P::Revoke)),
+            (StatementKind::PolicyBundle, Some(P::Policy)),
+            (StatementKind::OwnerDelegation, Some(P::Enroll)),
+            (StatementKind::RelayEpochFloor, Some(P::Administer)),
+        ] {
+            assert_eq!(kind.required_power(), expected, "{}", kind.as_str());
+            assert_eq!(kind.required_authority(), SigningAuthority::Owner);
+        }
+        for kind in [
+            StatementKind::PairingAttestation,
+            StatementKind::IdentitySuccession,
+            StatementKind::TunnelKeyBinding,
+            StatementKind::RouteAdvertisement,
+            StatementKind::ExitNodeOffer,
+        ] {
+            assert!(kind.required_power().is_none(), "{}", kind.as_str());
+            assert_eq!(kind.required_authority(), SigningAuthority::Device);
+        }
     }
 
     #[test]

@@ -35,6 +35,25 @@ pub struct Ctx<'a> {
     /// only over the mutually authenticated channel, so the caller is the
     /// connection's identity and a `sender_id` in the body is a claim.
     pub caller: DeviceKey,
+    /// The COSE_Key the caller **proved possession of** in the TLS handshake,
+    /// converted from its RFC 7250 raw public key.
+    ///
+    /// Not a claim: TLS 1.3's `CertificateVerify` is a signature over the
+    /// handshake transcript, so this is the one key on the connection that is
+    /// cryptographically established rather than asserted.
+    ///
+    /// It exists because of rotation. `RotateDeviceCredential` moves a device's
+    /// `identity_id` to the successor the signed `IdentitySuccession` names, but
+    /// the succession carries **no public key**, so the device record cannot
+    /// hold the successor's key. [`caller_key`] closes that with a check rather
+    /// than a write: if this key derives to the `identity_id` the record names,
+    /// it *is* that identity, and it is the key a device-signed statement must
+    /// be verified against.
+    ///
+    /// `None` on a path with no connection behind it — a test, or a future
+    /// admin caller — and then [`caller_key`] falls back to the recorded key,
+    /// which is the pre-rotation behaviour unchanged.
+    pub caller_identity_key: Option<&'a [u8]>,
     /// The `TwinNet` scope. Every message is `TwinNet`-scoped.
     pub twinnet_id: &'a str,
     /// Wall-clock milliseconds, **passed in** rather than read, so a decision is
@@ -143,21 +162,45 @@ pub fn require_quorum(ctx: &Ctx<'_>, command: crate::Command) -> Result<(), Serv
     Ok(())
 }
 
-/// The calling device's recorded `DeviceIdentityKey`, as COSE_Key octets.
+/// The calling device's `DeviceIdentityKey`, as COSE_Key octets.
 ///
-/// **The recorded one, never the one the request carried.** A handler that took
-/// the key out of the body would be verifying a device-signed statement against
-/// a key the same body chose, which verifies nothing at all.
+/// **Never the one the request carried.** A handler that took the key out of the
+/// body would be verifying a device-signed statement against a key the same body
+/// chose, which verifies nothing at all. Two sources are permitted, and both are
+/// established rather than asserted:
+///
+/// 1. the key this service **recorded at registration**, or
+/// 2. the key the caller **proved possession of on this connection**, and then
+///    only when it derives to the `identity_id` the record itself names.
+///
+/// (2) exists for exactly one case: a device that has rotated its identity key.
+/// Its record's `identity_id` was moved to the successor by a signed
+/// `IdentitySuccession` — an authorisation this service verified against the
+/// *old* key — but that statement carries no public key, so the record still
+/// holds the predecessor's. The successor arrives on the wire, in the handshake,
+/// and `derive_identity_id(channel_key) == record.identity_id` is the proof that
+/// it is the key the old key nominated. Without this, every device-signed
+/// command from a rotated device would fail `AUTH.BINDING_INVALID` for ever.
 ///
 /// # Errors
 ///
 /// `AUTH.PEER_UNTRUSTED` when the caller is not a member.
-pub fn caller_key<'a>(tx: &'a crate::NetTx, ctx: &Ctx<'_>) -> Result<&'a [u8], ServiceError> {
-    tx.state()
+pub fn caller_key(tx: &crate::NetTx, ctx: &Ctx<'_>) -> Result<Vec<u8>, ServiceError> {
+    let record = tx
+        .state()
         .devices
         .get(&ctx.caller)
-        .map(|d| d.identity_public_key.as_slice())
-        .ok_or_else(|| crate::codes::bare(twinvpn_types::codes::AUTH_PEER_UNTRUSTED))
+        .ok_or_else(|| crate::codes::bare(twinvpn_types::codes::AUTH_PEER_UNTRUSTED))?;
+    if let Some(channel) = ctx.caller_identity_key {
+        // `derive_identity_id` and not the checked form: these octets were
+        // produced by `binding::spki::spki_to_es256_cose_key`, which built them
+        // canonically from a P-256 point rustls had already accepted, so the
+        // canonicality the checked form proves is established at the conversion.
+        if twinvpn_crypto::deviceid::derive_identity_id(channel).to_array() == record.identity_id {
+            return Ok(channel.to_vec());
+        }
+    }
+    Ok(record.identity_public_key.clone())
 }
 
 /// Refuses a request from a device in the never-shrinking revoked set.
@@ -196,7 +239,107 @@ pub fn fixed<const N: usize>(field: &'static str, value: &[u8]) -> Result<[u8; N
 
 #[cfg(test)]
 mod tests {
-    use super::{fixed, mutation_result, record, Outcome};
+    use super::{caller_key, fixed, mutation_result, record, Ctx, Outcome};
+    use crate::model::{DeviceRecord, NetState};
+    use crate::tx::{NetTx, WriteLease};
+    use crate::verify::RefuseUnverifiable;
+
+    /// A `TwinNet` holding one device whose recorded key is `recorded` and whose
+    /// `identity_id` is `identity_id`.
+    fn one_device(recorded: &[u8], identity_id: [u8; 32]) -> NetTx {
+        let mut state = NetState::new("twn_test");
+        state.devices.insert(
+            [1u8; 32],
+            DeviceRecord {
+                device_id: [1u8; 32],
+                identity_id,
+                identity_public_key: recorded.to_vec(),
+                generation: 0,
+                tk_generation: 0,
+                label: String::new(),
+                version: 1,
+                membership_epoch: 1,
+                twinnet_addr_v4: [10, 0, 0, 1],
+                twinnet_addr_v6: [0u8; 16],
+                encoded: Vec::new(),
+                revoked: false,
+                net_seq: 1,
+                created_at_ms: 0,
+            },
+        );
+        NetTx::open(state, WriteLease { shard_epoch: 1 }, 0).expect("opens")
+    }
+
+    fn ctx<'a>(channel: Option<&'a [u8]>, verifier: &'a RefuseUnverifiable) -> Ctx<'a> {
+        Ctx {
+            caller: [1u8; 32],
+            caller_identity_key: channel,
+            twinnet_id: "twn_test",
+            now_ms: 0,
+            verifier,
+            quorum_available: true,
+            correlation: twinvpn_service_common::Correlation::empty(),
+            coordination_endpoints: &[],
+        }
+    }
+
+    #[test]
+    fn without_a_channel_key_the_recorded_key_is_the_signer() {
+        let tx = one_device(b"recorded", [9u8; 32]);
+        let v = RefuseUnverifiable;
+        assert_eq!(
+            caller_key(&tx, &ctx(None, &v)).expect("a member"),
+            b"recorded".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_channel_key_that_is_not_the_recorded_identity_is_ignored() {
+        // THE IMPORTANT HALF. A connection's key does not get to displace the
+        // recorded one just by being present: it is admitted only when it
+        // derives to the `identity_id` the record itself names. Otherwise any
+        // member could have its own statements checked against its own key while
+        // the record said something else.
+        let tx = one_device(b"recorded", [9u8; 32]);
+        let v = RefuseUnverifiable;
+        let impostor = twinvpn_crypto::testkit::FixtureIdentity::from_seed(b"impostor").cose_key();
+        assert_eq!(
+            caller_key(&tx, &ctx(Some(&impostor), &v)).expect("a member"),
+            b"recorded".to_vec(),
+            "the recorded key still wins"
+        );
+    }
+
+    #[test]
+    fn a_successors_channel_key_is_admitted_because_the_record_names_it() {
+        // The rotation case. `IdentitySuccession` moved `identity_id` to the
+        // successor and carried no public key, so the record still holds the
+        // predecessor's — and the successor is the key on the wire. Without
+        // this, every device-signed command from a rotated device would fail
+        // AUTH.BINDING_INVALID for ever.
+        let successor =
+            twinvpn_crypto::testkit::FixtureIdentity::from_seed(b"successor").cose_key();
+        let successor_id = twinvpn_crypto::deviceid::derive_identity_id(&successor).to_array();
+        let tx = one_device(b"predecessor", successor_id);
+        let v = RefuseUnverifiable;
+        assert_eq!(
+            caller_key(&tx, &ctx(Some(&successor), &v)).expect("a member"),
+            successor,
+            "the proven successor is the signer the record named"
+        );
+    }
+
+    #[test]
+    fn a_non_member_has_no_key_whatever_it_presented() {
+        let mut state = NetState::new("twn_test");
+        state.trust_epoch = 1;
+        let tx = NetTx::open(state, WriteLease { shard_epoch: 1 }, 0).expect("opens");
+        let v = RefuseUnverifiable;
+        let key = twinvpn_crypto::testkit::FixtureIdentity::from_seed(b"stranger").cose_key();
+        let err = caller_key(&tx, &ctx(Some(&key), &v)).expect_err("not a member");
+        assert_eq!(err.code().as_str(), "AUTH.PEER_UNTRUSTED");
+    }
+
     use prost::Message;
     use twinvpn_schema::v1;
 

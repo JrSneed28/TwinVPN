@@ -375,3 +375,170 @@ fn bound_pair() -> (PairTable, u32) {
     );
     (t, a.get())
 }
+
+// ===========================================================================
+// 5. The leg handshake gives the relay `K_leg` and NOTHING ELSE.
+// ===========================================================================
+//
+// This section did not exist while the relay had no handshake, and it is the
+// part that had to be written the moment one landed. A `Noise_IK` handshake
+// naturally ends in a transport session holding two ChaCha20-Poly1305 keys —
+// which would be a **fourth** entry in ADR-0005 §7.1's inventory, and one with
+// an `open()` on it. The whole design of `crate::leg` and of
+// `twinvpn_crypto::relay_leg` is arranged so that fourth key never crosses back
+// into this crate, and these are the assertions that keep it that way.
+
+/// The relay-leg module in `twinvpn-crypto`, as source.
+fn relay_leg_source() -> String {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../core/crates/twinvpn-crypto/src/relay_leg.rs");
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+}
+
+#[test]
+fn the_handshake_returns_a_mac_key_and_no_cipher() {
+    // The relay side first: nothing in this crate names a Noise session, a
+    // transport mode, or an AEAD operation.
+    for (name, source) in all_sources() {
+        let code = code_only(&source);
+        for forbidden in [
+            "TransportSession",
+            "into_transport",
+            "transport_mode",
+            "StatelessTransportState",
+            "fn seal",
+            ".seal(",
+            "ChaCha",
+            "Poly1305",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "{name} names `{forbidden}`. The leg handshake must yield K_leg \
+                 and nothing else: a cipher here is the fourth key ADR-0005 §7.1 \
+                 closes the inventory against, and I1 is an argument about that \
+                 inventory rather than about behaviour."
+            );
+        }
+    }
+
+    // And the producer side: `twinvpn-crypto`'s relay-leg module completes the
+    // handshake itself and hands back only `CompletedLeg`, whose whole surface is
+    // `k_leg`, `remote_static` and `payload`.
+    let leg = code_only(&relay_leg_source());
+    assert!(
+        !leg.contains("into_transport") && !leg.contains("transport_mode"),
+        "twinvpn-crypto's relay leg entered Noise transport mode; K_leg is a MAC \
+         key (ADR-0005 §9.1), not a session"
+    );
+    let start = leg
+        .find("pub struct CompletedLeg {")
+        .expect("the handshake's only output type");
+    let body = &leg[start..start + leg[start..].find('}').expect("closed")];
+    for forbidden in ["Session", "cipher", "Cipher", "State"] {
+        assert!(
+            !body.contains(forbidden),
+            "CompletedLeg gained `{forbidden}`: it is the ENTIRE output of the \
+             handshake, so a cipher on it is a cipher in the relay"
+        );
+    }
+}
+
+#[test]
+fn the_relay_leg_is_a_different_protocol_from_l_data() {
+    // ADR-0005 §11.2 row ADR-0001(a): `RLK` is "a distinct, domain-separated
+    // relay-leg key that MUST NOT be derivable from, or used to derive, any
+    // L-DATA key". The strongest available form of that is no shared key
+    // schedule at all — a different Noise pattern, a different prologue, and no
+    // `psk` slot, so `TwinNetPSK` cannot be an input.
+    assert_eq!(
+        twinvpn_crypto::relay_leg::NOISE_PARAMS,
+        "Noise_IK_25519_ChaChaPoly_BLAKE2s"
+    );
+    assert_ne!(
+        twinvpn_crypto::relay_leg::NOISE_PARAMS,
+        twinvpn_crypto::noise::NOISE_PARAMS,
+        "the relay leg must not be L-DATA's handshake: a relay is not a party to \
+         L-DATA (ADR-0005 §7.3) and running the same pattern would make that a \
+         claim about configuration rather than about protocol"
+    );
+    assert!(!twinvpn_crypto::relay_leg::NOISE_PARAMS.contains("psk"));
+
+    // And this crate never reaches for the L-DATA handshake at all.
+    for (name, source) in all_sources() {
+        let code = code_only(&source);
+        assert!(
+            !code.contains("twinvpn_crypto::noise") && !code.contains("crypto::noise::"),
+            "{name} imports the L-DATA Noise driver. A relay that could run \
+             `Noise_IKpsk2` is a relay that could terminate a tunnel."
+        );
+    }
+}
+
+#[test]
+fn the_relays_static_key_is_read_only_behind_the_leg_seam() {
+    // ADR-0005 §7.1's FIRST inventory item. It is legitimately held — a
+    // `Noise_IK` responder needs it — but only in one place, and `config` still
+    // holds a path rather than bytes, which is what
+    // `the_key_inventory_is_exactly_three_items` already asserts from the other
+    // direction.
+    let mut readers = Vec::new();
+    for (name, source) in all_sources() {
+        let code = code_only(&source);
+        if code.contains("static_private") {
+            readers.push(name);
+        }
+    }
+    readers.sort();
+    // Four holders, and each earns its place for a reason a reviewer can check
+    // in one line:
+    //
+    //   admit.rs     declares `LegSetup` and hands the key to the responder
+    //   leg.rs       is the responder seam it is handed to
+    //   main.rs      reads it from disk, once, into the locked allocator
+    //   register.rs  derives the PUBLIC half for the relay-map enrolment record
+    //
+    // Anything else is a new place a reviewer must check that the key did not
+    // reach a key schedule, which is what this list exists to make expensive.
+    assert_eq!(
+        readers,
+        vec![
+            "admit.rs".to_owned(),
+            "leg.rs".to_owned(),
+            "main.rs".to_owned(),
+            "register.rs".to_owned()
+        ],
+        "the relay static key is reachable from {readers:?}"
+    );
+
+    // It is held in the locked allocator, not in an ordinary Vec, so it is not
+    // paged to disk and is zeroed on drop.
+    let admit = code_only(&src("admit.rs"));
+    assert!(
+        admit.contains("twinvpn_crypto::LockedBytes"),
+        "the static key must live in the locked allocator"
+    );
+}
+
+#[test]
+fn the_handshake_payload_is_a_token_and_never_a_tunnel_key() {
+    // The one thing that crosses from the device into the relay at leg setup is
+    // a `RelayCapabilityToken`. `TokenPresentation` is its whole shape, and the
+    // field list IS the property: a handshake payload that could carry a key
+    // would be a channel for one.
+    let admit = code_only(&src("admit.rs"));
+    let start = admit
+        .find("pub struct TokenPresentation {")
+        .expect("declared");
+    let body = &admit[start..start + admit[start..].find('}').expect("closed")];
+    // `issuer_key_id` is deliberately not caught by this list: it names WHICH
+    // held public key to verify against and carries no key material. The names
+    // below are the ones that would.
+    for forbidden in ["secret", "psk", "seed", "static", "private", "k_leg"] {
+        assert!(
+            !body.contains(forbidden),
+            "TokenPresentation names `{forbidden}`: the leg-setup payload carries \
+             an issuer key id and a signed token, and widening it is how a relay \
+             comes to hold something it should not"
+        );
+    }
+}

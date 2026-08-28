@@ -69,7 +69,11 @@ twinvpn-relay-directory = { path = "../services/relay-directory" }
 twinvpn-relay-health   = { path = "../services/relay-health" }
 twinvpn-rendezvous     = { path = "../services/rendezvous" }
 twinvpn-presence       = { path = "../services/presence" }
-twinvpn-control-plane  = { path = "../services/control-plane" }
+# `test-support` carries the scripted verifier. It is what lets this workspace
+# drive the control plane's REAL revoke path without a signing anchor this host
+# does not have -- and it is never shipped, exactly as `twinvpn-env`'s and
+# `twinvpn-cp-client`'s equivalents are not (ADR-0018 CD-5).
+twinvpn-control-plane  = { path = "../services/control-plane", features = ["test-support"] }
 twinvpn-platform-linux = { path = "../core/crates/twinvpn-platform-linux" }
 twinvpn-path         = { path = "../core/crates/twinvpn-path" }
 twinvpn-relay-client = { path = "../core/crates/twinvpn-relay-client" }

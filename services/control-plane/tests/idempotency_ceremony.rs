@@ -13,8 +13,8 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    begin_pairing_request, complete_pairing_request, cose, dev, device, key, meta, owner, register,
-    revoke_request, Net, NO_ANCHOR,
+    begin_pairing_request, complete_pairing_request, cose, dev, device_attesting, key, meta, owner,
+    register, revoke_request, Net, NO_ANCHOR,
 };
 use prost::Message;
 use twinvpn_control_plane::config::IDEMPOTENCY_WINDOW_MS;
@@ -48,7 +48,7 @@ fn a_complete_pairing_replay_returns_the_original_outcome_byte_for_byte() {
             &complete_pairing_request(9, &key(102), 1, 0xaa),
             1_100,
             Duration::from_secs(30),
-            &device(),
+            &device_attesting(9),
         )
         .expect("completes");
     assert!(!first.idempotent_replay);
@@ -65,7 +65,7 @@ fn a_complete_pairing_replay_returns_the_original_outcome_byte_for_byte() {
             &complete_pairing_request(9, &key(102), 1, 0xbb),
             1_200,
             Duration::from_secs(60),
-            &device(),
+            &device_attesting(9),
         )
         .expect("replays");
 
@@ -140,7 +140,7 @@ fn a_cancelled_pairing_id_is_burnt_and_never_reissued() {
             &complete_pairing_request(9, &key(104), 2, 0xaa),
             1_200,
             Duration::from_secs(60),
-            &device(),
+            &device_attesting(9),
         )
         .expect_err("burnt");
     assert_eq!(err.code().as_str(), "AUTH.PAIRING_NOT_AUTHORIZED");
@@ -170,7 +170,7 @@ fn a_duplicate_outside_the_window_is_refused_by_the_precondition_not_the_window(
         &complete_pairing_request(9, &key(102), 1, 0xaa),
         1_100,
         Duration::from_secs(30),
-        &device(),
+        &device_attesting(9),
     )
     .expect("completes");
 
@@ -183,7 +183,7 @@ fn a_duplicate_outside_the_window_is_refused_by_the_precondition_not_the_window(
             &complete_pairing_request(9, &key(102), 1, 0xcc),
             late,
             Duration::from_secs(120),
-            &device(),
+            &device_attesting(9),
         )
         .expect("the recorded outcome is still the answer");
     assert!(

@@ -3,7 +3,8 @@
 //!
 //! # What is retained, exactly
 //!
-//! Per device: a [`PresenceState`], a [`Reachability`] (four booleans and a
+//! Per device: a [`PresenceState`][v1::PresenceState], a
+//! [`Reachability`][v1::Reachability] (four booleans and a
 //! coarse network class), and an absolute `expires_at_ms`. That is the whole
 //! record.
 //!

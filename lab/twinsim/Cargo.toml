@@ -1,0 +1,81 @@
+# twinsim — the simulated devices and gateways of the local multi-node environment.
+#
+# Owner: test-engineering. NEVER SHIPPED (ADR-0018 §11.12: `/lab/` is the
+# never-shipped path). Nothing here is linked by a product artifact.
+#
+# ===========================================================================
+# WHY THIS CRATE DOES NOT IMPORT `twinvpn-relay`
+# ===========================================================================
+# `services/relay/tests/common/mod.rs` says it plainly about its own harness:
+# it re-derives the wire format from the relay's own public constants, "which
+# means these tests assert SELF-CONSISTENCY, not interoperability", and it
+# records interoperability as a separate, unmet obligation.
+#
+# This crate is that obligation. `wire.rs` implements the C6 encodings from
+# ADR-0005 §9.1 and `contracts/proto/twinvpn/v1/relay.proto` INDEPENDENTLY of
+# `twinvpn_relay::{control, admit, frame}`. If the two agree, that is evidence;
+# if this crate imported the server's encoder, agreement would be a tautology
+# and the local environment would prove nothing it did not already assume.
+#
+# The one thing it does NOT re-derive is cryptography: CD-I2 forbids a second
+# implementation, so `twinvpn-crypto` supplies `Noise_IK`, the frame MAC, HKDF
+# and the COSE_Sign1 signer, and `twinvpn-schema` supplies every frozen width.
+[package]
+name    = "twinsim"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "simulated TwinVPN devices and gateways for the local multi-node environment"
+publish = false
+
+[[bin]]
+name = "twinsim"
+path = "src/main.rs"
+
+[lib]
+name = "twinsim"
+path = "src/lib.rs"
+
+[dependencies]
+# Every frozen width the wire uses comes from the contract, never from a
+# literal here: PAIR_TAG_BYTES, RELAY_ID_BYTES and the envelope caps are
+# generated from contracts/registry/limits.json.
+twinvpn-schema = { workspace = true }
+twinvpn-types  = { workspace = true }
+
+# CD-I2: the ONE cryptographic implementation. `test-support` carries
+# `FixtureIssuer`, the Ed25519 COSE_Sign1 signer the DEVELOPMENT relay-credential
+# issuer needs. The product never signs a RelayCapabilityToken -- only an Owner
+# does -- so the signer legitimately lives behind a never-shipped feature, and
+# `/lab/` is the never-shipped path.
+twinvpn-crypto = { workspace = true, features = ["test-support"] }
+
+twinlab   = { workspace = true }
+
+# The L-CONTROL seam. `twinvpn-cp-client` declares `ControlTransport` as a TRAIT
+# because ADR-0018 CB-1 puts the socket at the platform seam; implementing it
+# here is supplying that binding for the lab, and is the whole of `control.rs`.
+twinvpn-cp-client = { workspace = true }
+# The `BoxFuture` the trait's own signatures are written in.
+futures-core = "0.3"
+
+# ADR-0002 §11.2 rung 1. Named the way `services/control-plane` names it and for
+# the same reason (finding W-12): `quinn` is a transport implementation that
+# takes its cryptography from rustls and implements none itself, and it
+# RE-EXPORTS the rustls its own feature selection compiled. Naming `rustls`
+# directly here would activate its default `aws-lc-rs` provider alongside
+# quinn's `ring` and give one artifact two providers -- ADR-0018 DP-8's bound
+# violated through a feature flag rather than a dependency line, with no line to
+# review. So: `quinn::rustls::...`, never `rustls::...`.
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio", "log"] }
+
+anyhow    = { workspace = true }
+clap      = { workspace = true, features = ["env"] }
+serde     = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio     = { workspace = true }
+tracing   = { workspace = true }
+tracing-subscriber = { workspace = true }

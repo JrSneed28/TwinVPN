@@ -76,7 +76,24 @@ What it enforces, and why each one is here:
      history of the Owner" — the privacy defect itself. No database URL, no
      Postgres dependency.
 
- 12. RENDEZVOUS AND PRESENCE DO NOT GATE STARTUP ON THE CONTROL PLANE.
+ 12. THE LAB OVERLAY IS NEVER REACHED WITHOUT ASKING FOR IT.
+     Every service in infra/compose/netlab.yml is NEVER SHIPPED (ADR-0018
+     §11.12), so every one must carry a `profiles:` key. A lab service that
+     lost its profile would start on a plain `docker compose up`, and "is that
+     a real device or a simulated one?" would become a question an operator has
+     to answer from a label rather than from the command they typed.
+
+ 13. THE SIMULATORS HAVE THE SAME HEALTH AND READINESS OBLIGATION.
+     ownership.md rule 4 does not have a lab exemption. A simulator whose
+     readiness meant "the process started" would let `up --wait` go green over
+     a stack in which every leg was being refused.
+
+ 14. THE TEST NETWORK IS NEVER `privileged`.
+     `nft` and `tc` need NET_ADMIN and nothing else. `privileged: true` grants
+     SYS_ADMIN and every other capability to an image that, uniquely in this
+     repository, contains a shell.
+
+ 15. RENDEZVOUS AND PRESENCE DO NOT GATE STARTUP ON THE CONTROL PLANE.
      Both declared `ReadinessPolicy::NoControlPlaneCalls`, because a rendezvous
      pulled from the load balancer on a control-plane blip stops candidate
      exchange, which puts the control plane back in every reconnect — I5
@@ -105,6 +122,12 @@ OVERRIDES = [
     REPO_ROOT / "infra" / "compose" / "ipv6-only.yml",
     REPO_ROOT / "infra" / "compose" / "ipv4-only.yml",
 ]
+
+# The never-shipped lab overlay. Held separately from OVERRIDES because it is
+# not an address-family variant of the base: it ADDS services, so the
+# family-parity check (invariant 9) does not apply to it, and three checks that
+# apply to nothing else do.
+NETLAB = REPO_ROOT / "infra" / "compose" / "netlab.yml"
 
 SECRET_NAME = re.compile(
     r"(PASSWORD|PASSWD|SECRET|TOKEN|DATABASE_URL|_DSN|PRIVATE_KEY|SIGNING_KEY|API_KEY)",
@@ -176,10 +199,31 @@ def check_secret_defaults(doc: dict) -> None:
 
 
 def check_no_committed_secrets() -> None:
+    # ------------------------------------------------------------------
+    # `.env` — ASK GIT, exactly as the loop over infra/secrets/ below does.
+    #
+    # An earlier revision failed on the file's mere EXISTENCE, which put this
+    # check in direct contradiction with §1 of infra/README.md: the Quick Start
+    # says `cp infra/env.example .env`, so following the documented path made
+    # `make lint` fail. It went unnoticed because nobody had ever created one.
+    #
+    # Existence is the normal path and is not the finding. The finding is git
+    # being able to SEE it: ignored and untracked is a pass, said quietly;
+    # tracked or unignored stops the build, because a `.env` git can reach is a
+    # committed credential whether or not it has been pushed yet.
+    # ------------------------------------------------------------------
     env = REPO_ROOT / ".env"
     if env.exists():
-        fail(".env exists in the repository root. It must never be committed; "
-             "verify it is ignored and remove it from any staged change.")
+        if git("rev-parse", "--git-dir") != 0:
+            warn(".env exists and git could not be asked whether it is ignored. "
+                 "That is not a pass: check it by hand.")
+        elif git("ls-files", "--error-unmatch", ".env") == 0:
+            fail(".env is TRACKED BY GIT. It holds the database password and every "
+                 "other local secret; remove it from the index "
+                 "(`git rm --cached .env`) and confirm .gitignore covers it.")
+        elif git("check-ignore", "-q", ".env") != 0:
+            fail(".env exists and is NOT ignored by git, so `git add -A` will "
+                 "commit it. Add it to .gitignore.")
 
     secrets_dir = REPO_ROOT / "infra" / "secrets"
     if not secrets_dir.is_dir():
@@ -352,6 +396,148 @@ ENV_CONSUMED_ELSEWHERE = {
     # stable the moment the services adopt it.
     "TWINVPN_INSTANCE_ID",
 }
+
+
+def check_relay_carriages(doc: dict) -> None:
+    """Every carriage compose configures must be one the relay actually binds.
+
+    `services/relay/src/net.rs` binds `R-UDP` and pushes `R-QUIC` / `R-TLS` onto
+    its `unavailable` list, and `main.rs` holds readiness RED for any configured
+    carriage it could not serve. So a compose file that names an unimplemented
+    carriage produces a container that is permanently 503 — and every
+    `depends_on: {condition: service_healthy}` pointing at it waits forever.
+
+    That is a HUNG STACK with no error anywhere, which is why this is a build
+    failure rather than a warning. It is checked against the relay's source so
+    the two cannot drift: when a carriage is implemented, this check stops
+    complaining on its own.
+    """
+    net_rs = REPO_ROOT / "services" / "relay" / "src" / "net.rs"
+    if not net_rs.is_file():
+        warn("services/relay/src/net.rs is missing; carriages not checked")
+        return
+    body = net_rs.read_text()
+
+    # A carriage the relay refuses appears in the `unavailable` arm. Read the
+    # source rather than keeping a second list here — a list would be the thing
+    # that drifts.
+    unimplemented = set()
+    for token, variant in (("R-QUIC", "Carriage::Quic"), ("R-TLS", "Carriage::Tls")):
+        for arm in re.finditer(r"Carriage::\w+(?:\s*\|\s*Carriage::\w+)*\s*=>\s*\{([^}]*)", body):
+            if variant in arm.group(0) and "unavailable.push" in arm.group(1):
+                unimplemented.add(token)
+
+    for name in ("relay-a", "relay-b"):
+        svc = doc.get("services", {}).get(name)
+        if svc is None:
+            continue
+        configured = (svc.get("environment", {}) or {}).get("TWINVPN_RELAY_CARRIAGES")
+        if not configured:
+            continue
+        for carriage in [c.strip() for c in str(configured).split(",") if c.strip()]:
+            if carriage in unimplemented:
+                fail(f"{name}: TWINVPN_RELAY_CARRIAGES names `{carriage}`, which "
+                     f"services/relay/src/net.rs does not bind. main.rs holds "
+                     f"/readyz RED for an unserved carriage, so this container "
+                     f"can never become healthy and everything with "
+                     f"`depends_on: service_healthy` on it hangs.")
+
+
+def check_netlab_overlay(doc: dict, base: dict) -> None:
+    """Invariants 12, 13 and 14, over the never-shipped lab overlay."""
+    services = doc.get("services", {}) or {}
+    if not services:
+        fail("netlab.yml declares no services")
+        return
+
+    base_services = set(base.get("services", {}) or {})
+
+    for name, svc in sorted(services.items()):
+        # A name the base file already declares is an OVERRIDE FRAGMENT, not a
+        # lab service: netlab.yml patches `relay-a` and `relay-b` with static
+        # underlay addresses, because ADR-0011 DN-0 forbids a hostname in a
+        # relay endpoint and the map has to name a literal. Giving those
+        # fragments a `profiles:` key would hide the real relays behind a
+        # profile, which is the opposite of what invariant 12 wants.
+        if name in base_services:
+            if svc.get("profiles"):
+                fail(f"netlab.yml {name}: overrides a base service AND sets "
+                     f"`profiles:`, which would hide the real service behind a "
+                     f"profile flag.")
+            continue
+
+        # 12. Never reached without asking for it.
+        profiles = svc.get("profiles") or []
+        if not profiles:
+            fail(f"netlab.yml {name}: no `profiles:`. Every service here is "
+                 f"NEVER SHIPPED (ADR-0018 §11.12) and must not start on a "
+                 f"plain `docker compose up`.")
+
+        # 13. Health AND readiness, for the simulators.
+        #
+        # `netlab-*` is exempt and the exemption is narrow and stated: it is
+        # not a service, it applies a ruleset and then forwards, and it has no
+        # readiness question of its own. Its HEALTHCHECK re-asserts that the
+        # ruleset is still loaded, which is a liveness question about a
+        # CONDITION rather than about a process.
+        if name.startswith("twinsim"):
+            env = svc.get("environment", {}) or {}
+            if "TWINSIM_ADMIN_ADDR" not in env:
+                fail(f"netlab.yml {name}: no TWINSIM_ADMIN_ADDR, so /healthz, "
+                     f"/readyz and /metrics have no listener")
+            if "TWINSIM_HEALTHCHECK_URL" not in env:
+                fail(f"netlab.yml {name}: no TWINSIM_HEALTHCHECK_URL, so the "
+                     f"image HEALTHCHECK cannot know where to probe")
+            elif "/readyz" not in env["TWINSIM_HEALTHCHECK_URL"]:
+                fail(f"netlab.yml {name}: the healthcheck does not target "
+                     f"/readyz. Liveness does not reflect whether the relay "
+                     f"admitted this peer, and that is the whole question.")
+
+        # 14. NET_ADMIN, never `privileged`.
+        if svc.get("privileged"):
+            fail(f"netlab.yml {name}: `privileged: true`. `nft` and `tc` need "
+                 f"NET_ADMIN and nothing else, and this is the one image in "
+                 f"the repository that contains a shell.")
+        for cap in svc.get("cap_add", []) or []:
+            if cap != "NET_ADMIN":
+                fail(f"netlab.yml {name}: cap_add `{cap}`. Only NET_ADMIN is "
+                     f"justified here; anything else needs a reason in this "
+                     f"file and a line in this check.")
+
+    # The simulated pair must actually be a pair. One simulator alone can only
+    # ever reach PENDING (ADR-0005 §11.1(3): the SECOND BIND on a tag binds
+    # it), so a single-simulator overlay would look like a relay that never
+    # completes a flow.
+    peers = [n for n in services if n.startswith("twinsim") and n not in base_services]
+    if len(peers) < 2:
+        fail("netlab.yml declares fewer than two simulated peers. A pair_tag is "
+             "bound by its SECOND BIND (ADR-0005 §11.1(3)); one simulator can "
+             "only ever be told PENDING, which reads as a broken relay.")
+
+
+def check_dockerfile_healthchecks() -> None:
+    """Invariant 5, over every image that runs a long-lived listener."""
+    for rel, needs_ready in (
+        ("infra/docker/Dockerfile.service", True),
+        ("infra/docker/Dockerfile.twinsim", True),
+        # netlab's HEALTHCHECK asserts the ruleset is still loaded. It has no
+        # readiness path and must not be given a decorative one.
+        ("infra/docker/Dockerfile.netlab", False),
+    ):
+        path = REPO_ROOT / rel
+        if not path.is_file():
+            fail(f"{rel} is missing")
+            continue
+        body = path.read_text()
+        if "HEALTHCHECK" not in body:
+            fail(f"{rel} declares no HEALTHCHECK. ownership.md rule 4 requires "
+                 f"health AND readiness on every long-running service.")
+        if needs_ready and "/readyz" not in body:
+            fail(f"{rel}'s HEALTHCHECK does not target /readyz. Dependency "
+                 f"ordering needs READINESS; liveness does not reflect it.")
+        if needs_ready and "/healthz" not in body:
+            fail(f"{rel} does not document a /healthz liveness path. Health and "
+                 f"readiness are different checks and both are required.")
 
 
 def check_health_and_readiness(doc: dict) -> None:
@@ -639,6 +825,17 @@ def main() -> int:
     check_presence_has_no_database(base)
     check_owner_anchor(base)
     check_readiness_edges(base)
+    check_relay_carriages(base)
+    check_dockerfile_healthchecks()
+
+    if NETLAB.is_file():
+        netlab = yaml.safe_load(NETLAB.read_text())
+        check_secret_defaults(netlab)
+        check_ports(netlab, NETLAB.name)
+        check_bind_sources(netlab)
+        check_netlab_overlay(netlab, base)
+    else:
+        fail(f"missing {NETLAB.relative_to(REPO_ROOT)}")
 
     for path in OVERRIDES:
         if not path.is_file():

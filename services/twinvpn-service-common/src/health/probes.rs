@@ -15,7 +15,7 @@ pub type ProbeFuture<'a> = Pin<Box<dyn Future<Output = ProbeOutcome> + Send + 'a
 /// What a readiness probe reaches for.
 ///
 /// Declared rather than inferred, because the point of the declaration is that a
-/// reviewer and [`ReadinessPolicy`] can both see it.
+/// reviewer and [`super::ReadinessPolicy`] can both see it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeKind {
     /// In-process state only: a key set parsed, a listener bound, a config

@@ -599,7 +599,21 @@ services:
       # --- carriage ladder, ADR-0005 §11.4 -------------------------------
       # R-UDP on 41641 AND 443; R-QUIC on UDP/443; R-TLS on TCP/443. All are
       # RACED with a staggered start, never tried in sequence.
-      TWINVPN_RELAY_CARRIAGES: "R-UDP,R-QUIC,R-TLS"
+      # ONLY the carriages this build actually serves.
+      #
+      # `services/relay/src/net.rs` binds `R-UDP` and fails closed on `R-QUIC`
+      # and `R-TLS` — neither is implemented — and `main.rs` then holds
+      # readiness RED for any configured carriage it could not serve. Listing
+      # all three made `/readyz` answer 503 forever, so the container never
+      # became healthy and every `depends_on: {condition: service_healthy}` on
+      # it waited for a state that could not arrive. Observed on the first real
+      # `docker compose up`; before that, nothing had started.
+      #
+      # THIS LINE MUST GROW WHEN THEY LAND, and it cannot be forgotten:
+      # `check-compose.py` reads `net.rs` and fails the build if compose names
+      # a carriage the relay does not bind. When a carriage is implemented the
+      # check stops complaining on its own.
+      TWINVPN_RELAY_CARRIAGES: "R-UDP"
       TWINVPN_RELAY_LISTEN_UDP: "[::]:41641"
       TWINVPN_RELAY_LISTEN_UDP_443: "[::]:443"
       TWINVPN_RELAY_LISTEN_QUIC: "[::]:443"

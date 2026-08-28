@@ -72,6 +72,33 @@ pub enum PortMap {
     UpnpIgd2,
 }
 
+/// How a personality is produced.
+///
+/// Recorded in the run record next to the personality, because "N-EIM-APDF" is
+/// not a complete description of what ran: two realizations of one personality
+/// can disagree, and §3.4.2's conformance suite exists precisely to catch the
+/// one that has drifted. A record that named the personality and not the
+/// realization would make that disagreement unattributable a year later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+pub enum Realization {
+    /// The `nft` ruleset and `conntrack` state §3.3's table specifies.
+    Nftables,
+    /// `twinnet::nat`: a real middlebox process on the path, holding the RFC
+    /// 4787 state in userspace.
+    UserspaceMiddlebox,
+}
+
+impl Realization {
+    /// A name for a run record.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Realization::Nftables => "nftables",
+            Realization::UserspaceMiddlebox => "userspace-middlebox",
+        }
+    }
+}
+
 /// §3.3's personalities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum Personality {
@@ -165,7 +192,44 @@ impl Personality {
         }
     }
 
-    /// What the host must provide to realize this personality for real.
+    /// What the host must provide to realize this personality for real, under a
+    /// named realization.
+    ///
+    /// **Why there are two.** §3.3's `Realization` column names `nftables` and
+    /// `conntrack`, and that is *a* mechanism rather than the definition of the
+    /// personality. §3.1's rule constrains the **observable semantics**, not the
+    /// kernel subsystem that produces them:
+    ///
+    /// > Every condition TwinLab reproduces MUST be produced by a mechanism with
+    /// > the same observable semantics as the real thing, never by a flag inside
+    /// > TwinVPN.
+    ///
+    /// `twinnet::nat` is a second realization: a real middlebox process holding
+    /// a real RFC 4787 mapping table with real filtering behaviour and real
+    /// timers, forwarding real frames between two real `veth`s. It is not weaker
+    /// than the `nftables` one and it is not stronger; it is a different way to
+    /// produce the same observable behaviour, and §3.4.2's conformance suite —
+    /// an RFC 5780-style prober that is not TwinVPN code — is what decides
+    /// whether either of them actually did.
+    ///
+    /// A host that has neither still reports the personality as unavailable.
+    /// What changed is the number of ways to have it, not the rule about not
+    /// having it.
+    #[must_use]
+    pub fn required_facilities_for(self, realization: Realization) -> Vec<Facility> {
+        match realization {
+            Realization::Nftables => self.required_facilities(),
+            // The userspace middlebox needs a namespace, a `veth` pair and a raw
+            // packet socket, and nothing else — for every personality, because
+            // the mapping table is the same code in all of them.
+            Realization::UserspaceMiddlebox => {
+                vec![Facility::NetworkNamespaces, Facility::Veth]
+            }
+        }
+    }
+
+    /// What the host must provide to realize this personality with `nftables`,
+    /// which is the realization §3.3's table names.
     #[must_use]
     pub fn required_facilities(self) -> Vec<Facility> {
         let mut f = vec![Facility::NetworkNamespaces, Facility::Veth];
@@ -203,7 +267,11 @@ impl Personality {
         match self {
             Personality::Routed => format!(
                 "# {name}: forwarding only, no nat chain (§3.3, the IPv6 default)\n\
-                 {table} {{ chain forward {{ type filter hook forward priority 0; accept }} }}\n",
+                 {table} {{\n\
+                 \x20 chain forward {{ type filter hook forward priority 0;\n\
+                 \x20   accept;\n\
+                 \x20 }}\n\
+                 }}\n",
                 name = self.name()
             ),
             // EIM comes from NF_NAT_RANGE_PERSISTENT; the filtering axis is the
@@ -212,7 +280,7 @@ impl Personality {
                 "# {name}: EIM via `persistent`; EIF via the conntrack `cone` helper\n\
                  {table} {{\n\
                  \x20 chain postrouting {{ type nat hook postrouting priority 100;\n\
-                 \x20   ip saddr {internal_cidr} snat to {external} persistent }}\n\
+                 \x20   ip saddr {internal_cidr} snat to {external} persistent; }}\n\
                  \x20 chain prerouting {{ type nat hook prerouting priority -100; }}\n\
                  }}\n\
                  # helper: on each conntrack NEW, install\n\
@@ -224,7 +292,7 @@ impl Personality {
                 "# {name}: EIM via `persistent`; ADF via a saddr-qualified helper rule\n\
                  {table} {{\n\
                  \x20 chain postrouting {{ type nat hook postrouting priority 100;\n\
-                 \x20   ip saddr {internal_cidr} snat to {external} persistent }}\n\
+                 \x20   ip saddr {internal_cidr} snat to {external} persistent; }}\n\
                  \x20 chain prerouting {{ type nat hook prerouting priority -100; }}\n\
                  }}\n\
                  # helper: dnat rule carries `ip saddr <observed peer address>` (and\n\
@@ -237,7 +305,7 @@ impl Personality {
                  # (no helper at all — §3.3: this needs the least machinery)\n\
                  {table} {{\n\
                  \x20 chain postrouting {{ type nat hook postrouting priority 100;\n\
-                 \x20   ip saddr {internal_cidr} snat to {external} persistent }}\n\
+                 \x20   ip saddr {internal_cidr} snat to {external} persistent; }}\n\
                  }}\n",
                 name = self.name()
             ),
@@ -245,7 +313,7 @@ impl Personality {
                 "# {name}: fresh source port per destination tuple, uniform allocation\n\
                  {table} {{\n\
                  \x20 chain postrouting {{ type nat hook postrouting priority 100;\n\
-                 \x20   ip saddr {internal_cidr} masquerade fully-random }}\n\
+                 \x20   ip saddr {internal_cidr} masquerade fully-random; }}\n\
                  }}\n\
                  # plus a per-destination `ct mark` so an allocation cannot be\n\
                  # coincidentally reused, which would look like EIM to a prober.\n",
@@ -255,7 +323,8 @@ impl Personality {
                 "# {name}: monotone allocator — the delta-prediction target (§3.6)\n\
                  {table} {{\n\
                  \x20 chain postrouting {{ type nat hook postrouting priority 100;\n\
-                 \x20   ip saddr {internal_cidr} snat to {external}:1024-65535 }}\n\
+                 \x20   meta l4proto {{ tcp, udp }} ip saddr {internal_cidr} \\\n\
+                 \x20     snat to {external}:1024-65535; }}\n\
                  }}\n\
                  # `snat to <ext>:<lo>-<hi>` WITHOUT `fully-random` allocates\n\
                  # monotonically, which is the observable §3.6 distinguishes.\n",
@@ -269,23 +338,54 @@ impl Personality {
                      #  reproduce port exhaustion or hairpin behaviour, §3.2)\n\
                      {table} {{\n\
                      \x20 chain postrouting {{ type nat hook postrouting priority 100;\n\
-                     \x20   ip saddr {internal_cidr} snat to {external}:{lo}-{hi} }}\n\
+                     \x20   meta l4proto {{ tcp, udp }} ip saddr {internal_cidr} \\\n\
+                     \x20     snat to {external}:{lo}-{hi}; }}\n\
                      }}\n\
                      # the capped range is what makes port exhaustion REACHABLE (§3.4.2).\n",
                     name = self.name()
                 )
             }
-            Personality::Nat64 => format!(
-                "# {name}: stateful NAT64 in the transit namespace, v6-only access\n\
-                 # pref64 advertised BOTH ways and independently switchable:\n\
-                 #   - RFC 8781 PREF64 in RAs (the path networking.md §3.8 prefers)\n\
-                 #   - RFC 7050 ipv4only.arpa\n\
-                 {table} {{ chain prerouting {{ type nat hook prerouting priority -100;\n\
-                 \x20 ip6 daddr 64:ff9b::/96 dnat ip to 64:ff9b::/96 map {{ }} }} }}\n\
-                 # ({external}, {internal_cidr} are the v4 pool and the v6 access prefix)\n",
-                name = self.name()
-            ),
+            Personality::Nat64 => Self::nat64_ruleset(table, external, internal_cidr),
         }
+    }
+
+    /// The nft ruleset for `N-NAT64`, and why it installs no `nat` chain.
+    ///
+    /// # nftables cannot do the translation, and this says so
+    ///
+    /// There is no NAT64 statement in nft: stateful 6-to-4 translation is an
+    /// out-of-tree job (Jool, tayga) or a userspace middlebox. An earlier
+    /// revision of this function emitted `dnat ip to 64:ff9b::/96 map {}`,
+    /// which is not nft syntax at all — and had never been fed to `nft`,
+    /// because the tests compared the emitted string to expected substrings
+    /// rather than loading it.
+    ///
+    /// What is emitted is the part nft really owns: the policy that traffic to
+    /// the well-known prefix is forwarded to the translator rather than routed
+    /// as ordinary v6. It is deliberately **not** a `nat` chain, because a nat
+    /// chain here would look like a translator and translate nothing — a
+    /// personality reported as realized and not realized, the one outcome
+    /// `docs/testing-strategy.md` §3.1 exists to prevent.
+    ///
+    /// `twinnet::nat`'s userspace realization is the one that can actually
+    /// translate; [`crate::capability::Facility::UserspaceNat`] is what a host
+    /// needs for this class.
+    fn nat64_ruleset(table: &str, external: &str, internal_cidr: &str) -> String {
+        format!(
+            "# {name}: stateful NAT64, v6-only access\n\
+             # pref64 advertised BOTH ways and independently switchable:\n\
+             #   - RFC 8781 PREF64 in RAs (the path networking.md §3.8 prefers)\n\
+             #   - RFC 7050 ipv4only.arpa\n\
+             # The TRANSLATION itself is not nft's; see this function's docs.\n\
+             {table} {{\n\
+             \x20 chain forward {{ type filter hook forward priority 0;\n\
+             \x20   ip6 daddr 64:ff9b::/96 accept;\n\
+             \x20   accept;\n\
+             \x20 }}\n\
+             }}\n\
+             # ({external}, {internal_cidr} are the v4 pool and the v6 access prefix)\n",
+            name = Personality::Nat64.name()
+        )
     }
 }
 
@@ -607,22 +707,97 @@ mod tests {
 
     #[test]
     fn a_ruleset_is_real_nftables_and_names_its_mechanism() {
-        // The realization principle in miniature: every personality that
-        // translates must emit a real nat chain, and the two that do not must
-        // not pretend to.
+        // The realization principle in miniature: a personality that claims to
+        // translate must emit a real nat chain, and one that cannot must not
+        // pretend to.
+        //
+        // THREE cases, not two, and the third is the honest one:
+        //
+        //   - `N-ROUTED` forwards and does not translate. No nat chain.
+        //   - `N-NAT64` translates, and **nftables cannot do it**: there is no
+        //     NAT64 statement in nft, it is Jool/tayga or a userspace
+        //     middlebox. So its nft ruleset carries the forwarding policy and
+        //     NO nat chain. A nat chain here would look like a translator and
+        //     translate nothing — a personality reported as realized and not
+        //     realized, which is the one outcome §3.1 exists to prevent.
+        //     `twinnet::nat` is the realization that can actually translate.
+        //   - Everything else installs a real nat chain.
         for p in Personality::ALL {
             let rs = p.ruleset("198.51.100.10", "192.168.1.0/24", None);
             assert!(rs.contains(p.name()), "{} does not name itself", p.name());
             match p {
-                Personality::Routed => assert!(
+                Personality::Routed | Personality::Nat64 => assert!(
                     !rs.contains("type nat hook"),
-                    "N-ROUTED must have no nat chain at all"
+                    "{} must have no nat chain: it either does not translate, or \
+                     nftables cannot translate for it",
+                    p.name()
                 ),
                 _ => assert!(
                     rs.contains("type nat hook"),
                     "{} must install a real nat chain",
                     p.name()
                 ),
+            }
+        }
+    }
+
+    #[test]
+    fn every_ruleset_is_syntactically_loadable_nftables() {
+        // A STRUCTURAL check, because the real one needs `nft` and a host may
+        // not have it — `.github/workflows/lab-t1.yml` feeds every personality
+        // to a real `nft -f` and asserts it loads.
+        //
+        // This is the cheap half, and it is here because the expensive half did
+        // not exist and ALL EIGHT personalities emitted nft that does not parse:
+        // every rule ran straight into its chain's closing `}` with no `;`,
+        // `N-NAT64` emitted `dnat ip to … map { }` which is not nft syntax at
+        // all, and the two port-range personalities omitted the
+        // transport-protocol match `snat to <ip>:<lo>-<hi>` requires.
+        //
+        // Nothing caught it because the other tests assert that the emitted
+        // string CONTAINS an expected substring — which it did, while being
+        // unloadable. A ruleset nobody applies is a NAT class nobody realizes.
+        for p in Personality::ALL {
+            let rs = p.ruleset("198.51.100.10", "192.168.1.0/24", None);
+            let code: String = rs
+                .lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let opens = code.matches('{').count();
+            let closes = code.matches('}').count();
+            assert_eq!(opens, closes, "{}: unbalanced braces in\n{code}", p.name());
+
+            // The defect, made mechanical. TWO rules, and they are the two
+            // things `nft` actually refused:
+            //
+            //   1. `} }` on one line — two BLOCK terminators with no separator.
+            //      That was `N-ROUTED`, and nft says "unexpected '}'".
+            //   2. A line ending in `}` whose statement does not end in `;`.
+            //      That was the other six.
+            //
+            // Only a `}` at END OF LINE is treated as a block terminator. A `}`
+            // mid-line closes a SET literal — `meta l4proto { tcp, udp }` — and
+            // an earlier version of this check flagged it, which would have
+            // forced the emitter to break a rule that nft accepts.
+            assert!(
+                !code.contains("} }"),
+                "{}: two block terminators on one line need a `;` or a newline \
+                 between them:\n{code}",
+                p.name()
+            );
+            for line in code.lines() {
+                let trimmed = line.trim_end();
+                if !trimmed.ends_with('}') {
+                    continue;
+                }
+                let before = trimmed[..trimmed.len() - 1].trim_end();
+                assert!(
+                    before.is_empty() || before.ends_with(';') || before.ends_with('{'),
+                    "{}: a statement runs into a block-closing `}}` with no `;`:\n  {line}",
+                    p.name()
+                );
             }
         }
     }

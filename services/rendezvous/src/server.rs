@@ -39,7 +39,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use twinvpn_schema::{Channel, Reject};
-use twinvpn_service_common::binding::{Binding, Claim, Refusal};
+use twinvpn_service_common::binding::{Binding, Claim, DerivedPreferred, Refusal};
 use twinvpn_service_common::tls::{self, ChannelIdentity};
 use twinvpn_service_common::transport::Admission;
 use twinvpn_service_common::{Metrics, ServiceError, ShutdownHandle};
@@ -62,7 +62,21 @@ pub struct Shared {
     /// Per-source admission.
     pub limiter: Mutex<SourceLimiter>,
     /// `device_id` ↔ authenticated channel identity.
-    pub bindings: Mutex<Box<dyn Binding<frame::DeviceId>>>,
+    ///
+    /// **[`DerivedPreferred`], not `ChannelPinned`**, and the difference is the
+    /// whole of RZ-10. A claim whose TLS key *derives* to the claimed
+    /// `device_id` (`contracts/docs/identifiers.md` §2) is **proven**, and a
+    /// proven claim takes the subject from a merely pinned holder — which closes
+    /// first-contact impersonation for every device that has not rotated its
+    /// identity key. A key that cannot derive (a rotated device, ADR-0007 §11)
+    /// still binds by first claim, because derived-**only** would lock a rotated
+    /// device out for ever and this service holds no `IdentitySuccession` chain
+    /// and must not fetch one per connection (I5).
+    ///
+    /// Concrete rather than `Box<dyn Binding>`: the provenance counters are the
+    /// only visibility an operator has into how often a name is contested, and a
+    /// trait object cannot expose them.
+    pub bindings: Mutex<DerivedPreferred<frame::DeviceId>>,
     /// The TLS acceptor. Constructed at startup; a key that cannot be loaded is
     /// a startup failure, never a plaintext listener.
     pub tls: tokio_rustls::TlsAcceptor,
@@ -101,9 +115,9 @@ const EGRESS_QUEUE: usize = 16;
 pub mod counters {
     /// `CALL`s accepted at ingress.
     pub const CALLS_RECEIVED: &str = "twinvpn_rendezvous_calls_received_total";
-    /// `CALL`s handed to a live attachment (ADR-0002 §11.5 rung [1]).
+    /// `CALL`s handed to a live attachment (ADR-0002 §11.5 rung \[1\]).
     pub const CALLS_DELIVERED: &str = "twinvpn_rendezvous_calls_delivered_total";
-    /// `CALL`s queued in the jitter buffer (rung [3]).
+    /// `CALL`s queued in the jitter buffer (rung \[3\]).
     pub const CALLS_MAILBOXED: &str = "twinvpn_rendezvous_calls_mailboxed_total";
     /// Frames refused by the B3 parser.
     pub const FRAMES_REJECTED: &str = "twinvpn_rendezvous_frames_rejected_total";
@@ -116,6 +130,26 @@ pub mod counters {
     pub const HANDSHAKES_REFUSED: &str = "twinvpn_rendezvous_tls_handshakes_refused_total";
     /// `ATTACH`es refused because the claimed device does not match the channel.
     pub const BINDING_MISMATCHES: &str = "twinvpn_rendezvous_binding_mismatches_total";
+    /// Pinned holders displaced by a claim that **proved** the `device_id` from
+    /// the key it presented on TLS.
+    ///
+    /// Every one of these is either an impersonation attempt that got as far as
+    /// a binding, or a device reconnecting after an impostor took its name.
+    /// Worth an alert; deliberately **not** a reason code, because nothing was
+    /// refused — the rightful holder was let in.
+    pub const BINDING_DISPLACEMENTS: &str = "twinvpn_rendezvous_binding_displacements_total";
+    /// Claims that arrived on a key this build cannot derive a `device_id` from,
+    /// and so fell back to first-claim pinning.
+    ///
+    /// A device that has rotated its identity key is the expected cause
+    /// (ADR-0007 §11). A sustained rise with no rotation campaign means keys of
+    /// a shape the conversion does not handle are being presented — a silent
+    /// downgrade to the weaker binding, and this counter is how it stops being
+    /// silent.
+    pub const BINDING_UNPROVABLE_KEYS: &str = "twinvpn_rendezvous_binding_unprovable_keys_total";
+    /// Connections whose observed source address has no canonical `Endpoint`
+    /// form, so no `REFLEXIVE` was sent (see [`crate::codec::encode_endpoint`]).
+    pub const REFLEXIVE_SUPPRESSED: &str = "twinvpn_rendezvous_reflexive_suppressed_total";
 }
 
 /// Accepts connections until `handle` drains.
@@ -229,7 +263,20 @@ where
     // networking.md A6(a), and the free reflexive refresh ADR-0004 §5 relies on.
     // Sent once, on connect. The address is used and dropped: nothing here
     // retains it, logs it, or puts it in a metric label.
-    let _ = tx.try_send(Egress::Reflexive(encode_endpoint(peer)));
+    //
+    // `None` means the observed address has no canonical `Endpoint` — a
+    // link-local source, in practice. Silence is the answer there rather than a
+    // candidate the peer would have to reject or, worse, act on; the counter is
+    // so an operator can see it happening.
+    if let Some(reflexive) = encode_endpoint(peer) {
+        let _ = tx.try_send(Egress::Reflexive(reflexive));
+    } else {
+        count(
+            &shared,
+            counters::REFLEXIVE_SUPPRESSED,
+            "connections whose source address has no canonical Endpoint form",
+        );
+    }
 
     let mut bound: Option<(frame::DeviceId, u64)> = None;
     let outcome = read_loop(&mut rd, peer.ip(), &channel, &shared, &tx, &mut bound).await;
@@ -399,6 +446,24 @@ async fn handle_attach(
     // a full table is `CONTROL.ADMISSION_DEFERRED`, because the subject is not
     // contested, the server is — and answering "held by another channel" there
     // would tell a caller its device_id was taken when it was not.
+    // A RE-`ATTACH` on a connection that already holds this subject refreshes
+    // the binding; it must not take a second hold on it.
+    //
+    // `claim` increments a holder count that teardown decrements exactly once,
+    // and a held entry is neither swept at its TTL nor evictable for capacity.
+    // So without this release, a client that sends `ATTACH(D)` twice on one
+    // socket pins D's table entry for the life of the process — and a client
+    // that does it `max_bindings` times leaves every entry held, after which
+    // every *other* device's first `ATTACH` is refused `TableAtCapacity`. One
+    // authenticated peer, no flood, no rate-limit trigger, the whole service
+    // stops admitting devices. Releasing first makes the pair a refresh:
+    // the count is unchanged and the TTL moves forward.
+    {
+        let mut bindings = shared.bindings.lock().await;
+        if bound.is_some_and(|(held, _)| held == device_id) {
+            bindings.release(channel, &device_id, now);
+        }
+    }
     let claim = shared.bindings.lock().await.claim(channel, device_id, now);
     if let Claim::Refused(refusal) = claim {
         let e = refusal.to_error(crate::COMPONENT);
@@ -484,6 +549,32 @@ pub async fn sweeper(shared: Arc<Shared>, handle: ShutdownHandle, interval: Dura
                 let mut router = shared.router.lock().await;
                 router.sweep(now);
                 let labels = twinvpn_service_common::metrics::Labels::new;
+                // The binding table is swept on the SAME timer as the routing
+                // tables, not only when the next claim happens to arrive. A
+                // `device_id` is personal data; leaving lapsed ones in memory
+                // until unrelated traffic evicts them retains an identifier
+                // past the TTL that is its whole retention policy.
+                let (displacements, unprovable) = {
+                    let mut bindings = shared.bindings.lock().await;
+                    bindings.sweep(now);
+                    (bindings.displacements(), bindings.unprovable_keys())
+                };
+                shared
+                    .metrics
+                    .gauge(
+                        counters::BINDING_DISPLACEMENTS,
+                        "pinned holders displaced by a proven claim",
+                        labels(),
+                    )
+                    .set(i64::try_from(displacements).unwrap_or(i64::MAX));
+                shared
+                    .metrics
+                    .gauge(
+                        counters::BINDING_UNPROVABLE_KEYS,
+                        "claims on a key no device_id could be derived from",
+                        labels(),
+                    )
+                    .set(i64::try_from(unprovable).unwrap_or(i64::MAX));
                 shared
                     .metrics
                     .gauge(counters::MAILBOX_BYTES, "retained mailbox bytes", labels())
