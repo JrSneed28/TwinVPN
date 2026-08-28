@@ -60,6 +60,22 @@ pub enum CoreCommand {
     PeerGet,
     /// `path.list`
     PathList,
+
+    // -- the gateway role (ADR-0013), required as a noun by ADR-0023 EM-35 ---
+    //
+    // ADR-0017 §11.9's table has NO `gateway.*` row: EM-35 states the noun as a
+    // requirement ON that catalogue and §11.9 does not yet carry it, so these
+    // four are placed here rather than transcribed from a table that lacks them.
+    // Reported to the integration lead; §11.9 needs the rows.
+    /// `gateway.get` — this device's gateway posture: admitted peers, the
+    /// configured ceiling, the per-peer floor share, and whether the build
+    /// satisfies ADR-0013 MG-14's sixteen-peer floor.
+    GatewayGet,
+    /// `gateway.peer.list` — the admitted peer table (ADR-0013 §11.3).
+    GatewayPeerList,
+    /// `gateway.grant.list` — the live grant set, S-36.
+    GatewayGrantList,
+
     /// `policy.get`
     PolicyGet,
     /// `killswitch.get`
@@ -125,6 +141,14 @@ pub enum CoreCommand {
     ExitnodeSelect,
     /// `autostart.set`
     AutostartSet,
+    /// `gateway.set` — the gateway role's configuration.
+    ///
+    /// **MG-15** makes this refuse at *configuration* time rather than when the
+    /// last peer connects: "a gateway MUST refuse a configuration whose
+    /// worst-case reservation exceeds its measured available memory, at
+    /// configuration time, with `RESOURCE.CAPACITY.MEMORY_EXHAUSTED` — not at
+    /// the moment the last peer connects."
+    GatewaySet,
 
     // -- administration -----------------------------------------------------
     /// `killswitch.mode.set` — `max(current, requested)` (MI-S3).
@@ -179,6 +203,9 @@ impl CoreCommand {
         CoreCommand::PeerList,
         CoreCommand::PeerGet,
         CoreCommand::PathList,
+        CoreCommand::GatewayGet,
+        CoreCommand::GatewayPeerList,
+        CoreCommand::GatewayGrantList,
         CoreCommand::PolicyGet,
         CoreCommand::KillswitchGet,
         CoreCommand::KillswitchExemptGet,
@@ -205,6 +232,7 @@ impl CoreCommand {
         CoreCommand::RouteAcceptSet,
         CoreCommand::ExitnodeSelect,
         CoreCommand::AutostartSet,
+        CoreCommand::GatewaySet,
         CoreCommand::KillswitchModeSet,
         CoreCommand::PairBegin,
         CoreCommand::PairConfirm,
@@ -232,6 +260,10 @@ impl CoreCommand {
             CoreCommand::PeerList => "peer.list",
             CoreCommand::PeerGet => "peer.get",
             CoreCommand::PathList => "path.list",
+            CoreCommand::GatewayGet => "gateway.get",
+            CoreCommand::GatewayPeerList => "gateway.peer.list",
+            CoreCommand::GatewayGrantList => "gateway.grant.list",
+            CoreCommand::GatewaySet => "gateway.set",
             CoreCommand::PolicyGet => "policy.get",
             CoreCommand::KillswitchGet => "killswitch.get",
             CoreCommand::KillswitchExemptGet => "killswitch.exempt.get",
@@ -353,6 +385,10 @@ mod tests {
             | CoreCommand::PeerList
             | CoreCommand::PeerGet
             | CoreCommand::PathList
+            | CoreCommand::GatewayGet
+            | CoreCommand::GatewayPeerList
+            | CoreCommand::GatewayGrantList
+            | CoreCommand::GatewaySet
             | CoreCommand::PolicyGet
             | CoreCommand::KillswitchGet
             | CoreCommand::KillswitchExemptGet

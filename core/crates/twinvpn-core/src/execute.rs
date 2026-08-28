@@ -17,6 +17,7 @@
 //! | `session.get` | `twinvpn.v1.SessionEvent` | one `Session` plus its context |
 //! | `version.get` | `twinvpn.v1.CoreBuildIdentity` | S-46 is the version table |
 //! | `lifecycle.get` | one selector byte | S-61's phase; there is no frozen `HostLifecycleState` message |
+//! | `gateway.get`, `gateway.peer.list`, `gateway.grant.list` | fixed-width big-endian fields | ADR-0017 §11.9's table has **no `gateway.*` row at all** — ADR-0023 EM-35 requires the noun and §11.9 does not enumerate it — so there is no frozen message to choose. The encodings are written out in [`crate::gateway`] and reported to the integration lead |
 //!
 //! Inventing a message would have been the second contract OQ-2 excluded.
 
@@ -75,6 +76,17 @@ pub(crate) fn execute(core: &Core, submission: &Submission) -> Result<Outcome, B
             Ok(Outcome::read(core.event_cursor().to_be_bytes().to_vec()))
         }
 
+        // ADR-0023 EM-35's `gateway` noun. Every body is computed by
+        // `crate::gateway`, which is a thin caller over `twinvpn-gateway` —
+        // ADR-0013's decisions stay in that crate and none is restated here.
+        C::GatewayGet => Ok(Outcome::read(crate::gateway::encode_status(
+            &core.gateway(),
+        ))),
+        C::GatewayPeerList => Ok(Outcome::read(crate::gateway::encode_peers(&core.gateway()))),
+        C::GatewayGrantList => Ok(Outcome::read(crate::gateway::encode_grants(
+            &core.gateway(),
+        ))),
+
         // Everything below is `NotWired` in `dispatch::disposition`, which
         // `Core::submit` consults BEFORE calling this function. Reaching one of
         // these arms means the two matches disagree, which is a defect in this
@@ -107,6 +119,7 @@ pub(crate) fn execute(core: &Core, submission: &Submission) -> Result<Outcome, B
         | C::UpdateStatus
         | C::UpdateCheck
         | C::UpdateStage
+        | C::GatewaySet
         | C::UpdateApply
         | C::UpdateRollback => Err(Box::new(Diagnostic::invariant_violated(
             Component::ManagementInterface,

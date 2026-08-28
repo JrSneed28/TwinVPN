@@ -62,8 +62,7 @@ pub mod command;
 pub mod transport;
 
 pub use catalogue::{
-    catalogue, catalogue_digest, catalogue_digest_text, entry, Delivery, Entry, Idempotency,
-    Scope,
+    catalogue, catalogue_digest, catalogue_digest_text, entry, Delivery, Entry, Idempotency, Scope,
 };
 pub use codes::{substituted, Substitution, SUBSTITUTIONS};
 pub use command::{CoreCommand, Submission};

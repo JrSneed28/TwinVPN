@@ -293,8 +293,8 @@ mod tests {
     /// forwards.
     #[test]
     fn every_body_bearing_event_carries_its_encoded_body() {
-        let transition = CoreEventKind::Transition(Box::new(v1::TransitionEvent::default()));
-        let session = CoreEventKind::SessionEvent(Box::new(v1::SessionEvent::default()));
+        let transition = CoreEventKind::Transition(Box::default());
+        let session = CoreEventKind::SessionEvent(Box::default());
         let diagnostic = CoreEventKind::Diagnostic(Box::new(v1::ErrorEnvelope {
             reason_code: "PLATFORM.ADAPTER_UNAVAILABLE".to_owned(),
             ..v1::ErrorEnvelope::default()
