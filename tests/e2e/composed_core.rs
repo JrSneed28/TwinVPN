@@ -642,9 +642,9 @@ fn a_rejected_command_produces_an_event_as_well_as_the_error() {
     // never finished — and one watching only the return value would never learn
     // that the ledger recorded it.
     let rig = ComposedRig::new(HostFamily::Dual, 50);
-    let unimplemented = twinvpn_core::core::UNIMPLEMENTED
+    let unimplemented = twinvpn_core::core::unimplemented()
         .first()
-        .copied()
+        .map(|(op, _, _)| *op)
         .expect("the catalogue declares at least one unimplemented operation");
 
     let refused = rig
