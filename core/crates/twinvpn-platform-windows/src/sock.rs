@@ -62,8 +62,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_core::future::BoxFuture;
 use twinvpn_platform::{
-    Datagram, FragmentPolicy, InterfaceIndex, MulticastOptions, PlatformError, SocketCapabilities, SocketFamily,
-    SocketOptions, SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
+    Datagram, FragmentPolicy, InterfaceIndex, MulticastOptions, PlatformError, SocketCapabilities,
+    SocketFamily, SocketOptions, SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
 };
 use twinvpn_types::{Endpoint, IpAddr, Port, V4Addr, V6Addr, ZoneIndex};
 

@@ -43,9 +43,7 @@ use twinvpn_platform::{
     InterfaceFacts, InterfaceIndex, InterfaceName, InterfaceProvider, LinkClass, NetworkChange,
     PlatformError,
 };
-use twinvpn_types::{
-    AddressFamily, InterfaceAddress, IpAddr, V4Addr, V6Addr, ZoneIndex,
-};
+use twinvpn_types::{AddressFamily, InterfaceAddress, IpAddr, V4Addr, V6Addr, ZoneIndex};
 
 use crate::netlink::{self, NetlinkSocket, NlBuilder, AF_INET6_U8, AF_INET_U8};
 use crate::oserr::{self, Context};
@@ -441,7 +439,6 @@ fn decode_address(family: u8, value: &[u8], index: u32) -> Option<IpAddr> {
     None
 }
 
-
 /// Turns one netlink message into the changes it represents.
 ///
 /// Every value is a **fact**, never an instruction: the adapter reports what
@@ -637,9 +634,7 @@ mod tests {
 
         // A /0 and a /32 both work, and the /32 is a host route.
         assert_eq!(
-            crate::addr::prefix_text(
-                InterfaceAddress::new(addr, 0).expect("valid").network()
-            ),
+            crate::addr::prefix_text(InterfaceAddress::new(addr, 0).expect("valid").network()),
             "0.0.0.0/0"
         );
         let host = InterfaceAddress::new(addr, 32).expect("valid");

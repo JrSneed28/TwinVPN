@@ -37,8 +37,8 @@ use std::net::SocketAddr;
 use futures_core::future::BoxFuture;
 use socket2::{Domain, Protocol, Socket, Type};
 use twinvpn_platform::{
-    Datagram, FragmentPolicy, MulticastOptions, PlatformError, SocketCapabilities, SocketFamily, SocketOptions,
-    SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
+    Datagram, FragmentPolicy, MulticastOptions, PlatformError, SocketCapabilities, SocketFamily,
+    SocketOptions, SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
 };
 use twinvpn_types::{Endpoint, IpAddr};
 

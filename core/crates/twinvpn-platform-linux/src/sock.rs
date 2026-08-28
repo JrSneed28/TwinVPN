@@ -47,8 +47,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
 use twinvpn_platform::{
-    Datagram, InterfaceIndex, MulticastOptions, PlatformError, SocketCapabilities, SocketFamily, SocketOptions,
-    SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
+    Datagram, InterfaceIndex, MulticastOptions, PlatformError, SocketCapabilities, SocketFamily,
+    SocketOptions, SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
 };
 use twinvpn_types::{Endpoint, IpAddr};
 

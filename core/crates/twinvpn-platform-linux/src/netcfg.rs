@@ -46,8 +46,8 @@ use std::sync::Mutex;
 
 use futures_core::future::BoxFuture;
 use twinvpn_platform::{
-    ContractGeneration, EnforcementCustody, RouteCapabilities, LinkFacts, NetworkConfig, NetworkContract,
-    PlatformError, Ruleset,
+    ContractGeneration, EnforcementCustody, LinkFacts, NetworkConfig, NetworkContract,
+    PlatformError, RouteCapabilities, Ruleset,
 };
 use twinvpn_types::{AddressFamily, PerFamily, UnderlayFamilies};
 

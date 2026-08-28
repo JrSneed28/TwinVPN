@@ -62,7 +62,8 @@ fn contract(generation: u64, ruleset: Ruleset) -> NetworkContract {
         // compile error to omit.
         addresses: PerFamily::new(
             vec![
-                InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets([100, 64, 0, 1])), 32).unwrap(),
+                InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets([100, 64, 0, 1])), 32)
+                    .unwrap(),
             ],
             vec![InterfaceAddress::new(
                 IpAddr::V6(

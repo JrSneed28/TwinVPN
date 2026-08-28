@@ -75,6 +75,7 @@ pub mod dns;
 pub mod iface;
 pub mod netcfg;
 pub mod oserr;
+pub mod power;
 pub mod restore;
 pub mod route;
 pub mod shutdown;
