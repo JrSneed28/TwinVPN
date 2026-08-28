@@ -33,7 +33,7 @@
 //! defeats this module and does not defeat [`crate::nft`].
 
 use twinvpn_platform::{NetworkContract, PlatformError, RouteEntry};
-use twinvpn_types::{AddressFamily, IpAddr, IpPrefix};
+use twinvpn_types::{AddressFamily, InterfaceAddress, IpAddr, IpPrefix};
 
 use crate::netlink::{self, NetlinkSocket, NlBuilder};
 use crate::oserr::{self, Context};
@@ -129,7 +129,10 @@ const fn af(family: AddressFamily) -> u8 {
 enum Applied {
     Address {
         family: AddressFamily,
-        prefix: IpPrefix,
+        /// The address exactly as the contract carries it — host bits and all.
+        /// `IFA_LOCAL` must name the interface's own address, not the network it
+        /// sits on, which is what an `IpPrefix` here would have forced.
+        address: InterfaceAddress,
         index: u32,
     },
     Route {
@@ -210,14 +213,14 @@ pub async fn program(
         (AddressFamily::V4, &contract.addresses.v4),
         (AddressFamily::V6, &contract.addresses.v6),
     ] {
-        for prefix in prefixes {
-            if let Err(e) = add_address(&sock, family, *prefix, overlay_index).await {
+        for address in prefixes {
+            if let Err(e) = add_address(&sock, family, *address, overlay_index).await {
                 unwind(&sock, &state).await;
                 return Err(e);
             }
             state.steps.push(Applied::Address {
                 family,
-                prefix: *prefix,
+                address: *address,
                 index: overlay_index,
             });
         }
@@ -261,9 +264,9 @@ async fn unwind(sock: &NetlinkSocket, state: &AppliedState) {
         let result = match step {
             Applied::Address {
                 family,
-                prefix,
+                address,
                 index,
-            } => del_address(sock, *family, *prefix, *index).await,
+            } => del_address(sock, *family, *address, *index).await,
             Applied::Route { family, entry } => del_route(sock, *family, entry).await,
             Applied::Rule { family, mark } => del_rule(sock, *family, *mark).await,
         };
@@ -283,7 +286,7 @@ async fn unwind(sock: &NetlinkSocket, state: &AppliedState) {
 async fn add_address(
     sock: &NetlinkSocket,
     family: AddressFamily,
-    prefix: IpPrefix,
+    address: InterfaceAddress,
     index: u32,
 ) -> Result<(), PlatformError> {
     let mut b = NlBuilder::new(
@@ -296,10 +299,10 @@ async fn add_address(
     );
     b.payload(&ifaddrmsg(
         af(family),
-        u8::try_from(prefix.prefix_len()).unwrap_or(0),
+        u8::try_from(address.prefix_len()).unwrap_or(0),
         index,
     ));
-    let octets = prefix.address().octets();
+    let octets = address.address().octets();
     b.attr(libc::IFA_LOCAL, &octets);
     b.attr(libc::IFA_ADDRESS, &octets);
     sock.request(b.finish())
@@ -311,7 +314,7 @@ async fn add_address(
 async fn del_address(
     sock: &NetlinkSocket,
     family: AddressFamily,
-    prefix: IpPrefix,
+    address: InterfaceAddress,
     index: u32,
 ) -> Result<(), PlatformError> {
     let mut b = NlBuilder::new(
@@ -321,10 +324,10 @@ async fn del_address(
     );
     b.payload(&ifaddrmsg(
         af(family),
-        u8::try_from(prefix.prefix_len()).unwrap_or(0),
+        u8::try_from(address.prefix_len()).unwrap_or(0),
         index,
     ));
-    let octets = prefix.address().octets();
+    let octets = address.address().octets();
     b.attr(libc::IFA_LOCAL, &octets);
     b.attr(libc::IFA_ADDRESS, &octets);
     sock.request(b.finish())

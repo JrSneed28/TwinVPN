@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 
 use futures_core::future::BoxFuture;
 use twinvpn_platform::{
-    ContractGeneration, EnforcementCustody, LinkFacts, NetworkConfig, NetworkContract,
+    ContractGeneration, EnforcementCustody, RouteCapabilities, LinkFacts, NetworkConfig, NetworkContract,
     PlatformError, Ruleset,
 };
 use twinvpn_types::{PerFamily, UnderlayFamilies};
@@ -442,6 +442,19 @@ impl NetworkConfig for MacosNetworkConfig {
 
     fn enforcement_custody(&self) -> EnforcementCustody {
         pf::custody()
+    }
+
+    /// **Darwin has no route metric**, so the capability says so in advance.
+    ///
+    /// `route(8)` carries none, and preference comes from prefix length and the
+    /// network service order. This adapter already refuses a metric it is handed
+    /// (`RouteOp::metric_unrepresentable`); declaring the capability is what
+    /// lets the core express precedence the way this platform actually has one —
+    /// `docs/networking.md` §7.2's split default is a prefix-length technique
+    /// and needs no metric — rather than issuing an instruction that will be
+    /// refused.
+    fn route_capabilities(&self) -> RouteCapabilities {
+        RouteCapabilities { metric: false }
     }
 
     fn query_link_facts(&self) -> BoxFuture<'_, Result<LinkFacts, PlatformError>> {

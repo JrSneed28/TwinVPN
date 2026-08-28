@@ -48,7 +48,7 @@ use std::sync::{Arc, Mutex};
 
 use futures_core::future::BoxFuture;
 use twinvpn_platform::{
-    ContractGeneration, EnforcementCustody, LinkFacts, NetworkConfig, NetworkContract,
+    ContractGeneration, EnforcementCustody, RouteCapabilities, LinkFacts, NetworkConfig, NetworkContract,
     PlatformError, Ruleset,
 };
 use twinvpn_types::{AddressFamily, PerFamily};
@@ -598,6 +598,8 @@ fn blank_contract() -> NetworkContract {
         },
         ruleset: Ruleset::Blocked,
         mtu: 1280,
+        // `Blocked` describes nothing and rides nothing.
+        tunnel_remote_address: None,
     }
 }
 
@@ -664,6 +666,14 @@ impl NetworkConfig for WindowsNetworkConfig {
 
     fn enforcement_custody(&self) -> EnforcementCustody {
         wfp::custody()
+    }
+
+    /// Windows has route metrics, so the instruction is honoured.
+    ///
+    /// `MIB_IPFORWARD_ROW2::Metric` plus the interface metric, both of which
+    /// `route::plan` already programs.
+    fn route_capabilities(&self) -> RouteCapabilities {
+        RouteCapabilities { metric: true }
     }
 
     fn query_link_facts(&self) -> BoxFuture<'_, Result<LinkFacts, PlatformError>> {

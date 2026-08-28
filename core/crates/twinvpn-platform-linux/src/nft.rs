@@ -57,7 +57,8 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use twinvpn_platform::{
-    ContractGeneration, EnforcementCustody, NetworkContract, PlatformError, Ruleset,
+    BootEnforcement, ContractGeneration, EnforcementCustody, NetworkContract, PlatformError,
+    Ruleset,
 };
 use twinvpn_types::{AddressFamily, IpPrefix, PerFamily};
 
@@ -597,6 +598,20 @@ pub const fn custody() -> EnforcementCustody {
     EnforcementCustody {
         survives_core_exit: true,
         swap_is_atomic: true,
+        // ADR-0012 §11.6's Linux boot row: `twinvpn-killswitch.service`,
+        // `Before=network-pre.target`, restoring `/etc/twinvpn/killswitch.nft`.
+        // The artifact is **package-owned** and the unit loads it before the
+        // network stack, so the deny predates the first packet the host can emit
+        // (KS-19) — but it is loaded by the supervisor rather than held by the
+        // kernel from power-on, which is Windows' stronger answer.
+        //
+        // §11.6's own Linux residual is "single-user/emergency targets do not
+        // reach the unit". That is NOT `ExemptBootModes`: the disclosure column
+        // states why — "single-user brings up no network by default" — so there
+        // is no interval in which this host can emit a packet with no rule set.
+        // macOS's Recovery does have a network, which is why its row is the
+        // other value.
+        boot_enforcement: BootEnforcement::PackageArtifactLoadedAtBoot,
     }
 }
 
@@ -614,7 +629,7 @@ pub fn unreachable(call: &'static str, code: i32) -> PlatformError {
 mod tests {
     use super::*;
     use twinvpn_platform::{DnsConfig, RouteEntry};
-    use twinvpn_types::{IpAddr, PerFamily, V4Addr, V6Addr};
+    use twinvpn_types::{InterfaceAddress, IpAddr, PerFamily, V4Addr, V6Addr};
 
     fn v4(a: [u8; 4], len: u32) -> IpPrefix {
         IpPrefix::new(IpAddr::V4(V4Addr::from_octets(a)), len).expect("canonical")
@@ -627,10 +642,24 @@ mod tests {
         IpPrefix::new(IpAddr::V6(V6Addr::new(o, None).expect("valid")), len).expect("canonical")
     }
 
+    fn iface_v4(a: [u8; 4], len: u32) -> InterfaceAddress {
+        InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets(a)), len).expect("valid")
+    }
+
+    fn iface_v6(first: u8, second: u8, len: u32) -> InterfaceAddress {
+        let mut o = [0u8; 16];
+        o[0] = first;
+        o[1] = second;
+        InterfaceAddress::new(IpAddr::V6(V6Addr::new(o, None).expect("valid")), len).expect("valid")
+    }
+
     fn contract(generation: u64, ruleset: Ruleset) -> NetworkContract {
         NetworkContract {
             generation: ContractGeneration(generation),
-            addresses: PerFamily::new(vec![v4([100, 64, 0, 1], 32)], vec![v6(0xfd, 0x7c, 128)]),
+            addresses: PerFamily::new(
+                vec![iface_v4([100, 64, 0, 1], 32)],
+                vec![iface_v6(0xfd, 0x7c, 128)],
+            ),
             routes: PerFamily::new(
                 vec![RouteEntry {
                     destination: v4([100, 64, 0, 0], 12),
@@ -653,6 +682,7 @@ mod tests {
             },
             ruleset,
             mtu: 1280,
+            tunnel_remote_address: None,
         }
     }
 

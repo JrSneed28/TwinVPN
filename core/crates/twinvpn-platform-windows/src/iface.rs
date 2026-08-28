@@ -63,7 +63,7 @@ use twinvpn_platform::{
     InterfaceFacts, InterfaceIndex, InterfaceName, InterfaceProvider, LinkClass, NetworkChange,
     PlatformError,
 };
-use twinvpn_types::{AddressFamily, IpAddr, IpPrefix, V4Addr, V6Addr};
+use twinvpn_types::{AddressFamily, InterfaceAddress, IpAddr, IpPrefix, V4Addr, V6Addr};
 
 use crate::oserr;
 use crate::route::InterfaceLuid;
@@ -186,9 +186,16 @@ pub fn facts_from(row: &AdapterRow) -> Result<InterfaceFacts, PlatformError> {
     let name = InterfaceName::new(&row.name)?;
     let mut addresses = Vec::with_capacity(row.addresses.len());
     for (address, prefix_len) in &row.addresses {
-        if let Some(prefix) = mask_to_prefix(*address, *prefix_len) {
-            if !addresses.contains(&prefix) {
-                addresses.push(prefix);
+        // Kept exactly as the OS reported it. This used to mask down to an
+        // `IpPrefix`, which normalised away the host bits an interface address
+        // exists to carry, and stripped the scope zone from a link-local — the
+        // half of finding X-10 this adapter was on: it reported `fe80::/10` with
+        // no zone while `twinvpn-platform-linux` dropped it entirely, so the core
+        // saw a different address set for one host depending on which adapter was
+        // bound. Both now report the same thing, and both keep the zone.
+        if let Ok(interface_address) = InterfaceAddress::new(*address, *prefix_len) {
+            if !addresses.contains(&interface_address) {
+                addresses.push(interface_address);
             }
         }
     }
@@ -699,15 +706,22 @@ mod tests {
         assert!(!facts.has_default_route(AddressFamily::V6));
     }
 
+    /// **The host bits survive the crossing.**
+    ///
+    /// This test used to assert the opposite — that `192.0.2.10/24` arrived as
+    /// `192.0.2.0/24` — because `IpPrefix` refuses a set host bit and this
+    /// adapter masked before handing the value over. The masked value named a
+    /// network nothing answers on, which is what
+    /// `twinvpn-core::establish::host_address` then had to refuse. The seam now
+    /// carries `InterfaceAddress`, so there is nothing to mask.
     #[test]
-    fn an_address_is_masked_to_its_prefix_rather_than_refused_or_normalised() {
-        // `IpPrefix` refuses `192.0.2.10/24`. Masking here is this adapter's own
-        // arithmetic on an OS-supplied value, not a normalization of untrusted
-        // input before a policy check.
+    fn an_interface_address_crosses_with_its_host_bits() {
         let facts = facts_from(&row()).expect("facts");
         assert_eq!(facts.addresses.len(), 1);
-        assert_eq!(facts.addresses[0].address(), v4([192, 0, 2, 0]));
+        assert_eq!(facts.addresses[0].address(), v4([192, 0, 2, 10]));
         assert_eq!(facts.addresses[0].prefix_len(), 24);
+        // And the network is still derivable, by name, when a route is wanted.
+        assert_eq!(facts.addresses[0].network().address(), v4([192, 0, 2, 0]));
     }
 
     #[test]
@@ -737,11 +751,13 @@ mod tests {
     fn a_v6_prefix_masks_and_a_link_local_one_is_representable_here() {
         let prefix = mask_to_prefix(v6("2001:db8:1:2:3:4:5:6"), 64).expect("maskable");
         assert_eq!(prefix.address(), v6("2001:db8:1:2::"));
-        // The divergence from `twinvpn-platform-linux`, pinned as a test: that
-        // adapter drops a link-local prefix because it builds the address with a
-        // zone first. `prefix_base` strips the zone, which is right for a prefix
-        // and means the core sees a link-local prefix from this adapter and not
-        // from that one. Reported.
+        // `mask_to_prefix` is still used for the ROUTE side, where a prefix is
+        // the right kind of value and `prefix_base`'s zone-stripping is correct.
+        // The divergence it used to cause at the FACTS side — this adapter
+        // reporting a zoneless `fe80::/10` while `twinvpn-platform-linux` dropped
+        // it, finding X-10 — is gone: `InterfaceFacts.addresses` is a
+        // `Vec<InterfaceAddress>` now, and both adapters report the address with
+        // its zone.
         let link_local = mask_to_prefix(v6("fe80::1"), 64).expect("representable");
         assert_eq!(link_local.prefix_len(), 64);
     }
@@ -764,19 +780,29 @@ mod tests {
         assert!(facts_from(&control).is_err());
     }
 
+    /// **Two addresses on one subnet are two addresses, not one.**
+    ///
+    /// This test used to assert `2`, because `.10/24` and `.11/24` masked to the
+    /// same `IpPrefix` and the second was silently dropped — a real address the
+    /// core could then never bind or offer as a candidate. Only an exact
+    /// duplicate is now de-duplicated.
     #[test]
-    fn duplicate_addresses_on_one_adapter_are_reported_once() {
+    fn two_addresses_on_one_subnet_are_both_reported_and_an_exact_duplicate_is_not() {
         let mut dupes = row();
         dupes.addresses = vec![
             (v4([192, 0, 2, 10]), 24),
             (v4([192, 0, 2, 11]), 24),
+            // The same address twice: the OS can list one address on two rows,
+            // and reporting it twice would double-count a candidate.
+            (v4([192, 0, 2, 10]), 24),
             (v6("2001:db8::1"), 64),
         ];
         let facts = facts_from(&dupes).expect("facts");
         assert_eq!(
             facts.addresses.len(),
-            2,
-            "the two v4 addresses share a prefix"
+            3,
+            "two distinct v4 addresses on one subnet, plus the v6 — and the \
+             repeated row counted once"
         );
     }
 

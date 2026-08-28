@@ -372,6 +372,7 @@ mod tests {
             },
             ruleset: Ruleset::Blocked,
             mtu: 1420,
+            tunnel_remote_address: None,
         }
     }
 

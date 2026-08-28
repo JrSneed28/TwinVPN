@@ -557,6 +557,7 @@ fn a_contract_with_no_routes_at_all_still_denies_both_families() {
             },
             ruleset,
             mtu: 1280,
+            tunnel_remote_address: None,
         };
         let anchor = pf::render(&contract, ruleset, &testkit::enforcement());
         let installed = pfread::parse_tables(&table_names_in(&anchor)).expect("reads back");

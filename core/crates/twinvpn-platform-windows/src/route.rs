@@ -47,7 +47,7 @@
 //! [`crate::sys`]'s and are the only part that needs Windows.
 
 use twinvpn_platform::{NetworkContract, RouteEntry};
-use twinvpn_types::{AddressFamily, IpAddr, IpPrefix, PerFamily};
+use twinvpn_types::{AddressFamily, InterfaceAddress, IpAddr, IpPrefix, PerFamily};
 
 /// The interface LUID a row is programmed on.
 ///
@@ -116,24 +116,46 @@ pub struct RouteRow {
     pub protocol: RouteProtocol,
 }
 
+/// The sort key `AddressRow`'s `Ord` uses: the interface, then the address, then
+/// the prefix length, then the source flag.
+fn address_row_key(row: &AddressRow) -> (InterfaceLuid, IpAddr, u32, bool) {
+    (
+        row.luid,
+        row.address.address(),
+        row.address.prefix_len(),
+        row.skip_as_source,
+    )
+}
+
 /// One `MIB_UNICASTIPADDRESS_ROW`, reduced the same way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// `Ord` is written out rather than derived because
+/// [`twinvpn_types::InterfaceAddress`] has no `Ord` — see the note on
+/// [`AddressRow::address`] — and several planners here sort and dedup rows to
+/// make a diff deterministic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AddressRow {
     /// The interface.
     pub luid: InterfaceLuid,
-    /// The address and its on-link prefix length.
+    /// The address, exactly as the contract carries it, and its on-link prefix
+    /// length.
     ///
-    /// # Why an `IpPrefix` is sufficient here, unlike in `InterfaceFacts`
+    /// # This was an `IpPrefix`, and the reasoning was narrower than it looked
     ///
-    /// [`twinvpn_platform::InterfaceFacts::addresses`] documents a known defect:
-    /// `IpPrefix` requires every host bit to be zero, so it cannot express an
-    /// interface's own `192.0.2.10/24`. That defect does **not** reach this
-    /// struct, because ADR-0010 §11.1 assigns each device a `/32` and a `/128` —
-    /// prefixes whose host part is empty by construction. A contract carrying a
-    /// shorter overlay prefix would be expressing something ADR-0010 does not
-    /// allocate, and [`AddressPlan::validate`] names it rather than programming
-    /// a network address as an interface address.
-    pub address: IpPrefix,
+    /// The previous note here argued that `IpPrefix`'s canonical-form rule could
+    /// not bite, because ADR-0010 §11.1 allocates each device a `/32` and a
+    /// `/128` whose host part is empty by construction. That is true of the
+    /// *overlay* and it made this struct a place where the seam's defect was
+    /// invisible rather than absent. `CreateUnicastIpAddressEntry` wants the
+    /// **host** address in `Address` and the length in `OnLinkPrefixLength` —
+    /// two fields, exactly what [`twinvpn_types::InterfaceAddress`] carries —
+    /// and now that `NetworkContract::addresses` carries it too there is nothing
+    /// to convert and nothing to mask.
+    ///
+    /// [`AddressPlan::validate`] still refuses a non-host overlay prefix, for the
+    /// unchanged reason: a contract carrying one is expressing something
+    /// ADR-0010 does not allocate.
+    pub address: InterfaceAddress,
     /// Whether Windows should treat the prefix as on-link and add the
     /// corresponding subnet route.
     ///
@@ -142,6 +164,18 @@ pub struct AddressRow {
     /// synthesise one would put a route in the table that no generation owns and
     /// that rollback would therefore not remove.
     pub skip_as_source: bool,
+}
+
+impl Ord for AddressRow {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        address_row_key(self).cmp(&address_row_key(other))
+    }
+}
+
+impl PartialOrd for AddressRow {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// The addresses and the interface metric for one generation.
@@ -510,10 +544,10 @@ pub fn desired_rows(contract: &NetworkContract, overlay: InterfaceLuid) -> Vec<R
 pub fn desired_address_rows(contract: &NetworkContract, overlay: InterfaceLuid) -> Vec<AddressRow> {
     let mut rows = Vec::new();
     for family in [AddressFamily::V4, AddressFamily::V6] {
-        for prefix in contract.addresses.get(family) {
+        for address in contract.addresses.get(family) {
             rows.push(AddressRow {
                 luid: overlay,
-                address: *prefix,
+                address: *address,
                 skip_as_source: false,
             });
         }
@@ -563,16 +597,17 @@ mod tests {
         IpPrefix::new(IpAddr::V6(V6Addr::prefix_base(octets).expect("base")), len).expect("prefix")
     }
 
-    fn host_v4(octets: [u8; 4]) -> IpPrefix {
-        v4(octets, 32)
+    fn host_v4(octets: [u8; 4]) -> InterfaceAddress {
+        InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets(octets)), 32).expect("address")
     }
 
-    fn host_v6(tail: u8) -> IpPrefix {
+    fn host_v6(tail: u8) -> InterfaceAddress {
         let mut octets = [0u8; 16];
         octets[0] = 0xfd;
         octets[1] = 0x7c;
         octets[15] = tail;
-        IpPrefix::new(IpAddr::V6(V6Addr::new(octets, None).expect("address")), 128).expect("prefix")
+        InterfaceAddress::new(IpAddr::V6(V6Addr::new(octets, None).expect("address")), 128)
+            .expect("address")
     }
 
     fn entry(destination: IpPrefix, metric: Option<u32>) -> RouteEntry {
@@ -586,7 +621,7 @@ mod tests {
 
     fn contract(
         routes: PerFamily<Vec<RouteEntry>>,
-        addresses: PerFamily<Vec<IpPrefix>>,
+        addresses: PerFamily<Vec<InterfaceAddress>>,
     ) -> NetworkContract {
         NetworkContract {
             generation: ContractGeneration(3),
@@ -600,6 +635,7 @@ mod tests {
             },
             ruleset: twinvpn_platform::Ruleset::Protected,
             mtu: 1420,
+            tunnel_remote_address: None,
         }
     }
 
@@ -904,7 +940,13 @@ mod tests {
         // nothing and reads as a NAT fault when offered as a candidate.
         let contract = contract(
             PerFamily::new(Vec::new(), Vec::new()),
-            PerFamily::new(vec![v4([100, 64, 0, 0], 24)], Vec::new()),
+            PerFamily::new(
+                vec![
+                    InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets([100, 64, 0, 7])), 24)
+                        .expect("address"),
+                ],
+                Vec::new(),
+            ),
         );
         let plan = plan(&InstalledRoutes::default(), &contract, OVERLAY);
         assert!(matches!(

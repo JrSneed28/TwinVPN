@@ -26,7 +26,9 @@ use twinvpn_platform_linux::{
     route, AbsentElement, EnforcementConfig, LinuxAdapterParts, LinuxPlatformAdapter,
     DEFAULT_FWMARK,
 };
-use twinvpn_types::{AddressFamily, IpAddr, IpPrefix, PerFamily, V4Addr, V6Addr};
+use twinvpn_types::{
+    AddressFamily, InterfaceAddress, IpAddr, PerFamily, V4Addr, V6Addr,
+};
 
 fn privileged() -> bool {
     std::env::var_os("TWINVPN_NETNS_TEST").is_some()
@@ -87,12 +89,12 @@ async fn program_a_contract_and_show_what_the_kernel_holds() {
         generation: ContractGeneration(1),
         addresses: PerFamily::new(
             vec![
-                IpPrefix::new(IpAddr::V4(V4Addr::from_octets([100, 64, 0, 1])), 32)
-                    .expect("canonical"),
+                InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets([100, 64, 0, 1])), 32)
+                    .expect("valid"),
             ],
             vec![
-                IpPrefix::new(IpAddr::V6(V6Addr::new(v6_host, None).expect("valid")), 128)
-                    .expect("canonical"),
+                InterfaceAddress::new(IpAddr::V6(V6Addr::new(v6_host, None).expect("valid")), 128)
+                    .expect("valid"),
             ],
         ),
         // `docs/networking.md` §7.2's full-tunnel form: four `/1` routes, two per
@@ -128,6 +130,7 @@ async fn program_a_contract_and_show_what_the_kernel_holds() {
         },
         ruleset: Ruleset::Blocked,
         mtu: 1280,
+        tunnel_remote_address: None,
     };
 
     let applied = route::program(&contract, index, DEFAULT_FWMARK)

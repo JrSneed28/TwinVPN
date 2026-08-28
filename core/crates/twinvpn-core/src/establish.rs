@@ -47,19 +47,26 @@ pub enum FamilyOutcome {
     /// A socket opened and the interface table reported no address of this
     /// family at all.
     NoAddress,
-    /// A socket opened, the interface table reported prefixes of this family,
-    /// and **none of them names a host address**.
+    /// A socket opened, the interface table reported addresses of this family,
+    /// and **every one of them was malformed as a candidate**.
     ///
-    /// See [`host_address`]: `InterfaceFacts.addresses` is a `Vec<IpPrefix>`,
-    /// and `IpPrefix::address()` is documented as *"the network address"* —
-    /// `IpPrefix::new` rejects any set host bit. So an adapter reporting
-    /// `192.0.2.10/24` hands the core `192.0.2.0/24`, and the interface's own
-    /// address is **not recoverable from the seam**.
+    /// # This used to mean something else, and the something else is fixed
     ///
-    /// This is a distinct outcome from [`FamilyOutcome::NoAddress`] on purpose:
-    /// "the OS reported nothing" and "the OS reported something the seam cannot
-    /// carry" are different facts, and folding them together would hide a
-    /// contract defect as an empty network.
+    /// `InterfaceFacts.addresses` was a `Vec<IpPrefix>`, whose `address()` is
+    /// *"the network address"* — `IpPrefix::new` rejects any set host bit — so an
+    /// adapter holding `192.0.2.10/24` handed the core `192.0.2.0/24` and the
+    /// interface's own address was **not recoverable from the seam**. The core
+    /// could accept only `/32` and `/128` and reported this outcome for
+    /// everything else.
+    ///
+    /// The seam now carries [`twinvpn_types::InterfaceAddress`], which keeps the
+    /// host bits and the scope zone, so an interface address of any prefix
+    /// length is usable and that cause is gone. The outcome is **kept**, not
+    /// deleted, because the other cause it always had is still real: an address
+    /// the OS reports that cannot be a well-formed candidate — an IPv6
+    /// link-local with no zone index is the case
+    /// [`Candidate::is_well_formed`] rejects. "The OS reported nothing" and "the
+    /// OS reported something unusable" remain different facts.
     AddressNotReportable,
     /// The platform refused the bind.
     Refused,
@@ -178,15 +185,12 @@ pub async fn gather(
         // one is how a tunnel comes to be routed through itself.
         if let Ok(facts) = interfaces.as_ref() {
             for iface in facts.iter().filter(|i| !i.is_overlay && i.is_up) {
-                for prefix in &iface.addresses {
-                    if prefix.address().family() != family {
+                for interface_address in &iface.addresses {
+                    let address = interface_address.address();
+                    if address.family() != family {
                         continue;
                     }
                     prefixes_seen += 1;
-                    let Some(address) = host_address(*prefix) else {
-                        not_reportable += 1;
-                        continue;
-                    };
                     let candidate = Candidate {
                         id: candidate_id(session_id, candidates.len()),
                         kind: host_kind(address),
@@ -199,6 +203,8 @@ pub async fn gather(
                     // multi-interface host, and shipping it wastes a probe.
                     if candidate.is_well_formed() {
                         candidates.push(candidate);
+                    } else {
+                        not_reportable += 1;
                     }
                 }
             }
@@ -224,33 +230,26 @@ pub async fn gather(
     }
 }
 
-/// The interface's own address, where the seam can carry it.
+/// The interface's own address, as the seam now carries it.
 ///
-/// # A contract defect, worked around rather than guessed
+/// # The contract defect this used to work around is closed
 ///
-/// `InterfaceFacts.addresses` is `Vec<IpPrefix>` and its doc reads *"Every
-/// address on it, with its prefix"* — but `IpPrefix::new` **rejects any set host
-/// bit** (`TypeError::PrefixNotCanonical`) and `IpPrefix::address()` is
-/// documented as *"the network address"*. An adapter holding `192.0.2.10/24`
-/// therefore cannot express it: constructing that `IpPrefix` fails, and the
-/// canonical `192.0.2.0/24` names the network, not the host.
+/// `InterfaceFacts.addresses` was a `Vec<IpPrefix>`, and `IpPrefix::new`
+/// **rejects any set host bit** while `IpPrefix::address()` is documented as
+/// *"the network address"*. An adapter holding `192.0.2.10/24` could not express
+/// it, so **the core could not learn its own address from the seam for any
+/// interface whose prefix was shorter than a single host** — and this function
+/// accepted only `/32` and `/128`, because offering a network address as a
+/// candidate sends probes where nothing answers and that failure reads as a NAT
+/// problem rather than a contract one.
 ///
-/// **Consequence: the core cannot learn its own address from the platform seam
-/// for any interface whose prefix is shorter than a single host.**
-///
-/// The only unambiguous case is a single-host prefix — `/32` on v4, `/128` on
-/// v6 — where the network address *is* the host address. This function accepts
-/// exactly that and refuses everything else, because using a network address as
-/// a candidate would send probes to an address nothing answers on, and that
-/// failure would look like a NAT problem rather than a contract one.
-///
-/// Reported to the integration lead. The fix belongs in `twinvpn-platform`
-/// (`core-foundation`'s crate): `InterfaceFacts` needs a host address alongside
-/// its prefix, and this domain must not add one.
+/// The seam now carries [`twinvpn_types::InterfaceAddress`], so the host address
+/// is simply there. This is kept as a named accessor rather than inlined so the
+/// call sites still say *what* they are taking, and so the property it used to
+/// enforce by refusal is now enforced by the type.
 #[must_use]
-pub fn host_address(prefix: twinvpn_types::IpPrefix) -> Option<IpAddr> {
-    let single_host = prefix.prefix_len() == prefix.family().max_prefix_len();
-    single_host.then(|| prefix.address())
+pub const fn host_address(address: twinvpn_types::InterfaceAddress) -> IpAddr {
+    address.address()
 }
 
 /// The `Kind` a host address of this shape is.
@@ -389,21 +388,23 @@ mod tests {
     use super::*;
     use crate::testing;
     use twinvpn_platform::iface::{InterfaceFacts, InterfaceIndex, InterfaceName, LinkClass};
-    use twinvpn_types::{IpPrefix, V4Addr, V6Addr};
+    use twinvpn_types::{InterfaceAddress, IpPrefix, V4Addr, V6Addr};
 
     fn dual_stack_interface() -> InterfaceFacts {
         InterfaceFacts {
             index: InterfaceIndex(2),
             name: InterfaceName::new("eth0").expect("valid"),
-            // SINGLE-HOST prefixes, because they are the only shape the seam
-            // can carry an interface's own address in. See `host_address`.
+            // A /24 and a /64 WITH HOST BITS SET. Under the old seam these had
+            // to be a `/32` and a `/128`, because anything else masked the host
+            // address away; that is the defect `InterfaceAddress` closes, and
+            // this fixture is what would have failed under it.
             addresses: vec![
-                IpPrefix::new(
+                InterfaceAddress::new(
                     IpAddr::V4(V4Addr::from_slice(&[192, 0, 2, 10]).expect("v4")),
-                    32,
+                    24,
                 )
-                .expect("prefix"),
-                IpPrefix::new(
+                .expect("address"),
+                InterfaceAddress::new(
                     IpAddr::V6(
                         V6Addr::from_slice(
                             &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10],
@@ -411,9 +412,9 @@ mod tests {
                         )
                         .expect("v6"),
                     ),
-                    128,
+                    64,
                 )
-                .expect("prefix"),
+                .expect("address"),
             ],
             has_default_route_v4: true,
             has_default_route_v6: true,
@@ -492,38 +493,68 @@ mod tests {
         assert_eq!(gathered.outcome.v6, FamilyOutcome::NoAddress);
     }
 
+    /// **The contract defect, now asserted as closed.**
+    ///
+    /// This test used to assert the opposite: that a `/24` could not name a host
+    /// address, because the seam carried an `IpPrefix` whose host bits were
+    /// masked away. It is kept, inverted, because the property that mattered was
+    /// never "refuse a /24" — it was "never offer a NETWORK address as a
+    /// candidate", and that is now true by construction rather than by refusal.
     #[test]
-    fn a_subnet_prefix_cannot_name_a_host_address() {
-        // The contract defect, asserted so it is visible rather than inferred.
-        let subnet = IpPrefix::new(
+    fn an_interface_address_keeps_the_host_bits_a_prefix_would_mask() {
+        let address = InterfaceAddress::new(
+            IpAddr::V4(V4Addr::from_slice(&[192, 0, 2, 10]).expect("v4")),
+            24,
+        )
+        .expect("valid interface address");
+
+        // The candidate is the HOST, 192.0.2.10 — not the network it sits on.
+        assert_eq!(
+            host_address(address),
+            IpAddr::V4(V4Addr::from_slice(&[192, 0, 2, 10]).expect("v4")),
+        );
+
+        // And the network is still derivable, explicitly, when a route is what
+        // is wanted.
+        let network = IpPrefix::new(
             IpAddr::V4(V4Addr::from_slice(&[192, 0, 2, 0]).expect("v4")),
             24,
         )
         .expect("canonical");
-        assert!(
-            host_address(subnet).is_none(),
-            "a /24 names a network; using it as a candidate would probe an address \
-             nothing answers on"
+        assert_eq!(address.network(), network);
+        assert_ne!(
+            address.address(),
+            network.address(),
+            "a network address offered as a candidate probes where nothing answers"
         );
-        let single = IpPrefix::new(
-            IpAddr::V4(V4Addr::from_slice(&[192, 0, 2, 10]).expect("v4")),
-            32,
-        )
-        .expect("canonical");
-        assert!(host_address(single).is_some());
     }
 
+    /// **"The OS reported nothing" and "the OS reported something unusable"
+    /// must stay different answers.**
+    ///
+    /// The cause has changed and the outcome has not. It used to fire on any
+    /// prefix shorter than a single host, because the seam masked the address
+    /// away; that is closed. What remains — and is the case that actually
+    /// matters — is an adapter that hands over an IPv6 **link-local with no zone
+    /// index**. `V6Addr::new` refuses to build one, but `V6Addr::prefix_base`
+    /// does not, and `twinvpn-platform-windows` reached for exactly that
+    /// (`shells/windows/README.md` §7 gap 16). Such an address is unusable on a
+    /// multi-interface host, `Candidate::is_well_formed` drops it rather than
+    /// probing with it, and the family reports that it had something and could
+    /// not use it.
     #[test]
     fn a_family_whose_address_cannot_be_carried_says_so() {
-        // "The OS reported nothing" and "the OS reported something the seam
-        // cannot carry" must stay different answers.
         let (parts, adapter, _vt) = testing::parts();
         let mut iface = dual_stack_interface();
-        iface.addresses = vec![IpPrefix::new(
-            IpAddr::V4(V4Addr::from_slice(&[192, 0, 2, 0]).expect("v4")),
-            24,
+        let mut link_local = [0u8; 16];
+        link_local[0] = 0xfe;
+        link_local[1] = 0x80;
+        link_local[15] = 1;
+        iface.addresses = vec![InterfaceAddress::new(
+            IpAddr::V6(V6Addr::prefix_base(link_local).expect("no zone")),
+            64,
         )
-        .expect("canonical")];
+        .expect("valid")];
         adapter.interfaces_mock().set_interfaces(vec![iface]);
         let env = parts.env.clone();
         let platform = parts.adapter.clone();
@@ -533,8 +564,8 @@ mod tests {
             result = Some(gather(&env, &platform, session()).await);
         }));
         let gathered = result.expect("gather ran");
-        assert_eq!(gathered.outcome.v4, FamilyOutcome::AddressNotReportable);
-        assert_eq!(gathered.outcome.v6, FamilyOutcome::NoAddress);
+        assert_eq!(gathered.outcome.v4, FamilyOutcome::NoAddress);
+        assert_eq!(gathered.outcome.v6, FamilyOutcome::AddressNotReportable);
     }
 
     #[test]

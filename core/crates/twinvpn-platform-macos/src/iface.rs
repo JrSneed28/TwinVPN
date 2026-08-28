@@ -46,7 +46,7 @@ use twinvpn_platform::{
     InterfaceFacts, InterfaceIndex, InterfaceName, InterfaceProvider, LinkClass, NetworkChange,
     PlatformError,
 };
-use twinvpn_types::IpPrefix;
+use twinvpn_types::InterfaceAddress;
 
 use crate::oserr;
 use crate::shutdown::ShutdownLatch;
@@ -135,8 +135,13 @@ pub struct RawInterface {
     pub name: String,
     /// The OS index.
     pub index: u32,
-    /// Addresses, already in canonical prefix form.
-    pub addresses: Vec<IpPrefix>,
+    /// Addresses, exactly as `getifaddrs` reports them: the address with its
+    /// host bits intact and its prefix length beside it.
+    ///
+    /// `InterfaceAddress` rather than `IpPrefix`, which normalised the host bits
+    /// away — see [`twinvpn_platform::InterfaceFacts::addresses`]. It also means
+    /// a link-local `fe80::/64` keeps its scope zone instead of being dropped.
+    pub addresses: Vec<InterfaceAddress>,
     /// Whether the link is up (`IFF_UP` **and** `IFF_RUNNING`).
     pub is_up: bool,
     /// The MTU.

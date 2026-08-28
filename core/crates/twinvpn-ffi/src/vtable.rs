@@ -767,7 +767,26 @@ impl NetworkConfig for HostNetworkConfig {
             // ATOMIC SWAP, so a shell that binds this ABI has already promised
             // it; a shell that cannot deliver it must not implement the entry.
             swap_is_atomic: true,
+            // GAP, reported rather than guessed: F-9 has no entry for the KS-19
+            // boot artifact, so a shell binding this ABI has promised nothing
+            // about the interval before it starts. `None` is the honest floor —
+            // it is what `BootEnforcement` calls "nothing enforces until the
+            // authority installs the ruleset", and it makes
+            // `covers_the_boot_window()` false, so the core discloses the
+            // residual instead of claiming a guarantee no one made. Claiming
+            // `OsHeldFromBoot` here would be this vtable asserting a fact about
+            // an installer it cannot see.
+            boot_enforcement: twinvpn_platform::BootEnforcement::None,
         }
+    }
+
+    fn route_capabilities(&self) -> twinvpn_platform::RouteCapabilities {
+        // `false`, and for the same reason as above: F-9 carries no route
+        // programming at all, so nothing on the other side of this ABI has
+        // promised a metric will be honoured. The core plans without one, which
+        // is the safe direction — a metric that is silently discarded is a
+        // precedence decision nobody made.
+        twinvpn_platform::RouteCapabilities { metric: false }
     }
 
     fn query_link_facts(&self) -> BoxFuture<'_, Result<LinkFacts, PlatformError>> {
@@ -809,6 +828,16 @@ impl SocketProvider for NoSockets {
         // becomes a v4-only session"; reporting a capability this ABI cannot
         // deliver would be the same defect one layer up.
         Box::pin(async move { Err(PlatformError::AdapterUnavailable(None)) })
+    }
+
+    fn socket_capabilities(&self) -> twinvpn_platform::SocketCapabilities {
+        // Both `false`. There are no sockets here at all, so there is no option
+        // that could be honoured, and the same rule applies as above: this ABI
+        // must not report a capability it cannot deliver.
+        twinvpn_platform::SocketCapabilities {
+            reuse_port: false,
+            firewall_mark: false,
+        }
     }
 }
 

@@ -43,7 +43,9 @@ use twinvpn_platform::{
     InterfaceFacts, InterfaceIndex, InterfaceName, InterfaceProvider, LinkClass, NetworkChange,
     PlatformError,
 };
-use twinvpn_types::{AddressFamily, IpAddr, IpPrefix, V4Addr, V6Addr, ZoneIndex};
+use twinvpn_types::{
+    AddressFamily, InterfaceAddress, IpAddr, V4Addr, V6Addr, ZoneIndex,
+};
 
 use crate::netlink::{self, NetlinkSocket, NlBuilder, AF_INET6_U8, AF_INET_U8};
 use crate::oserr::{self, Context};
@@ -311,7 +313,7 @@ fn classify(name: &str, arphrd: u16, kind: Option<&str>) -> LinkClass {
 
 async fn dump_addresses(
     sock: &NetlinkSocket,
-) -> Result<HashMap<u32, Vec<IpPrefix>>, PlatformError> {
+) -> Result<HashMap<u32, Vec<InterfaceAddress>>, PlatformError> {
     let mut b = NlBuilder::new(
         libc::RTM_GETADDR,
         u16::try_from(libc::NLM_F_REQUEST | libc::NLM_F_DUMP).unwrap_or(0x301),
@@ -323,7 +325,7 @@ async fn dump_addresses(
         .await
         .map_err(|e| oserr::from_errno(&e, "RTM_GETADDR", Context::Netlink))?;
 
-    let mut out: HashMap<u32, Vec<IpPrefix>> = HashMap::new();
+    let mut out: HashMap<u32, Vec<InterfaceAddress>> = HashMap::new();
     for message in messages {
         if message.body.len() < IFADDRMSG_LEN {
             continue;
@@ -347,16 +349,23 @@ async fn dump_addresses(
             let Some(address) = decode_address(family, value, index) else {
                 continue;
             };
-            // The address is masked down to its prefix, because `IpPrefix`
-            // enforces canonical form and REFUSES `10.0.0.1/24` rather than
-            // normalizing it — normalizing attacker input before a policy check
-            // is how a rule intended to match one network comes to match
-            // another. Masking here is our own arithmetic on a kernel-supplied
-            // value, not a normalization of untrusted input.
-            if let Some(prefix) = mask_to_prefix(address, prefix_len) {
+            // The address is kept EXACTLY as the kernel reported it, with its
+            // prefix length beside it. This used to mask down to an `IpPrefix`,
+            // which "enforces canonical form and REFUSES `10.0.0.1/24`" — right
+            // for a range matched against untrusted input, and wrong for an
+            // interface's own address, whose host bits are the whole point.
+            //
+            // Two defects close here. `10.0.0.7/24` is now representable, so the
+            // core no longer has to reject everything that is not a `/32` or a
+            // `/128`. And a link-local address keeps its zone, so `fe80::/64` is
+            // no longer silently dropped from this list while
+            // `twinvpn-platform-windows` reported it — the divergence recorded as
+            // finding X-10, where "the core saw a different address set for one
+            // host depending on which adapter was bound".
+            if let Ok(interface_address) = InterfaceAddress::new(address, prefix_len) {
                 let list = out.entry(index).or_default();
-                if !list.contains(&prefix) {
-                    list.push(prefix);
+                if !list.contains(&interface_address) {
+                    list.push(interface_address);
                 }
             }
         }
@@ -432,37 +441,6 @@ fn decode_address(family: u8, value: &[u8], index: u32) -> Option<IpAddr> {
     None
 }
 
-/// Masks `address` down to `prefix_len` and builds the canonical prefix.
-fn mask_to_prefix(address: IpAddr, prefix_len: u32) -> Option<IpPrefix> {
-    let family = address.family();
-    if prefix_len > family.max_prefix_len() {
-        return None;
-    }
-    let (mut octets, len) = address.octet_buffer();
-    let full = (prefix_len / 8) as usize;
-    let rem = prefix_len % 8;
-    if rem != 0 && full < len {
-        octets[full] &= 0xffu8 << (8 - rem);
-    }
-    for slot in octets
-        .iter_mut()
-        .take(len)
-        .skip(full + usize::from(rem != 0))
-    {
-        *slot = 0;
-    }
-    let masked = match family {
-        AddressFamily::V4 => {
-            let mut o = [0u8; 4];
-            o.copy_from_slice(&octets[..4]);
-            IpAddr::V4(V4Addr::from_octets(o))
-        }
-        // A prefix carries no zone by construction (`IpPrefix::new` rejects
-        // one), so a link-local prefix is expressed without it.
-        AddressFamily::V6 => IpAddr::V6(V6Addr::new(octets, None).ok()?),
-    };
-    IpPrefix::new(masked, prefix_len).ok()
-}
 
 /// Turns one netlink message into the changes it represents.
 ///
@@ -638,25 +616,38 @@ pub fn provider(shutdown: ShutdownLatch) -> Arc<LinuxInterfaceProvider> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use twinvpn_types::IpPrefix;
 
+    /// **An interface address keeps its host bits, and derives the network on
+    /// request.**
+    ///
+    /// This adapter used to mask every kernel-supplied address down to a
+    /// canonical `IpPrefix` before it crossed the seam, because that was the
+    /// only shape `InterfaceFacts.addresses` could carry — and `10.1.2.3/24`
+    /// arrived at the core as `10.1.2.0/24`, which is a network nothing answers
+    /// on. The masking helper is gone; `InterfaceAddress` carries both facts and
+    /// `network()` is the explicit, named derivation when a route is what is
+    /// wanted.
     #[test]
-    fn an_address_is_masked_to_a_canonical_prefix_never_normalized_at_the_type() {
-        // IpPrefix REFUSES a set host bit rather than normalizing it, so the
-        // masking has to happen here, on a kernel-supplied value we own.
+    fn an_address_crosses_the_seam_with_its_host_bits_and_derives_its_network() {
         let addr = IpAddr::V4(V4Addr::from_octets([10, 1, 2, 3]));
-        let prefix = mask_to_prefix(addr, 24).expect("masks");
-        assert_eq!(crate::addr::prefix_text(prefix), "10.1.2.0/24");
-        // And a /0 and a /32 both work.
+        let carried = InterfaceAddress::new(addr, 24).expect("valid");
+        assert_eq!(carried.address(), addr, "the host address survives");
+        assert_eq!(crate::addr::prefix_text(carried.network()), "10.1.2.0/24");
+
+        // A /0 and a /32 both work, and the /32 is a host route.
         assert_eq!(
-            crate::addr::prefix_text(mask_to_prefix(addr, 0).expect("masks")),
+            crate::addr::prefix_text(
+                InterfaceAddress::new(addr, 0).expect("valid").network()
+            ),
             "0.0.0.0/0"
         );
-        assert_eq!(
-            crate::addr::prefix_text(mask_to_prefix(addr, 32).expect("masks")),
-            "10.1.2.3/32"
-        );
+        let host = InterfaceAddress::new(addr, 32).expect("valid");
+        assert!(host.is_host_route());
+        assert_eq!(crate::addr::prefix_text(host.network()), "10.1.2.3/32");
+
         // An over-long prefix for the family is refused, not clamped.
-        assert!(mask_to_prefix(addr, 33).is_none());
+        assert!(InterfaceAddress::new(addr, 33).is_err());
     }
 
     #[test]
@@ -681,48 +672,45 @@ mod tests {
         }
     }
 
-    /// **A contract defect, pinned as a test.**
+    /// **The contract defect this used to pin is closed, and the test is kept
+    /// inverted so the closure is asserted rather than assumed.**
     ///
-    /// `twinvpn-types` cannot represent a link-local IPv6 **prefix** at all:
-    /// `V6Addr::new` rejects a link-local address with no zone
-    /// (`TypeError::Ipv6ZoneIndex`), and `IpPrefix::new` rejects any address that
-    /// *has* one (`TypeError::PrefixHasZone`). Both rules are individually right
-    /// and their conjunction leaves `fe80::/10` — and every `fe80::/64` an
-    /// interface actually carries — unrepresentable.
+    /// It used to read: `twinvpn-types` cannot represent a link-local IPv6
+    /// *prefix* at all — `V6Addr::new` rejects a link-local address with no zone
+    /// and `IpPrefix::new` rejects any address that *has* one — so every
+    /// `fe80::/64` an interface actually carries was **dropped** from
+    /// `InterfaceFacts.addresses`, while `twinvpn-platform-windows` stripped the
+    /// zone and kept it. Finding X-10: "the core saw a different address set for
+    /// the same host depending on which adapter was bound."
     ///
-    /// The consequence for this adapter is concrete and is not hidden: a
-    /// link-local address is enumerated as an *address* (with its zone, which
-    /// works) but **cannot appear in `InterfaceFacts.addresses`**, which is a
-    /// `Vec<IpPrefix>`, so it is dropped. The core therefore does not see
-    /// link-local prefixes on any interface.
-    ///
-    /// ADR-0012 §11.2 class 9 permits `fe80::/10` on non-overlay interfaces, and
-    /// [`crate::nft`] emits it as a **literal** rather than through `IpPrefix`,
-    /// so enforcement is unaffected. What is affected is any core-side decision
-    /// that would want to know an interface's link-local prefix.
-    ///
-    /// Reported to the integration lead. Neither `contracts/` nor
-    /// `twinvpn-types` is this domain's to change.
+    /// `InterfaceFacts.addresses` is now a `Vec<InterfaceAddress>`, which is the
+    /// right kind of value for an interface's own address and **permits a scope
+    /// zone**, because a link-local interface address genuinely has one. Both
+    /// halves of the old conjunction still hold for `IpPrefix` — they are right
+    /// about a *range* — and neither reaches this list any more.
     #[test]
-    fn a_link_local_prefix_is_unrepresentable_and_is_dropped_rather_than_faked() {
+    fn a_link_local_address_reaches_the_seam_with_its_zone_intact() {
         let mut ll = [0u8; 16];
         ll[0] = 0xfe;
         ll[1] = 0x80;
         ll[15] = 1;
-        // With a zone it is a valid ADDRESS...
-        let with_zone = decode_address(AF_INET6_U8, &ll, 7);
-        assert!(with_zone.is_some());
-        // ...and it is still not a valid PREFIX, in either direction.
-        assert!(
-            mask_to_prefix(with_zone.expect("address"), 64).is_none(),
-            "if this ever returns Some, twinvpn-types learned to express a \
-             link-local prefix and this finding should be deleted"
-        );
+        let address = decode_address(AF_INET6_U8, &ll, 7).expect("link-local decodes");
+
+        // It is now carriable as an INTERFACE ADDRESS, zone and all...
+        let carried = InterfaceAddress::new(address, 64).expect("carried with its zone");
+        assert_eq!(carried.prefix_len(), 64);
+        match carried.address() {
+            IpAddr::V6(a) => assert_eq!(a.zone().map(ZoneIndex::get), Some(7)),
+            IpAddr::V4(_) => panic!("v6 expected"),
+        }
+
+        // ...while `IpPrefix` still refuses it in both directions, which is
+        // correct for a range and is why the two are not the same type.
         assert!(V6Addr::new(ll, None).is_err(), "no zone: rejected");
         let zoned = V6Addr::new(ll, ZoneIndex::new(7)).expect("with zone");
         assert!(
             IpPrefix::new(IpAddr::V6(zoned), 64).is_err(),
-            "with a zone: rejected"
+            "with a zone: still not a prefix"
         );
     }
 

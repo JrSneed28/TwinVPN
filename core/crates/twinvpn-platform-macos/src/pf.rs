@@ -67,7 +67,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use twinvpn_platform::{EnforcementCustody, NetworkContract, Ruleset};
+use twinvpn_platform::{BootEnforcement, EnforcementCustody, NetworkContract, Ruleset};
 use twinvpn_types::{AddressFamily, IpPrefix};
 
 use crate::addr::prefix_text;
@@ -602,14 +602,20 @@ fn emit_scope(s: &mut String, overlay: &str, ruleset: Ruleset) {
 /// `pfctl -f` load of an anchor is applied as one transaction so the swap has no
 /// window with no rules (KS-17).
 ///
-/// **The residual §11.6 states and this type cannot:** "Recovery and safe boot do
-/// not load the LaunchDaemon", so a device booted to Recovery is unprotected.
-/// [`EnforcementCustody`] has no field for a boot mode, so the fact is carried by
-/// the shell's posture report and its README rather than here.
+/// **The residual §11.6 states, and the type can now carry it:** "Recovery and
+/// safe boot do not load the LaunchDaemon. Residual exposure: a device booted to
+/// Recovery is unprotected." That is a **hole**, not Windows' availability gap,
+/// and `EnforcementCustody::boot_enforcement` is where it is now declared rather
+/// than left to the shell's posture report and this README to carry.
 #[must_use]
 pub const fn custody() -> EnforcementCustody {
     EnforcementCustody {
         survives_core_exit: true,
         swap_is_atomic: true,
+        // The boot anchor exists and `/etc/pf.conf` references it, but the
+        // `LaunchDaemon` that loads it is not loaded in Recovery or safe boot,
+        // and Recovery HAS a network. So there is a boot mode in which this host
+        // can emit packets with no TwinVPN rule set at all.
+        boot_enforcement: BootEnforcement::ExemptBootModes,
     }
 }

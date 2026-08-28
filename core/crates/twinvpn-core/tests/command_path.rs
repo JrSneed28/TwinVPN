@@ -24,7 +24,7 @@ use twinvpn_core::events::CoreEventKind;
 use twinvpn_core::{testing, VaultState};
 use twinvpn_mgmt::{CoreCommand, Idempotency, Submission};
 use twinvpn_platform::iface::{InterfaceFacts, InterfaceIndex, InterfaceName, LinkClass};
-use twinvpn_types::{IpAddr, IpPrefix, V4Addr, V6Addr};
+use twinvpn_types::{InterfaceAddress, IpAddr, V4Addr, V6Addr};
 
 const PEER: [u8; 32] = [0x5a; 32];
 
@@ -32,15 +32,16 @@ fn dual_stack_interface() -> InterfaceFacts {
     InterfaceFacts {
         index: InterfaceIndex(2),
         name: InterfaceName::new("eth0").expect("valid"),
-        // Single-host prefixes: the only shape `InterfaceFacts.addresses` can
-        // carry an interface's own address in. See `establish::host_address`.
+        // A /24 and a /64 with host bits set — the ordinary shape of an
+        // interface address, and the shape the seam could not carry until
+        // `InterfaceFacts.addresses` became a `Vec<InterfaceAddress>`.
         addresses: vec![
-            IpPrefix::new(
+            InterfaceAddress::new(
                 IpAddr::V4(V4Addr::from_slice(&[192, 0, 2, 10]).expect("v4")),
-                32,
+                24,
             )
-            .expect("prefix"),
-            IpPrefix::new(
+            .expect("address"),
+            InterfaceAddress::new(
                 IpAddr::V6(
                     V6Addr::from_slice(
                         &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10],
@@ -48,9 +49,9 @@ fn dual_stack_interface() -> InterfaceFacts {
                     )
                     .expect("v6"),
                 ),
-                128,
+                64,
             )
-            .expect("prefix"),
+            .expect("address"),
         ],
         has_default_route_v4: true,
         has_default_route_v6: true,

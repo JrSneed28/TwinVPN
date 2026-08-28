@@ -73,7 +73,7 @@ pub mod canary;
 pub mod filters;
 pub mod readback;
 
-use twinvpn_platform::EnforcementCustody;
+use twinvpn_platform::{BootEnforcement, EnforcementCustody};
 use twinvpn_types::{AddressFamily, IpPrefix};
 
 pub use canary::{CounterSnapshot, NetEvent, NetEventKind};
@@ -676,6 +676,19 @@ pub const fn custody() -> EnforcementCustody {
     EnforcementCustody {
         survives_core_exit: true,
         swap_is_atomic: true,
+        // ADR-0012 §11.6's Windows boot row: `FWPM_FILTER_FLAG_BOOTTIME` coarse
+        // deny plus `FWPM_FILTER_FLAG_PERSISTENT` full policy, reinstated by BFE
+        // with **no process of ours running**. The host is held closed from
+        // power-on in every boot mode that has a network at all — Safe Mode
+        // without Networking has none, and Safe Mode with Networking starts BFE.
+        //
+        // The residual §11.6 records is availability and not exposure: a
+        // BOOTTIME filter cannot carry an ALE app-id, so the bootstrap exemption
+        // is unavailable during the boot window and **TwinVPN itself** is what
+        // cannot get out. `BootEnforcement::leaves_the_host_open()` is `false`
+        // here for exactly that reason, and that is the fact the honest
+        // `ProtectionAssertion` differs on.
+        boot_enforcement: BootEnforcement::OsHeldFromBoot,
     }
 }
 

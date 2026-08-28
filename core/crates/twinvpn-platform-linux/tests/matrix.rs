@@ -63,7 +63,7 @@ use twinvpn_platform_linux::{
     nft, resolver, route, AbsentElement, EnforcementConfig, LinuxAdapterParts,
     LinuxPlatformAdapter, DEFAULT_FWMARK,
 };
-use twinvpn_types::{AddressFamily, IpAddr, IpPrefix, PerFamily, V4Addr, V6Addr};
+use twinvpn_types::{AddressFamily, InterfaceAddress, IpAddr, IpPrefix, PerFamily, V4Addr, V6Addr};
 
 // ---------------------------------------------------------------------------
 // harness
@@ -204,11 +204,25 @@ fn overlay_v6(len: u32) -> IpPrefix {
     IpPrefix::new(IpAddr::V6(V6Addr::new(octets, None).expect("valid")), len).expect("canonical")
 }
 
+/// The overlay's own v4 address, host bits intact.
+fn iface_v4(octets: [u8; 4], len: u32) -> InterfaceAddress {
+    InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets(octets)), len).expect("valid")
+}
+
+/// The overlay's own v6 address.
+fn iface_overlay_v6(len: u32) -> InterfaceAddress {
+    let base = overlay_v6(len);
+    InterfaceAddress::new(base.address(), base.prefix_len()).expect("valid")
+}
+
 /// A contract with **both families**, as ADR-0010 R1 requires of every device.
 fn contract(generation: u64, interface: InterfaceIndex) -> NetworkContract {
     NetworkContract {
         generation: ContractGeneration(generation),
-        addresses: PerFamily::new(vec![v4([100, 64, 0, 1], 32)], vec![overlay_v6(128)]),
+        addresses: PerFamily::new(
+            vec![iface_v4([100, 64, 0, 1], 32)],
+            vec![iface_overlay_v6(128)],
+        ),
         routes: PerFamily::new(
             vec![RouteEntry {
                 destination: v4([100, 64, 0, 0], 10),
@@ -246,6 +260,7 @@ fn contract(generation: u64, interface: InterfaceIndex) -> NetworkContract {
         },
         ruleset: Ruleset::Protected,
         mtu: 1280,
+        tunnel_remote_address: None,
     }
 }
 

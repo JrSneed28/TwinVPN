@@ -32,9 +32,11 @@
 //! anywhere in this crate, and `cargo run -p xtask -- lint` fails the build if
 //! one appears outside a `twinvpn-platform-*` crate. Where the core genuinely
 //! needs to behave differently per target, it branches on a **declared
-//! capability** — [`config::Datapath`], [`config::EnforcementCustody`],
+//! capability** — [`config::Datapath`], [`config::EnforcementCustody`] and its
+//! [`config::BootEnforcement`], [`config::RouteCapabilities`],
 //! [`custody::RecordAeadCustody`], [`socket::SupportedFamilies`],
-//! [`iface::LinkClass`] — never on which OS it is.
+//! [`socket::SocketCapabilities`], [`iface::LinkClass`] — never on which OS it
+//! is.
 //!
 //! # The seam, both ways
 //!
@@ -80,8 +82,9 @@ pub mod socket;
 pub mod mock;
 
 pub use config::{
-    ApplyBudget, ContractGeneration, Datapath, DnsConfig, EnforcementCustody, LinkFacts, LinkState,
-    NetworkConfig, NetworkContract, RouteEntry, Ruleset, TunnelDevice, TunnelHandle,
+    ApplyBudget, BootEnforcement, ContractGeneration, Datapath, DnsConfig, EnforcementCustody,
+    LinkFacts, LinkState, NetworkConfig, NetworkContract, RouteCapabilities, RouteEntry, Ruleset,
+    TunnelDevice, TunnelHandle,
 };
 pub use custody::{
     IdentityAttestation, IdentityCustody, IdentityKeyRef, IdentityPublic, PeerPublicKey,
@@ -91,10 +94,11 @@ pub use custody::{
 pub use error::{OsDetail, PlatformError};
 pub use iface::{
     InterfaceFacts, InterfaceIndex, InterfaceName, InterfaceProvider, LinkClass, NetworkChange,
+    ResumeFacts,
 };
 pub use socket::{
-    AdapterResponseBudget, Datagram, FragmentPolicy, MulticastOptions, SocketFamily, SocketOptions,
-    SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
+    AdapterResponseBudget, Datagram, FragmentPolicy, MulticastOptions, SocketCapabilities,
+    SocketFamily, SocketOptions, SocketProvider, SupportedFamilies, UdpBindSpec, UdpSocket,
 };
 
 /// The whole adapter: every capability the core reaches the platform through.
