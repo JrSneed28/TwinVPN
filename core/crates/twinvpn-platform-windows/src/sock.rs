@@ -240,20 +240,8 @@ pub fn render_options(family: SocketFamily, options: &SocketOptions) -> OptionPr
     let mut unsupported = Vec::new();
 
     // First, and before `bind`.
-    match family {
-        SocketFamily::V6Only => calls.push(SockOpt {
-            level: IPPROTO_IPV6,
-            name: IPV6_V6ONLY,
-            value: OptValue::Int(1),
-            call: "IPV6_V6ONLY",
-        }),
-        SocketFamily::V6DualStack => calls.push(SockOpt {
-            level: IPPROTO_IPV6,
-            name: IPV6_V6ONLY,
-            value: OptValue::Int(0),
-            call: "IPV6_V6ONLY",
-        }),
-        SocketFamily::V4 => {}
+    if let Some(option) = v6only(family) {
+        calls.push(option);
     }
 
     if options.reuse_address {
@@ -268,93 +256,20 @@ pub fn render_options(family: SocketFamily, options: &SocketOptions) -> OptionPr
         unsupported.push(Unsupported::ReusePort);
     }
 
-    // DPLPMTUD (§6.2): "success is inferred from an acknowledgement, not from
-    // the absence of an ICMP error", which requires the too-large probe to be
-    // DROPPED rather than fragmented. Windows expresses that as a plain
-    // don't-fragment flag; it has no `IP_PMTUDISC_PROBE` equivalent, so it also
-    // keeps its own path-MTU bookkeeping. That difference is a reported finding,
-    // not something this function papers over.
     if matches!(options.fragment_policy, FragmentPolicy::DontFragment) {
-        calls.push(if is_v6 {
-            SockOpt {
-                level: IPPROTO_IPV6,
-                name: IPV6_DONTFRAG,
-                value: OptValue::Int(1),
-                call: "IPV6_DONTFRAG",
-            }
-        } else {
-            SockOpt {
-                level: IPPROTO_IP,
-                name: IP_DONTFRAGMENT,
-                value: OptValue::Int(1),
-                call: "IP_DONTFRAGMENT",
-            }
-        });
+        calls.push(dont_fragment(is_v6));
     }
-
     if let Some(hops) = options.hop_limit {
-        calls.push(if is_v6 {
-            SockOpt {
-                level: IPPROTO_IPV6,
-                name: IPV6_UNICAST_HOPS,
-                value: OptValue::Int(i32::from(hops)),
-                call: "IPV6_UNICAST_HOPS",
-            }
-        } else {
-            SockOpt {
-                level: IPPROTO_IP,
-                name: IP_TTL,
-                value: OptValue::Int(i32::from(hops)),
-                call: "IP_TTL",
-            }
-        });
+        calls.push(hop_limit(is_v6, hops));
     }
-
     if let Some(dscp) = options.dscp {
-        // The seam carries the DSCP code point; the wire field is the full
-        // TOS / traffic-class octet, so the shift happens here rather than in
-        // the core — where it would be a platform fact above the adapter.
-        let octet = i32::from(dscp) << 2;
-        calls.push(if is_v6 {
-            SockOpt {
-                level: IPPROTO_IPV6,
-                name: IPV6_TCLASS,
-                value: OptValue::Int(octet),
-                call: "IPV6_TCLASS",
-            }
-        } else {
-            SockOpt {
-                level: IPPROTO_IP,
-                name: IP_TOS,
-                value: OptValue::Int(octet),
-                call: "IP_TOS",
-            }
-        });
+        calls.push(traffic_class(is_v6, dscp));
     }
-
     if let Some(index) = options.bind_to_interface {
         calls.push(unicast_if(is_v6, index));
     }
-
     if options.receive_packet_info {
-        // Without this a wildcard-bound socket cannot tell which of its
-        // addresses a probe arrived on, which is what §3.4's disco probe needs
-        // to attribute a reflexive candidate correctly.
-        calls.push(if is_v6 {
-            SockOpt {
-                level: IPPROTO_IPV6,
-                name: IPV6_PKTINFO,
-                value: OptValue::Int(1),
-                call: "IPV6_PKTINFO",
-            }
-        } else {
-            SockOpt {
-                level: IPPROTO_IP,
-                name: IP_PKTINFO,
-                value: OptValue::Int(1),
-                call: "IP_PKTINFO",
-            }
-        });
+        calls.push(packet_info(is_v6));
     }
 
     if options.firewall_mark.is_some() {
@@ -378,9 +293,130 @@ pub fn render_options(family: SocketFamily, options: &SocketOptions) -> OptionPr
         });
     }
 
-    OptionProgramme {
-        calls,
-        unsupported,
+    OptionProgramme { calls, unsupported }
+}
+
+/// `IPV6_V6ONLY`, or nothing at all on a v4 socket.
+///
+/// The whole reason [`SocketFamily::V6Only`] and [`SocketFamily::V6DualStack`]
+/// are different values rather than a flag is that "we forgot to set it" is how
+/// a v6 socket silently starts accepting v4-mapped traffic that `common.proto`
+/// rejects everywhere else. An `Option` from one function is what makes "the v4
+/// case sets nothing" a single reviewable line rather than an empty match arm.
+#[must_use]
+pub const fn v6only(family: SocketFamily) -> Option<SockOpt> {
+    let value = match family {
+        SocketFamily::V6Only => 1,
+        SocketFamily::V6DualStack => 0,
+        SocketFamily::V4 => return None,
+    };
+    Some(SockOpt {
+        level: IPPROTO_IPV6,
+        name: IPV6_V6ONLY,
+        value: OptValue::Int(value),
+        call: "IPV6_V6ONLY",
+    })
+}
+
+/// The don't-fragment option for a family.
+///
+/// DPLPMTUD (`docs/networking.md` §6.2): "success is inferred from an
+/// acknowledgement, not from the absence of an ICMP error", which requires the
+/// too-large probe to be **dropped** rather than fragmented. Windows expresses
+/// that as a plain don't-fragment flag; it has no `IP_PMTUDISC_PROBE`
+/// equivalent, so it also keeps its own path-MTU bookkeeping and will act on an
+/// ICMP "packet too big" that RFC 8899 says to ignore. That difference is a
+/// reported finding, not something this function papers over.
+#[must_use]
+pub const fn dont_fragment(is_v6: bool) -> SockOpt {
+    if is_v6 {
+        SockOpt {
+            level: IPPROTO_IPV6,
+            name: IPV6_DONTFRAG,
+            value: OptValue::Int(1),
+            call: "IPV6_DONTFRAG",
+        }
+    } else {
+        SockOpt {
+            level: IPPROTO_IP,
+            name: IP_DONTFRAGMENT,
+            value: OptValue::Int(1),
+            call: "IP_DONTFRAGMENT",
+        }
+    }
+}
+
+/// `IP_TTL` or `IPV6_UNICAST_HOPS`.
+///
+/// One field on the seam and not two, "because a socket has exactly one family
+/// and carrying both would make *which one applies* a question the core has to
+/// answer".
+#[must_use]
+pub const fn hop_limit(is_v6: bool, hops: u8) -> SockOpt {
+    let value = OptValue::Int(hops as i32);
+    if is_v6 {
+        SockOpt {
+            level: IPPROTO_IPV6,
+            name: IPV6_UNICAST_HOPS,
+            value,
+            call: "IPV6_UNICAST_HOPS",
+        }
+    } else {
+        SockOpt {
+            level: IPPROTO_IP,
+            name: IP_TTL,
+            value,
+            call: "IP_TTL",
+        }
+    }
+}
+
+/// `IP_TOS` or `IPV6_TCLASS`.
+///
+/// The seam carries the DSCP **code point**; the wire field is the full TOS /
+/// traffic-class octet, so the shift happens here rather than in the core, where
+/// it would be a platform fact above the adapter.
+#[must_use]
+pub const fn traffic_class(is_v6: bool, dscp: u8) -> SockOpt {
+    let value = OptValue::Int((dscp as i32) << 2);
+    if is_v6 {
+        SockOpt {
+            level: IPPROTO_IPV6,
+            name: IPV6_TCLASS,
+            value,
+            call: "IPV6_TCLASS",
+        }
+    } else {
+        SockOpt {
+            level: IPPROTO_IP,
+            name: IP_TOS,
+            value,
+            call: "IP_TOS",
+        }
+    }
+}
+
+/// `IP_PKTINFO` or `IPV6_PKTINFO`.
+///
+/// Without it a wildcard-bound socket cannot tell which of its addresses a probe
+/// arrived on, which is what `docs/networking.md` §3.4's disco probe needs to
+/// attribute a reflexive candidate correctly.
+#[must_use]
+pub const fn packet_info(is_v6: bool) -> SockOpt {
+    if is_v6 {
+        SockOpt {
+            level: IPPROTO_IPV6,
+            name: IPV6_PKTINFO,
+            value: OptValue::Int(1),
+            call: "IPV6_PKTINFO",
+        }
+    } else {
+        SockOpt {
+            level: IPPROTO_IP,
+            name: IP_PKTINFO,
+            value: OptValue::Int(1),
+            call: "IP_PKTINFO",
+        }
     }
 }
 
@@ -477,6 +513,27 @@ pub fn render_sockaddr(endpoint: Endpoint) -> ([u8; SOCKADDR_MAX], i32) {
             // a non-zero value there is a flow label we never negotiated.
             out[8..24].copy_from_slice(&a.octets());
             out[24..28].copy_from_slice(&a.zone().map_or(0, ZoneIndex::get).to_ne_bytes());
+            (out, 28)
+        }
+    }
+}
+
+/// Renders the wildcard address for a family: any address, ephemeral port.
+///
+/// Separate from [`render_sockaddr`] because [`twinvpn_types::Port`] rejects
+/// zero — correctly, since `common.proto` calls a zero port malformed — so an
+/// ephemeral bind cannot be expressed as an [`Endpoint`] at all. Port zero is
+/// meaningful to exactly one caller, `bind`, and this is that caller's function.
+#[must_use]
+pub fn render_wildcard(family: SocketFamily) -> ([u8; SOCKADDR_MAX], i32) {
+    let mut out = [0u8; SOCKADDR_MAX];
+    match family {
+        SocketFamily::V4 => {
+            out[0..2].copy_from_slice(&2u16.to_ne_bytes());
+            (out, 16)
+        }
+        SocketFamily::V6Only | SocketFamily::V6DualStack => {
+            out[0..2].copy_from_slice(&23u16.to_ne_bytes());
             (out, 28)
         }
     }
@@ -621,9 +678,18 @@ pub fn parse_pktinfo(control: &[u8], word: usize) -> Option<PktInfo> {
         if cmsg_len < header || offset + cmsg_len > control.len() {
             return None;
         }
-        let level = i32::from_ne_bytes(control.get(offset + word..offset + word + 4)?.try_into().ok()?);
-        let kind =
-            i32::from_ne_bytes(control.get(offset + word + 4..offset + word + 8)?.try_into().ok()?);
+        let level = i32::from_ne_bytes(
+            control
+                .get(offset + word..offset + word + 4)?
+                .try_into()
+                .ok()?,
+        );
+        let kind = i32::from_ne_bytes(
+            control
+                .get(offset + word + 4..offset + word + 8)?
+                .try_into()
+                .ok()?,
+        );
         let data = control.get(offset + header..offset + cmsg_len)?;
 
         // `IN_PKTINFO` is `{ ipi_addr: IN_ADDR, ipi_ifindex: ULONG }` — 8 bytes.
@@ -846,7 +912,11 @@ impl SocketProvider for WindowsSocketProvider {
 /// It may not, and the answer is a named condition rather than a Winsock error:
 /// a closed socket is a state the caller asked for.
 fn closed(call: &'static str) -> PlatformError {
-    oserr::from_status(Win32Error(oserr::ERROR_INVALID_HANDLE), call, Context::Socket)
+    oserr::from_status(
+        Win32Error(oserr::ERROR_INVALID_HANDLE),
+        call,
+        Context::Socket,
+    )
 }
 
 #[cfg(windows)]
@@ -1021,8 +1091,10 @@ mod win_constants {
         assert!(ws::AF_INET == 2);
         assert!(ws::AF_INET6 == 23);
         // The control-message header this module walks by hand.
-        assert!(super::cmsg_header_len(core::mem::size_of::<usize>())
-            == core::mem::size_of::<ws::CMSGHDR>());
+        assert!(
+            super::cmsg_header_len(core::mem::size_of::<usize>())
+                == core::mem::size_of::<ws::CMSGHDR>()
+        );
     };
 }
 
@@ -1031,7 +1103,9 @@ mod tests {
     use super::*;
 
     fn v6(text: &str) -> [u8; 16] {
-        text.parse::<std::net::Ipv6Addr>().expect("literal").octets()
+        text.parse::<std::net::Ipv6Addr>()
+            .expect("literal")
+            .octets()
     }
 
     fn defaults() -> SocketOptions {
@@ -1218,16 +1292,18 @@ mod tests {
     #[test]
     fn a_sockaddr_round_trips_in_both_families_with_the_windows_family_numbers() {
         for (address, port, scope) in [
-            (IpAddr::V4(V4Addr::from_octets([192, 0, 2, 1])), 443u16, 0u32),
+            (
+                IpAddr::V4(V4Addr::from_octets([192, 0, 2, 1])),
+                443u16,
+                0u32,
+            ),
             (
                 IpAddr::V6(V6Addr::new(v6("2001:db8::1"), None).expect("literal")),
                 51820,
                 0,
             ),
             (
-                IpAddr::V6(
-                    V6Addr::new(v6("fe80::1"), ZoneIndex::new(9)).expect("literal"),
-                ),
+                IpAddr::V6(V6Addr::new(v6("fe80::1"), ZoneIndex::new(9)).expect("literal")),
                 5353,
                 9,
             ),
@@ -1260,7 +1336,10 @@ mod tests {
     fn a_short_or_unknown_sockaddr_is_a_typed_reject_and_never_padded() {
         // A padded address matches the wrong peer.
         assert!(parse_sockaddr(&[], "test").is_err());
-        assert!(parse_sockaddr(&[2, 0], "test").is_err(), "AF_INET, too short");
+        assert!(
+            parse_sockaddr(&[2, 0], "test").is_err(),
+            "AF_INET, too short"
+        );
         assert!(
             parse_sockaddr(&[23, 0, 0, 0, 0, 0, 0, 0], "test").is_err(),
             "AF_INET6, too short"

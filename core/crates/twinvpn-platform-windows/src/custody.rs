@@ -310,8 +310,11 @@ pub trait SigningElement: Send + Sync + std::fmt::Debug {
     /// **not** X25519, so on this platform the honest answer is
     /// [`PlatformError::OsUnsupported`] — a fact the core records, and **not** a
     /// licence to fall back to a private key it does not have.
-    fn agree(&self, key: IdentityKeyRef, peer: &PeerPublicKey)
-        -> Result<SharedSecret, PlatformError>;
+    fn agree(
+        &self,
+        key: IdentityKeyRef,
+        peer: &PeerPublicKey,
+    ) -> Result<SharedSecret, PlatformError>;
 
     /// The element's own attestation blob, if it produces one.
     fn attestation(&self) -> Option<(Vec<u8>, &'static str)>;
@@ -574,6 +577,19 @@ impl WindowsSecureStore {
         self.backend.custody_class()
     }
 
+    /// The vault directory this store was constructed with.
+    ///
+    /// The same path [`SecureStore::store_root`] vends, without the `async` and
+    /// without the side effect of creating the directory — for the shell's start
+    /// sequence, which reports the configured path in a diagnostic before it has
+    /// decided whether the store is usable. It is an accessor for an injected
+    /// value and not a discovery: ST-12e's rule is about where the path *comes
+    /// from*, and it came from the constructor.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Creates the Tier-1 directory beneath the vended root.
     ///
     /// **It does not write the ACL.** ADR-0020 §11.9 and ADR-0016 §11.9 put the
@@ -745,7 +761,7 @@ mod platform {
     //! §11.16 (l) forbids.
 
     use super::{
-        no_element, IdentityPublic, IdentityKeyRef, PeerPublicKey, PlatformError, SecretProtector,
+        no_element, IdentityKeyRef, IdentityPublic, PeerPublicKey, PlatformError, SecretProtector,
         SharedSecret, Signature, SigningElement, Tier1Backend,
     };
     use crate::oserr::{self, Context, Win32Error};
@@ -882,13 +898,16 @@ mod tests {
             Ok(out)
         }
         fn unseal(&self, sealed: &[u8]) -> Result<Vec<u8>, PlatformError> {
-            sealed.strip_prefix(MARKER).map(<[u8]>::to_vec).ok_or_else(|| {
-                oserr::from_status(
-                    Win32Error(oserr::NTE_BAD_KEYSET),
-                    "NCryptUnprotectSecret",
-                    Context::SecureStore,
-                )
-            })
+            sealed
+                .strip_prefix(MARKER)
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| {
+                    oserr::from_status(
+                        Win32Error(oserr::NTE_BAD_KEYSET),
+                        "NCryptUnprotectSecret",
+                        Context::SecureStore,
+                    )
+                })
         }
     }
 
@@ -952,13 +971,19 @@ mod tests {
     fn each_backend_declares_the_class_and_the_aead_custody_adr_0020_gives_it() {
         let tpm = Tier1Backend::PlatformCryptoProvider { attested: true };
         assert_eq!(tpm.custody_class(), CustodyClass::HardwareAttested);
-        assert_eq!(tpm.record_aead_custody(), RecordAeadCustody::PlatformPerformed);
+        assert_eq!(
+            tpm.record_aead_custody(),
+            RecordAeadCustody::PlatformPerformed
+        );
         assert_eq!(tpm.provider_name(), Some(PLATFORM_KEY_STORAGE_PROVIDER));
 
         // VBS-only Windows: an element, but no attestation this build accepts.
         let vbs = Tier1Backend::PlatformCryptoProvider { attested: false };
         assert_eq!(vbs.custody_class(), CustodyClass::HardwareUnattested);
-        assert_eq!(vbs.record_aead_custody(), RecordAeadCustody::PlatformPerformed);
+        assert_eq!(
+            vbs.record_aead_custody(),
+            RecordAeadCustody::PlatformPerformed
+        );
 
         let ksp = Tier1Backend::SoftwareKsp;
         assert_eq!(ksp.custody_class(), CustodyClass::SoftwareLocal);
@@ -1090,7 +1115,10 @@ mod tests {
             .expect("writes");
 
         let on_disk = fs::read(store.item_path(&key)).expect("exists");
-        assert!(on_disk.starts_with(MARKER), "the store wrote unsealed bytes");
+        assert!(
+            on_disk.starts_with(MARKER),
+            "the store wrote unsealed bytes"
+        );
         assert_ne!(on_disk, secret);
         let _ = fs::remove_dir_all(&root);
     }
@@ -1119,12 +1147,16 @@ mod tests {
             .secure_item_write_atomic(&key, &SecureItem::new(vec![2u8; 16]))
             .await
             .expect_err("the seal failed");
-        // See `a_dpapi_ng_failure_reports_the_identity_key_code_not_the_store_code`
-        // for why this is the identity code and not the store one.
-        assert_eq!(err.reason_code().as_str(), "AUTH.KEY_UNAVAILABLE");
+        // A store condition, not a missing identity — see
+        // `a_dpapi_ng_failure_is_a_store_condition_and_not_a_missing_identity`.
+        assert_eq!(err.reason_code().as_str(), "AUTH.KEY_STORE_UNAVAILABLE");
 
         // The old value is intact, and no temp file was left behind.
-        let read = good.secure_item_read(&key).await.expect("reads").expect("present");
+        let read = good
+            .secure_item_read(&key)
+            .await
+            .expect("reads")
+            .expect("present");
         assert_eq!(read.as_bytes(), &[1u8; 16]);
         assert!(!failing.temp_path(&key).exists());
         let _ = fs::remove_dir_all(&root);
@@ -1145,7 +1177,7 @@ mod tests {
             .secure_item_read(&key)
             .await
             .expect_err("the unseal failed");
-        assert_eq!(err.reason_code().as_str(), "AUTH.KEY_UNAVAILABLE");
+        assert_eq!(err.reason_code().as_str(), "AUTH.KEY_STORE_UNAVAILABLE");
         assert!(
             err.os_detail().is_some(),
             "the HRESULT reaches a Tier-1 bundle whichever code it carries"
@@ -1153,48 +1185,59 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// **A finding, pinned as a test rather than reported only in prose.**
+    /// **A defect this file found and `oserr.rs` fixed.**
     ///
     /// DPAPI-NG *is* NCrypt: `NCryptProtectSecret` and `NCryptUnprotectSecret`
-    /// fail with `NTE_*` HRESULTs. [`crate::oserr::from_status`] matches those
-    /// **before** it consults [`Context`], so a Tier-1 *store* failure is
-    /// reported as `AUTH.KEY_UNAVAILABLE` (the identity key is gone) rather than
-    /// as `AUTH.KEY_STORE_UNAVAILABLE` (the store could not be reached) — even
-    /// though the caller passed `Context::SecureStore`.
+    /// fail with the same `NTE_*` HRESULTs a key operation does.
+    /// [`crate::oserr::from_status`] used to match those **before** it consulted
+    /// [`Context`], so a Tier-1 *store* failure was reported as
+    /// `AUTH.KEY_UNAVAILABLE` — the identity key is gone — rather than as
+    /// `AUTH.KEY_STORE_UNAVAILABLE`, the store could not be reached, even though
+    /// the caller passed `Context::SecureStore`.
     ///
     /// The two have different classes in the frozen registry:
     /// `AUTH.KEY_UNAVAILABLE` is `PERSISTENT`/`ERROR`, `AUTH.KEY_STORE_UNAVAILABLE`
     /// is `TRANSIENT`/`WARN`. So a locked or momentarily unavailable DPAPI-NG
-    /// protector reads to the core as a permanently missing identity, which
-    /// routes ADR-0020's recovery ladder to the wrong rung: L4 ("anchor absent
-    /// ⇒ re-enrolment") instead of a retry.
+    /// protector read to the core as a permanently missing identity, which routes
+    /// ADR-0020's recovery ladder to the wrong rung: L4 ("anchor absent ⇒
+    /// re-enrolment") instead of a retry.
     ///
-    /// `oserr.rs` belongs to this crate but not to this file's change, and
-    /// ADR-0020 §11.12's own name for the condition — `STORE.KEYSTORE_UNAVAILABLE`
-    /// — **is not in `contracts/registry/reason_codes.json`** at all, so there is
-    /// no unambiguously right code to move to. Reported to the integration lead;
-    /// the behaviour is asserted as it is.
+    /// The `NTE_*` arm is context-sensitive now. What is **not** fixed and is
+    /// still reported: ADR-0020 §11.12's own name for the condition,
+    /// `STORE.KEYSTORE_UNAVAILABLE`, is not in
+    /// `contracts/registry/reason_codes.json` at all, so `AUTH.KEY_STORE_UNAVAILABLE`
+    /// is a substitution — it carries the right class and the right remediation
+    /// and loses the `STORE` domain.
     #[tokio::test]
-    async fn a_dpapi_ng_failure_reports_the_identity_key_code_not_the_store_code() {
+    async fn a_dpapi_ng_failure_is_a_store_condition_and_not_a_missing_identity() {
         for status in [
             oserr::NTE_BAD_KEYSET,
             oserr::NTE_NOT_FOUND,
             oserr::NTE_DEVICE_NOT_READY,
         ] {
-            let err = oserr::from_status(
-                Win32Error(status),
-                "NCryptUnprotectSecret",
-                Context::SecureStore,
-            );
             assert_eq!(
-                err.reason_code().as_str(),
+                oserr::from_status(
+                    Win32Error(status),
+                    "NCryptUnprotectSecret",
+                    Context::SecureStore,
+                )
+                .reason_code()
+                .as_str(),
+                "AUTH.KEY_STORE_UNAVAILABLE",
+                "{status:#x}"
+            );
+            // ...and the same status from a key operation is still the identity
+            // condition, which is what makes the context the disambiguator
+            // rather than a blanket re-mapping.
+            assert_eq!(
+                oserr::from_status(Win32Error(status), "NCryptSignHash", Context::Identity)
+                    .reason_code()
+                    .as_str(),
                 "AUTH.KEY_UNAVAILABLE",
-                "if this ever becomes AUTH.KEY_STORE_UNAVAILABLE or a registered \
-                 STORE.* code, this test and its finding should be deleted"
+                "{status:#x}"
             );
         }
-        // A non-NCrypt store failure DOES reach the store code, which is what
-        // makes the arm above a mapping quirk rather than a blanket rule.
+        // A non-NCrypt store failure reaches the store code too.
         assert_eq!(
             oserr::from_status(
                 Win32Error(oserr::ERROR_ACCESS_DENIED),
@@ -1216,7 +1259,10 @@ mod tests {
         let root = temp_root();
         let store = store(root.clone(), Tier1Backend::SoftwareKsp);
         let key = SecureItemKey::new("sek.v1").expect("valid");
-        assert_eq!(store.temp_path(&key).parent(), store.item_path(&key).parent());
+        assert_eq!(
+            store.temp_path(&key).parent(),
+            store.item_path(&key).parent()
+        );
         assert!(store
             .temp_path(&key)
             .starts_with(root.join(WindowsSecureStore::TIER1_DIR)));
@@ -1246,8 +1292,11 @@ mod tests {
     fn the_aead_custody_is_declared_from_the_probe_and_not_from_the_build() {
         let root = temp_root();
         assert_eq!(
-            store(root.clone(), Tier1Backend::PlatformCryptoProvider { attested: true })
-                .record_aead_custody(),
+            store(
+                root.clone(),
+                Tier1Backend::PlatformCryptoProvider { attested: true }
+            )
+            .record_aead_custody(),
             RecordAeadCustody::PlatformPerformed
         );
         assert_eq!(
@@ -1310,7 +1359,10 @@ mod tests {
         // CNG's key-storage providers offer ECDH over the NIST curves and not
         // X25519. Refusing is the fact the core records; falling back to a key
         // this process does not have is not available and must not look like it.
-        let custody = WindowsIdentityCustody::new(Arc::new(CngElement::new(Tier1Backend::Absent)), ShutdownLatch::new());
+        let custody = WindowsIdentityCustody::new(
+            Arc::new(CngElement::new(Tier1Backend::Absent)),
+            ShutdownLatch::new(),
+        );
         let err = custody
             .identity_agree(
                 IdentityKeyRef::Identity { generation: 0 },
@@ -1318,7 +1370,10 @@ mod tests {
             )
             .await
             .expect_err("no in-element agreement");
-        assert!(err.os_detail().is_some(), "the detail reaches a Tier-1 bundle");
+        assert!(
+            err.os_detail().is_some(),
+            "the detail reaches a Tier-1 bundle"
+        );
     }
 
     #[tokio::test]

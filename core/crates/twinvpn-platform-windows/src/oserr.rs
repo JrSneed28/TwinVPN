@@ -375,9 +375,21 @@ pub fn from_status(status: Win32Error, call: &'static str, context: Context) -> 
             _ => PlatformError::AdapterUnavailable(d),
         },
 
-        NTE_BAD_KEYSET | NTE_NOT_FOUND | NTE_NO_KEY | NTE_DEVICE_NOT_READY => {
-            PlatformError::IdentityKeyUnavailable(d)
-        }
+        // A CNG status, and **the context decides which condition it is**.
+        //
+        // This arm used to be context-free, and `desktop-windows`'s custody work
+        // caught what that cost: DPAPI-NG returns the same `NTE_*` values as a
+        // key operation, so a Tier-1 *store* failure reported
+        // `AUTH.KEY_UNAVAILABLE` — `PERSISTENT`/`ERROR` — where the registry has
+        // `AUTH.KEY_STORE_UNAVAILABLE` at `TRANSIENT`/`WARN`. A momentarily
+        // unavailable protector read to the core as a permanently missing
+        // identity, which routes ADR-0020's recovery ladder to L4 (re-enrolment)
+        // instead of a retry. Two codes, two classes, two remediations: the
+        // disambiguator is the one `Context` already carries.
+        NTE_BAD_KEYSET | NTE_NOT_FOUND | NTE_NO_KEY | NTE_DEVICE_NOT_READY => match context {
+            Context::SecureStore => PlatformError::SecureStoreUnavailable(d),
+            _ => PlatformError::IdentityKeyUnavailable(d),
+        },
 
         // The WFP session went away underneath us. That is **not** "no rules" —
         // once committed, the filters belong to the Base Filtering Engine and
@@ -507,6 +519,32 @@ mod tests {
             let e = from_status(Win32Error(status), "NCryptOpenKey", Context::Identity);
             assert_eq!(
                 e.reason_code().as_str(),
+                "AUTH.KEY_UNAVAILABLE",
+                "{status:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dpapi_ng_failure_is_a_store_condition_and_not_a_missing_identity() {
+        // DPAPI-NG returns the same `NTE_*` values a key operation does, and the
+        // two conditions have different classes and different remediations:
+        // `AUTH.KEY_STORE_UNAVAILABLE` is TRANSIENT/WARN and the caller retries,
+        // `AUTH.KEY_UNAVAILABLE` is PERSISTENT/ERROR and ADR-0020's ladder goes
+        // to L4 — re-enrolment. Reporting the second for the first would make a
+        // momentarily unavailable protector look like a lost device.
+        for status in [NTE_BAD_KEYSET, NTE_NOT_FOUND, NTE_NO_KEY, NTE_DEVICE_NOT_READY] {
+            assert_eq!(
+                from_status(Win32Error(status), "NCryptUnprotectSecret", Context::SecureStore)
+                    .reason_code()
+                    .as_str(),
+                "AUTH.KEY_STORE_UNAVAILABLE",
+                "{status:#x}"
+            );
+            assert_eq!(
+                from_status(Win32Error(status), "NCryptSignHash", Context::Identity)
+                    .reason_code()
+                    .as_str(),
                 "AUTH.KEY_UNAVAILABLE",
                 "{status:#x}"
             );
