@@ -17,10 +17,15 @@
 # NOTHING HERE HAS EVER BEEN LINKED. `make cross-check` type-checks the whole
 # workspace for aarch64-apple-darwin with `-D warnings`, which is a COMPILE proof
 # and never a behaviour proof. `cargo test` on the Linux host runs whatever is
-# target-free, which is most of `mi` and all of `twinvpn-bridge`.
+# target-free, which is the management interface, the start sequence, the
+# datapath framing and the whole of the C surface.
 [workspace]
 resolver = "2"
-members = ["twinvpnd", "twinvpnctl", "twinvpn-bridge"]
+# X-7 / PS-22: `twinvpnd` is gone. The NE system extension is the authority
+# (`twinvpn-bridge`), `ksd` holds the KS-19 boot anchor and nothing else, and
+# `twinvpn-mi` is the one declaration of the management contract that the
+# authority serves and the CLI speaks.
+members = ["twinvpn-bridge", "twinvpn-mi", "twinvpnctl", "ksd", "twinvpn-unblock"]
 
 [workspace.package]
 version      = "0.1.0"

@@ -1,21 +1,40 @@
-# twinvpn-bridge - the Swift <-> Rust ABI of the macOS system extension.
+# twinvpn-bridge - the macOS NE system extension: THE AUTHORITY.
 #
 # Owner: desktop-macos.
 #
-# A `staticlib` because the Swift `NEPacketTunnelProvider` links it into the
-# system extension bundle, and an `rlib` as well so `twinvpnd` can use the same
-# `TvbExt` machinery in-process without going through C.
+# ============================================================== WHAT X-7 MOVED
 #
-# THE ONE CRATE IN THIS SHELL THAT CANNOT FORBID `unsafe`. Every other crate
-# under `shells/` carries `#![forbid(unsafe_code)]`; this one is the FFI
-# boundary itself, so it carries `#![deny(unsafe_op_in_unsafe_fn)]` and a
-# `// SAFETY:` comment on every block instead. DP-4 permits that here.
+# Until X-7 this crate was the Swift<->Rust ABI and nothing else: it built the
+# platform adapter, pumped packets, and left `twinvpn-core` hosted in a
+# `LaunchDaemon` called `twinvpnd`. ADR-0016 §11.2 says the system extension IS
+# the authority, amendment **PS-22** says so with the mechanism named, and the
+# argument is physical: `NEPacketTunnelProvider.packetFlow` exists only inside
+# the provider process, the core owns the datapath, and §11.16 (a) / S-47 permit
+# exactly ONE process to hold a mutating core handle. There is therefore no
+# split in which the daemon holds the core and the extension pumps packets.
+#
+# So this crate now hosts the `Core`, the key handle, the platform adapter, the
+# datapath and the management interface. `shells/macos/ksd` holds the KS-19 boot
+# anchor and nothing else.
+#
+# ==================================================== THE `staticlib` + `rlib`
+#
+# A `staticlib` because the Swift `NEPacketTunnelProvider` links it into the
+# system extension bundle. An `rlib` as well so this crate's own integration
+# tests -- and any later in-tree consumer -- can reach `TvbExt` without going
+# through C.
+#
+# ============================================== THE ONE CRATE THAT USES UNSAFE
+#
+# Every other crate under `shells/` carries `#![forbid(unsafe_code)]`. This one
+# is the FFI boundary itself AND the holder of `getsockopt(LOCAL_PEERCRED)`,
+# which ADR-0017 MI-A1 makes the only kernel source of a principal on Darwin.
+# It carries `#![deny(unsafe_op_in_unsafe_fn)]` and a `// SAFETY:` comment on
+# every block instead. DP-4 permits that here.
 #
 # `futures-core` is the one dependency NOT inherited from the workspace: it is
 # needed only to IMPLEMENT `twinvpn_platform_macos::utun::PacketPort`, whose
-# methods return `BoxFuture`, and no other crate in this shell names it. The
-# bridge itself never awaits anything -- Swift calls blocking C functions -- so
-# it is a type dependency and not a runtime one.
+# methods return `BoxFuture`, and no other crate in this shell names it.
 [package]
 name        = "twinvpn-bridge"
 version.workspace      = true
@@ -23,18 +42,32 @@ edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
 repository.workspace   = true
-description = "the Swift/Rust bridge for the macOS packet-tunnel system extension"
+description = "the macOS NE system extension: the hosted core, the datapath, and the management interface (ADR-0016 PS-22)"
 
 [lib]
 name       = "twinvpn_bridge"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+# The authority's half. `core-host` was a FEATURE here until wave 3, gated only
+# because `twinvpn-crypto` selected `snow`'s `ring-accelerated` resolver and
+# `ring`'s C sources could not be cross-compiled on the Linux CI host.
+# `core/Cargo.toml` now selects snow's default resolver, so the gate's only
+# reason is gone and the core edge is unconditional -- which means
+# `make cross-check` type-checks it for aarch64-apple-darwin with `-D warnings`
+# like everything else.
+twinvpn-core           = { workspace = true }
+twinvpn-diag           = { workspace = true }
+twinvpn-mgmt           = { workspace = true }
+twinvpn-mi             = { path = "../twinvpn-mi" }
 twinvpn-platform-macos = { workspace = true }
 twinvpn-platform       = { workspace = true }
 twinvpn-types          = { workspace = true }
 twinvpn-env            = { workspace = true }
+thiserror              = { workspace = true }
+tokio                  = { workspace = true }
 tracing                = { workspace = true }
+tracing-subscriber     = { workspace = true }
 serde_json             = { workspace = true }
 libc                   = { workspace = true }
 futures-core           = "0.3"

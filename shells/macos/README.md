@@ -1,4 +1,4 @@
-# The macOS shell — `twinvpnd`, `twinvpnctl`, `twinvpn-bridge` and the system extension
+# The macOS shell — the system extension, `ksd`, `twinvpnctl` and `twinvpn-unblock`
 
 **Owner:** `desktop-macos`.
 **Authority:** [ADR-0016](../../docs/adr/ADR-0016-client-process-and-privilege-separation.md)
@@ -24,14 +24,26 @@ what it does not mean, is the whole of §7 — and the short version is:
 
 | Artifact | Compiled for `aarch64-apple-darwin` | **Executed** |
 |---|---|---|
-| `twinvpn-bridge` (Rust) | yes, `-D warnings` | **yes, on Linux** — 66 tests |
-| `twinvpnd` (Rust) | yes, `-D warnings` | **yes, on Linux** — 76 tests |
+| `twinvpn-bridge` (Rust) — **the authority** | yes, `-D warnings` | **yes, on Linux** — 134 tests |
+| `twinvpn-mi` (Rust) | yes, `-D warnings` | **yes, on Linux** — 31 tests |
 | `twinvpnctl` (Rust) | yes, `-D warnings` | **yes, on Linux** — 22 tests |
-| `TwinVPNTunnel/*.swift` | **no.** Swift 6.1.2 here is the Linux toolchain with no Darwin SDK: no `NetworkExtension`, no `Security`, no `SystemConfiguration` | **no** |
+| `ksd` (Rust) | yes, `-D warnings` | **yes, on Linux** — 12 tests |
+| `twinvpn-unblock` (Rust) | yes, `-D warnings` | **yes, on Linux** — 10 tests |
+| `TwinVPNTunnel/*.swift` | **no.** Swift 6.1.2 here is the Linux toolchain with no Darwin SDK: no `NetworkExtension`, no `XPC`, no `Security`, no `SystemConfiguration` | **no** |
 | `packaging/*` | n/a | **no** |
 
 A green `make cross-check` is a **compile proof and never a behaviour proof**, and
 it must not be reported as one.
+
+**What changed in wave 3.** `ownership.md` §9.6 **X-7** closed a defect against
+this shell: ADR-0016 §11.2 says the NE system extension is the authority, and
+wave 2 put the core, the keys and the management interface in a `LaunchDaemon`
+called `twinvpnd` instead. Amendment **PS-22** names the mechanism and the
+argument — `NEPacketTunnelProvider.packetFlow` exists only inside the provider
+process, the core owns the datapath, and §11.16 (a) / S-47 permit exactly one
+process a mutating core handle — so the authority moved into
+`twinvpn-bridge`, `twinvpnd` was deleted, and `ksd` narrowed to the KS-19 boot
+anchor. §7's gap list is rewritten accordingly.
 
 ---
 
@@ -39,45 +51,68 @@ it must not be reported as one.
 
 | Path | What |
 |---|---|
-| `twinvpnd/` | the privileged `LaunchDaemon`, **and** the `mi` module both Rust binaries share |
+| `twinvpn-bridge/` | **the authority.** The hosted `Core`, the platform adapter, the key handle, the datapath and the management interface — as a Rust `staticlib` the Swift system extension links, plus the C header that is the ABI of record between them |
+| `twinvpn-mi/` | the management contract as this shell carries it: the endpoint, the framing, the scope set and the client. Linked by the authority **and** by the CLI, and by nothing privileged |
 | `twinvpnctl/` | the unprivileged CLI |
-| `twinvpn-bridge/` | the Rust staticlib the Swift provider links, and the C header that is the ABI of record between them |
-| `TwinVPNTunnel/` | the `NEPacketTunnelProvider` system extension, in Swift |
+| `ksd/` | the `LaunchDaemon`, narrowed to the KS-19 boot anchor: apply, read back, exit |
+| `twinvpn-unblock/` | KS-20a's offline recovery command — package-owned, privileged, and dependent on nothing that can fail to start |
+| `TwinVPNTunnel/` | the `NEPacketTunnelProvider` system extension and the XPC management listener, in Swift |
 | `TwinVPNApp/` | the host app's system-extension installer, in Swift |
-| `packaging/pf.anchor` | the **KS-19 boot artifact**: the fail-closed ruleset in force before the daemon runs |
+| `packaging/pf.anchor` | the **KS-19 boot artifact**: the fail-closed ruleset in force before the authority runs |
 | `packaging/pf.conf.include` | the lines a package adds to `/etc/pf.conf` |
-| `packaging/com.twinvpn.ksd.plist` | the `LaunchDaemon` that applies the boot anchor (`RunAtLoad`) — **package-owned** (PS-7) |
-| `packaging/com.twinvpn.twinvpnd.plist` | the authority's `LaunchDaemon` |
+| `packaging/com.twinvpn.ksd.plist` | the **only** `LaunchDaemon`. It applies the boot anchor at `RunAtLoad` and exits — **package-owned** (PS-7) |
 | `packaging/*.entitlements`, `*.Info.plist` | the system extension's and the app's |
 | `packaging/SIGNING.md` | Developer ID signing, notarization and stapling, **as documented procedure that has never been run** |
 | `packaging/install.sh` | an idempotent installer, **never executed** |
 
+### The process topology, after PS-22
+
+| Process | Holds | Does not hold |
+|---|---|---|
+| `com.twinvpn.app.sysext` (NE system extension, root) | the core, the platform adapter, the datapath, the key handle, the management interface on **both** of ADR-0017 §11.2's macOS channels | — |
+| `com.twinvpn.ksd` (`LaunchDaemon`, root) | the KS-19 boot anchor | no core, no keys, no network sockets, no management interface |
+| `TwinVPN.app` (per-user, sandboxed) | UI, the VPN profile, the sysext activation | no authority, no key, no recovery path |
+| `twinvpnctl` (user) | the CLI over the MI socket | nothing privileged in its dependency graph |
+| `twinvpn-unblock` (root, on demand) | the offline removal of the owner-tagged anchor | no core, no MI, no channel |
+
 The adapter these bind is
 [`core/crates/twinvpn-platform-macos`](../../core/crates/twinvpn-platform-macos),
-which this domain also owns. **163 of its tests execute on the Linux host**: the
+which this domain also owns. **169 of its tests execute on the Linux host**: the
 pf anchor's text and its `pfctl` read-back parser, the route programme, the
 `NEPacketTunnelNetworkSettings` document, the resolver programme, the `PF_ROUTE`
 decoder, the mach timebase arithmetic, the power state machine, and the whole
-apply/rollback transaction against recording carriers.
+apply/rollback transaction against recording carriers, plus KS-20a's anchor
+removal and its read-back.
 
-### Why `twinvpnd` is a library as well as a binary
+### Why `twinvpn-mi` is its own crate
 
 ADR-0017 MI-20 and ADR-0018 §11.16 (b) require *"one contract, two carriages,
-**never two contracts**"*. The MI envelope, its framing and its client are
-declared **once**, in `twinvpnd`'s `mi` module, and `twinvpnctl` depends on that
-crate with `default-features = false` — which excludes the whole `agent` feature,
-so the unprivileged CLI links no pf, no route programme, no `SCDynamicStore` and
-no core-hosting code.
+**never two contracts**"*. Before X-7 the two carriages were two halves of one
+`twinvpnd` crate behind a feature gate. The authority has moved into the system
+extension and the CLI has not, so the shared half is a crate of its own — and the
+exclusion the feature gate used to provide is now **structural**: `twinvpn-mi`
+links no core, no platform adapter and no `pf`, so `twinvpnctl` is unprivileged
+by its dependency graph rather than by how it is run.
 
-### Why the core is behind a non-default feature
+The envelope itself is not here at all. `ownership.md` §9.6 **X-4** moved it into
+`core/crates/twinvpn-mgmt`, where all three shells share one declaration; this
+crate carries the **transport**.
 
-`twinvpn-core` pulls `twinvpn-crypto` → `snow` → `ring`, whose C sources are
-compiled by a build script. There is no Darwin C toolchain on this host, so
-`cargo clippy --target aarch64-apple-darwin` fails inside `ring`'s build script
-**before it type-checks a line of ours**. So the MI server's edge onto the core is
-a one-method trait (`agent::server::CommandSink`, which is PS-4's typed vocabulary
-anyway), everything above it is default-on and cross-checked, and only the ~30
-lines in `main.rs` that *construct* a `Core` are behind `core-host`. See §7 gap 3.
+### Why the core is no longer behind a feature
+
+It was, and the reason was never a design one: `twinvpn-core` pulled
+`twinvpn-crypto` → `snow` → `ring`, whose C sources are compiled by a build
+script, and there is no Darwin C toolchain on this host — so
+`cargo clippy --target aarch64-apple-darwin` failed inside `ring`'s build script
+**before it type-checked a line of ours**. `core/Cargo.toml` now selects `snow`'s
+default resolver, that edge is gone, and the core-hosting path is inside the
+`make cross-check` gate like everything else.
+
+The MI server's edge onto the core is still a one-method trait
+(`mgmt::server::CommandSink`, which is PS-4's typed vocabulary), because the two
+*design* reasons remain: PS-22 (§11.3) requires the management server to have no
+dependency edge onto the datapath, and a recording sink is what makes the
+authorization ladder testable on a host with no Darwin kernel.
 
 ---
 
@@ -112,16 +147,25 @@ The agent reads **no configuration file**.
 source build/toolchain/env.sh
 
 # Everything that can run, runs:
-cd core         && cargo test -p twinvpn-platform-macos   # 163 tests
-cd ../shells/macos && cargo test --workspace --all-features  # 164 tests
+cd core            && cargo test -p twinvpn-platform-macos   # 169 tests
+cd ../shells/macos && cargo test --workspace                 # 209 tests
 
 # Everything that can be type-checked for Darwin, is:
-cd ../.. && make cross-check                              # -D warnings, nothing linked
+cd ../.. && make cross-check                                 # -D warnings, nothing linked
 ```
 
-`twinvpnd` **will refuse to start on Linux**, at the `clocks` step, and that is
-correct: `ContinuousElapsedClock::from_kernel()` returns `None` off Darwin, and a
-clock with a guessed timebase is wrong by a factor of 41 on Apple silicon.
+`--all-features` is gone from the second line and its absence is the point: there
+are no features left to turn on. The core-hosting path used to be behind
+`core-host`; it is unconditional now, so `cargo check` and `make cross-check`
+cover the same code.
+
+`Host::start` **will refuse on Linux**, at the privilege posture or at the clocks
+depending on who is running it, and that is correct: `pfctl` needs uid 0 and
+`ContinuousElapsedClock::from_kernel()` returns `None` off Darwin, where a clock
+with a guessed timebase is wrong by a factor of 41 on Apple silicon.
+`tvb_ext_start` therefore returns `TVB_ERR` with the step's registered code in
+the envelope, which is what `a_start_that_cannot_host_the_authority_refuses_and_
+writes_no_handle` asserts.
 
 ### On a Mac — the procedure, never performed
 
@@ -131,15 +175,19 @@ sudo dscl . -create /Groups/twinvpn            # OBSERVE
 sudo dscl . -create /Groups/twinvpn-operators  # OPERATE
 sudo dscl . -create /Groups/twinvpn-admins     # ADMINISTER
 
-# 2. The KS-19 boot artifact, the anchor, the daemon, the endpoint directory.
+# 2. Build. There are no feature flags -- see §1.
+cd shells/macos && cargo build --release
+
+# 3. The KS-19 boot artifact, the anchor, the ksd job, twinvpn-unblock, the
+#    CLI and the endpoint directory. NOT the authority: it is inside the app.
 sudo ./packaging/install.sh
 
-# 3. Build. `core-host` is not default -- see §1.
-cd shells/macos && cargo build --release --features core-host
-
-# 4. The system extension is installed by the APP, through
-#    OSSystemExtensionRequest, and requires a Developer ID signature and
-#    notarization: see packaging/SIGNING.md.
+# 4. The system extension -- WHICH IS THE AUTHORITY -- is installed by the APP,
+#    through OSSystemExtensionRequest, and requires a Developer ID signature and
+#    notarization: see packaging/SIGNING.md. Until it is activated there is no
+#    core, no MI socket and no Mach service on this host, and a `twinvpnctl`
+#    exits 3 with MGMT.UNAVAILABLE. That is MI-A3's answer and not a defect:
+#    M-P17-17 names socket activation as the defect for exactly this case.
 ```
 
 To grant a person read access, add them to `twinvpn`; to let them connect and
@@ -153,26 +201,30 @@ platform default."* A membership change takes effect **on the next attach**
 
 ## 4. The start sequence, and what each step refuses
 
-ADR-0016 §11.6, in order. `agent::start::StartSequence` is this table as a value
-the diagnostic bundle can carry; `agent::start`'s tests exercise every row on this
-Linux host against injected probes.
+ADR-0016 §11.6, in order, **inside the system extension** —
+`twinvpn_bridge::start::StartSequence` is this table as a value the diagnostic
+bundle can carry, and `tvb_ext_start` is what runs it. Its tests exercise every
+row on this Linux host against injected probes.
+
+`ksd` has its own four-step sequence (`ksd::boot`) and the split is in that
+module's header: eight of the ten steps below belong to the authority and moved
+with it; privilege, the anchor body, the apply and **the read-back** stayed.
 
 | Step | On failure |
 |---|---|
-| 1. the KS-19 boot artifact is installed | `PLATFORM.ADAPTER_UNAVAILABLE` as a **warning** — and the agent starts anyway. §11.6 step 1 reads as a refusal and PS-7 says the artifact "MUST NOT be a prerequisite for [the authority] to apply"; `desktop-linux` read the pair as warn-and-continue and this shell takes the **same** reading, because two shells behaving differently on one rule is worse than either. See §7 gap 1 |
+| 1. the KS-19 boot artifact is installed | `PLATFORM.SERVICE.BOOT_ARTIFACT_UNREGISTERED` as a **warning** — and the agent starts anyway. §11.6 step 1 reads as a refusal and PS-7 says the artifact "MUST NOT be a prerequisite for [the authority] to apply"; `desktop-linux` read the pair as warn-and-continue and this shell takes the **same** reading, because two shells behaving differently on one rule is worse than either. Reported to the integration lead, and unchanged since wave 2 |
 | 2. the privilege posture | **Fatal** if not root: pf, the route socket and `SCDynamicStore` all require it, and PS-18 forbids starting in a mode that cannot arm enforcement. Root **is itself a named degradation** (`PLATFORM.PRIV.SANDBOX_DEGRADED`), because macOS has no spelling of "this capability and nothing else" — see §7 gap 2 |
 | 3. the three clocks, the CSPRNG and the boot identity | **Fatal.** `mach_absolute_time` is suspend-**exclusive** and `mach_continuous_time` is suspend-**inclusive** (ADR-0022 LC-8); the timebase is read once and a failed read refuses rather than guessing. The CSPRNG is **probed at startup**, not on first use |
 | 3b. the runtime's I/O driver (**W-43**) | **Fatal.** Fixed upstream (`enable_io()` is on both `TokioRuntime` constructors now), and the probe stays: PS-18's rule is to refuse at startup rather than report a running agent that panics on the first command |
-| 4. the adapter's capability probe | **Fatal** if `pfctl(8)` is absent — ADR-0012 §8: arming must never fail open. A KS-9(1) predicate that holds only in its weaker uid-only form is a **named degradation**, never silently upgraded |
+| 4. the adapter's capability probe | **Fatal** if `pfctl(8)` is absent — ADR-0012 §8: arming must never fail open. **KS-9(1) now holds in full**: inside the provider the uid is matched in the anchor and the socket-set half is supplied by the NE runtime, so `ExemptPredicate::ProviderUidAndSocketSet` replaces wave 2's `UidOnly` and the degradation this row used to report is gone. Moving the authority did not only satisfy §11.2, it closed a KS-9 gap — **declared, never assumed**: see §7 gap 11 |
 | 4b. reclaim the owner-tagged ruleset (KS-20, PS-8) | **Fatal.** The ruleset is reclaimed *and then* **read back from pf** — `pfctl -s info` for whether the filter is even on, and `pfctl -a twinvpn -s Tables` for the posture, the generation and the per-family scope cardinality. That is the **W-24 query**, not the fact that a load returned `Ok`, and `DarwinProbes::with_read_back` takes an `Assertion` precisely so a boolean cannot be set any other way |
 | 5. durable state | **Fatal** if the vault directory is not `0700`. A vault the group can read is a vault every local account can read |
-| 6. the core | **Fatal**, `INTERNAL.ABI_VERSION_MISMATCH` (VR-4), checked before any capability is touched. In a build without `core-host` this step refuses, which is the honest outcome |
-| 7. the MI endpoint | **Fatal**, `MGMT.UNAVAILABLE`. MI-A3: the agent verifies `/var/run/twinvpn`'s ownership and mode **before** binding, binds a staging name, sets the mode and group, then `rename`s it — `unlink()`-then-`bind()` is prohibited and the word does not appear in the module |
-| 8. accept connections | only now (§11.6) |
+| 6. the core | **Fatal**, `INTERNAL.ABI_VERSION_MISMATCH` (VR-4), checked before any capability is touched. There is no build in which this step is skipped any more |
+| 7. the MI endpoint | **Fatal**, `MGMT.UNAVAILABLE`. MI-A3: the authority verifies `/var/run/twinvpn`'s ownership and mode **before** binding, binds a staging name, sets the mode and group, then `rename`s it — `unlink()`-then-`bind()` is prohibited and the word does not appear in the module. The `tokio` reactor attach happens **inside** the runtime, in the accept task, because `from_std` needs one and the bind does not (wave 2 called it outside any runtime, which on a Mac would have panicked on the first start) |
+| 8. accept connections | only now (§11.6). The XPC listener is started by `PacketTunnelProvider.startTunnel` **after** `tvb_ext_start` returns a handle, for the same reason |
 
-`twinvpnd` also **warns and continues** on: no recognised supervisor (PS-11), the
-root-with-no-narrowing posture (PS-17), a KS-9 predicate that holds only in its
-weaker form, and a peer whose kernel group list was full and may be truncated.
+The authority also **warns and continues** on: the root-with-no-narrowing posture
+(PS-17), and a peer whose kernel group list was full and may be truncated.
 
 ---
 
@@ -206,14 +258,25 @@ sysctl kern.boottime kern.bootsessionuuid
 
 # The agent's own view of its start:
 sudo log stream --predicate 'subsystem == "net.twinvpn"' --level debug
-TWINVPN_LOG_LEVEL=trace TWINVPN_LOG_FORMAT=text sudo ./target/debug/twinvpnd
+
+# The authority has no command line: it is a static library inside a system
+# extension, and `tvb_ext_start` installs the subscriber. Its environment comes
+# from the sysext's, not from a shell.
+systemextensionsctl list
+sudo launchctl print system/com.twinvpn.ksd
+
+# The KS-19 job, on demand and read-only:
+sudo /Library/Application\ Support/TwinVPN/twinvpn-ksd --status
+
+# "Is TwinVPN what is blocking me?" -- asked without changing anything:
+sudo twinvpn-unblock --status
 ```
 
 ### Running the tests
 
 ```sh
-cd core            && cargo test -p twinvpn-platform-macos    # 163, unprivileged
-cd ../shells/macos && cargo test --workspace --all-features   # 164, unprivileged
+cd core            && cargo test -p twinvpn-platform-macos    # 169, unprivileged
+cd ../shells/macos && cargo test --workspace                  # 209, unprivileged
 ```
 
 Both suites run unprivileged **on Linux**, which is the point: the adapter keeps
@@ -273,21 +336,23 @@ gets it" — and retry policy is driven by the class, not by the exit code
 
 ## 7. What is NOT here, stated plainly
 
-Each of these is a gap this wave did not close, with the reason.
+Each of these is a gap this wave did not close, with the reason. The list is
+renumbered because X-7 removed a component and added two; wave 2's numbering is
+not preserved.
 
 ### The one that matters most
 
 1. **No line of Swift has been compiled.** Swift 6.1.2 is installed and it is the
-   **Linux** toolchain: there is no Darwin SDK, so `NetworkExtension`, `Security`
-   and `SystemConfiguration` do not exist here. `swiftc -parse` was run over all
-   six files and they parse — a syntax check with a planted error confirming it
-   has teeth — and that is **all**: no type-check, no name resolution, no
-   concurrency checking, no API-existence check. Every NE API shape, every
-   `Codable` field name, every `os.Logger` call and every actor boundary in
-   `TwinVPNTunnel/` is unverified. This is the single largest risk in the
-   directory, and it is why the Swift surface was kept to a `Codable` struct, a
-   buffer wrapper and two loops: **every decision is on the Rust side, where it is
-   tested.**
+   **Linux** toolchain: there is no Darwin SDK, so `NetworkExtension`, `XPC`,
+   `Security` and `SystemConfiguration` do not exist here. `swiftc -parse` was run
+   over all seven files and they parse — a syntax check with a planted error
+   confirming it has teeth — and that is **all**: no type-check, no name
+   resolution, no concurrency checking, no API-existence check. Every NE and XPC
+   API shape, every `Codable` field name, every `os.Logger` call and every actor
+   boundary in `TwinVPNTunnel/` is unverified. This is the single largest risk in
+   the directory, and it is why the Swift surface is a `Codable` struct, a buffer
+   wrapper, two loops and a listener: **every decision is on the Rust side, where
+   it is tested.**
 
 2. **`pfctl` has never parsed the anchor this adapter renders.** `pf::render` is
    exhaustively tested for what it *says* — 24 states, both families, the class
@@ -300,130 +365,200 @@ Each of these is a gap this wave did not close, with the reason.
    `tests/darwin.rs::the_anchor_this_adapter_renders_is_one_apples_pf_accepts` is
    the assertion that would settle it.
 
+3. **`xpc_connection_get_audit_token` is Apple SPI.** ADR-0016 §11.14 (a) names
+   `audit_token_t` over XPC as the macOS peer attestation and ADR-0017 §11.2's
+   macOS row says why — "audit-token attestation is not pid-based and therefore
+   not TOCTOU-able" — but the only API that returns one is declared in
+   `<xpc/private.h>`. `TwinVPNXPCShim.h` declares it, says so at length, and names
+   the public alternative (`NSXPCConnection`'s `effectiveUserIdentifier` /
+   `effectiveGroupIdentifier` / `processIdentifier` / `auditSessionIdentifier`),
+   which covers the two fields the authorization decision uses and loses
+   `pidversion`. The swap is confined to one Swift function
+   (`ManagementListener.auditTokenBytes(for:)`). **Needs a decision** from
+   ADR-0016's owner: §11.14 (a) requires a mechanism Apple does not publish.
+
 ### The privilege model
 
-3. **`twinvpnd` runs as root and cannot narrow itself.** ADR-0016 §11.2 says the
-   authority "MUST NOT continue as root 'just this once'", and Linux discharges it
-   by dropping to `CAP_NET_ADMIN`. **macOS has no spelling of "this capability and
-   nothing else"**: pf, the `PF_ROUTE` socket and `SCDynamicStore` all require
-   root, and the equivalents of `systemd`'s hardening directives — hardened
-   runtime, library validation — are set at *codesign* time rather than by the
-   supervisor. The start sequence reports this as a `PLATFORM.PRIV.SANDBOX_DEGRADED`
-   degradation on **every** start rather than letting a reader assume a sandbox
-   that is not there. **Needs a decision** from ADR-0016's owner.
+4. **The authority runs as root and cannot narrow itself.** ADR-0016 §11.2 says
+   the authority "MUST NOT continue as root 'just this once'", and Linux
+   discharges it by dropping to `CAP_NET_ADMIN`. **macOS has no spelling of "this
+   capability and nothing else"**: pf, the `PF_ROUTE` socket and `SCDynamicStore`
+   all require root, and the equivalents of `systemd`'s hardening directives —
+   hardened runtime, library validation — are set at *codesign* time rather than
+   by the supervisor. A system extension does not change this: it is root by
+   grant. The start sequence reports `PLATFORM.PRIV.SANDBOX_DEGRADED` on **every**
+   start rather than letting a reader assume a sandbox that is not there.
+   **Needs a decision** from ADR-0016's owner.
 
-4. **ADR-0016 §11.2's macOS row does not contain a `twinvpnd`.** It says the
-   system extension *is* the authority and `com.twinvpn.ksd` is not a
-   general-purpose helper. This shell adds a third root component that hosts the
-   core, owns the pf anchor and serves the MI. The reason is **W-24 and W-25**:
-   `twinvpn.h`'s F-9 vtable has no socket capability, no interface enumeration, no
-   `installed_ruleset` read-back and no `current_generation`, so a Swift-only
-   system extension bound to the C ABI **cannot do NAT traversal and cannot
-   produce a `ProtectionAssertion` at all**. **§11.2's macOS row needs
-   re-deriving** by the integration lead.
+5. **`audit_token_t` carries no supplementary group list, so the XPC carriage's
+   class map is narrower than the socket's.** ADR-0016 PS-12a derives the three
+   authorization classes from **group membership**, and a token carries the
+   effective gid and nothing else — there is no `audit_token_to_groups` and no
+   XPC API that supplies one. `getsockopt(LOCAL_PEERCRED)` returns up to sixteen
+   groups, which is why wave 2 recorded macOS as *better* than Linux here. So an
+   XPC client reaches a class only if that class's gid is its **effective** gid,
+   which fails **closed** and is flagged (`groups_possibly_truncated` is always
+   true on that carriage). It is deliberately **not** patched by looking the uid
+   up in Directory Services: a directory answer is a statement about the
+   *account*, not about the connected *process*, and MI-A1 asks for the latter.
+   `mgmt::audit`'s tests pin the behaviour in both directions.
 
-5. **`com.twinvpn.sysext` is not a legal system-extension bundle id.** A system
-   extension's identifier must be prefixed by its containing app's, so the ADR
-   names a component the platform cannot spell. The packaging uses
-   `com.twinvpn.app.sysext`. Reported, not resolved.
+6. **The XPC code requirement is not checked.** ADR-0017 §11.2's macOS row gives
+   the XPC carriage "XPC audit token → **`SecCodeCheckValidity`** against a
+   Team-ID-pinned code requirement". The token is decoded and the principal
+   derived from it; the client's code signature is **not** verified, because that
+   needs `Security.framework`, which this crate does not link. The consequence is
+   real: any local process whose euid/egid land in a TwinVPN group can attach,
+   not only a Team-signed one.
 
-6. **MI-A3 is discharged by the installer, not by the supervisor.** `systemd` has
+7. **MI-A3 is discharged by the installer, not by the supervisor.** `systemd` has
    `RuntimeDirectory=`, which recreates `/run/twinvpn` with the right owner and
-   mode on every start; `launchd` has no equivalent. So `/var/run/twinvpn` is
-   created once by `install.sh` and `twinvpnd` **verifies and refuses** rather
-   than creating it. That is genuinely weaker — the installer runs once, the
-   supervisor every boot — and after a `/var/run` wipe the agent will not start
-   until the directory is restored.
+   mode on every start; neither `launchd` nor `systemextensionsd` has an
+   equivalent. So `/var/run/twinvpn` is created once by `install.sh` and the
+   authority **verifies and refuses** rather than creating it. That is genuinely
+   weaker — the installer runs once, the OS starts the extension every time — and
+   after a `/var/run` wipe the MI socket will not bind until the directory is
+   restored. The XPC carriage is unaffected, which is one practical argument for
+   having two.
 
-7. **`launchd` expresses almost none of ADR-0016 §11.9's hardening table.** No
-   `ProtectSystem`, `PrivateDevices`, `RestrictAddressFamilies` or
-   `SystemCallFilter` equivalents exist. The plists say so in their headers, so
-   their shortness is not read as containment.
+8. **`launchd` expresses almost none of ADR-0016 §11.9's hardening table, and the
+   sysext expresses none of it either.** No `ProtectSystem`, `PrivateDevices`,
+   `RestrictAddressFamilies` or `SystemCallFilter` equivalents exist. The plist
+   says so in its header, so its shortness is not read as containment.
 
-8. **`launchd` has no burst limit**, so `KeepAlive` alone does not discharge PS-9
-   or PS-10. ADR-0016 §11.5's macOS row makes crash-loop containment the
-   authority's own durable restart counter (S-40) latching quarantine itself.
-   **That counter is not implemented.**
+9. **PS-9 and PS-10 are not implemented.** ADR-0016 §11.5's macOS row makes
+   crash-loop containment the authority's **own durable restart counter (S-40)**
+   latching quarantine itself, because launchd has no burst limit — and NE's
+   on-demand restart of a system extension has none either. **That counter does
+   not exist**, and neither does PS-9 (2)'s degraded stub: an authority that
+   cannot start answers nothing at all rather than answering
+   `PLATFORM.SERVICE.QUARANTINED`. PS-22 makes this sharper than it was, because
+   §11.14 (d) requires the contract to be answerable by that stub.
 
-9. **One `unsafe` block, and it is load-bearing.** `#![deny(unsafe_code)]` with
-   exactly one `#[allow]`, at `agent::peer::PeerCredentials::read`: MI-A1 requires
-   a kernel-sourced principal, `getsockopt(LOCAL_PEERCRED)` is the only source on
-   Darwin, and no safe wrapper exists in `std` or in any dependency this shell
-   has. `twinvpnd::tests::the_crate_allows_unsafe_in_exactly_one_place` asserts
-   the budget. (`shells/linux` forbids `unsafe` outright and loses
-   `getgrouplist(3)` for it — a trade available there because the group list
-   *refines* the principal, and not available here because `LOCAL_PEERCRED` *is*
-   the principal.)
+10. **One `unsafe` block on the management side, and it is load-bearing.**
+    `twinvpn-bridge` is on the DP-4 allowlist and its FFI entry points are
+    `unsafe` by construction, so a blanket count would say nothing. The
+    *management* modules have exactly one: `getsockopt(LOCAL_PEERCRED)` in
+    `mgmt::peer::PeerCredentials::read`, because MI-A1 requires a kernel-sourced
+    principal and no safe wrapper exists in `std` or in any dependency this shell
+    has. `mgmt::tests::the_management_modules_use_unsafe_in_exactly_one_place`
+    asserts the budget over the source. `ksd`, `twinvpn-mi`, `twinvpnctl` and
+    `twinvpn-unblock` all carry `#![forbid(unsafe_code)]`.
 
-10. **`xucred` carries at most 16 groups.** A principal in more than sixteen
-    groups may have the relevant one truncated away by the kernel. It fails
-    **closed** — fewer scopes than intended — and the agent logs a warning when
-    the list came back full.
+11. **KS-9(1) is now satisfied in full — as a declaration, not an observation.**
+    The provider binding declares
+    `ExemptPredicate::ProviderUidAndSocketSet`, on the ground that the NE runtime
+    excludes the provider's own sockets from the tunnel it is serving. **Nothing
+    on this host verifies that**, and nothing in the ADR corpus states it as a
+    guarantee rather than as an expectation. If NE does not do it, the predicate
+    is silently the weaker uid-only one and `ks9_complete()` is a lie. This is the
+    one place the move *strengthened* a claim, which is exactly why it needs
+    checking on a Mac.
+
+12. **`xucred` carries at most 16 groups.** On the socket carriage a principal in
+    more than sixteen groups may have the relevant one truncated away by the
+    kernel. It fails **closed** — fewer scopes than intended — and the authority
+    logs a warning when the list came back full.
 
 ### The management interface
 
-11. **No event stream.** `event.subscribe` reaches the core and the core accepts
-    it, but the agent pushes no `Event` frames, and `event.resync` is unwired. The
-    `Compacted` marker (MI-19) and §11.10's eviction ladder are therefore
-    unexercised.
+13. **The XPC carriage never closes a connection.** `tvb_mgmt_exchange` cannot:
+    Swift owns the `xpc_connection_t`, and CB-2 forbids Swift deciding *when* to
+    close one from a domain fact, so the ABI does not report the session's
+    `ending` outward. The refusal is enforced on the Rust side instead — an
+    ended session answers `MGMT.UNAVAILABLE` to everything for as long as it
+    exists, and no path re-opens one — but the **connection** stays until the
+    peer goes away or the tunnel stops. The socket carriage does close. There is
+    no rate limit on either (ADR-0017 §11.16's is unimplemented), so a client
+    that keeps a rejected session open costs one lock and one `Vec` per message.
 
-12. **No ADMINISTER ceremony.** Every ADMINISTER operation is **refused**, not
-    performed on a scope alone — §11.5's third consequence and the safe direction.
-    Wiring it needs Authorization Services (`system.privilege.admin`, KS-21's
-    macOS mechanism), which is a Darwin framework this crate does not link.
+14. **No event stream.** `event.subscribe` reaches the core and the core accepts
+    it, but neither carriage pushes `Event` frames, and `event.resync` is
+    unwired. The `Compacted` marker (MI-19) and §11.10's eviction ladder are
+    therefore unexercised. The XPC carriage makes this harder rather than easier:
+    it is request/reply, so a push needs a second connection direction that
+    nothing here builds.
 
-13. **No XPC.** ADR-0017 §11.2 *prefers* XPC to `com.twinvpn.agent.mgmt` on this
-    platform; this wave is `AF_UNIX` only. The name is fixed in one place
-    (`mi::XPC_SERVICE_NAME`) and the `LaunchDaemon` plist deliberately does **not**
-    declare `MachServices`: a declared service with no server behind it reproduces
-    exactly the hang MI-A3 rejects socket activation for.
+15. **No ADMINISTER ceremony.** Every ADMINISTER operation is **refused**, not
+    performed on a scope alone — §11.5's third consequence and the safe
+    direction. Wiring it needs Authorization Services (`system.privilege.admin`,
+    KS-21's macOS mechanism), which is a Darwin framework this crate does not
+    link. The same framework gap is gap 17's.
 
-14. **`SOCK_STREAM` + length prefix, not `SOCK_SEQPACKET`.** §11.2 prefers the
-    latter "so message boundaries are kernel-preserved"; `tokio`'s `UnixListener`
-    is `SOCK_STREAM` only. The cost is exactly the one §11.2 names, bounded by the
-    1 MiB cap being enforced **before any allocation**.
+16. **`SOCK_STREAM` + length prefix on the socket carriage, not
+    `SOCK_SEQPACKET`.** §11.2 prefers the latter "so message boundaries are
+    kernel-preserved"; `tokio`'s `UnixListener` is `SOCK_STREAM` only. The cost is
+    exactly the one §11.2 names, bounded by the 1 MiB cap being enforced **before
+    any allocation**. The XPC carriage does preserve boundaries and uses the same
+    length prefix anyway, so a captured message is byte-identical on both — which
+    is §11.2's own opening requirement.
 
-15. **The MI envelope is declared in this shell, and in `shells/linux` too.**
-    ADR-0017 §11.3's message appears **nowhere in `contracts/`** —
-    `phase1-conflicts.md` OQ-2 excluded an MI transport schema from Phase 2 so the
-    MI could not acquire an independent vocabulary. It worked for the *vocabulary*
-    (both shells use `twinvpn_mgmt`'s command set) and left the **carriage**
-    unspecified, with the consequence that two shells now carry two copies of one
-    envelope. **Request: move it into `core/crates/twinvpn-mgmt`**, which is
-    `core-foundation`'s.
-
-16. **`committed_at_net_seq` is always absent, and correctly so.** MI-6's cursor
+17. **`committed_at_net_seq` is always absent, and correctly so.** MI-6's cursor
     is "a real, monotone position in the same log" the C2 stream replays; a
     locally-mutating operation reaches no C1 request and has none. Reporting a
     per-process counter there would tell a client it had read-your-writes when it
     had not.
 
-17. **`platform_ctx.os_version` is empty.** The real answer is
+18. **`platform_ctx.os_version` is empty.** The real answer is
     `sysctl kern.osproductversion`, which is Darwin-only and not wired. MI-C3
     requires clients to use the value **verbatim**, so an empty string renders as
     unknown rather than as a wrong version — the right failure.
 
-18. **The binary is `twinvpnctl`, and ADR-0016 §11.2 / ADR-0017 §11.12 name it
+19. **The binary is `twinvpnctl`, and ADR-0016 §11.2 / ADR-0017 §11.12 name it
     `twinvpn`.** ADR-0023 EM-42's rendered next actions say `run 'twinvpn peer
     disconnect nas-attic'`, which names a command installed under another name.
     `shells/linux` raised the same deviation; this shell matches it rather than
     having the CLI called one thing on Linux and another on macOS. **Needs a
     decision.**
 
-19. **No `twinvpn-unblock`.** KS-20a makes a privileged local unblock command
-    mandatory on macOS (one of the four platforms where it is satisfiable), and
-    MI-12/MI-13 specify it. It is a separate package-owned binary, not a
-    subcommand, "precisely because the case it exists for is 'the authority will
-    not start'". Not written, not in `install.sh`, not in `SIGNING.md`.
+20. **`isatty` is not called**, because it needs `unsafe` and `twinvpnctl`
+    forbids it. The CLI therefore assumes **not a TTY**, which under EM-43 means
+    no colour ever. The UTF-8 decision still follows `LANG`/`LC_ALL`.
+    Conservative and always correct, and less than EM-43 permits.
 
-20. **`isatty` is not called**, because it needs `unsafe`. `twinvpnctl` therefore
-    assumes **not a TTY**, which under EM-43 means no colour ever. The UTF-8
-    decision still follows `LANG`/`LC_ALL`. Conservative and always correct, and
-    less than EM-43 permits.
+### The unblock command
+
+21. **`twinvpn-unblock` checks uid 0 and not MI-13(1)'s ceremony.** MI-13(1)
+    requires "the **same OS-mediated administrator authentication** as §11.14's
+    ceremony … `system.privilege.admin`" and is explicit that *"'privileged'
+    means an authenticated administrator act, not merely 'runs as root'"*. This
+    binary is the second: **a root cron job could invoke it**, which MI-13(1)
+    forbids. Authorization Services is not linked (gap 15's framework). Named
+    rather than papered over by calling `sudo` the ceremony. `shells/linux` makes
+    the same trade with `CAP_NET_ADMIN`, so the two shells are consistently
+    short of the same rule.
+
+22. **The `UnblockRecord`'s `invoked_at` is `null`.** MI-13(3) names the field;
+    CD-1a makes the wall clock evidence-only and three-state, this binary injects
+    no `Env` and therefore holds no clock with a declared trust state, and a
+    `SystemTime::now()` here would put an untrusted reading into a record that
+    reads as authoritative. The authority stamps its own reading when it ingests
+    the record. **Whether that is acceptable is MI-13's owner's to say.**
+
+23. **Nothing ingests the `UnblockRecord`.** MI-13(4) requires the authority at
+    next start to emit `MGMT.UNBLOCK_INVOKED` into the Tier-0 ledger and the
+    `mgmt` topic and hold a persistent `PERMISSIVE_ANNOUNCED` indication until
+    the `Owner` re-arms. The record is **written** and never **read**: the start
+    sequence has no step for it. The write half is the half that cannot be added
+    later without losing the crashes it exists to explain, which is why it is the
+    half that exists.
+
+24. **MI-12 names `ksd` as the unblock's serving component on macOS, and this
+    build does not serve it there.** MI-12's list is "`twinvpn-killswitch` on
+    Linux, the installer-written persistent set on Windows, **`ksd` on macOS**",
+    which reads as though `ksd` should accept the unblock as a request — and
+    §11.2 does say `ksd` "MUST NOT accept any request **other than** … (b) the
+    unblock command's local, admin-authenticated invocation", implying there is a
+    request to accept. This build instead makes `twinvpn-unblock` a
+    self-contained privileged binary, matching `shells/linux` and MI-12's own
+    first sentence ("MUST NOT depend on … any MI channel"). **Reported as a
+    reading, not resolved:** a Mach service on `ksd` is a channel with exactly the
+    availability problem the rule exists to avoid, and two shells behaving
+    differently on one rule is worse than either.
 
 ### The adapter's own gaps, restated here because they are the shell's problem
 
-21. **`NetworkConfig::query_link_facts` is not implemented.** It needs the
+25. **`NetworkConfig::query_link_facts` is not implemented.** It needs the
     underlay's MTU, families, per-family default routes, resolvers and power
     posture — five reads across `getifaddrs`, a `PF_ROUTE` table dump and
     `SCDynamicStore`, none exercisable here. It returns the registered "cannot
@@ -431,144 +566,182 @@ Each of these is a gap this wave did not close, with the reason.
     ADR-0010 §11.7 branches three ways on, and a wrong answer there is a v6-only
     network silently treated as dual-stack.
 
-22. **`TunnelProvenance::AdapterCreatedUtun` is not implemented.** The
-    `PF_SYSTEM`/`SYSPROTO_CONTROL` open, `set_link` and `SIOCSIFMTU` refuse by
-    name. The constants, the `ctl_info`/`sockaddr_ctl` layouts and the
-    `_IOWR('N', 3, …)` encoding are written and their sizes asserted; the syscalls
-    are not. **The `LaunchDaemon` therefore cannot create a tunnel interface**;
-    only the OS-provided (system-extension) path can.
+26. **`TunnelProvenance::AdapterCreatedUtun` is not implemented, and after X-7
+    nothing in this shell selects it.** The `PF_SYSTEM`/`SYSPROTO_CONTROL` open,
+    `set_link` and `SIOCSIFMTU` refuse by name. The constants, the
+    `ctl_info`/`sockaddr_ctl` layouts and the `_IOWR('N', 3, …)` encoding are
+    written and their sizes asserted; the syscalls are not. The authority is the
+    provider and is handed a flow, so the unimplemented path is now **dead in
+    this shell** — it is kept because ADR-0016 §14(2) names MX-3 (a `LaunchDaemon`
+    owning `utun`) as the fallback if Apple refuses the NE entitlement.
 
-23. **`InterfaceProvider::enumerate` has no Darwin source.** The classifier, the
+27. **`InterfaceProvider::enumerate` has no Darwin source.** The classifier, the
     ownership rule and the facts conversion are tested; `getifaddrs` and
-    `SCNetworkInterfaceGetInterfaceType` are not wired, and enumeration **refuses**
-    rather than reporting an empty host.
+    `SCNetworkInterfaceGetInterfaceType` are not wired, and enumeration
+    **refuses** rather than reporting an empty host.
 
-24. **No `PF_ROUTE` socket reader and no IOKit registration.** The decoders
+28. **No `PF_ROUTE` socket reader and no IOKit registration.** The decoders
     (`rtmsg`, `power`) are complete and tested against hand-built Darwin messages;
-    nothing opens the socket or calls `IORegisterForSystemPower`, so no change ever
-    reaches `MacosInterfaceProvider::publish` at runtime.
+    nothing opens the socket or calls `IORegisterForSystemPower`. What *does* now
+    reach the core is the NE-sourced half: `tvb_ext_sleep`, `tvb_ext_wake` and
+    `tvb_ext_network_changed` publish into **the adapter's own** interface
+    provider, which the core subscribes to. Wave 2 published them into a second
+    provider nothing subscribed to — harmless with no core, and a silently
+    deaf reconciler the moment there was one.
 
-25. **The Darwin constants were written from the headers and checked against no
+29. **The Darwin constants were written from the headers and checked against no
     running kernel.** `IPV6_BOUND_IF = 125`, `IP_DONTFRAG = 28`, `AF_INET6 = 30`,
-    `CTLIOCGINFO`, the `xucred` layout, the IOKit message numbers. Internal
-    consistency is asserted (sizes, offsets, the `_IOWR` encoding); Apple's actual
+    `CTLIOCGINFO`, the `xucred` layout, the IOKit message numbers, and now the
+    eight-word `audit_token_t` layout. Internal consistency is asserted (sizes,
+    offsets, the `_IOWR` encoding, the token's field offsets); Apple's actual
     numbers are a compile-and-review claim.
 
-26. **The Keychain and `SCDynamicStore` shims are compile-only.** ~450 lines of CF
+30. **The Keychain and `SCDynamicStore` shims are compile-only.** ~450 lines of CF
     ownership discipline that `make cross-check` type-checks against the real sys
-    crates and that has never allocated a `CFString`.
+    crates and that has never allocated a `CFString`. The Keychain half matters
+    more than it did: the key handle is the extension's now, and §11.14 (g)
+    requires it to be openable with no user logged in.
 
-27. **No Secure Enclave signer.** `AbsentElement` reports `hardware_backed: false`
-    truthfully and refuses, which §11.16 (l) requires over silently substituting a
-    file-backed one. `custody_class` is therefore `ABSENT` on every build here.
+31. **No Secure Enclave signer.** `AbsentElement` reports `hardware_backed:
+    false` truthfully and refuses, which §11.16 (l) requires over silently
+    substituting a file-backed one. `custody_class` is therefore `ABSENT` on every
+    build here.
 
-28. **`record_aead_custody` is `CoreHeld` on every macOS row.** The Secure Enclave
+32. **`record_aead_custody` is `CoreHeld` on every macOS row.** The Secure Enclave
     performs ECIES and signing and offers no general AEAD over caller-supplied
     data, so ADR-0020's survey ("2 of 10 targets") does not include macOS.
     Declared, not inferred.
 
-29. **`StoreRootAttributes::backup_excluded` reports `false`.** ADR-0020 needs
+33. **`StoreRootAttributes::backup_excluded` reports `false`.** ADR-0020 needs
     `NSURLIsExcludedFromBackupKey` *and* a `tmutil addexclusion`; the first is a
     Foundation API this crate does not link and the second is the installer's.
     Reporting `true` would be the core recording an exclusion nobody applied.
 
-30. **`SocketOptions::firewall_mark` has nowhere to go.** Darwin has no `SO_MARK`
+34. **`SocketOptions::firewall_mark` has nowhere to go.** Darwin has no `SO_MARK`
     and no policy routing table; the function it serves is served by
     `IP_BOUND_IF`, which is a different mechanism with a different failure mode.
     Reported in `SocketOptionPlan::unsupported` rather than quietly mapped.
 
-31. **`recv_from` does not collect the control data it asked for.** The `cmsg`
+35. **`recv_from` does not collect the control data it asked for.** The `cmsg`
     parser is written and tested, and the read path uses `recv_from`, which
     discards ancillary data — so `Datagram::destination` and `::interface` are
     `None` and `truncated` is always `false`. §3.4's reflexive-candidate
     attribution needs the first two.
 
-32. **`RouteEntry::metric` is dropped.** macOS `route(8)` has no metric; preference
-    comes from prefix length and network service order. `RouteOp::metric_unrepresentable`
-    reports it per operation.
+36. **`RouteEntry::metric` is dropped.** macOS `route(8)` has no metric;
+    preference comes from prefix length and network service order.
+    `RouteOp::metric_unrepresentable` reports it per operation. Under the
+    provider binding the routes are the OS's anyway
+    (`RouteCarrier::TunnelSettings`), so this now bites only the MX-3 fallback.
 
-33. **The wall clock declares `Unsynchronised`.** macOS exposes no NTP-sync fact
+37. **The wall clock declares `Unsynchronised`.** macOS exposes no NTP-sync fact
     through an API this crate reaches, so a reading is `Offset`, never `Trusted`.
     CD-1a makes that the safe direction; anything needing a trusted wall clock
     will not silently get an untrusted one.
 
-34. **`EnforcementConfig::doh_endpoints` and `on_link_prefixes` are empty at
+38. **`EnforcementConfig::doh_endpoints` and `on_link_prefixes` are empty at
     start.** ADR-0011 §11.9's known-DoH list is an installation fact the seam does
     not carry; KS-4's on-link set is recomputed per network-change event, which
-    needs gap 24. Both empty fail **closed**.
+    needs gap 28. Both empty fail **closed**.
+
+39. **The resolver engine of this binding refuses by name.** Under
+    `ResolverCarrier::TunnelSettings` the OS installs the resolver from the
+    settings document, so `host::NoResolver` is the honest engine to inject: a
+    `DynamicStoreEngine` beside it would be a **second writer** for a fact
+    `NEPacketTunnelNetworkSettings.dnsSettings` already owns, which is the I8
+    defect rather than a belt-and-braces measure. The `SCDynamicStore` code is
+    therefore unreachable from this shell — kept for the MX-3 fallback, like
+    gap 26.
 
 ### The bridge
 
-35. **No core handle in `twinvpn-bridge`.** `tvb_ext_start` succeeds and
-    `tvb_ext_next_settings` refuses with `PLATFORM.ADAPTER_UNAVAILABLE`, because
-    no `NetworkContract` is computed. That places the refusal where NE actually
-    fails the start (`startTunnel` completes only once settings are applied) while
-    leaving the datapath, the lifecycle facts, the buffer discipline and the panic
-    containment reachable and tested through the real C surface.
-
-36. **`causation_id` has no field in the bridge ABI.** §6 rule 6 asks for
+40. **`causation_id` has no field in the bridge ABI.** §6 rule 6 asks for
     correlation *and* causation across every boundary; the Swift side carries both
-    and the second is dropped at this hop.
+    and the second is dropped at this hop. The three `tvb_mgmt_*` entries carry
+    **neither**, which is worse: an MI request's correlation id lives in the
+    envelope and is therefore opaque to the ABI, so a bridge log line about a
+    management exchange cannot be joined to the request it served.
 
-37. **`tvb_ext_app_message` refuses.** No in-process MI is wired into the
-    extension, so `handleAppMessage` has nothing to answer with.
+41. **`tvb_ext_app_message` refuses**, now with `MGMT.PRINCIPAL_UNVERIFIABLE`
+    rather than wave 2's `MGMT.UNAVAILABLE`. The MI exists; the
+    `sendProviderMessage` hop carries no peer credential and MI-A1 requires one.
+    The symbol stays exported because F-1 makes it permanent.
 
-38. **The bridge bounds `correlation_id` at 64 bytes, which is its own choice.**
+42. **The bridge bounds `correlation_id` at 64 bytes, which is its own choice.**
     `limits.json`'s `correlation_id_bytes = 16` is the *binary* width and the ABI
     carries the 36-byte UUID text; 64 matches the registry's largest identifier
     bound. Stated as a choice.
 
-39. **The bridge's error envelope is JSON where `twinvpn-ffi`'s is protobuf**, for
+43. **The bridge's error envelope is JSON where `twinvpn-ffi`'s is protobuf**, for
     the same ADR-0015 §11.2 document — chosen because Swift logs it as UTF-8 text.
     Field names are §11.2's verbatim, so a switch is a re-encoding.
 
-40. **`twinvpn-bridge/src/lib.rs` is 556 lines**, over the 500-line rule. All 14
-    exported symbols must be in one file for the header-drift test to be sure it
-    has seen the whole surface — the same reason `twinvpn-ffi/src/lib.rs` is 779.
+44. **`twinvpn-bridge/src/lib.rs` is over the 500-line rule**, and further over it
+    than in wave 2. All 17 exported symbols must be in one file for the
+    header-drift test to be sure it has seen the whole surface — the same reason
+    `twinvpn-ffi/src/lib.rs` is 779. Everything that is not an `extern "C"`
+    signature was pushed into `abi`, `report`, `host`, `config`, `probes`,
+    `start` and `mgmt/*`. Two of those are over the limit too and for a worse
+    reason — `start.rs` and `tests.rs` are long because their test modules are,
+    and `mgmt/server.rs`'s was split into `server_tests.rs` rather than left to
+    grow.
 
 ### Packaging
 
-41. **Nothing is signed, notarized or stapled.** `SIGNING.md` is procedure. No
+45. **Nothing is signed, notarized or stapled.** `SIGNING.md` is procedure. No
     Xcode project and no `Package.swift`: SwiftPM cannot produce a
     `.systemextension` bundle, and a manifest that can never build the product
-    would be noise.
+    would be noise. There is also **no bridging header**, which
+    `TwinVPNXPCShim.h` needs to be in.
 
-42. **`NEMachServiceName`, the App Group prefix, and whether a system extension
-    uses the same `NEProviderClasses` keys as an app extension** are all
-    unconfirmed. `com.apple.developer.networking.vpn.api` is on both bundles and
-    one is probably redundant.
+46. **`NEMachServiceName` on a packet-tunnel system extension is unconfirmed**,
+    and so is whether a client that is not the containing app can reach a service
+    vended that way. It is required for some provider kinds (app-proxy,
+    DNS-proxy) and this domain has not confirmed which list packet-tunnel is on.
+    **If it turns out that only the containing app can connect, the XPC carriage
+    serves the app and the CLI keeps the socket** — which is exactly the split
+    ADR-0017 §11.2's macOS row already describes, so the architecture survives
+    either answer. That is why both carriages exist.
 
-43. **`SMAppService` vs the pkg form.** The plists are the pkg form (absolute
+47. **`SMAppService` vs the pkg form.** The `ksd` plist is the pkg form (absolute
     `ProgramArguments`); the `SMAppService.daemon(plistName:)` form needs
     `BundleProgram` and the plist inside the app bundle. Whether one plist serves
     both is untested.
 
-44. **The boot anchor emits 11 of the runtime anchor's 19 labels.** `lan.*`,
+48. **The boot anchor emits 11 of the runtime anchor's 19 labels.** `lan.*`,
     `mcast.*`, `protected.*` and `deny.fwd.*` need `local_network_access`, the
     on-link prefixes and the overlay interface, none of which exist before the
     authority runs. The read-back parser requires no label to be present, so this
     is correct rather than merely tolerated.
 
-45. **`deny.dns` in the *boot* anchor is scoped to the protected tables, not a
+49. **`deny.dns` in the *boot* anchor is scoped to the protected tables, not a
     blanket port 53/853 deny.** A blanket DNS deny in the boot artifact would take
     the host off name resolution before the authority exists. Full class-6
     containment is the runtime anchor's.
 
-46. **`100.64.0.0/10` is RFC 6598 *carrier* space.** A Mac behind CGNAT
+50. **`100.64.0.0/10` is RFC 6598 *carrier* space.** A Mac behind CGNAT
     legitimately holds an address in it, and the Tier-2 outbound deny will also
     block that Mac's traffic to a `100.64.x.x` DHCP or DNS server. Linux has
     identical behaviour, so this shell matches it rather than deviating — but it
     is a real-world hazard neither ADR-0010 nor ADR-0012 names.
 
-47. **ADR-0012 §11.6's own macOS residual, restated:** *"Recovery and safe boot do
+51. **ADR-0012 §11.6's own macOS residual, restated:** *"Recovery and safe boot do
     not load the LaunchDaemon. Residual exposure: a device booted to Recovery is
     unprotected."*
 
+52. **The `.pkg` cannot install the authority.** The system extension is inside
+    the app and activated by `OSSystemExtensionRequest` with administrator
+    approval; `install.sh` installs `ksd`, the anchor, `twinvpn-unblock` and the
+    CLI, and cannot make the authority exist. That is Apple's model rather than a
+    gap in the script, but it means a **fresh install has no core until a user
+    opens the app and approves**, which the KS-19 boot anchor is what covers.
+
 ### Toolchain
 
-48. **`make cross-check` does not type-check `twinvpnd`'s core-hosting path.**
-    `core-host` is not a default feature because `ring`'s C sources cannot be
-    cross-compiled here — see §1. `cargo test --workspace --all-features` on Linux
-    does compile and exercise it. **Request:** if `twinvpn-crypto` selected
-    `snow`'s pure-Rust resolver rather than `ring-accelerated`, the feature could
-    be default and the whole shell would be cross-checked.
+53. **`make cross-check` now covers the whole shell, including the core-hosting
+    path.** Wave 2 recorded the opposite as gap 48, with a request: "if
+    `twinvpn-crypto` selected `snow`'s pure-Rust resolver rather than
+    `ring-accelerated`, the feature could be default and the whole shell would be
+    cross-checked." `core/Cargo.toml` did exactly that. **The request is
+    discharged**, and the first full run of the newly-covered code found real
+    defects — see gap 28 and the §4 note about `from_std` outside a runtime.

@@ -36,7 +36,7 @@
 
 pub use twinvpn_mgmt::envelope::{decode_frame, encode_frame, FrameError, MAX_ENVELOPE_BYTES};
 
-use crate::mi::wire::{MgmtEnvelope, LENGTH_PREFIX_BYTES};
+use crate::wire::{MgmtEnvelope, LENGTH_PREFIX_BYTES};
 
 /// The declared length in a prefix, refusing an over-cap or zero one.
 ///
@@ -85,7 +85,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mi::wire::{Body, Hello, MI_VERSION, MI_VERSION_MIN};
+    use crate::wire::{Body, Hello, MI_VERSION, MI_VERSION_MIN};
 
     fn envelope() -> MgmtEnvelope {
         MgmtEnvelope {

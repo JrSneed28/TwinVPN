@@ -95,7 +95,13 @@ struct BridgeUnavailable: Error, Sendable {
 /// One running extension instance, over the C ABI.
 final class CoreBridge: @unchecked Sendable {
     /// `tvb_ext *`. An incomplete C struct imports as `OpaquePointer`.
-    private let ext: OpaquePointer
+    ///
+    /// `fileprivate` rather than `private` so `ManagementSession` below can pass
+    /// it back across the ABI. It stays inside this file, which is the property
+    /// that matters: no other file in the shell holds a raw handle, and rule 3
+    /// — one owner, one `tvb_ext_free`, in `deinit` — is still checkable by
+    /// reading one file.
+    fileprivate let ext: OpaquePointer
 
     /// The ABI the bridge was compiled against, checked once at start.
     ///
@@ -278,8 +284,16 @@ final class CoreBridge: @unchecked Sendable {
     ///
     /// ADR-0017 MI-20 — "one contract, two carriages, never two contracts" — is
     /// why this file does not decode either side. The envelope's schema lives in
-    /// the Rust `mi` module that `twinvpnd` and `twinvpnctl` share; a Swift copy
-    /// of it would be the second contract that rule forbids.
+    /// `twinvpn-mgmt`, shared by the authority and the CLI; a Swift copy of it
+    /// would be the second contract that rule forbids.
+    ///
+    /// **This hop refuses**, and the reason is not that the MI is missing: it is
+    /// served on the Mach service by `ManagementSession` below and on the
+    /// `AF_UNIX` socket by the Rust accept loop. What `sendProviderMessage`
+    /// cannot supply is a peer credential, and MI-A1 requires one. The Rust side
+    /// answers `MGMT.PRINCIPAL_UNVERIFIABLE` and this method hands the envelope
+    /// back unread — which is CB-2: the shell does not decide that a refusal is
+    /// a refusal, it carries one.
     func appMessage(_ request: [UInt8], correlation: Correlation) throws -> [UInt8] {
         var resp: OpaquePointer?
         var err: OpaquePointer?
@@ -326,12 +340,111 @@ final class CoreBridge: @unchecked Sendable {
     /// pointer to Swift code that outlives the call would put the free at a
     /// point no reviewer can locate. The copy is what makes "freed exactly once,
     /// here" a property of the file rather than of every call site.
-    private static func consume(_ buf: OpaquePointer?) -> [UInt8]? {
+    fileprivate static func consume(_ buf: OpaquePointer?) -> [UInt8]? {
         guard let buf else { return nil }
         defer { tvb_buf_free(buf) }
         let slice = tvb_buf_bytes(buf)
         guard let ptr = slice.ptr, slice.len > 0 else { return [] }
         return Array(UnsafeBufferPointer(start: ptr, count: Int(slice.len)))
+    }
+}
+
+// MARK: - The management interface's XPC carriage
+
+/// One management connection, over the C ABI.
+///
+/// **Authority:** ADR-0016 §11.2's amendment PS-22 (the MI lives in the system
+/// extension, "over XPC with `audit_token_t`"), §11.14 (a); ADR-0017 §11.2's
+/// macOS row, MI-A1, MI-A5, MI-20, MI-S2.
+///
+/// # What this type does, and the list is short
+///
+/// It hands a 32-byte `audit_token_t` to Rust once, then hands one message at a
+/// time to Rust and hands the answer back. **It does not decode the envelope,
+/// does not know what a scope is, does not decide whether a principal may run
+/// an operation, and does not construct a reply.** Every one of those is in
+/// `twinvpn-bridge`'s `mgmt` module, where it is tested on a Linux host.
+///
+/// That is CB-2 stated as a file boundary rather than as an intention: there is
+/// no TwinVPN domain type in this declaration to branch on.
+///
+/// # Ownership
+///
+/// The same three rules as `CoreBridge`. `tvb_mgmt_close` runs in `deinit` and
+/// nowhere else, so a session that is dropped mid-reply is released once, and a
+/// double close — which the ABI documents as undefined behaviour — is not
+/// reachable by forgetting a branch.
+final class ManagementSession: @unchecked Sendable {
+    /// `tvb_session *`.
+    private let handle: OpaquePointer
+    /// Held so the session outlives no longer than the extension it belongs to.
+    /// A strong reference: releasing the bridge while a session is open would
+    /// free the `tvb_ext` this session's every call passes back.
+    private let bridge: CoreBridge
+
+    /// Opens a session for the process an `audit_token_t` names.
+    ///
+    /// - Parameter auditToken: exactly 32 bytes, copied verbatim out of the
+    ///   connection. Any other length is refused on the Rust side with
+    ///   `MGMT.PRINCIPAL_UNVERIFIABLE` — **MI-A5**: an unverifiable identity is
+    ///   a refusal, never a default principal.
+    init(bridge: CoreBridge, auditToken: [UInt8], correlation: Correlation) throws {
+        var session: OpaquePointer?
+        var err: OpaquePointer?
+        let rc = auditToken.withTVBSlice { token in
+            tvb_mgmt_open(bridge.ext, token, &session, &err)
+        }
+        guard rc == TVB_OK, let session else {
+            let envelope = CoreBridge.consume(err) ?? []
+            TunnelLog.bridge.error(
+                "mgmt.open.refused",
+                envelope: String(decoding: envelope, as: UTF8.self),
+                correlation)
+            throw BridgeError(envelope: envelope, code: rc, call: "tvb_mgmt_open")
+        }
+        assert(err == nil, "tvb_mgmt_open wrote an envelope on success")
+        self.handle = session
+        self.bridge = bridge
+    }
+
+    deinit {
+        // The ONLY call to `tvb_mgmt_close` in the shell.
+        tvb_mgmt_close(handle)
+    }
+
+    /// One framed `MgmtEnvelope` in, one framed `MgmtEnvelope` out.
+    ///
+    /// **There is always an answer on success**, including for a refusal:
+    /// ADR-0017 §11.7 forbids a silent close, "because a silent close is
+    /// indistinguishable from the agent not running and sends the user to
+    /// reinstall rather than to update". A thrown error means there was no
+    /// session at all, which is the only case with nothing to say.
+    func exchange(_ request: [UInt8], correlation: Correlation) throws -> [UInt8] {
+        var resp: OpaquePointer?
+        var err: OpaquePointer?
+        let rc = request.withTVBSlice { req in
+            tvb_mgmt_exchange(bridge.ext, handle, req, &resp, &err)
+        }
+        guard rc == TVB_OK else {
+            let envelope = CoreBridge.consume(err) ?? []
+            _ = CoreBridge.consume(resp)
+            TunnelLog.bridge.error(
+                "mgmt.exchange.failed",
+                envelope: String(decoding: envelope, as: UTF8.self),
+                correlation)
+            throw BridgeError(envelope: envelope, code: rc, call: "tvb_mgmt_exchange")
+        }
+        return CoreBridge.consume(resp) ?? []
+    }
+}
+
+extension CoreBridge {
+    /// Opens a management session. See `ManagementSession`.
+    func openManagementSession(
+        auditToken: [UInt8],
+        correlation: Correlation
+    ) throws -> ManagementSession {
+        try ManagementSession(bridge: self, auditToken: auditToken, correlation: correlation)
     }
 }
 

@@ -71,6 +71,12 @@
     <!--
       The keychain access group shared with the containing app.
 
+      READ THIS ONE WITH X-7 IN MIND. ADR-0016 §11.2's amendment PS-22 puts the
+      KEY HANDLE in this bundle: the system extension is the authority, and
+      §11.14 (g) requires the key to be openable by it "with no user logged in"
+      and UNOPENABLE by the unprivileged client. Neither half is discharged by
+      the group below.
+
       ADR-0016 §11.4 records the residual this creates, and it is NOT hypothetical
       on macOS: "the keychain access group cannot be scoped below app identity",
       so anything in this group can use DeviceKey as a signing oracle.
@@ -127,8 +133,9 @@
           - would let an unsigned or differently-signed dylib load into a root
             process. §11.9 requires library validation ON.
         com.apple.security.cs.allow-dyld-environment-variables
-          - would restore the DYLD_* injection path that com.twinvpn.twinvpnd's
-            pinned PATH and Q10 exist to close.
+          - would restore the DYLD_* injection path that ADR-0016 Q10 exists to
+            close, in the process that now holds the core, the key handle and
+            the management interface (PS-22).
         com.apple.security.cs.allow-unsigned-executable-memory
         com.apple.security.cs.allow-jit
           - the MemoryDenyWriteExecute analogue. ADR-0018 §11.16 (f) requires the

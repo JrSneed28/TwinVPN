@@ -20,12 +20,12 @@
 //!   granted one.
 //! - **MI-S2 (attach-time immutability).** [`Scopes`] has no mutator. The granted
 //!   set is built once, at attach, and there is no scope-escalation message in
-//!   [`super::wire::Body`] for one to arrive on.
+//!   [`crate::wire::Body`] for one to arrive on.
 //!
 //! # Re-derived at every attach, never cached across attaches
 //!
 //! S-44. On macOS the principal's groups come from the kernel's answer at the
-//! moment of the attach ([`super::super::agent::peer`]), so a membership change
+//! moment of the attach (the authority's `mgmt::peer`), so a membership change
 //! takes effect on the **next** attach — which is what "re-derived at every
 //! attach" means operationally, and why [`Scopes`] is a value the connection owns
 //! rather than a cache the agent keeps.

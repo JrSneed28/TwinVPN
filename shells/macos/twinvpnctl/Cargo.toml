@@ -22,10 +22,15 @@ description = "the unprivileged macOS CLI over the local management interface (A
 publish = false
 
 [dependencies]
-# The MI contract, from the ONE place it is declared (MI-20). `default-features
-# = false` excludes the whole `agent` feature, so this unprivileged binary links
-# no pf, no route programme, no `SCDynamicStore` and no core-hosting code.
-twinvpnd      = { path = "../twinvpnd", default-features = false }
+# The MI contract, from the ONE place it is declared (MI-20).
+#
+# Before X-7 this was `twinvpnd` with `default-features = false`, which excluded
+# the daemon's whole `agent` feature. There is no daemon now: PS-22 moved the
+# authority into the NE system extension, so the shared half is its own crate
+# and the exclusion is STRUCTURAL rather than a feature flag. `twinvpn-mi` links
+# no core, no platform adapter and no `pf`, so this binary is unprivileged by
+# its dependency graph and not merely by how it is run.
+twinvpn-mi    = { path = "../twinvpn-mi" }
 twinvpn-mgmt  = { workspace = true }
 twinvpn-types = { workspace = true }
 tokio         = { workspace = true }

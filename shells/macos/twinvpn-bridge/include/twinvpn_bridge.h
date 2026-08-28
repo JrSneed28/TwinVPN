@@ -73,6 +73,7 @@ extern "C" {
 /* Opaque handles. F-8: no struct with product fields crosses. */
 typedef struct tvb_ext tvb_ext; /* one running extension instance */
 typedef struct tvb_buf tvb_buf; /* a bridge-owned buffer; free with tvb_buf_free */
+typedef struct tvb_session tvb_session; /* one management connection */
 
 /* A borrowed, length-delimited byte range. F-3: never NUL-reliant.
  *
@@ -220,9 +221,61 @@ int32_t tvb_ext_network_changed(tvb_ext *ext, tvb_slice correlation_id,
  *
  * ADR-0017 MI-20 - "one contract, two carriages, never two contracts" - is why
  * neither side of this call decodes the envelope in Swift. Its schema lives in
- * the Rust `mi` module that `twinvpnd` and `twinvpnctl` share. */
+ * `twinvpn-mgmt`, shared by the authority and the CLI.
+ *
+ * REFUSES with MGMT.PRINCIPAL_UNVERIFIABLE. NETunnelProviderSession's
+ * sendProviderMessage hop carries no peer credential - no audit_token_t, no
+ * xucred - and MI-A1 requires the calling principal to come from the kernel on
+ * the connected channel. ADR-0017 11.2's macOS row gives this platform two
+ * Phase 1 channels, and this is not one of them; the provider-message row is
+ * the future-compatible App Store variant (C-13). Declared rather than deleted
+ * because F-1 makes an exported symbol permanent. */
 int32_t tvb_ext_app_message(tvb_ext *ext, tvb_slice req, tvb_buf **resp,
                             tvb_buf **err);
+
+/* --------------------------------------------------------------------------
+ * The management interface - the XPC carriage.
+ *
+ * ADR-0016 11.2's macOS amendment PS-22 puts the management interface inside
+ * the system extension, "over XPC with audit_token_t (11.14 (a))". ADR-0017
+ * 11.2's macOS row names the Mach service `com.twinvpn.agent.mgmt` and gives
+ * its peer attestation as the XPC audit token.
+ *
+ * XPC's listener is a block-based Objective-C API, so SWIFT owns it: it accepts
+ * the connection, copies the 32-byte audit_token_t out with
+ * xpc_connection_get_audit_token, and calls the three entries below. Swift
+ * MARSHALS - it does not decode the envelope, does not know what a scope is,
+ * and does not decide whether a principal may run an operation. CB-2.
+ * -------------------------------------------------------------------------- */
+
+/* Opens one management session for the process an audit_token_t names.
+ *
+ * `audit_token` is EXACTLY 32 bytes - the eight words of audit_token_t, in host
+ * order, copied verbatim. Any other length is MGMT.PRINCIPAL_UNVERIFIABLE:
+ * MI-A5 makes an unverifiable identity a refusal, never a default principal.
+ *
+ * On TVB_OK, `*out` owns a session the caller releases with tvb_mgmt_close. */
+int32_t tvb_mgmt_open(tvb_ext *ext, tvb_slice audit_token, tvb_session **out,
+                      tvb_buf **err);
+
+/* One framed MgmtEnvelope in, one framed MgmtEnvelope out.
+ *
+ * ALWAYS writes `*resp` on TVB_OK, including for a refusal: ADR-0017 11.7
+ * forbids a silent close. TVB_ERR means there was no session and therefore
+ * nothing that could have produced an envelope.
+ *
+ * The framing is the socket carriage's framing - a 4-byte big-endian length
+ * prefix - even though XPC preserves message boundaries, because 11.2 requires
+ * "one MgmtEnvelope per message in every binding, so a message that is valid on
+ * one channel is byte-identical on another". */
+int32_t tvb_mgmt_exchange(tvb_ext *ext, tvb_session *session, tvb_slice req,
+                          tvb_buf **resp, tvb_buf **err);
+
+/* Releases a session. Tolerates NULL.
+ *
+ * PS-3: a client going away changes nothing. Calling this twice on the same
+ * non-null pointer is undefined behaviour. */
+void tvb_mgmt_close(tvb_session *session);
 
 /* --------------------------------------------------------------------------
  * Buffers.

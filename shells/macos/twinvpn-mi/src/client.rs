@@ -6,7 +6,7 @@
 //! # One contract, two carriages
 //!
 //! This is the second carriage. It speaks the envelope declared in
-//! [`super::wire`] and the framing in [`super::codec`], and it declares nothing
+//! [`crate::wire`] and the framing in [`crate::codec`], and it declares nothing
 //! of its own — which is MI-20's rule as a dependency edge rather than a
 //! convention.
 //!
@@ -20,8 +20,8 @@
 
 use std::path::Path;
 
-use crate::mi::codec::{self, FrameError};
-use crate::mi::wire::{
+use crate::codec::{self, FrameError};
+use crate::wire::{
     Body, Diagnostic, Hello, HelloAck, MgmtEnvelope, Request, Response, MI_VERSION, MI_VERSION_MIN,
 };
 
@@ -237,7 +237,7 @@ fn placeholder_ack() -> HelloAck {
         catalogue_digest: String::new(),
         event_cursor: 0,
         protocol_epoch_range: [1, 1],
-        platform_ctx: crate::mi::wire::PlatformCtx {
+        platform_ctx: crate::wire::PlatformCtx {
             platform: String::new(),
             os_version: String::new(),
         },

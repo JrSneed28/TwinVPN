@@ -15,11 +15,20 @@
      than (a) apply the boot anchor and (b) the unblock command's local,
      admin-authenticated invocation."
 
+  and amendment PS-22 restates it as a table:
+
+    | `ksd`, the LaunchDaemon | the KS-19 boot anchor, and the unblock
+    | command's local admin-authenticated invocation | no core, no keys, no
+    | network sockets, no management interface |
+
   So this job has NO network access, NO core, NO key access and NO management
-  interface. It runs, applies /etc/twinvpn/pf.anchor, and exits. The authority
-  is com.twinvpn.sysext (the NetworkExtension system extension) and its
-  LaunchDaemon companion com.twinvpn.twinvpnd — a DIFFERENT job, in a different
-  plist, so that this one can stay small enough to review line by line.
+  interface. It runs, applies /etc/twinvpn/pf.anchor, READS BACK what pfctl
+  says is loaded, and exits.
+
+  THE AUTHORITY IS THE SYSTEM EXTENSION, and there is no second LaunchDaemon.
+  Wave 2 shipped a `com.twinvpn.twinvpnd` beside this one that hosted the core
+  and served the MI; ownership.md §9.6 X-7 closed that as a defect and its plist
+  is deleted. If you are here looking for it, that is why it is not.
 
   ADR-0016 §11.5's macOS row says why this exists as a second privileged
   component at all: "a sysext can be deactivated by the user, and the boot
@@ -99,9 +108,14 @@
       "launchd has no burst limit, so the authority maintains its OWN durable
       restart counter (S-40) and latches quarantine itself." A ThrottleInterval
       spaces restarts out; it never gives up, so it cannot be the crash-loop
-      containment those rules require. The counter that can is in the authority
-      (com.twinvpn.twinvpnd), not here. This plist must not be read as if the
-      key below were the containment.
+      containment those rules require. The counter that can is the AUTHORITY's
+      — the system extension's — not this job's. This plist must not be read as
+      if the key below were the containment.
+
+      And note what this job's KeepAlive is actually for: SuccessfulExit=false
+      restarts a CRASH and not a clean exit, and this job exits 0 once the
+      anchor is confirmed loaded. A restart here means the apply or the
+      read-back failed, which is the case worth retrying.
     -->
     <key>ThrottleInterval</key>
     <integer>10</integer>
@@ -179,10 +193,21 @@
       No MachServices, no Sockets, no WatchPaths, no StartInterval. ADR-0016
       §11.2 forbids ksd accepting "any request other than (a) apply the boot
       anchor and (b) the unblock command's local, admin-authenticated
-      invocation" — and (b) is a SEPARATE, single-purpose privileged Mach
-      service per ADR-0017 §11.21's macOS row, which is NOT in this wave and is
-      therefore not declared here. Declaring an unused MachServices key would
-      create the request channel the rule forbids.
+      invocation" — and (b) is discharged by `twinvpn-unblock`, a SEPARATE
+      package-owned privileged binary at /usr/local/sbin/twinvpn-unblock, rather
+      than by a request channel into this job.
+
+      ADR-0017 MI-12 names `ksd` as the SERVING component for the unblock on
+      macOS, and this build reads that as "the same package, the same privilege
+      class, the same uninstall" rather than "an IPC endpoint on this daemon" —
+      because MI-12's own first sentence is that the command "MUST NOT depend on
+      the management interface, on the agent process, or on any MI channel", and
+      a Mach service on this job would be a channel with exactly the
+      availability problem the rule exists to avoid. Reported to the integration
+      lead as a READING, not a resolution: shells/macos/README.md §7.
+
+      Declaring an unused MachServices key here would in any case create the
+      request channel §11.2 forbids.
     -->
 </dict>
 </plist>

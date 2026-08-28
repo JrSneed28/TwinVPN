@@ -48,6 +48,29 @@
 //  there is no `try!` and no `try?` that discards an error in this file.
 //
 //  ============================================================================
+//  X-7 / PS-22: THIS PROCESS IS THE AUTHORITY
+//
+//  Until wave 3 the core, the keys and the management interface lived in a
+//  `LaunchDaemon` called `twinvpnd` and this provider was a packet pump.
+//  ADR-0016 §11.2's amendment PS-22 moves all three here, and the argument is
+//  physical rather than editorial: `packetFlow` — the property four lines of
+//  this file use — exists only inside this process, the core owns the datapath,
+//  and §11.16 (a) / S-47 permit exactly ONE process to hold a mutating core
+//  handle.
+//
+//  What that changes in this file is small and deliberate, which is the point:
+//
+//    - `tvb_ext_start` now runs ADR-0016 §11.6's whole start sequence behind
+//      the ABI, so a refusal here means "the authority could not arm" rather
+//      than "an object could not be allocated". PS-18 makes that a refused
+//      `startTunnel`, which is what it already was.
+//    - a `ManagementListener` is started after the handle exists and stopped
+//      before it goes away.
+//
+//  There is still no decision in this file. The listener marshals; the sequence
+//  is the core's.
+//
+//  ============================================================================
 //  FC-1 §6 instance 5
 //
 //  The EXTENSION fetches the signed contract; core-lite parses and verifies it.
@@ -72,6 +95,14 @@ final class TwinVPNPacketTunnelProvider: NEPacketTunnelProvider {
     private var bridge: CoreBridge?
     private var packets: PacketLoop?
     private var settingsTask: Task<Void, Never>?
+
+    /// The MI's XPC carriage (PS-22, ADR-0017 §11.2's macOS row).
+    ///
+    /// Started only once `tvb_ext_start` has returned a handle: a Mach service
+    /// that exists but can only refuse is the shape MI-A3 rejects socket
+    /// activation for. The `AF_UNIX` carriage is bound inside `tvb_ext_start`
+    /// itself, on the Rust side, and is not this file's to manage.
+    private var management: ManagementListener?
 
     /// The correlation chain for this provider's lifetime. `startTunnel` is an
     /// ORIGIN — the OS initiated it and there is no parent id to carry — so a
@@ -106,8 +137,20 @@ final class TwinVPNPacketTunnelProvider: NEPacketTunnelProvider {
                 protocolConfiguration: protocolConfiguration,
                 options: options)
 
+            // Behind this call: §11.6's start sequence — the boot artifact, the
+            // privilege posture, the three clocks, the runtime's I/O driver, the
+            // capability probe, the enforcement READ-BACK (W-24), the vault, the
+            // core (ABI-checked, VR-4) and the MI socket endpoint. A refusal
+            // arrives here as a `BridgeError` carrying the step's registered
+            // code, and this file does not read it — CB-2.
             let bridge = try CoreBridge(configJSON: configBytes, correlation: correlation)
             self.bridge = bridge
+
+            // The management interface's second carriage. After the handle
+            // exists, and never before.
+            let management = ManagementListener(bridge: bridge)
+            management.start(correlation: correlation)
+            self.management = management
 
             let packets = PacketLoop(bridge: bridge, flow: packetFlow)
             self.packets = packets
@@ -258,6 +301,13 @@ final class TwinVPNPacketTunnelProvider: NEPacketTunnelProvider {
         settingsTask?.cancel()
         settingsTask = nil
 
+        // The MI goes first. A client that reaches the service after the
+        // datapath has stopped would be answered by an authority in the middle
+        // of tearing itself down, and §11.7's "never a silent close" is easier
+        // to keep by not accepting than by racing.
+        management?.stop(correlation: correlation)
+        management = nil
+
         let packets = self.packets
         let bridge = self.bridge
         self.packets = nil
@@ -299,9 +349,16 @@ final class TwinVPNPacketTunnelProvider: NEPacketTunnelProvider {
     /// ADR-0017: an opaque MI envelope in, an opaque MI envelope out.
     ///
     /// MI-20 — "one contract, two carriages, never two contracts" — is why this
-    /// method decodes neither side. The envelope's schema lives in the Rust `mi`
-    /// module shared by `twinvpnd` and `twinvpnctl`; a Swift copy of it would be
-    /// the second contract.
+    /// method decodes neither side. The envelope's schema lives in
+    /// `twinvpn-mgmt`, shared by the authority and the CLI; a Swift copy of it
+    /// would be the second contract.
+    ///
+    /// **The Rust side refuses this hop**, and after X-7 the reason is not that
+    /// the MI is absent — it is served on the Mach service and on the socket.
+    /// `sendProviderMessage` carries no peer credential, MI-A1 requires one from
+    /// the kernel on the connected channel, and MI-A5 makes an unverifiable
+    /// identity a refusal. The envelope that comes back says
+    /// `MGMT.PRINCIPAL_UNVERIFIABLE`, and this method hands it on unread.
     override func handleAppMessage(
         _ messageData: Data,
         completionHandler: ((Data?) -> Void)?

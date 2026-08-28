@@ -502,6 +502,61 @@ pub fn link_facts_from(
 }
 
 // ---------------------------------------------------------------------------
+// KS-20a's offline recovery, as two functions over an injected engine
+//
+// `twinvpn-unblock` is a package-owned binary that must work when the authority
+// will not start (ADR-0012 §10, ADR-0017 MI-12), so it links this crate and
+// nothing from the shell. Its two operations live here, beside the engine trait
+// they use, for the same reason `twinvpn-platform-linux` puts
+// `remove_owner_tagged_table` beside `nft`: a recovery path that reimplemented
+// the anchor's identity would be a second answer to "which rules are ours".
+// ---------------------------------------------------------------------------
+
+/// Removes **only** the owner-tagged anchor, and confirms it is gone.
+///
+/// # Why an empty load rather than a flush
+///
+/// `pfctl -a twinvpn -f /dev/null` replaces the anchor's contents with nothing,
+/// in **one** transaction, and touches no rule outside the anchor. `pfctl -F
+/// all` would flush the host's own firewall, and KS-20's reclamation is scoped
+/// to what we tagged — a recovery command that removed somebody else's rules
+/// would be a worse outage than the one it is fixing.
+///
+/// # The read-back is part of the operation, not a courtesy
+///
+/// **W-24.** The anchor must be gone from what `pfctl` *says* is loaded, never
+/// from the fact that the load returned `Ok`. A caller that trusted the return
+/// value would tell an operator their host was unblocked while it was not,
+/// which is the exact inversion of the assertion discipline the arming path
+/// already follows.
+///
+/// # Errors
+///
+/// Whatever the engine reports, and [`PlatformError::AdapterUnavailable`] when
+/// the load succeeded but the anchor is still loaded.
+pub fn remove_owner_tagged_anchor(pf: &dyn PfEngine) -> Result<(), PlatformError> {
+    pf.load_anchor(pf::ANCHOR, "")?;
+    if pf.tables(pf::ANCHOR)?.is_some() {
+        return Err(oserr::unavailable("pfctl -a twinvpn -f -", libc::EBUSY));
+    }
+    Ok(())
+}
+
+/// What the kernel holds in the owner-tagged anchor, changing nothing.
+///
+/// The question an operator asks first — "is TwinVPN what is blocking me" —
+/// and asking it must not require running the destructive command to find out.
+///
+/// # Errors
+///
+/// Whatever the engine reports. A failure is **not** turned into "nothing is
+/// installed": that is the dangerous direction, and O-18 requires the unknown
+/// case to stay unknown.
+pub fn read_owner_tagged_anchor(pf: &dyn PfEngine) -> Result<Option<Installed>, PlatformError> {
+    pf.tables(pf::ANCHOR)
+}
+
+// ---------------------------------------------------------------------------
 // The Darwin engines
 //
 // Process-spawning, so their ARGUMENT CONSTRUCTION is target-free and tested

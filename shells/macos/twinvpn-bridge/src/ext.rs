@@ -15,25 +15,29 @@
 //! there; the packet framing is the adapter's [`encode_frame`]/[`decode_frame`].
 //! This file marshals, locks and hands over.
 //!
-//! # What is NOT wired in this wave, stated once
+//! # The core is wired (X-7 / PS-22)
 //!
-//! There is **no `twinvpn-core` handle**. `shells/macos` has no core-hosting
-//! runtime yet, so no `NetworkContract` is ever computed and
-//! [`TvbExt::next_settings`] refuses by name on every call.
+//! [`CoreHandle`] has two variants and the difference is the whole of X-7.
+//! [`CoreHandle::Hosted`] carries the [`crate::host::Host`] — the `Env`, the
+//! platform adapter, the `Core` and the management interface, all in **this**
+//! process, because `NEPacketTunnelProvider.packetFlow` exists only here and
+//! §11.16 (a) / S-47 permit exactly one process a mutating core handle.
 //!
-//! The refusal is placed at `next_settings` rather than at `tvb_ext_start`, and
-//! that is a deliberate choice with a consequence worth stating plainly:
-//! `PacketTunnelProvider.swift`'s `startTunnel` **completes only once a settings
-//! document has arrived and NE has accepted it**, so refusing here refuses the
-//! start from the OS's point of view exactly as refusing at `start` would — and
-//! it leaves the datapath, the lifecycle facts, the buffer discipline and the
-//! panic containment reachable through the real C surface, where they are
-//! tested. Refusing at `start` would have made all of that unreachable and
-//! untested.
+//! [`CoreHandle::Unwired`] is what a start that refused leaves behind, and what
+//! this crate's own tests use to exercise the datapath, the lifecycle facts, the
+//! buffer discipline and the panic containment without a Darwin kernel. It is
+//! **not** the shipping state any more: `tvb_ext_start` refuses rather than
+//! handing Swift an unwired instance, so the provider never reaches `startTunnel`
+//! with a hollow extension behind it.
 //!
-//! [`TvbExt::publish_settings`] is the entry the day a core is wired. It is not
-//! dead code kept for tidiness: it is the shape the wiring plugs into, and it is
-//! exercised by this crate's tests.
+//! # Where the lifecycle facts go, and why that changed
+//!
+//! Before the core moved in, `TvbExt` published network changes into an
+//! interface provider **of its own** — which nothing subscribed to. Now the
+//! adapter's provider is the one the core watches, so the private
+//! `TvbExt::interface_sink` routes to it whenever a host is present. Publishing into the other one would
+//! have been a sleep/wake report the core never received: harmless while there
+//! was no core, and a silent hang of the reconciler the moment there was.
 
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -99,15 +103,29 @@ pub const fn family_tag(family: AddressFamily) -> &'static str {
 
 /// Whether a core is wired to compute contracts.
 ///
-/// **One gate, in one place.** The day `shells/macos` hosts a core, this becomes
-/// a second variant holding the handle and every refusal below turns into a
-/// call. Making it an enum rather than an `Option<()>` is what keeps the day-one
-/// state a named condition rather than an absence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// **One gate, in one place**, and it is now a real two-state value rather than
+/// a named absence: [`Hosted`](CoreHandle::Hosted) is what `tvb_ext_start`
+/// produces on a Mac, and [`Unwired`](CoreHandle::Unwired) is what this crate's
+/// tests use and what a refused start leaves.
+#[derive(Debug, Clone)]
 pub enum CoreHandle {
     /// No core hosts this extension. Every operation that needs a
     /// `NetworkContract` refuses by name.
     Unwired,
+    /// The authority: the `Env`, the adapter, the `Core` and the MI, in this
+    /// process (**PS-22**).
+    Hosted(Arc<crate::host::Host>),
+}
+
+impl CoreHandle {
+    /// The host, when there is one.
+    #[must_use]
+    pub fn host(&self) -> Option<&Arc<crate::host::Host>> {
+        match self {
+            CoreHandle::Unwired => None,
+            CoreHandle::Hosted(host) => Some(host),
+        }
+    }
 }
 
 /// One running extension instance.
@@ -138,9 +156,18 @@ impl TvbExt {
     pub fn new(core: CoreHandle) -> Self {
         let (settings_tx, settings_rx) = sync_channel(SETTINGS_CAPACITY);
         let shutdown = ShutdownLatch::new();
+        // **One port, and the adapter already holds it.** When a host is present
+        // the port was created by `Host::start` and handed to the adapter's
+        // tunnel device with `set_pending_port`, so taking a copy here is the
+        // same object rather than a second queue. A `BridgePort::new()` in this
+        // branch would have given Swift one end of a pipe with nothing at the
+        // other — the datapath equivalent of the interface-provider bug above.
+        let port = core
+            .host()
+            .map_or_else(|| Arc::new(BridgePort::new()), |host| host.port());
         Self {
             core,
-            port: Arc::new(BridgePort::new()),
+            port,
             settings_tx,
             settings_rx: Mutex::new(settings_rx),
             journal: Mutex::new(PowerJournal::new()),
@@ -157,12 +184,35 @@ impl TvbExt {
         Arc::clone(&self.port)
     }
 
-    /// The interface provider the lifecycle facts are published into.
+    /// The instance's own interface provider.
     ///
-    /// The core subscribes to this; the bridge only ever publishes.
+    /// Used when no core is hosted — this crate's tests, and a refused start.
+    /// The publishing path goes through the private `interface_sink`, which prefers
+    /// the adapter's; see the module header for why that distinction is
+    /// load-bearing rather than tidy.
     #[must_use]
     pub fn interfaces(&self) -> Arc<MacosInterfaceProvider> {
         Arc::clone(&self.interfaces)
+    }
+
+    /// Where a lifecycle fact is actually published.
+    ///
+    /// **The adapter's provider whenever there is one**, because that is the one
+    /// the core subscribes to. Not a branch on a TwinVPN domain fact (CB-2): it
+    /// is the shell's own bookkeeping about which object exists, the same class
+    /// of branch as "has this task already been started".
+    fn interface_sink(&self) -> &MacosInterfaceProvider {
+        self.core.host().map_or(&*self.interfaces, |host| {
+            host.adapter().interface_provider()
+        })
+    }
+
+    /// The management context, for the XPC carriage. `None` before a core is
+    /// hosted — which is what makes `tvb_ext_mgmt_*` answer `MGMT.UNAVAILABLE`
+    /// rather than pretending to serve.
+    #[must_use]
+    pub fn mgmt_context(&self) -> Option<&crate::mgmt::ServerContext> {
+        self.core.host().map(|host| host.context())
     }
 
     /// Whether `stop` has been reported.
@@ -182,6 +232,13 @@ impl TvbExt {
             *stopped = true;
         }
         self.shutdown.begin();
+        // The host's own graceful shutdown: the adapter's latch, the runtime's
+        // refusal of new spawns, and the datapath closed. **Still no
+        // enforcement teardown** — `Host::begin_shutdown` is where CB-6 is
+        // stated and where a reviewer should check it.
+        if let Some(host) = self.core.host() {
+            host.begin_shutdown();
+        }
         self.port.close();
         // The OS's own stop reason, widened without a sign loss: a negative
         // value is not one NE documents, and silently reinterpreting it as a
@@ -301,6 +358,12 @@ impl TvbExt {
     /// the module documentation for why the refusal is here and not at `start`.
     pub fn next_settings(&self, timeout: Duration) -> Result<Option<Vec<u8>>, Diagnostic> {
         match self.core {
+            // A hosted core computes contracts, so a quiet interval is a
+            // TIMEOUT and never a refusal: the provider loops and applies the
+            // next document. Turning silence into `PLATFORM.ADAPTER_UNAVAILABLE`
+            // here would fail `startTunnel` on any Mac whose first contract took
+            // longer than one poll.
+            CoreHandle::Hosted(_) => Ok(self.await_settings(timeout)),
             CoreHandle::Unwired => {
                 // A document that WAS published — by a test today, by the wiring
                 // tomorrow — is served normally, so the gate is the only thing
@@ -361,7 +424,7 @@ impl TvbExt {
     /// It is the same gap [`PowerJournal`] records against a resume.
     pub fn report_network_changed(&self, correlation: &CorrelationId) {
         let published = self
-            .interfaces
+            .interface_sink()
             .publish(NetworkChange::EventsLost { count: None });
         crate::log::counted(
             "tvb_ext_network_changed",
@@ -380,7 +443,7 @@ impl TvbExt {
             Err(_) => vec![NetworkChange::EventsLost { count: None }],
         };
         let count = changes.len();
-        self.interfaces.publish_all(changes);
+        self.interface_sink().publish_all(changes);
         crate::log::counted(call, "changes", count as u64, correlation);
     }
 }

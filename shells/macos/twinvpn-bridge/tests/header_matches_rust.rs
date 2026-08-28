@@ -160,7 +160,7 @@ fn the_surface_stays_the_size_f1_makes_permanent() {
     let exported = rust_exports();
     assert_eq!(
         exported.len(),
-        14,
+        17,
         "the exported surface changed: {exported:?}"
     );
     for expected in [
@@ -178,6 +178,13 @@ fn the_surface_stays_the_size_f1_makes_permanent() {
         "tvb_ext_start",
         "tvb_ext_stop",
         "tvb_ext_wake",
+        // Added by X-7: PS-22 moved the management interface into the system
+        // extension, and ADR-0017 11.2's macOS row serves it over XPC with an
+        // `audit_token_t`. Three entries, because a session has a lifetime:
+        // open with a principal, exchange messages, close.
+        "tvb_mgmt_close",
+        "tvb_mgmt_exchange",
+        "tvb_mgmt_open",
     ] {
         assert!(
             exported.iter().any(|e| e == expected),

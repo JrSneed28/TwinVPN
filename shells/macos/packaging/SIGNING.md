@@ -29,8 +29,8 @@
 |---|---|---|---|
 | `TwinVPN.app` | `Developer ID Application: … (TEAMID)` | hardened | `TwinVPNApp.entitlements` |
 | `TwinVPN.app/Contents/Library/SystemExtensions/com.twinvpn.app.sysext.systemextension` | same | hardened | `TwinVPNTunnel.entitlements` |
-| `twinvpnd` (the authority daemon) | same | hardened | none |
 | `twinvpn-ksd` (the KS-19 boot job) | same | hardened | none |
+| `twinvpn-unblock` (KS-20a's offline recovery) | same | hardened | none |
 | `twinvpn` / `twinvpnctl` (the CLI) | same | hardened | none |
 | `TwinVPN.pkg` (the installer) | `Developer ID Installer: … (TEAMID)` | n/a | n/a |
 
@@ -39,10 +39,26 @@ interchangeable: **Application** signs Mach-O and bundles, **Installer** signs
 `.pkg`. Using the wrong one produces an artifact that Gatekeeper rejects at
 install time rather than at build time.
 
-`twinvpnd` and `twinvpn-ksd` carry **no entitlements**. ADR-0016 §11.9's macOS
-row assigns entitlements to the app and the sysext only, and `ksd` explicitly has
-"no network entitlement, no keychain access". An entitlement on a root daemon is
-surface with no compensating control.
+**There is no `twinvpnd` row, and its absence is the architecture.** ADR-0016
+§11.2's macOS row lists one LaunchDaemon and amendment **PS-22** puts the core,
+the key handle and the management interface inside the system extension. Wave 2
+signed a second root daemon that held all three; `ownership.md` §9.6 **X-7**
+closed that as a defect. If a build produces a `twinvpnd`, the build is wrong,
+not this table.
+
+`twinvpn-ksd` and `twinvpn-unblock` carry **no entitlements**. ADR-0016 §11.9's
+macOS row assigns entitlements to the app and the sysext only, and `ksd`
+explicitly has "no network entitlement, no keychain access". An entitlement on a
+root binary is surface with no compensating control — and `twinvpn-unblock`
+needs none: it runs `pfctl`, which needs uid 0 and nothing else.
+
+**The extension's signature is now load-bearing for the MI as well as for the
+datapath.** ADR-0017 §11.2's macOS row gives the XPC carriage "XPC audit token →
+`SecCodeCheckValidity` against a Team-ID-pinned code requirement". That check is
+**not implemented** (see §7's gap list): the extension decodes the audit token
+and derives the principal from it, and does not additionally verify the client's
+code signature. Named here because this is the file where the reader is thinking
+about code requirements.
 
 ---
 
@@ -53,7 +69,7 @@ signature, so signing a container before its nested code invalidates the
 container the moment the nested code is signed.
 
 ```
-1. the CLI, twinvpnd, twinvpn-ksd          (plain Mach-O)
+1. the CLI, twinvpn-ksd, twinvpn-unblock    (plain Mach-O)
 2. the .systemextension bundle
 3. TwinVPN.app                             (--deep is NOT used; see below)
 4. productbuild the .pkg
@@ -83,7 +99,7 @@ PKG_ID="Developer ID Installer: TwinVPN Ltd ($TEAM_ID)"
 # it, library validation is off and DYLD_INSERT_LIBRARIES works against a root
 # process.
 # --timestamp is required for notarization; an unsigned timestamp is rejected.
-for bin in twinvpnd twinvpn-ksd twinvpnctl; do
+for bin in twinvpn-ksd twinvpn-unblock twinvpnctl; do
   codesign --force --sign "$APP_ID" \
            --options runtime \
            --timestamp \
@@ -193,9 +209,14 @@ ADR-0020.
 2. **No reproducibility claim.** ADR-0018 §11.3 pins one Rust toolchain version
    so "the bindings compile" is reproducible; nothing equivalent is stated here
    for the Xcode version, and two Xcode versions produce different binaries.
-3. **No `twinvpn-unblock` row.** ADR-0012 KS-20a makes the offline unblock
-   command mandatory, ADR-0016 §11.6 gives it its own executable, and it is not
-   in this wave — so it is not in the table in §1 either.
+3. **`twinvpn-unblock` is signed but its MI-13(1) ceremony is not built.**
+   MI-13(1) requires "the same OS-mediated administrator authentication as
+   §11.14's ceremony … `system.privilege.admin`", and is explicit that
+   "'privileged' means an authenticated administrator act, not merely 'runs as
+   root'". The binary checks uid 0 and no more, because Authorization Services
+   is a Darwin framework it does not link. A root cron job could therefore
+   invoke it, which MI-13(1) forbids. Signing does not close that; only linking
+   `Security.framework` does.
 4. **The `.pkg` scripts are not covered.** `install.sh` is written as a
    standalone script; folding it into a `preinstall`/`postinstall` pair inside
    the package is not done, and a `.pkg` script is signed as part of the package

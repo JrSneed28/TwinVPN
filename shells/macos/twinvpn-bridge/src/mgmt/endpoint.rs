@@ -17,7 +17,7 @@
 //! 3. set the mode and the owning group on that name;
 //! 4. `rename` it over the real path, which is **atomic** and leaves no window.
 //!
-//! [`unlink`] appears nowhere in this module, and its absence is the mechanism.
+//! `unlink` appears nowhere in this module, and its absence is the mechanism.
 //!
 //! # Where macOS is weaker than Linux, stated
 //!
@@ -138,10 +138,22 @@ pub fn staging_path(final_path: &Path, pid: u32) -> PathBuf {
 
 /// Binds the endpoint.
 ///
+/// Returns the **`std`** listener, not the `tokio` one, and that split is not
+/// cosmetic: `tokio::net::UnixListener::from_std` registers with the reactor and
+/// therefore requires a runtime context, while the bind, the mode, the group and
+/// MI-A3's rename need none. Binding first and attaching later means the
+/// endpoint exists at its final path with its final mode **before** any task is
+/// spawned, and it means this function is callable from the start sequence
+/// rather than only from inside the runtime. [`into_tokio`] is the second half.
+///
+/// (Wave 2 called `from_std` here, outside any runtime. On a Mac that would have
+/// been a panic on the first start — the same shape of defect as W-43, found by
+/// moving the code rather than by running it.)
+///
 /// # Errors
 ///
 /// [`EndpointError`].
-pub fn bind(path: &Path, group: u32) -> Result<tokio::net::UnixListener, EndpointError> {
+pub fn bind(path: &Path, group: u32) -> Result<std::os::unix::net::UnixListener, EndpointError> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let directory = path.parent().ok_or(EndpointError::DirectoryMissing)?;
@@ -159,7 +171,7 @@ pub fn bind(path: &Path, group: u32) -> Result<tokio::net::UnixListener, Endpoin
     // its real path with a wider mode than §11.2's.
     std::fs::set_permissions(
         &staging,
-        std::fs::Permissions::from_mode(crate::mi::SOCKET_MODE),
+        std::fs::Permissions::from_mode(twinvpn_mi::SOCKET_MODE),
     )
     .map_err(|_| EndpointError::BindFailed)?;
     chown_group(&staging, group)?;
@@ -168,6 +180,19 @@ pub fn bind(path: &Path, group: u32) -> Result<tokio::net::UnixListener, Endpoin
     listener
         .set_nonblocking(true)
         .map_err(|_| EndpointError::BindFailed)?;
+    Ok(listener)
+}
+
+/// Attaches a bound endpoint to the running runtime's reactor.
+///
+/// **Must be called from inside the runtime**; see [`bind`].
+///
+/// # Errors
+///
+/// [`EndpointError::BindFailed`].
+pub fn into_tokio(
+    listener: std::os::unix::net::UnixListener,
+) -> Result<tokio::net::UnixListener, EndpointError> {
     tokio::net::UnixListener::from_std(listener).map_err(|_| EndpointError::BindFailed)
 }
 

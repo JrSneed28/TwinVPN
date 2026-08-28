@@ -606,6 +606,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "ksd"
+version = "0.1.0"
+dependencies = [
+ "twinvpn-platform",
+ "twinvpn-platform-macos",
+ "twinvpn-types",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1273,8 +1282,15 @@ dependencies = [
  "futures-core",
  "libc",
  "serde_json",
+ "thiserror",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
+ "twinvpn-core",
+ "twinvpn-diag",
  "twinvpn-env",
+ "twinvpn-mgmt",
+ "twinvpn-mi",
  "twinvpn-platform",
  "twinvpn-platform-macos",
  "twinvpn-types",
@@ -1419,6 +1435,17 @@ dependencies = [
  "twinvpn-diag",
  "twinvpn-env",
  "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-mi"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "twinvpn-mgmt",
  "twinvpn-types",
 ]
 
@@ -1574,33 +1601,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "twinvpn-unblock"
+version = "0.1.0"
+dependencies = [
+ "twinvpn-platform",
+ "twinvpn-platform-macos",
+ "twinvpn-types",
+]
+
+[[package]]
 name = "twinvpnctl"
 version = "0.1.0"
 dependencies = [
  "serde_json",
  "tokio",
  "twinvpn-mgmt",
- "twinvpn-types",
- "twinvpnd",
-]
-
-[[package]]
-name = "twinvpnd"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "twinvpn-core",
- "twinvpn-diag",
- "twinvpn-env",
- "twinvpn-mgmt",
- "twinvpn-platform",
- "twinvpn-platform-macos",
+ "twinvpn-mi",
  "twinvpn-types",
 ]
 
