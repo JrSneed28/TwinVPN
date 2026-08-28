@@ -26,7 +26,7 @@ BASELINE   := $(CONTRACTS)/.baseline.binpb
 .PHONY: help bootstrap toolchains contracts contracts-lint contracts-gen \
         contracts-breaking contracts-freshness verify-bindings test-contracts \
         build lint test clean gate freeze freeze-scope build-rust lint-rust \
-        test-rust fmt arch-lint infra-bootstrap infra-check infra-up \
+        test-rust fmt arch-lint doc-check infra-bootstrap infra-check infra-up \
         infra-up-v6 infra-down budgets budgets-images redaction-check
 
 help:
@@ -221,6 +221,39 @@ lint-rust:
 	  echo "==> fmt+clippy $$w"; \
 	  ( cd $$w && $(CARGO) fmt --all -- --check && \
 	              $(CARGO) clippy --workspace --all-targets -- -D warnings ) || exit 1; \
+	done
+
+# Broken intra-doc links, as a gate.
+#
+# Added on relay-plane's recommendation after it found FOUR stale links in its
+# own crates -- a type deleted in a refactor, a module that moved, and two that
+# never resolved. Its diagnosis is the reason this is a target rather than a
+# habit: "it is also why this drifted: nothing was watching."
+#
+# This matters more here than in most repositories. Several crates' stated value
+# is that a claim can be checked against its source in one hop -- twinvpn-crypto
+# says so explicitly -- and a broken link in those defeats the crate's own
+# premise while looking cosmetic.
+# `invalid_html_tags` is allowed, and ONLY that one. contracts/gen/** is frozen
+# generated output that twinvpn-schema include!s, and a proto comment there
+# legitimately reads "<twinnet-label>.tnet.twinvpn.net" -- which rustdoc parses
+# as an unclosed HTML tag. The contract is frozen and the comment is correct
+# prose, so the lint is wrong here rather than the source. core-foundation hit
+# the same class from the doctest side and set `doctest = false` for the same
+# reason. Every other rustdoc warning, including the broken-intra-doc-link class
+# this target exists for, still fails the build.
+DOCFLAGS := -D warnings -A rustdoc::invalid_html_tags
+
+# NOT yet a prerequisite of `lint`. On first run this target found 14 broken
+# intra-doc links across six crates owned by three domains -- precisely the drift
+# it exists to catch. It is a NAMED target rather than a silent skip, on the same
+# principle infrastructure applied to the arch-lint CI job while it was red: a
+# gate you intend to enforce should be visible and failing, not absent.
+# Wire it into `lint` once the six crates are clean.
+doc-check:
+	@for w in $(WORKSPACES); do \
+	  echo "==> doc $$w"; \
+	  ( cd $$w && RUSTDOCFLAGS="$(DOCFLAGS)" $(CARGO) doc --workspace --no-deps -q ) || exit 1; \
 	done
 
 fmt:
