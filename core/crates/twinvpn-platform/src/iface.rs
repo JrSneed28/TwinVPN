@@ -96,6 +96,25 @@ pub struct InterfaceFacts {
     /// The OS name.
     pub name: InterfaceName,
     /// Every address on it, with its prefix.
+    ///
+    /// # Known defect: this cannot express an interface's own address
+    ///
+    /// [`IpPrefix`] requires every host bit to be zero, so an adapter holding
+    /// `192.0.2.10/24` has no representation for it and must mask to
+    /// `192.0.2.0/24`, losing the address the core actually needs — the one to
+    /// bind and to offer as a host candidate. A network address offered as a
+    /// candidate probes where nothing answers and reads as a NAT fault, which is
+    /// why `twinvpn-core`'s `establish::host_address` accepts only `/32` and
+    /// `/128` and reports `AddressNotReportable` otherwise. The same conjunction
+    /// drops link-local addresses: [`twinvpn_types::V6Addr`] requires a zone on
+    /// `fe80::/10` and [`IpPrefix`] rejects any zone.
+    ///
+    /// **The replacement is ready and additive:**
+    /// [`twinvpn_types::InterfaceAddress`] keeps the host bits and the scope
+    /// zone, and derives the route with `network()`. Flipping this field to
+    /// `Vec<InterfaceAddress>` is a one-line change at each of six call sites in
+    /// `twinvpn-core` and `twinvpn-platform-linux`, so it lands as a coordinated
+    /// commit across those domains rather than as a red build from this one.
     pub addresses: Vec<IpPrefix>,
     /// Whether a v4 default route points through it.
     pub has_default_route_v4: bool,

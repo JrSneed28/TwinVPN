@@ -74,7 +74,9 @@ pub mod error;
 pub mod iface;
 pub mod socket;
 
-#[cfg(feature = "mock")]
+// `doc` as well as the feature, so the intra-doc link to this module resolves
+// when the docs are built without `mock`. See the same note in twinvpn-env.
+#[cfg(any(feature = "mock", doc))]
 pub mod mock;
 
 pub use config::{

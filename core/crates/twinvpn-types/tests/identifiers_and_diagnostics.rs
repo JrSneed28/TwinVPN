@@ -450,3 +450,73 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// HealthState (W-20)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn health_state_has_the_five_frozen_variants_not_four() {
+    use twinvpn_types::HealthState;
+    // The defect W-20 names: three hand-written copies each had FOUR variants,
+    // omitting the proto3 zero value an unset field decodes to.
+    assert_eq!(HealthState::ALL.len(), 5);
+    for (i, s) in HealthState::ALL.iter().enumerate() {
+        assert_eq!(s.to_wire(), i32::try_from(i).unwrap());
+        assert_eq!(HealthState::from_wire(s.to_wire()).unwrap(), *s);
+    }
+    assert_eq!(
+        HealthState::from_wire(0).unwrap(),
+        HealthState::Unspecified,
+        "an unset field must decode to a variant, not be invented"
+    );
+    assert!(HealthState::from_wire(5).is_err());
+    assert!(HealthState::from_wire(-1).is_err());
+}
+
+#[test]
+fn health_state_score_deltas_are_adr_0006_s() {
+    use twinvpn_types::HealthState;
+    // HEALTHY 0 · DEGRADED -40 · UNHEALTHY -150 · UNKNOWN 0
+    assert_eq!(HealthState::Healthy.score_delta(), 0);
+    assert_eq!(HealthState::Degraded.score_delta(), -40);
+    assert_eq!(HealthState::Unhealthy.score_delta(), -150);
+    assert_eq!(HealthState::Unknown.score_delta(), 0);
+    // Silence must neither help nor harm: penalising it would remove a
+    // candidate, which §11.2 says a stale ranking must never do.
+    assert_eq!(HealthState::Unspecified.score_delta(), 0);
+
+    for s in HealthState::ALL {
+        assert!(s.score_delta() >= HealthState::SCORE_BOUND);
+        assert!(
+            s.score_delta() <= 0,
+            "health is a penalty term, never a bonus"
+        );
+    }
+}
+
+#[test]
+fn neither_zero_ish_health_state_renders_as_healthy() {
+    use twinvpn_types::HealthState;
+    assert!(HealthState::Healthy.renders_as_healthy());
+    assert!(!HealthState::Unknown.renders_as_healthy());
+    assert!(!HealthState::Unspecified.renders_as_healthy());
+    assert!(!HealthState::Degraded.renders_as_healthy());
+    assert!(!HealthState::Unhealthy.renders_as_healthy());
+
+    assert!(!HealthState::Unspecified.is_observed());
+    assert!(!HealthState::Unknown.is_observed());
+    assert!(HealthState::Degraded.is_observed());
+}
+
+#[test]
+fn health_state_shares_only_a_name_with_connection_state() {
+    use twinvpn_types::{ConnectionState, HealthState};
+    // reliability.md §4.1: HealthState is NOT a ConnectionState. The wire values
+    // differ, so a value that leaked from one into the other would mean
+    // something else entirely - which is why they are separate types.
+    assert_ne!(
+        HealthState::Degraded.to_wire(),
+        ConnectionState::Degraded.to_wire()
+    );
+}

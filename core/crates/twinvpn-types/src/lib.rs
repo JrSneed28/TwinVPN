@@ -90,11 +90,11 @@ pub use idvar::{
     CausalityToken, ChannelBinding, IdempotencyKey, PolicyId, RegionId, SignerKeyId, TwinnetId,
 };
 pub use net::{
-    AddressFamily, Endpoint, IpAddr, IpPrefix, Nat64Prefix, OverlayAddresses, PerFamily, Port,
-    UnderlayFamilies, V4Addr, V6Addr, ZoneIndex,
+    AddressFamily, Endpoint, InterfaceAddress, IpAddr, IpPrefix, Nat64Prefix, OverlayAddresses,
+    PerFamily, Port, UnderlayFamilies, V4Addr, V6Addr, ZoneIndex,
 };
 pub use reason::{
     codes, CodeStatus, DiagnosticScope, Domain, ErrorClass, ErrorSeverity, ObservedReasonCode,
     ReasonCode, ReasonCodeEntry, RemediationClass, REASON_REGISTRY_VERSION,
 };
-pub use state::{ConnectionState, PathClass, TrafficDisposition};
+pub use state::{ConnectionState, HealthState, PathClass, TrafficDisposition};

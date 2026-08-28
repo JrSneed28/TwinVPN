@@ -58,7 +58,7 @@ pub fn run(manifest_path: &Path) -> Result<Vec<Violation>, String> {
                 continue;
             };
             let file = ScannedFile::new(relative, &contents);
-            violations.extend(checks::cd3(&file));
+            violations.extend(checks::cd3(&file, &package.name));
             violations.extend(checks::cb3(&file, &package.name));
         }
     }

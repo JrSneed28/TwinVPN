@@ -69,7 +69,12 @@ pub mod error;
 pub mod rng;
 pub mod task;
 
-#[cfg(feature = "test-support")]
+// `doc` as well as the feature: rustdoc sets `doc`, so the four intra-doc links
+// to this module resolve when the docs are built WITHOUT `test-support` - which
+// is what docs.rs and any plain `cargo doc` do. Without it the links are broken
+// in every build except the one that happens to enable the feature, and
+// `make doc-check` only passes because it passes --all-features.
+#[cfg(any(feature = "test-support", doc))]
 pub mod virtual_time;
 
 pub use clock::{

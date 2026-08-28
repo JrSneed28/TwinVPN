@@ -305,3 +305,130 @@ impl TrafficDisposition {
         self as i32
     }
 }
+
+/// The derived, eventually-consistent **opinion** held about a `Relay` or a
+/// `Device`.
+///
+/// **Authority:** `contracts/proto/twinvpn/v1/connection.proto` (the frozen
+/// vocabulary), `docs/reliability.md` §4.1, ADR-0006 §11.2 (the score delta),
+/// §11.3 rule 1, S-10.
+///
+/// # This is not a `ConnectionState`
+///
+/// `connection.proto` is emphatic, and it is worth restating because the two
+/// share the name `DEGRADED` and nothing else:
+///
+/// > `HealthState` is **NOT** a `ConnectionState`, shares only the name
+/// > `DEGRADED` with one, and — decisively — **MUST NOT GATE A CONNECTION
+/// > ATTEMPT.** It contributes a score delta to relay selection and nothing
+/// > more. **A device's own probe result always outranks any reported
+/// > `HealthState`.**
+///
+/// [`HealthState::score_delta`] is the only thing this type is *for*, and there
+/// is deliberately no `is_usable()` or `may_connect()` — a predicate shaped like
+/// that is how an opinion becomes a gate.
+///
+/// # Why `Unspecified` is a variant
+///
+/// W-20: three hand-written copies of this enum grew across two workspaces, and
+/// **each had four variants where the frozen enum has five** — every one omitted
+/// `HEALTH_STATE_UNSPECIFIED`, the proto3 zero value an *unset* field decodes to.
+/// A four-variant model cannot represent "the sender did not say", so it has to
+/// invent an answer, and the convenient invention is `HEALTHY`. Both zero-ish
+/// states are therefore explicit here, and neither renders as healthy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HealthState {
+    /// The proto3 zero value: the field was not set. **Never healthy.**
+    Unspecified = 0,
+    /// Observed healthy.
+    Healthy = 1,
+    /// Observed degraded. Shares only its name with
+    /// [`ConnectionState::Degraded`].
+    Degraded = 2,
+    /// Observed unhealthy.
+    Unhealthy = 3,
+    /// "The value before any observation exists, and after an observation goes
+    /// stale. **NEVER RENDERED AS HEALTHY.**"
+    Unknown = 4,
+}
+
+impl HealthState {
+    /// The most negative delta this term can contribute (ADR-0006 §11.2's
+    /// `Bound` column).
+    pub const SCORE_BOUND: i32 = -150;
+
+    /// All five, in wire order.
+    pub const ALL: [HealthState; 5] = [
+        HealthState::Unspecified,
+        HealthState::Healthy,
+        HealthState::Degraded,
+        HealthState::Unhealthy,
+        HealthState::Unknown,
+    ];
+
+    /// Decodes a wire value.
+    ///
+    /// Unlike [`ConnectionState`], zero decodes to a **real** variant rather
+    /// than needing a `specified()` step: "the sender did not say" is a state
+    /// this type must be able to hold and to score, because scoring it is
+    /// exactly what stops it becoming an invented `HEALTHY`.
+    pub const fn from_wire(value: i32) -> Result<Self, TypeError> {
+        match value {
+            0 => Ok(HealthState::Unspecified),
+            1 => Ok(HealthState::Healthy),
+            2 => Ok(HealthState::Degraded),
+            3 => Ok(HealthState::Unhealthy),
+            4 => Ok(HealthState::Unknown),
+            observed => Err(TypeError::ConnectionStateUnknown { observed }),
+        }
+    }
+
+    /// The wire value.
+    #[must_use]
+    pub const fn to_wire(self) -> i32 {
+        self as i32
+    }
+
+    /// ADR-0006 §11.2's contribution to the relay-selection score, in points,
+    /// where one point is one millisecond of RTT.
+    ///
+    /// > `HEALTHY` 0 · `DEGRADED` −40 · `UNHEALTHY` −150 · `UNKNOWN` 0
+    ///
+    /// `Unspecified` scores as `Unknown` — zero — for the same reason §11.2
+    /// gives `UNKNOWN` zero: an absent observation must neither help nor harm a
+    /// relay, because "a stale server ranking decays to zero influence over 24 h
+    /// **without ever removing a candidate**". Penalising silence would remove
+    /// one.
+    ///
+    /// **This is the single definition.** Three copies previously re-encoded
+    /// these numbers as literals; a fourth would be a fourth place to drift.
+    #[must_use]
+    pub const fn score_delta(self) -> i32 {
+        match self {
+            HealthState::Healthy | HealthState::Unknown | HealthState::Unspecified => 0,
+            HealthState::Degraded => -40,
+            HealthState::Unhealthy => -150,
+        }
+    }
+
+    /// Whether this state may be **rendered** to a user as healthy.
+    ///
+    /// False for `Unknown` and `Unspecified`, which `connection.proto` requires
+    /// never to render as healthy. This is a *presentation* question, and it is
+    /// the only predicate offered — deliberately, because a
+    /// `may_attempt_connection()` beside it would be the gate §11.3 rule 1
+    /// forbids.
+    #[must_use]
+    pub const fn renders_as_healthy(self) -> bool {
+        matches!(self, HealthState::Healthy)
+    }
+
+    /// Whether an observation exists at all.
+    #[must_use]
+    pub const fn is_observed(self) -> bool {
+        matches!(
+            self,
+            HealthState::Healthy | HealthState::Degraded | HealthState::Unhealthy
+        )
+    }
+}

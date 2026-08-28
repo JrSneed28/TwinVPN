@@ -32,6 +32,22 @@ pub struct TokioRuntime {
 }
 
 impl TokioRuntime {
+    // ---------------------------------------------------------------------
+    // Both constructors enable BOTH drivers, and the I/O one is not optional.
+    //
+    // W-43: an earlier revision enabled only `enable_time()`, so no socket,
+    // netlink channel or tun device could be registered on a production `Env` —
+    // every candidate gather, every probe, every relay leg and the tun device
+    // itself need a registered I/O resource. It survived because `MockAdapter`
+    // needs no driver and `VirtualTime` needs no I/O, so the whole test tree
+    // passed without one: a property every test assumed and none verified.
+    //
+    // `production_runtime.rs` is the test that verifies it. The drivers are
+    // named individually rather than with `enable_all()` — they are the same
+    // set today — so that removing one is a visible deletion rather than a
+    // silent narrowing.
+    // ---------------------------------------------------------------------
+
     /// The **work-stealing** binding: Linux, Windows, macOS, Android, OpenWrt.
     ///
     /// # Errors
@@ -39,6 +55,7 @@ impl TokioRuntime {
     /// [`EnvError::SpawnRefused`] if the OS refuses the worker threads.
     pub fn work_stealing() -> Result<Self, EnvError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_io()
             .enable_time()
             .thread_name("twinvpn-core")
             .build()
@@ -63,6 +80,7 @@ impl TokioRuntime {
     /// [`EnvError::SpawnRefused`] if the runtime cannot be built.
     pub fn single_threaded() -> Result<Self, EnvError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
             .enable_time()
             .build()
             .map_err(|_| EnvError::SpawnRefused {
