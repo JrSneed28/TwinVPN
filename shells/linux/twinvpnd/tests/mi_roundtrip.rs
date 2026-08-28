@@ -223,10 +223,10 @@ async fn an_unimplemented_operation_is_surfaced_as_unimplemented_not_as_a_failur
         .expect("attaches");
 
     // `update.status` is `mgmt.status` — inside this principal's grant — and is
-    // in `UNIMPLEMENTED`, so the refusal is the *unimplemented* one and not an
+    // refused by this build, so the refusal is the *unimplemented* one and not an
     // authorization one. That ordering matters: a scope refusal would tell the
     // operator to change their groups, which would not help.
-    assert!(twinvpn_core::core::UNIMPLEMENTED.contains(&twinvpn_mgmt::CoreCommand::UpdateStatus));
+    assert!(!twinvpn_core::core::executes(twinvpn_mgmt::CoreCommand::UpdateStatus));
     let error = client
         .call("update.status", Vec::new(), None, Vec::new())
         .await
@@ -281,7 +281,7 @@ async fn the_catalogue_the_agent_serves_says_which_operations_this_build_execute
         .filter(|r| !r.implemented)
         .map(|r| r.operation.as_str())
         .collect();
-    assert_eq!(unimplemented.len(), twinvpn_core::core::UNIMPLEMENTED.len());
+    assert_eq!(unimplemented.len(), twinvpn_core::core::unimplemented().len());
     assert!(unimplemented.contains(&"pair.begin"));
     assert!(unimplemented.contains(&"exitnode.select"));
     assert!(unimplemented.contains(&"killswitch.disarm.begin"));
@@ -638,8 +638,11 @@ fn cb2_every_fact_the_shell_serves_comes_from_the_core() {
         // The scope is the catalogue's.
         assert!(entry.scope.name().starts_with("mgmt."));
         // Whether it is implemented is the core's.
-        let implemented = twinvpn_core::core::is_implemented(*op);
-        assert_eq!(implemented, !twinvpn_core::core::UNIMPLEMENTED.contains(op));
+        let implemented = twinvpn_core::core::executes(*op);
+        assert_eq!(
+            implemented,
+            !twinvpn_core::core::unimplemented().iter().any(|(c, _, _)| c == op)
+        );
     }
     // And the transport set is closed at four, which the shell cannot widen.
     twinvpn_mgmt::assert_closed().expect("MI-21 holds");

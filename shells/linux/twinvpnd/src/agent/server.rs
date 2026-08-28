@@ -327,7 +327,7 @@ fn dispatch(
     // unimplemented, not as a failure**: a command the catalogue advertises and
     // the core does not execute is a lie a client cannot detect, so the set is
     // enumerable and this reports it by name.
-    if !twinvpn_core::core::is_implemented(op) {
+    if !twinvpn_core::core::executes(op) {
         return failure("PROTO.CAPABILITY_MISSING", "PERSISTENT", "ERROR", true);
     }
 
@@ -423,7 +423,7 @@ fn catalogue_rows() -> Vec<CatalogueRow> {
             // The honest half: which operations this BUILD executes. ADR-0017
             // §11.7's "the catalogue, not the version, is the capability
             // contract" is only true if the catalogue says so.
-            implemented: twinvpn_core::core::is_implemented(entry.op),
+            implemented: twinvpn_core::core::executes(entry.op),
         })
         .collect()
 }
