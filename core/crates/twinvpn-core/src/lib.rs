@@ -67,6 +67,15 @@ pub mod lite;
 pub mod planes;
 
 #[cfg(feature = "full")]
+pub mod dispatch;
+#[cfg(feature = "full")]
+pub mod establish;
+#[cfg(feature = "full")]
+pub(crate) mod execute;
+#[cfg(feature = "full")]
+pub mod session_table;
+
+#[cfg(feature = "full")]
 pub mod cp_binding;
 #[cfg(feature = "full")]
 pub mod journal;
@@ -77,7 +86,7 @@ pub mod session_loop;
 pub mod testing;
 
 pub use build_identity::{CoreBuildIdentity, EpochRow, EPOCH_TABLE};
-pub use core::{Core, CoreParts};
+pub use core::{Core, CoreParts, VaultState};
 pub use events::{CoreEvent, CoreEventKind, EventStream};
 pub use planes::{ControlPlanePort, DataPlaneView, PeerRecord};
 

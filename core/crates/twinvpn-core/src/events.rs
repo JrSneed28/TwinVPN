@@ -206,6 +206,15 @@ impl EventStream {
         self.signal.notify_all();
     }
 
+    /// The next sequence number the stream will assign.
+    ///
+    /// `event.subscribe`'s attach cursor: a client that reattaches offering this
+    /// value has missed nothing, and one offering less has (§11.10, MI-9a).
+    #[must_use]
+    pub fn cursor(&self) -> u64 {
+        self.inner.lock().map_or(0, |i| i.next_seq)
+    }
+
     /// How many events are queued.
     #[must_use]
     pub fn len(&self) -> usize {

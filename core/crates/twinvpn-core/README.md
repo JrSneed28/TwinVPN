@@ -141,79 +141,121 @@ domains' crates. **The composed core therefore has no L-CONTROL transport.**
 
 ---
 
-## 6. Known gaps in this crate
+## 6. What this crate does, and what it refuses
 
-> **Correction, recorded rather than quietly edited.** An earlier revision of this
-> section said *"`Core::submit` executes a subset"* and listed the fourteen
-> operations in `UNIMPLEMENTED`. That was **false in the most damaging
-> direction**: it implied the other thirty-three executed. None did. The claim was
-> relayed upward on this crate's authority, so the correction is left visible.
+> **Correction, recorded rather than quietly edited.** An earlier revision of
+> this section said *"`Core::submit` executes a subset"* and listed fourteen
+> unimplemented operations. That was **false in the most damaging direction**: it
+> implied the other thirty-three executed. None did — `submit` performed the
+> admission checks, published an empty `CommandCompleted` and returned `Ok`
+> having called no component. The claim was relayed upward on this crate's
+> authority, so the correction stays visible.
 
-### 6.1 What `Core::submit` does today
+### 6.1 `Core::submit`, step by step
 
-**It performs admission checks and then does nothing.** In full, `core.rs`:
+An admission gate followed by a **dispatcher**:
 
-1. refuses if the instance is poisoned (F-7);
-2. refuses if the ADR-0008 precondition its catalogue row declares (`key` or
-   `ver`) is absent;
-3. refuses with the `MGMT.OP_UNKNOWN` substitute if the operation is in
-   [`core::UNIMPLEMENTED`];
-4. increments the S-47 `generation` if the row is mutating;
-5. publishes `CommandCompleted { result: <empty> }`;
-6. returns `Ok(())`.
+1. refuse if the instance is poisoned (F-7);
+2. refuse if the ADR-0008 precondition the catalogue row declares (`key`/`ver`)
+   is absent;
+3. refuse if a required parameter is missing or malformed — **before any work**,
+   so a command is never partially applied;
+4. consult `dispatch::disposition`; a `NotWired` operation is **refused by
+   name**, never a false success;
+5. `execute::execute` performs it;
+6. an operation that reports success with **zero observable effects** is itself
+   reported as `INTERNAL.INVARIANT_VIOLATED` — the dispatcher said it executes
+   and it did nothing.
 
-There is no step that calls a component. `CoreCommand` declares **47** variants
-and `UNIMPLEMENTED` names **14**; the other **33 — `session.connect` among
-them — report success and execute no work.** `core.rs` names no data-plane or
-control-plane crate at all:
+`dispatch::disposition` and `execute::execute` are **two exhaustive matches over
+the same enum**. A new `CoreCommand` fails to compile in both until someone
+states whether it executes or why it does not. That mechanism is what the
+earlier revision lacked.
 
-```bash
-grep -cE "twinvpn_(session|path|relay_client|tunnel|cp_client|trust|route|dns|enforce)" \
-  core/crates/twinvpn-core/src/core.rs      # 0
-```
+### 6.2 The register
 
-Every operation returns an empty result. There is no query path either: a
-`status.get` submission publishes an empty `CommandCompleted` and tells the
-caller nothing.
+`core::executes(op)` and `core::unimplemented()` are **derived from
+`dispatch::disposition`** — there is no second list to drift.
+`tests/command_path.rs` submits **all 47** catalogue operations and asserts each
+one either completes with an effect or is refused with a registered code; there
+is no third outcome, and an operation returning `Ok` with nothing behind it fails
+that test.
 
-**What *is* wired and tested** is everything around that hole: the CD-I5 ports
-(`planes.rs`), the store bridge (`bridge.rs`), the `ControlPlaneStore` adapter
-(`cp_binding.rs`), the `SessionJournal` adapter (`journal.rs`), the `Env`-driven
-timer and event mapping (`session_loop.rs`), S-46, the ordered event stream and
-the poison path. The components below are real. **The join is not made.**
+**16 execute.** `status.get`, `session.list`, `session.get`, `path.list`,
+`version.get`, `metrics.get`, `lifecycle.get`, `session.connect`,
+`session.disconnect`, `session.reconnect`, `net.up`, `net.down`,
+`event.subscribe`, `event.unsubscribe`, `host.network_changed`,
+`host.lifecycle`.
 
-Consequence for anyone building on this: **do not read `Ok(())` from `submit` as
-evidence that anything happened.** Until §6.2 is closed, the only honest reading
-is "the submission was admissible".
+**31 are refused**, each with a registered code and a stated reason. The reasons
+cluster into five causes, and none of them is this crate's to fix alone:
 
-### 6.2 The vault is never opened (D4)
+| Cause | Operations |
+|---|---|
+| **W-12** — no `ControlTransport` exists in the workspace | `peer.*`, `policy.get`, `device.revoke`, `key.rotate`, `dns.preference.set`, `route.accept.set`, `exitnode.select` |
+| **W-24** — F-9 has no `installed_ruleset` read-back, so the `ProtectionAssertion` cannot be produced | `killswitch.get`, `killswitch.exempt.get`, `killswitch.mode.set`, `diag.report` |
+| **D4-adjacent** — the operation is vault-backed and needs `open_store` | `settings.*`, `autostart.set`, `diag.bundle.create`, `diag.log.tail`, `diag.capture.set` |
+| **W-21** — `PairingOffer` appears nowhere in `contracts/` | `pair.*` |
+| **no owner built it** — ADR-0021's delivery, ADR-0016's local auth, `DiscoAuth` | `update.*`, `killswitch.disarm.*`, `path.probe`, `capability.get` |
 
-`StoreBridge::new` is constructed **nowhere** in `core/`, `services/` or
-`shells/`. `Core::create` initialises an empty `BridgeState` and never hydrates
-it, and `Core::begin_shutdown` closes the event stream and the adapter **without
-flushing**, because the `Core` holds no bridge.
+### 6.3 What `session.connect` actually does
 
-So S-12, S-15, S-27, S-30 and S-37 are **memory-only**, and §5.1's crash window
-is not "the last transition" — it is the **entire process lifetime**. Nothing
-`reliability.md` §9.1 promises about an outage holds on this build.
+The operation a Phase 4 gate opens with, and the one that forces the chain:
 
-A live sub-defect sits behind it: `bridge.rs`'s `encode_peer` writes
-`endpoints.len()` as a `u32` and then **discards the endpoints**, and no
-`decode_peer` exists. `PeerRecord.endpoints` is documented as *"what a reconnect
-during a total outage uses"*. Its unit test asserts a fixed `bytes.len() == 65`,
-which can only be right *because* the endpoints are dropped.
+1. **gathers on the platform** — `supported_families`, `enumerate`, and one
+   `bind_udp` **per family** (ADR-0010 R1; `tests/command_path.rs` asserts two
+   sockets open);
+2. drives **T01** through the real §4.5 table, then **T03** or **T04** on the
+   gathered set;
+3. admits the candidates into `twinvpn-path`'s `Ledger` and schedules its `Race`;
+4. **probes** — a bounded, keyless reachability datagram from the socket whose
+   family matches the peer endpoint, marking the candidate `Probing` and **never**
+   `Validated` (ADR-0007 N-4);
+5. persists the `Session` to the journal (S-12);
+6. publishes the §4.4 `ConnectionRequested` event and every transition on the one
+   ordered stream.
 
-### 6.3 The rest
+It is **naturally idempotent** (§11.9's `nat`) because the `SessionId` is derived
+from the peer's `device_id`: connecting twice reaches one `Session`.
 
-- **The session loop is a driver, not a daemon.** `SessionRuntime` arms
-  deadlines, fires them and applies triggers, but nothing subscribes to
-  `InterfaceProvider::subscribe` and feeds `event_for_change` into it on a running
-  task — the F-9 vtable carries no interface stream.
-- **`SessionRuntime` re-arms only on a state *change*** (W-34). A timer that
-  fires and matches no row leaves its deadline consumed with nothing re-arming
-  it, which is the shape of an unbounded state that §4.4 bounds deliberately.
-- **`twinvpn-cp-client` is bound to the store and driven by nothing**, because no
-  `ControlTransport` implementation exists in the workspace (W-12, §5.3).
-- **`EPOCH_TABLE` declares `1..=1` on the integration lead's authority to
-  confirm.** No Phase 1 document states the numeric launch epoch; VR-3 forbids
-  inferring it, so the table declares it and says so.
+`Core::tick()` is the step a daemon runs on each wake — §4.4 staggers the race by
+the Happy-Eyeballs bias, so the v4 half is not due at t=0 and a one-shot
+`connect` would never probe it.
+
+### 6.4 The vault (D4)
+
+`Core::open_store()` opens the vault, hydrates the `BridgeState` and the session
+journal from it, and reports the ST-24 outcome. `Core::flush()` drains every
+queued write into **one** transaction (ST-12b). `Core::shutdown()` flushes
+**before** it stops accepting work — `begin_shutdown` is synchronous and cannot.
+
+**Until a host calls `open_store`, the core is memory-only, and it says so.**
+`Core::vault_state()` answers `Absent`, `flush` refuses with
+`STORE.CUSTODY_DEGRADED` rather than reporting success, and every vault-backed
+operation is refused. `Core::create` cannot open it itself: `Store::open` is
+`async` and needs a runtime that is not running at construction.
+
+### 6.5 Still not wired
+
+- **The tunnel.** `session.connect` reaches `NEGOTIATING`; it does not program a
+  kernel WireGuard peer or install a network contract. `twinvpn-tunnel`'s
+  handshake driver needs a `NoiseHandshake` binding `twinvpn-crypto` exposes only
+  for verification, and `apply` needs the encoded plan F-9 defines no encoding
+  for (`twinvpn-ffi/README.md` §5).
+- **`credentials_valid` and `peer_authorized` are supplied as `true`.**
+  `twinvpn-trust`'s peer set is populated over C2 and there is no transport
+  (W-12), so this build cannot check them. **A real weakness**, not a
+  simplification: a build with a trust store must supply the real values.
+- **Nothing subscribes to `InterfaceProvider::subscribe`.** `host.network_changed`
+  re-enumerates on submission; there is no running task feeding
+  `event_for_change`, because the F-9 vtable carries no interface stream.
+- **`twinvpn-cp-client` is bound to the store and driven by nothing** (W-12).
+- **`EPOCH_TABLE` declares `1..=1`** on the integration lead's authority to
+  confirm. VR-3 forbids inferring it, so the table declares it and says so.
+- **The seam cannot report an interface's own address.** `InterfaceFacts.addresses`
+  is `Vec<IpPrefix>`, and `IpPrefix::new` rejects any set host bit while
+  `address()` is *"the network address"*. `establish::host_address` accepts only
+  a single-host prefix (`/32`, `/128`) and reports
+  `FamilyOutcome::AddressNotReportable` for anything else, because a network
+  address as a candidate would probe somewhere nothing answers and look like a
+  NAT fault. The fix belongs in `twinvpn-platform`.

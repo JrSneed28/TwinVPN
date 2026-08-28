@@ -223,8 +223,20 @@ impl StoreBridge {
 /// `peer.proto` `TrustedPeer` is the *transmissible projection*; what is stored
 /// here is the local cache, which `contract-matrix.md` §2 marks `LOCAL` with "no
 /// remote replica".
+///
+/// # A defect this function used to have
+///
+/// An earlier revision wrote `endpoints.len()` as a `u32` and then **discarded
+/// the endpoints**, and there was no decoder at all. `PeerRecord.endpoints` is
+/// documented as *"what a reconnect during a total outage uses"* (S-15), so the
+/// one field that makes `reliability.md` §9.1's "continues, indefinitely" true
+/// was the field being thrown away — and the unit test asserted a **fixed**
+/// length, which could only pass *because* they were dropped.
+///
+/// It now writes each endpoint and [`decode_peer`] reads them back, with a
+/// round-trip test over both families.
 fn encode_peer(record: &crate::planes::PeerRecord) -> Vec<u8> {
-    let mut out = Vec::with_capacity(64);
+    let mut out = Vec::with_capacity(64 + record.endpoints.len() * 20);
     out.extend_from_slice(record.device_id.as_bytes());
     out.extend_from_slice(&record.generation.to_be_bytes());
     out.extend_from_slice(&record.tk_generation.to_be_bytes());
@@ -236,7 +248,117 @@ fn encode_peer(record: &crate::planes::PeerRecord) -> Vec<u8> {
             .unwrap_or(u32::MAX)
             .to_be_bytes(),
     );
+    for endpoint in &record.endpoints {
+        // `{family, address, port}`. Both families, and the v6 zone index —
+        // without it a link-local endpoint is unusable on a multi-interface
+        // host, which is the same rule `Candidate::is_well_formed` enforces.
+        match endpoint.address {
+            twinvpn_types::IpAddr::V4(a) => {
+                out.push(4);
+                out.extend_from_slice(&a.octets());
+            }
+            twinvpn_types::IpAddr::V6(a) => {
+                out.push(6);
+                out.extend_from_slice(&a.octets());
+                out.extend_from_slice(
+                    &a.zone()
+                        .map_or(0, twinvpn_types::ZoneIndex::get)
+                        .to_be_bytes(),
+                );
+            }
+        }
+        out.extend_from_slice(&endpoint.port.get().to_be_bytes());
+    }
     out
+}
+
+/// Reads back what [`encode_peer`] wrote.
+///
+/// A record that does not decode is **refused**, never partially recovered: a
+/// `TrustedPeer` reconstructed with half its endpoints would silently lose the
+/// cached path a total outage depends on, and reporting that as success is how
+/// "we still have the peer" becomes false without anyone noticing.
+///
+/// # Errors
+///
+/// [`StoreError::RecordCorrupt`] for any malformed record.
+pub fn decode_peer(bytes: &[u8]) -> Result<crate::planes::PeerRecord, StoreError> {
+    const FIXED: usize = 32 + 4 + 4 + 1 + 4 + 16 + 4;
+    let corrupt = || StoreError::RecordCorrupt {
+        namespace: "peer/",
+        detector: "peer record length or endpoint framing",
+    };
+    if bytes.len() < FIXED {
+        return Err(corrupt());
+    }
+    let device_id = twinvpn_types::DeviceId::from_slice(&bytes[..32]).map_err(|_| corrupt())?;
+    let generation = u32::from_be_bytes(bytes[32..36].try_into().map_err(|_| corrupt())?);
+    let tk_generation = u32::from_be_bytes(bytes[36..40].try_into().map_err(|_| corrupt())?);
+    let verified = bytes[40] == 1;
+    let v4 = twinvpn_types::V4Addr::from_slice(&bytes[41..45]).map_err(|_| corrupt())?;
+    let v6 = twinvpn_types::V6Addr::from_slice(&bytes[45..61], 0).map_err(|_| corrupt())?;
+    let count = u32::from_be_bytes(bytes[61..65].try_into().map_err(|_| corrupt())?) as usize;
+
+    // `ownership.md` §6 rule 10: bound every allocation an untrusted input can
+    // drive. The count is checked against what the remaining bytes can actually
+    // hold BEFORE reserving anything.
+    let mut endpoints = Vec::new();
+    let mut cursor = FIXED;
+    for _ in 0..count {
+        if cursor >= bytes.len() {
+            return Err(corrupt());
+        }
+        let (address, next) = match bytes[cursor] {
+            4 => {
+                let end = cursor + 1 + 4;
+                if end > bytes.len() {
+                    return Err(corrupt());
+                }
+                (
+                    twinvpn_types::IpAddr::V4(
+                        twinvpn_types::V4Addr::from_slice(&bytes[cursor + 1..end])
+                            .map_err(|_| corrupt())?,
+                    ),
+                    end,
+                )
+            }
+            6 => {
+                let end = cursor + 1 + 16 + 4;
+                if end > bytes.len() {
+                    return Err(corrupt());
+                }
+                let zone =
+                    u32::from_be_bytes(bytes[cursor + 17..end].try_into().map_err(|_| corrupt())?);
+                (
+                    twinvpn_types::IpAddr::V6(
+                        twinvpn_types::V6Addr::from_slice(&bytes[cursor + 1..cursor + 17], zone)
+                            .map_err(|_| corrupt())?,
+                    ),
+                    end,
+                )
+            }
+            _ => return Err(corrupt()),
+        };
+        let port_end = next + 2;
+        if port_end > bytes.len() {
+            return Err(corrupt());
+        }
+        let port = u16::from_be_bytes(bytes[next..port_end].try_into().map_err(|_| corrupt())?);
+        endpoints.push(twinvpn_types::Endpoint::new(
+            address,
+            twinvpn_types::Port::new(port).map_err(|_| corrupt())?,
+        ));
+        cursor = port_end;
+    }
+
+    Ok(crate::planes::PeerRecord {
+        device_id,
+        generation,
+        tk_generation,
+        tunnel_key_binding_verified: verified,
+        endpoints,
+        overlay: twinvpn_types::OverlayAddresses { v4, v6 },
+    })
 }
 
 /// A store bridge is not `Sync`: it holds the single mutating handle, and S-47
@@ -261,6 +383,75 @@ mod tests {
         TwinnetId::new("tn-bridge").expect("valid")
     }
 
+    fn record_with(endpoints: Vec<twinvpn_types::Endpoint>) -> PeerRecord {
+        PeerRecord {
+            device_id: twinvpn_types::DeviceId::from_slice(&[5; 32]).expect("32"),
+            generation: 2,
+            tk_generation: 3,
+            tunnel_key_binding_verified: true,
+            endpoints,
+            overlay: twinvpn_types::OverlayAddresses {
+                v4: twinvpn_types::V4Addr::from_slice(&[100, 64, 0, 5]).expect("v4"),
+                v6: twinvpn_types::V6Addr::from_slice(&[0xfd; 16], 0).expect("v6"),
+            },
+        }
+    }
+
+    #[test]
+    fn the_cached_endpoints_survive_a_round_trip() {
+        // S-15, and the whole of `reliability.md` §9.1's "continues,
+        // indefinitely": these endpoints ARE what a reconnect during a total
+        // outage uses. An earlier revision wrote their COUNT and discarded them.
+        let endpoints = vec![
+            twinvpn_types::Endpoint::new(
+                twinvpn_types::IpAddr::V4(
+                    twinvpn_types::V4Addr::from_slice(&[198, 51, 100, 7]).expect("v4"),
+                ),
+                twinvpn_types::Port::new(51_820).expect("port"),
+            ),
+            twinvpn_types::Endpoint::new(
+                twinvpn_types::IpAddr::V6(
+                    twinvpn_types::V6Addr::from_slice(
+                        &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                        0,
+                    )
+                    .expect("v6"),
+                ),
+                twinvpn_types::Port::new(51_821).expect("port"),
+            ),
+        ];
+        let original = record_with(endpoints);
+        let back = decode_peer(&encode_peer(&original)).expect("round-trips");
+        assert_eq!(back, original, "both families must survive the vault");
+        assert_eq!(back.endpoints.len(), 2);
+    }
+
+    #[test]
+    fn a_truncated_peer_record_is_refused_not_partially_recovered() {
+        let original = record_with(vec![twinvpn_types::Endpoint::new(
+            twinvpn_types::IpAddr::V4(
+                twinvpn_types::V4Addr::from_slice(&[198, 51, 100, 7]).expect("v4"),
+            ),
+            twinvpn_types::Port::new(51_820).expect("port"),
+        )]);
+        let encoded = encode_peer(&original);
+        for cut in [0, 10, 64, encoded.len() - 1] {
+            assert!(
+                decode_peer(&encoded[..cut]).is_err(),
+                "a {cut}-byte record must be refused, not half-recovered"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declared_endpoint_count_cannot_drive_an_unbounded_allocation() {
+        // §6 rule 10. A record claiming four billion endpoints must be refused
+        // on its bytes, not on its claim.
+        let mut encoded = encode_peer(&record_with(Vec::new()));
+        encoded[61..65].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(decode_peer(&encoded).is_err());
+    }
+
     #[test]
     fn a_peer_record_encodes_both_families() {
         let record = PeerRecord {
@@ -275,8 +466,11 @@ mod tests {
             },
         };
         let bytes = encode_peer(&record);
-        // 32 device_id + 4 + 4 + 1 + 4 (v4) + 16 (v6) + 4 (endpoint count)
-        assert_eq!(bytes.len(), 65);
+        // 32 device_id + 4 + 4 + 1 + 4 (v4) + 16 (v6) + 4 (endpoint count).
+        // The record above carries no endpoints, so the fixed part IS the whole
+        // record — asserted as a floor rather than an equality, because a fixed
+        // length is exactly what hid the dropped endpoints before.
+        assert!(bytes.len() >= 65);
         assert!(
             bytes.windows(16).any(|w| w == [0xfd; 16]),
             "the v6 half must be stored, not dropped"

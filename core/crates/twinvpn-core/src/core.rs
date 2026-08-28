@@ -23,19 +23,27 @@
 //! protection.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use futures_core::future::BoxFuture;
 use twinvpn_diag::{Emitter, Ledger, Tier};
-use twinvpn_env::Env;
+use twinvpn_env::{Env, MonotonicInstant};
 use twinvpn_mgmt::{catalogue, CoreCommand, Submission};
 use twinvpn_platform::PlatformAdapter;
 use twinvpn_schema::v1;
 use twinvpn_types::{codes, Component, Diagnostic, EvidenceValue, ReasonCode};
 
+use crate::bridge::StoreBridge;
 use crate::build_identity::CoreBuildIdentity;
+#[cfg(feature = "full")]
+use crate::dispatch::{self, Disposition, Lifecycle};
 use crate::events::{CoreEvent, CoreEventKind, EventStream};
+#[cfg(feature = "full")]
+use crate::journal::CoreSessionJournal;
 use crate::planes::{new_shared, ControlPlanePort, DataPlaneView, Shared};
+#[cfg(feature = "full")]
+use crate::session_table::{SessionEntry, SessionMap};
 
 /// Everything the core takes at construction. **CD-2: no global, no
 /// `OnceCell`, no ambient default.**
@@ -77,13 +85,53 @@ pub struct Core {
     env: Env,
     adapter: Arc<dyn PlatformAdapter>,
     identity: CoreBuildIdentity,
-    ledger: std::sync::Mutex<Ledger>,
+    ledger: Mutex<Ledger>,
     events: Arc<EventStream>,
     shared: Shared,
     emitter: Emitter,
     poisoned: AtomicBool,
     instance_id: u64,
     generation: AtomicU64,
+    /// Every `Session` this device knows about (S-12).
+    ///
+    /// Absent under `core-lite`: §11.12's profile carries no data-plane crate,
+    /// so there is no `SessionMachine` to hold.
+    #[cfg(feature = "full")]
+    sessions: Mutex<SessionMap>,
+    /// The durable half, once a host has called [`Core::open_store`].
+    ///
+    /// `None` until then, and [`Core::vault_state`] says so rather than letting
+    /// a caller assume otherwise. `Store::open` is `async` and needs a runtime
+    /// that is not yet running at construction, which is why this is a second
+    /// step rather than part of `create`.
+    bridge: Mutex<Option<StoreBridge>>,
+    #[cfg(feature = "full")]
+    journal: CoreSessionJournal,
+    /// Whether a vault has been opened.
+    ///
+    /// A separate flag from `bridge`, because [`Core::flush`] **takes the bridge
+    /// out** of its mutex for the duration of the commit — a `std` `MutexGuard`
+    /// held across an `.await` makes the future non-`Send`, and a core whose
+    /// flush cannot be spawned is worse than one that needs two fields. Without
+    /// this flag a concurrent `vault_state()` would report `Absent` mid-flush,
+    /// which is precisely the kind of momentary lie D4 was.
+    vault_open: AtomicBool,
+    /// S-61's current phase, as `host.lifecycle` last reported it.
+    #[cfg(feature = "full")]
+    lifecycle: Mutex<Lifecycle>,
+}
+
+/// Whether the durable store has been opened.
+///
+/// Reported rather than inferred, because the difference is the whole of D4: a
+/// core with no vault answers every durable question from memory and loses it
+/// all on exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultState {
+    /// No vault has been opened. Every durable operation is refused.
+    Absent,
+    /// A vault is open and the bridge owns it.
+    Open,
 }
 
 impl core::fmt::Debug for Core {
@@ -150,19 +198,31 @@ impl Core {
             ))
         })?;
 
+        let shared = new_shared();
         Ok(Self {
             env: parts.env,
             adapter: parts.adapter,
             identity,
             ledger: std::sync::Mutex::new(Ledger::new(parts.ledger_capacity)),
             events: Arc::new(EventStream::new(parts.event_capacity)),
-            shared: new_shared(),
+            shared: Arc::clone(&shared),
             // Tier 0 is what the core writes into. A bundle re-encodes from it
             // (ADR-0015 §11.1); nothing here writes at Tier 1 or Tier 2.
             emitter: Emitter::new(Component::Diagnostics, Tier::LocalLedger),
             poisoned: AtomicBool::new(false),
             instance_id: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
             generation: AtomicU64::new(0),
+            #[cfg(feature = "full")]
+            sessions: Mutex::new(SessionMap::new()),
+            bridge: Mutex::new(None),
+            #[cfg(feature = "full")]
+            journal: CoreSessionJournal::new(Arc::clone(&shared), Vec::new()),
+            vault_open: AtomicBool::new(false),
+            // A core that has not been told its phase is FOREGROUND: it is the
+            // only phase in which every timer runs, so assuming it can only
+            // cause more work, never less protection.
+            #[cfg(feature = "full")]
+            lifecycle: Mutex::new(Lifecycle::Foreground),
         })
     }
 
@@ -243,17 +303,22 @@ impl Core {
     /// **F-5.** Non-blocking. Every outcome, including a rejection, arrives as an
     /// event on the one ordered stream.
     ///
-    /// # THIS METHOD EXECUTES NOTHING
+    /// # What it does, and what it refuses
     ///
-    /// It is an admission gate: poison check, ADR-0008 precondition,
-    /// [`UNIMPLEMENTED`] check, `generation` bump, `CommandCompleted` with an
-    /// **empty** result. No component is called. 33 of the 47 catalogue
-    /// operations — `session.connect` among them — pass every check and report
-    /// success having done no work.
+    /// An admission gate followed by a **dispatcher**: poison check, ADR-0008
+    /// precondition, parameter check, [`crate::dispatch::disposition`], then
+    /// [`crate::execute`]. An operation this build does not perform is
+    /// **refused by name** — never a false success.
     ///
-    /// `Ok(())` means *"the submission was admissible"* and nothing more. Do not
-    /// read it as evidence that anything happened. See this crate's `README.md`
-    /// §6.1.
+    /// **16 of the 47 catalogue operations execute; 31 are refused**, each with
+    /// a registered code and a stated reason ([`unimplemented`]). An operation
+    /// that reports success with zero observable effects is itself reported as
+    /// `INTERNAL.INVARIANT_VIOLATED`.
+    ///
+    /// `disposition` and `execute` are two exhaustive matches over one enum, so
+    /// a new operation cannot acquire an empty implementation: it fails to
+    /// compile until someone states whether it executes. See this crate's
+    /// `README.md` §6.
     ///
     /// # Errors
     ///
@@ -277,24 +342,382 @@ impl Core {
             return Err(Box::new(self.reject(submission, code)));
         }
 
-        if !is_implemented(submission.op) {
+        // core-lite carries no data-plane crate, so it performs NO command.
+        // Refusing by name is the honest answer; returning Ok would be the same
+        // false success this dispatcher exists to remove.
+        #[cfg(not(feature = "full"))]
+        {
+            let _ = entry;
             return Err(Box::new(
-                self.reject(submission, twinvpn_mgmt::codes::op_unknown()),
+                self.reject(submission, codes::PLATFORM_ADAPTER_UNAVAILABLE),
             ));
         }
 
-        if entry.mutating {
-            self.generation.fetch_add(1, Ordering::Relaxed);
-        }
+        #[cfg(feature = "full")]
+        {
+            // A malformed submission is refused BEFORE any work, so a command can
+            // never be partially applied.
+            if let Some(code) = dispatch::missing_parameter(submission.op, submission) {
+                return Err(Box::new(self.reject(submission, code)));
+            }
 
-        self.events.publish(
-            CoreEventKind::CommandCompleted {
-                op: submission.op.name(),
-                result: Vec::new(),
-            },
-            submission.actor_principal.clone(),
-        );
-        Ok(())
+            match dispatch::disposition(submission.op) {
+                Disposition::NotWired { code, .. } => {
+                    return Err(Box::new(self.reject(submission, code)));
+                }
+                Disposition::Executes => {}
+            }
+
+            let outcome = match crate::execute::execute(self, submission) {
+                Ok(outcome) => outcome,
+                Err(diagnostic) => {
+                    self.record(&diagnostic);
+                    self.events.publish(
+                        CoreEventKind::CommandRejected {
+                            op: submission.op.name(),
+                            diagnostic: Box::new(self.emitter.error_envelope(&diagnostic, None)),
+                        },
+                        submission.actor_principal.clone(),
+                    );
+                    return Err(diagnostic);
+                }
+            };
+
+            // An executed operation that had no observable effect is a defect, not
+            // a success. `INTERNAL.INVARIANT_VIOLATED` is the honest report: the
+            // dispatcher said it executes and it did nothing.
+            if outcome.effects == 0 {
+                let diagnostic = Diagnostic::invariant_violated(
+                    Component::ManagementInterface,
+                    "an operation dispatch declared EXECUTES produced no observable effect",
+                );
+                self.record(&diagnostic);
+                return Err(Box::new(diagnostic));
+            }
+
+            if entry.mutating {
+                self.generation.fetch_add(1, Ordering::Relaxed);
+            }
+
+            self.events.publish(
+                CoreEventKind::CommandCompleted {
+                    op: submission.op.name(),
+                    result: outcome.result,
+                },
+                submission.actor_principal.clone(),
+            );
+            Ok(())
+        }
+    }
+
+    // -- state the executor reaches -----------------------------------------
+
+    /// The `Session` table.
+    #[cfg(feature = "full")]
+    pub(crate) fn sessions(&self) -> MutexGuard<'_, SessionMap> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The durable-session journal.
+    #[cfg(feature = "full")]
+    pub(crate) const fn journal(&self) -> &CoreSessionJournal {
+        &self.journal
+    }
+
+    /// The Tier-0 emitter.
+    pub(crate) const fn emitter(&self) -> &Emitter {
+        &self.emitter
+    }
+
+    /// The event stream's next sequence number, for `event.subscribe`.
+    #[must_use]
+    pub fn event_cursor(&self) -> u64 {
+        self.events.cursor()
+    }
+
+    /// S-61's current phase.
+    #[cfg(feature = "full")]
+    #[must_use]
+    pub fn lifecycle(&self) -> Lifecycle {
+        *self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(feature = "full")]
+    pub(crate) fn set_lifecycle(&self, phase: Lifecycle) {
+        *self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = phase;
+    }
+
+    /// Advances every `Session` by whatever the injected clock now permits.
+    ///
+    /// **The step a daemon runs on each wake**, and the reason a one-shot
+    /// `session.connect` is not enough: §4.4 races candidates staggered by the
+    /// family bias, so a v4 candidate is not due until `T_HE_BIAS` after a v6
+    /// one. Without a tick the delayed half of the race is never probed.
+    ///
+    /// Two things happen, in order:
+    ///
+    /// 1. every timer whose deadline has passed fires its §4.5 transition;
+    /// 2. every candidate whose first probe is now due is probed.
+    ///
+    /// Returns `(transitions, probes)`. Nothing here reads the wall clock or
+    /// sleeps: the deadline comparison is against the injected `MonotonicClock`,
+    /// so a suspended device does not fire a timer on wake (CD-1).
+    #[cfg(feature = "full")]
+    pub fn tick(&self) -> (usize, usize) {
+        use twinvpn_session::{Context, Guards};
+
+        let now = self.env.now_monotonic();
+        let ids: Vec<twinvpn_types::SessionId> = self.sessions().keys().copied().collect();
+        let mut transitions = 0usize;
+        let mut probes = 0usize;
+
+        for id in ids {
+            // The transitions first: a timer that moves the machine changes what
+            // a probe means, so probing before firing would probe for a state
+            // the Session has already left.
+            let records = {
+                let mut sessions = self.sessions();
+                let Some(entry) = sessions.get_mut(&id) else {
+                    continue;
+                };
+                entry
+                    .runtime
+                    .tick(Guards::default(), Context::default())
+                    .iter()
+                    .filter_map(|o| o.record().map(twinvpn_session::TransitionRecord::to_proto))
+                    .collect::<Vec<_>>()
+            };
+            for record in records {
+                self.publish_transition(record, None);
+                transitions += 1;
+            }
+
+            let (sockets, race, peer) = {
+                let sessions = self.sessions();
+                let Some(entry) = sessions.get(&id) else {
+                    continue;
+                };
+                let Some(race) = entry.race.clone() else {
+                    continue;
+                };
+                // The sockets cannot be cloned out, so the probe runs under the
+                // guard. That is safe here because `probe` awaits only the
+                // adapter, and `block_on_probe` drives it on this thread.
+                (entry.sockets.len(), race, entry.peer_endpoint)
+            };
+            if sockets == 0 || peer.is_none() {
+                continue;
+            }
+            let mut sessions = self.sessions();
+            let Some(entry) = sessions.get_mut(&id) else {
+                continue;
+            };
+            let sent = {
+                // The ledger is swapped out for the call so the borrow
+                // checker sees one mutable borrow of `entry` at a time, then
+                // swapped back with whatever the probe recorded.
+                let mut ledger = twinvpn_path::ledger::Ledger::new();
+                core::mem::swap(&mut ledger, &mut entry.ledger);
+                let n = self.block_on_probe(&entry.sockets, &race, &mut ledger, peer, now);
+                core::mem::swap(&mut ledger, &mut entry.ledger);
+                n
+            };
+            probes += sent;
+        }
+        (transitions, probes)
+    }
+
+    /// Records the endpoint a peer is reachable at.
+    ///
+    /// **The rendezvous seam.** `protocol.md` §10's establishment learns the
+    /// peer's candidates over C4, and with no `ControlTransport` in the
+    /// workspace (W-12) nothing supplies one on this build. This is where that
+    /// answer lands when it exists, and it is a real entry point rather than a
+    /// test hook: the probe path already reads it.
+    ///
+    /// Creates the `Session` if it does not exist, because a rendezvous answer
+    /// can legitimately arrive before the local user asks to connect.
+    #[cfg(feature = "full")]
+    pub fn set_peer_endpoint(
+        &self,
+        peer: twinvpn_types::DeviceId,
+        endpoint: twinvpn_types::Endpoint,
+    ) {
+        let session_id = crate::session_table::session_id_for(peer);
+        let mut sessions = self.sessions();
+        sessions
+            .entry(session_id)
+            .or_insert_with(|| SessionEntry::new(self.env.clone(), session_id, peer))
+            .peer_endpoint = Some(endpoint);
+    }
+
+    /// Publishes a local, device-authoritative session event.
+    pub(crate) fn publish_session_event(&self, event: v1::SessionEvent, actor: Option<String>) {
+        if let Ok(mut ledger) = self.ledger.lock() {
+            ledger.push(
+                self.env.now_monotonic(),
+                None,
+                twinvpn_diag::Record::SessionEvent(Box::new(event.clone())),
+            );
+        }
+        self.events
+            .publish(CoreEventKind::SessionEvent(Box::new(event)), actor);
+    }
+
+    /// Runs one adapter call to completion on the injected runtime.
+    ///
+    /// `submit` is documented non-blocking (F-5), and on the production
+    /// work-stealing runtime this returns as soon as the adapter does — the
+    /// adapter's own contract bounds it (§11.6, `ApplyBudget`). On the lab's
+    /// virtual-time runtime it is inline and deterministic **by that runtime's
+    /// design**, which is what makes a scenario reproducible.
+    pub(crate) fn block_on_adapter<'a, T: Send + 'static>(
+        &'a self,
+        make: impl FnOnce(&'a Env, &'a Arc<dyn PlatformAdapter>) -> BoxFuture<'a, T>,
+    ) -> T {
+        let mut slot: Option<T> = None;
+        {
+            let future = make(&self.env, &self.adapter);
+            self.env.runtime().block_on(Box::pin(async {
+                slot = Some(future.await);
+            }));
+        }
+        slot.expect("block_on drives the future to completion")
+    }
+
+    /// Runs one probe round to completion.
+    #[cfg(feature = "full")]
+    pub(crate) fn block_on_probe(
+        &self,
+        sockets: &[Box<dyn twinvpn_platform::socket::UdpSocket>],
+        race: &twinvpn_path::race::Race,
+        ledger: &mut twinvpn_path::ledger::Ledger,
+        peer: Option<twinvpn_types::Endpoint>,
+        now: MonotonicInstant,
+    ) -> usize {
+        let mut sent = 0usize;
+        self.env.runtime().block_on(Box::pin(async {
+            sent = crate::establish::probe(sockets, race, ledger, peer, now).await;
+        }));
+        sent
+    }
+
+    // -- the vault (D4) ------------------------------------------------------
+
+    /// Whether a durable store is open.
+    #[must_use]
+    pub fn vault_state(&self) -> VaultState {
+        if self.vault_open.load(Ordering::Acquire) {
+            VaultState::Open
+        } else {
+            VaultState::Absent
+        }
+    }
+
+    /// Opens the durable store and hydrates the bridge from it.
+    ///
+    /// **This is D4's fix.** Until it is called, S-12, S-15, S-27, S-30 and S-37
+    /// are memory-only and everything `reliability.md` §9.1 leans on for
+    /// "continues indefinitely" is lost at process exit.
+    ///
+    /// A second call is a no-op that reports the state rather than reopening:
+    /// `twinvpn_store` takes a single-opener lock, and a second `open` would
+    /// report `STORE.LOCK_CONTENDED` against this very process.
+    ///
+    /// # Errors
+    ///
+    /// A [`Diagnostic`] carrying the `STORE.*` code the ladder produced.
+    pub async fn open_store(&self) -> Result<VaultState, Box<Diagnostic>> {
+        if self.vault_state() == VaultState::Open {
+            return Ok(VaultState::Open);
+        }
+        let identity_present = self.adapter.identity().public_identity().await.is_ok();
+        let store = twinvpn_store::Store::open(
+            self.env.clone(),
+            Arc::new(AdapterSecureStore(Arc::clone(&self.adapter))),
+            identity_present,
+        )
+        .await
+        .map_err(|e| Box::new(e.diagnostic(Component::Store)))?;
+
+        let outcome = store.outcome().clone();
+        let bridge = StoreBridge::new(store, Arc::clone(&self.shared));
+        // ST-24's classification drives behaviour outside the store: a rung that
+        // suspends granted authority is a fact the data plane must see, and it
+        // crosses as data rather than as a call back into the store.
+        if outcome.suspend_granted_authority {
+            self.publish_diagnostic(
+                &Diagnostic::builder(codes::STORE_CUSTODY_DEGRADED, Component::Store).build(),
+            );
+        }
+        *self
+            .bridge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bridge);
+        self.vault_open.store(true, Ordering::Release);
+
+        // §6.5: a restarted client resumes into RECONNECTING for each known
+        // peer. Hydration is what makes that true rather than aspirational.
+        #[cfg(feature = "full")]
+        {
+            use twinvpn_session::journal::SessionJournal as _;
+            let restored = self.journal.load_all().unwrap_or_default();
+            let mut sessions = self.sessions();
+            for record in restored {
+                sessions
+                    .entry(record.session_id)
+                    .or_insert_with(|| SessionEntry::resumed(self.env.clone(), &record));
+            }
+        }
+        Ok(VaultState::Open)
+    }
+
+    /// Drains every queued durable write into one transaction.
+    ///
+    /// ADR-0009 R-9 requires the high-water mark to be durable **before** the
+    /// document it admits is acted on, and ST-12b requires the whole set to
+    /// commit together. Both are the caller's to sequence; this is the step that
+    /// makes a queued write durable.
+    ///
+    /// # Errors
+    ///
+    /// A [`Diagnostic`] carrying the `STORE.*` code, or
+    /// `STORE.CUSTODY_DEGRADED` when no vault has been opened — which is a
+    /// **refusal**, not a silent success, so "we flushed" cannot be true of a
+    /// core that has nowhere to flush to.
+    pub async fn flush(&self) -> Result<usize, Box<Diagnostic>> {
+        // The bridge is TAKEN for the duration of the commit rather than
+        // borrowed through the guard: holding a `std::sync::MutexGuard` across
+        // an `.await` makes the future non-`Send`, and this future has to be
+        // spawnable. `vault_open` is what keeps `vault_state()` truthful in the
+        // window.
+        let taken = self
+            .bridge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(mut bridge) = taken else {
+            return Err(Box::new(
+                Diagnostic::builder(codes::STORE_CUSTODY_DEGRADED, Component::Store).build(),
+            ));
+        };
+        let result = bridge.flush().await;
+        // Put it back BEFORE propagating the error: a failed flush leaves the
+        // queue intact and the vault open, and dropping the bridge here would
+        // turn a retryable store error into a permanently closed vault.
+        *self
+            .bridge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bridge);
+        result.map_err(|e| Box::new(e.diagnostic(Component::Store)))
     }
 
     /// **F-5.** The one blocking call, with an explicit timeout.
@@ -348,9 +771,48 @@ impl Core {
     /// adapter **does not** remove the installed ruleset, because CB-6 puts it in
     /// the OS's custody so that the core going away cannot drop protection.
     pub fn begin_shutdown(&self) {
-        self.env.begin_shutdown();
         self.events.close();
         self.adapter.begin_shutdown();
+        self.env.begin_shutdown();
+    }
+
+    /// Graceful shutdown **with** a final durable flush.
+    ///
+    /// `ownership.md` §6 rule 7, and D4's core half. [`Core::begin_shutdown`] is
+    /// synchronous and cannot flush, because flushing is `async`; a host that
+    /// only calls it loses every queued durable write. This is the entry point a
+    /// host should call, and `begin_shutdown` is what it delegates to once the
+    /// vault is safe.
+    ///
+    /// The order matters: flush **first**, while the runtime still accepts work,
+    /// then stop accepting. Reversing it means the flush is refused by the
+    /// runtime it needs.
+    ///
+    /// # Errors
+    ///
+    /// The flush's [`Diagnostic`]. Shutdown proceeds either way — a store that
+    /// cannot be written must not also prevent the process from exiting — and
+    /// the error is returned so a host can report it rather than discover it on
+    /// the next start.
+    pub async fn shutdown(&self) -> Result<usize, Box<Diagnostic>> {
+        let flushed = if self.vault_state() == VaultState::Open {
+            self.flush().await
+        } else {
+            Ok(0)
+        };
+        if let Some(bridge) = self
+            .bridge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            // Releases the single-opener lock, so the next start does not report
+            // `STORE.LOCK_CONTENDED` against a process that is gone.
+            let _ = bridge.close();
+        }
+        self.vault_open.store(false, Ordering::Release);
+        self.begin_shutdown();
+        flushed
     }
 
     fn record(&self, diagnostic: &Diagnostic) {
@@ -390,39 +852,73 @@ fn missing_precondition(entry: twinvpn_mgmt::Entry, submission: &Submission) -> 
     }
 }
 
-/// Which operations this build actually executes.
+/// `SecureStore`, forwarded from the platform adapter.
 ///
-/// **Stated as a list rather than hidden behind a `_ =>` arm.** A command the
-/// catalogue advertises and the core does not execute is a lie a client cannot
-/// detect, so the unimplemented set is enumerable, testable, and reported.
-#[must_use]
-pub fn is_implemented(op: CoreCommand) -> bool {
-    !UNIMPLEMENTED.contains(&op)
+/// `twinvpn_store::Store::open` takes an `Arc<dyn SecureStore>` and
+/// `PlatformAdapter` vends only `&dyn SecureStore` — deliberately, so an adapter
+/// can implement all six capabilities on one object. This is the join, and it is
+/// a forwarder with no state of its own: every call goes straight through to the
+/// adapter the core was constructed with.
+struct AdapterSecureStore(Arc<dyn PlatformAdapter>);
+
+impl twinvpn_platform::custody::SecureStore for AdapterSecureStore {
+    fn secure_item_read<'a>(
+        &'a self,
+        key: &'a twinvpn_platform::custody::SecureItemKey,
+    ) -> BoxFuture<
+        'a,
+        Result<Option<twinvpn_platform::custody::SecureItem>, twinvpn_platform::PlatformError>,
+    > {
+        self.0.store().secure_item_read(key)
+    }
+
+    fn secure_item_write_atomic<'a>(
+        &'a self,
+        key: &'a twinvpn_platform::custody::SecureItemKey,
+        value: &'a twinvpn_platform::custody::SecureItem,
+    ) -> BoxFuture<'a, Result<(), twinvpn_platform::PlatformError>> {
+        self.0.store().secure_item_write_atomic(key, value)
+    }
+
+    fn secure_item_delete<'a>(
+        &'a self,
+        key: &'a twinvpn_platform::custody::SecureItemKey,
+    ) -> BoxFuture<'a, Result<(), twinvpn_platform::PlatformError>> {
+        self.0.store().secure_item_delete(key)
+    }
+
+    fn store_root(
+        &self,
+    ) -> BoxFuture<'_, Result<twinvpn_platform::custody::StoreRoot, twinvpn_platform::PlatformError>>
+    {
+        self.0.store().store_root()
+    }
+
+    fn record_aead_custody(&self) -> twinvpn_platform::custody::RecordAeadCustody {
+        self.0.store().record_aead_custody()
+    }
 }
 
-/// Operations the catalogue names that this build does not yet execute.
+/// Whether this build performs `op`.
 ///
-/// Every one of them needs a component this wave did not wire: pairing needs the
-/// C-B ceremony end to end (blocked by `ownership.md` §8 **W-21** —
-/// `PairingOffer` appears nowhere in `contracts/`), the update verbs need
-/// ADR-0021's delivery path, and the disarm ceremony needs ADR-0016's local
-/// authentication, which is a shell capability with no ABI entry yet.
-pub const UNIMPLEMENTED: &[CoreCommand] = &[
-    CoreCommand::PairBegin,
-    CoreCommand::PairConfirm,
-    CoreCommand::PairCancel,
-    CoreCommand::PairStatus,
-    CoreCommand::DeviceRevoke,
-    CoreCommand::KeyRotate,
-    CoreCommand::UpdateStatus,
-    CoreCommand::UpdateCheck,
-    CoreCommand::UpdateStage,
-    CoreCommand::UpdateApply,
-    CoreCommand::UpdateRollback,
-    CoreCommand::KillswitchDisarmBegin,
-    CoreCommand::KillswitchDisarmCommit,
-    CoreCommand::ExitnodeSelect,
-];
+/// Derived from [`crate::dispatch::disposition`], which is the exhaustive match
+/// that decides it. There is no second list to drift.
+#[cfg(feature = "full")]
+#[must_use]
+pub fn executes(op: CoreCommand) -> bool {
+    dispatch::disposition(op).executes()
+}
+
+/// Every operation the catalogue advertises that this build **refuses**, with
+/// the registered code and the reason.
+///
+/// Derived, not maintained. `tests/command_path.rs` asserts that every entry
+/// really is refused and that everything else really does work.
+#[cfg(feature = "full")]
+#[must_use]
+pub fn unimplemented() -> Vec<(CoreCommand, ReasonCode, &'static str)> {
+    dispatch::not_wired()
+}
 
 #[cfg(test)]
 mod tests {
@@ -508,8 +1004,9 @@ mod tests {
     fn a_mutating_command_advances_the_s47_generation() {
         let core = testing::core().expect("creates");
         let before = core.generation();
-        core.submit(&Submission::bare(CoreCommand::SessionConnect))
-            .expect("implemented");
+        let mut connect = Submission::bare(CoreCommand::SessionConnect);
+        connect.params = vec![0x11; 32];
+        core.submit(&connect).expect("session.connect executes");
         assert_eq!(core.generation(), before + 1);
         core.submit(&Submission::bare(CoreCommand::StatusGet))
             .expect("implemented");
@@ -517,13 +1014,32 @@ mod tests {
     }
 
     #[test]
-    fn the_unimplemented_set_is_a_subset_of_the_catalogue() {
-        for op in UNIMPLEMENTED {
+    fn the_refused_set_is_a_subset_of_the_catalogue() {
+        for (op, _, _) in unimplemented() {
             assert!(
-                CoreCommand::ALL.contains(op),
+                CoreCommand::ALL.contains(&op),
                 "{op} is not a catalogue operation"
             );
         }
+    }
+
+    #[test]
+    fn a_core_with_no_vault_says_so_rather_than_answering_from_memory() {
+        // D4. Until `open_store` runs, S-12/S-15/S-27/S-30/S-37 are memory-only,
+        // and a caller has to be able to tell.
+        let core = testing::core().expect("creates");
+        assert_eq!(core.vault_state(), VaultState::Absent);
+    }
+
+    #[test]
+    fn flushing_without_a_vault_is_refused_not_a_silent_success() {
+        let core = testing::core().expect("creates");
+        let env = core.env().clone();
+        let mut result = None;
+        env.runtime().block_on(Box::pin(async {
+            result = Some(core.flush().await.map_err(|d| d.code().as_str()));
+        }));
+        assert_eq!(result, Some(Err("STORE.CUSTODY_DEGRADED")));
     }
 
     #[test]
