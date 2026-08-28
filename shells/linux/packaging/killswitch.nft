@@ -1,0 +1,87 @@
+#!/usr/sbin/nft -f
+#
+# The KS-19 boot ruleset: what protects the host between the network stack
+# coming up and `twinvpnd` starting.
+#
+# ADR-0012 §11.8's boot row:
+#   boot: OS applies boot ruleset -> network stack comes up -> agent starts
+#         (the deny predates the first packet the host can emit)
+#
+# ------------------------------------------------------------------ WHAT THIS
+# IS AND IS NOT
+#
+# This is `RULESET_BLOCKED` for a host that has **no contract yet**, so the
+# Tier-1 protected scope is not yet known. It therefore denies the one thing
+# that is protected on every TwinVPN host regardless of contract: the **overlay
+# address space itself** (ADR-0010 §11.1's IPv4 `100.64.0.0/10` and the pinned
+# product ULA `fd7c:9e5d:2a10::/48`), plus off-tunnel DNS.
+#
+# It deliberately does **not** default-deny all egress. ADR-0012 **KS-3a**: the
+# traffic-class table is "exhaustive over the Tier-1 protected set, which is
+# mode-dependent; traffic outside that set is not governed by this table and is
+# not dropped by it". A boot ruleset that denied everything would take the host
+# off the network before the agent could tell it not to — including the SSH
+# session an operator needs to fix it.
+#
+# `twinvpnd` **replaces** this table on its first `apply`, by the same
+# `add`/`delete`/`define` transaction `src/nft.rs` renders — KS-23's atomic swap,
+# never a remove-then-add.
+#
+# ------------------------------------------------------------------ KS-5
+#
+# One `inet` table, matching IPv4 and IPv6 together. "There is no code path that
+# installs IPv4 protection without IPv6 protection, because there is no separate
+# IPv6 object to forget."
+
+add table inet twinvpn
+delete table inet twinvpn
+
+table inet twinvpn {
+  # The posture, held by the kernel and readable with the agent absent — by
+  # `twinvpn-unblock` (ADR-0012 KS-20a) and by `nft --json list table`.
+  counter posture_blocked { }
+  # Generation 0: no contract has been applied.
+  counter gen_0 { }
+  counter deny_v4 { }
+  counter deny_v6 { }
+  counter deny_dns { }
+  counter exempt_v4 { }
+  counter exempt_v6 { }
+
+  chain output {
+    type filter hook output priority filter; policy accept;
+
+    # Class 8 — loopback. The DNS stub's own listeners live here.
+    oifname "lo" accept
+
+    # Return traffic for an already-permitted flow.
+    ct state established,related accept
+
+    # Class 5 — underlay DHCP / DHCPv6 / ND / RA. ADR-0010 §11.5 clause 5:
+    # blocking them breaks the underlay itself.
+    udp dport { 67, 68 } accept
+    udp dport { 546, 547 } accept
+    icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, nd-redirect } accept
+
+    # Class 9 — link-local unicast, both families.
+    ip daddr 169.254.0.0/16 accept
+    ip6 daddr fe80::/10 accept
+
+    # ---- the Tier-2 deny -------------------------------------------------
+    # The overlay address space, both families, in one table. ADR-0010 §11.1:
+    # IPv4 `100.64.0.0/10` (RFC 6598) and the pinned product ULA
+    # `fd7c:9e5d:2a10::/48` (AP-1, "a pinned constant, identical in every
+    # build"). No interface is exempt: no overlay interface exists yet.
+    ip daddr 100.64.0.0/10 counter name "deny_v4" drop
+    ip6 daddr fd7c:9e5d:2a10::/48 counter name "deny_v6" drop
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    ct state established,related accept
+    # KS-2: forwarded traffic gets the same Tier-2 rule and is never eligible
+    # for any §11.2 exemption. There is no mark match and no cgroup match here.
+    ip daddr 100.64.0.0/10 counter name "deny_v4" drop
+    ip6 daddr fd7c:9e5d:2a10::/48 counter name "deny_v6" drop
+  }
+}

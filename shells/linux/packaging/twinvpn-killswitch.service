@@ -1,0 +1,39 @@
+# The KS-19 boot artifact.
+#
+# ADR-0012 **KS-19**: "The rule set that covers the interval between the network
+# stack coming up and the agent starting MUST be installed by an artifact the OS
+# ITSELF applies, never by the agent."
+#
+# ADR-0012 §11.6's Linux row names this unit and this file:
+#   "twinvpn-killswitch.service, Before=network-pre.target,
+#    Wants=network-pre.target, restoring /etc/twinvpn/killswitch.nft"
+#
+# ADR-0016 **PS-7**: this artifact is installed by the PACKAGE and is modified
+# only by an atomic replace under ADMINISTER authority. `twinvpnd` MUST NOT
+# rewrite it as an ordinary runtime action and MUST NOT be a prerequisite for it
+# to apply — which is why this unit has no dependency on `twinvpnd.service` at
+# all, in either direction.
+
+[Unit]
+Description=TwinVPN fail-closed boot ruleset
+Documentation=https://github.com/twinvpn/twinvpn
+DefaultDependencies=no
+# The deny predates the first packet the host can emit.
+Wants=network-pre.target
+Before=network-pre.target
+ConditionPathExists=/etc/twinvpn/killswitch.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=15s
+# `FailureAction=none`: if the ruleset cannot be applied, the host boots
+# UNPROTECTED and the agent reports
+# `PLATFORM.SERVICE.BOOT_ARTIFACT_UNREGISTERED` at CRITICAL. Halting the boot
+# instead would make a firewall problem into an unbootable machine, which is a
+# worse outcome for a machine an operator may only reach over the network.
+FailureAction=none
+ExecStart=/usr/sbin/nft -f /etc/twinvpn/killswitch.nft
+
+[Install]
+WantedBy=sysinit.target
