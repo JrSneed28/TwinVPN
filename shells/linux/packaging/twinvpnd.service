@@ -25,10 +25,32 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
+# ---- ADR-0023 EM-70: the watchdog credential is a ProtectionAssertion -----
+# "Type=notify, WatchdogSec=60, NotifyAccess=main; sd_notify(WATCHDOG=1)."
+#
+# The agent feeds the watchdog ONLY from a health check that obtained a fresh
+# ProtectionAssertion — the W-24 read-back of the installed ruleset, not a
+# timer tick. EM-70: "a watchdog fed by a timer thread proves that the timer
+# thread is alive, which is not the property anybody wants." So an agent that
+# is running but can no longer verify its own protection stops feeding this,
+# and systemd restarts it. That is the intended outcome, not a failure of it.
 Type=notify
+NotifyAccess=main
+WatchdogSec=60
 ExecStart=/usr/lib/twinvpn/twinvpnd
 Restart=always
 RestartSec=1s
+# ---- EM-71: a crash loop is HELD, never resolved by disarming -------------
+# "If the daemon exits abnormally more than N times within T (defaults: 5
+# within 300 s), the supervisor MUST stop respawning into a loop and the device
+# MUST enter safe hold with the enforcement rule set left installed."
+#
+# The StartLimit* pair above is that N-within-T. `StartLimitAction=none` is what
+# makes the hold a HOLD: systemd stops respawning and does nothing else. It is
+# NEVER `reboot` — a crash loop turned into a reboot loop is strictly worse —
+# and it is never anything that touches enforcement, because the ruleset is
+# kernel-resident (CB-6) and stays installed through every one of those exits.
+# "A crash loop that ends with an unarmed device is the leak" (KS-20).
 StartLimitAction=none
 OnFailure=twinvpn-quarantine.service
 

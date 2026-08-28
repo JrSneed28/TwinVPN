@@ -10,6 +10,7 @@ pub mod authority;
 pub mod conn;
 pub mod endpoint;
 pub mod events;
+pub mod health;
 pub mod logging;
 pub mod peer;
 pub mod privilege;

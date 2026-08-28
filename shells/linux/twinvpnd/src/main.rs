@@ -45,8 +45,8 @@
 use std::sync::Arc;
 
 use twinvpnd::agent::{
-    authority, boot_artifact_present, conn, endpoint, events, logging, peer, privilege, runtime,
-    server, StartSequence,
+    authority, boot_artifact_present, conn, endpoint, events, health, logging, peer, privilege,
+    runtime, server, StartSequence,
 };
 use twinvpnd::mi;
 
@@ -475,6 +475,71 @@ async fn serve_forever(
         "ready; accepting management connections"
     );
 
+    // **ADR-0023 §11.16's unattended-operation channels**, now that the agent is
+    // actually ready. This host is H-SRV: "the distinguishing property is 'no
+    // user ever logs in'", so a condition not written where a monitoring system
+    // can read it has not been reported at all.
+    //
+    // The `ProtectionAssertion` is the **W-24 read-back**, not a belief:
+    // ADR-0015 §11.6 rule 1 makes the indicator "a pure function of the most
+    // recent assertion, never of the agent's belief", and O-18 makes an
+    // assertion that cannot be produced `UNKNOWN` rather than "unprotected".
+    let assertion = protection_assertion(&agent).await;
+    let report = health::Report {
+        // CB-2: the state is the CORE's, never derived here. This build reports
+        // the one fact the shell legitimately owns — that it reached `ready` —
+        // and `worst_reason_code` is filled from the enforcement read-back
+        // rather than from a `ConnectionState` the shell would have to compute.
+        state: "READY",
+        worst_reason_code: if assertion {
+            "NONE"
+        } else {
+            "POLICY.KILLSWITCH.ARM_FAILED"
+        },
+        as_of_ms: context.as_of_ms(),
+        protection_asserted: assertion,
+    };
+    // **EM-69 names `$STATE_DIR/health` and then says `(tmpfs)`, and on a
+    // `systemd` host those two halves disagree**: `StateDirectory=` is
+    // `/var/lib`, which is persistent, and `RuntimeDirectory=` is `/run`, which
+    // is the tmpfs. The parenthetical is the load-bearing half — a health line
+    // that survives a reboot is a monitoring system told a falsehood by a file,
+    // which is the exact failure the file exists to prevent — so it is written
+    // to the runtime directory. Reported rather than silently resolved.
+    let state_dir = runtime_dir();
+    if let Err(error) = health::write(&state_dir, &report) {
+        // Logged and continued: a health file that cannot be written is a
+        // degraded observability channel, not a reason to stop being a VPN, and
+        // EM-69 has four other channels.
+        tracing::warn!(
+            target: "twinvpn.agent",
+            specified_code = "PLATFORM.EMBEDDED.SAFE_HOLD",
+            path = %state_dir.join(health::HEALTH_FILE).display(),
+            detail = %error,
+            "the EM-69 health file could not be written; the journal and \
+             sd_notify channels remain"
+        );
+    }
+    if let Err(error) = health::notify_ready(&report) {
+        tracing::warn!(target: "twinvpn.agent", detail = %error, "sd_notify(READY=1) failed");
+    }
+    // **EM-70.** The first watchdog ping, and it is refused unless the
+    // assertion above was fresh: "a watchdog fed by a timer thread proves that
+    // the timer thread is alive, which is not the property anybody wants."
+    match health::notify_watchdog(assertion) {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            target: "twinvpn.agent",
+            specified_code = "POLICY.KILLSWITCH.ASSERTION_MISMATCH",
+            "the watchdog was NOT fed: no fresh ProtectionAssertion could be \
+             obtained (EM-70). systemd will restart this agent, which is the \
+             intended outcome"
+        ),
+        Err(error) => {
+            tracing::warn!(target: "twinvpn.agent", detail = %error, "sd_notify(WATCHDOG=1) failed");
+        }
+    }
+
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| StartupRefusal {
             code: "PLATFORM.ADAPTER_UNAVAILABLE",
@@ -523,7 +588,17 @@ async fn serve_forever(
     // `ownership.md` §6 rule 7, and W-28's flush. The endpoint is removed FIRST
     // so a client that connects during the drain gets `MGMT.UNAVAILABLE` rather
     // than a successful connect and a hang (§10.3).
+    // **EM-71's distinction.** `STOPPING=1` is what lets `systemd` tell a clean
+    // stop from a crash, and the crash-loop ladder — held, with enforcement
+    // still installed — is only reachable if it can.
+    let _ = health::notify_stopping();
+
     endpoint::remove(&path);
+    // A stale "READY" line outliving the agent is a monitoring system told a
+    // falsehood by a file, and the file is the channel that is supposed to be
+    // authoritative when nobody is watching.
+    health::retract(&state_dir);
+
     // The event stream closes before the core does, so every per-connection pump
     // wakes, finds it closed and returns — and every dispatcher still waiting
     // for a command body is settled rather than left hanging. CB-6 is untouched:
@@ -531,4 +606,21 @@ async fn serve_forever(
     context.fanout.close();
     agent.shutdown();
     Ok(())
+}
+
+/// The **W-24 read-back**, as a boolean the health channels can carry.
+///
+/// ADR-0015 §11.6 rule 1: the `ProtectionAssertion` is produced by **querying
+/// the enforcement layer**, and the indicator is "a pure function of the most
+/// recent assertion, **never of the agent's belief**".
+///
+/// `false` means the query failed or reported no table — which O-18 makes
+/// `UNKNOWN` rather than "unprotected", and which [`health::Report`] carries as
+/// the word `unknown` for exactly that reason. The two are different facts and a
+/// monitoring system must be able to tell them apart.
+async fn protection_assertion(agent: &runtime::Agent) -> bool {
+    matches!(
+        twinvpn_platform::NetworkConfig::installed_ruleset(agent.adapter.network()).await,
+        Ok(Some(_))
+    )
 }
