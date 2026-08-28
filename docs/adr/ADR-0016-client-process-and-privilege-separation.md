@@ -398,6 +398,46 @@ on-demand privileged helpers are **rejected** for this product (§6 C). `ksd` is
 `SMAppService.daemon(plistName:)` on macOS 13+ and by `SMJobBless` on macOS 11–12, in both cases
 signed with the same Team ID and embedded in the app bundle.
 
+**Amendment PS-22 — how the core gets *into* the system extension, and why the daemon is not the
+authority.** The paragraph above says the system extension is the authority. Wave 2's macOS
+implementation read `ownership.md` §8's **W-24/W-25** — `twinvpn.h`'s F-9 vtable carries no
+`installed_ruleset` read-back, no `current_generation`, no socket provider and no interface
+enumerator — concluded that a Swift extension therefore *cannot* be the authority, and put the core
+in the `LaunchDaemon` instead. **The conclusion does not follow, and the resulting topology is
+wrong.**
+
+W-24 and W-25 are about a shell bound **only to the C vtable**. They are not about a shell that
+**links the core as a Rust staticlib**, which is what §11.14 (f) already requires in terms: *"the
+portable core MUST link into … a macOS NE **system extension**"*. `ownership.md` §10.4 rules the
+same way for the Swift and Kotlin mobile shells — the missing capabilities stay in Rust,
+in-process, reached through a per-platform `extern "C"` bridge that is **not** an ABI of record and
+carries **no** compatibility obligation, because both sides compile from one commit into one
+artifact. That ruling is hereby **general**: it is how every Swift or Kotlin shell obtains the
+capabilities F-9 lacks, macOS included.
+
+**The decisive constraint is physical, not editorial.** `NEPacketTunnelProvider.packetFlow` exists
+only inside the provider process. The datapath must therefore be in the extension; the core owns
+the datapath; and §11.16 (a) / S-47 permit **exactly one process** to hold a mutating core handle.
+So there is no split in which the daemon holds the core and the extension pumps packets — it would
+put an IPC hop on every packet, and a second core handle where S-47 allows one.
+
+**Normatively, restating §11.2 for macOS with the mechanism named:**
+
+| Component | Holds | Does not hold |
+|---|---|---|
+| the NE **system extension** | the core (linked as a Rust staticlib through the bridge), the platform adapter, the datapath, the key handle, the management interface over XPC with `audit_token_t` (§11.14 (a)) | — |
+| `ksd`, the `LaunchDaemon` | the KS-19 boot anchor, and the unblock command's local admin-authenticated invocation | **no core, no keys, no network sockets, no management interface** |
+
+**And the availability question this raises is already answered.** If the authority is the extension
+and the extension is started on demand, what answers the management interface when the tunnel is
+down? Nothing, and that is correct: **MI-A3** makes a client connecting to an absent agent receive
+`MGMT.UNAVAILABLE` — the one code ADR-0017 §11.12 has the client mint — rather than a hang, and
+`M-P17-17` names socket activation as the defect precisely because it would start the agent from a
+client connection. **MI-I5-5**'s "the management channel MUST still answer" is scoped to *"every
+phase in which a process exists at all"*, and PS-9 (2)'s stub is **the authority's own degraded
+form**, not a second process. No forwarding daemon is needed, and adding one would create the
+general-purpose privileged helper the paragraph above forbids.
+
 **iOS and iPadOS, normatively.** The capability split follows
 [docs/networking.md](../networking.md) §5.4 and is normative here:
 
