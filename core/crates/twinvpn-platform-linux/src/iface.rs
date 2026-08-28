@@ -562,13 +562,69 @@ fn decode_change(message: &netlink::NlMessage) -> Vec<NetworkChange> {
     out
 }
 
-/// The index of `name`, or `None` if the interface does not exist.
+/// The index of `name`, asked of **the kernel on this process's own netlink
+/// socket**.
 ///
-/// Reads `sysfs` rather than calling `if_nametoindex`, so it needs no `unsafe`
-/// and no third syscall wrapper. Used by tests and by the tun device's own
-/// index lookup after creation.
+/// # Why not `sysfs`
+///
+/// An earlier version of this function read `/sys/class/net/<name>/ifindex`,
+/// which needs no `unsafe` and is correct on an ordinary host. It is **wrong in
+/// a network namespace**: `/sys` is not remounted when a process enters one, so
+/// a freshly created interface is invisible under `/sys/class/net` and the
+/// lookup returns `ENODEV` for an interface that plainly exists.
+///
+/// That was found by `tests/netns.rs` and not by any unit test, which is the
+/// argument for running one. A netlink query is scoped to the caller's own
+/// namespace by construction, which is the property this needs.
+///
+/// `RTM_GETLINK` **without** `NLM_F_DUMP` and with an `IFLA_IFNAME` filter, so
+/// the kernel matches rather than this code walking a dump.
+///
+/// # Errors
+///
+/// [`PlatformError`] if netlink is unavailable; `Ok(None)` if the interface
+/// simply does not exist, which is a different fact and is reported as one.
+pub async fn index_of(name: &str) -> Result<Option<InterfaceIndex>, PlatformError> {
+    let sock = NetlinkSocket::open(0)
+        .map_err(|e| oserr::from_errno(&e, "AF_NETLINK", Context::Netlink))?;
+    let mut b = NlBuilder::new(libc::RTM_GETLINK, netlink::REQUEST, sock.next_seq());
+    b.payload(&[0u8; IFINFOMSG_LEN]);
+    // NUL-terminated, as the kernel's own `IFLA_IFNAME` policy expects.
+    let mut named = name.as_bytes().to_vec();
+    named.push(0);
+    b.attr(libc::IFLA_IFNAME, &named);
+
+    match sock.request(b.finish()).await {
+        Ok(messages) => Ok(messages.first().and_then(|message| {
+            if message.body.len() < IFINFOMSG_LEN {
+                return None;
+            }
+            let index = u32::from_ne_bytes([
+                message.body[4],
+                message.body[5],
+                message.body[6],
+                message.body[7],
+            ]);
+            Some(InterfaceIndex(index))
+        })),
+        // The interface does not exist. Distinct from "netlink is broken", and
+        // reported as such rather than collapsed into one answer.
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ENODEV | libc::ENOENT)) => Ok(None),
+        Err(e) => Err(oserr::from_errno(
+            &e,
+            "RTM_GETLINK(IFLA_IFNAME)",
+            Context::Netlink,
+        )),
+    }
+}
+
+/// The `sysfs` form, for a caller with no async runtime.
+///
+/// **Namespace-unsafe**, and named so: `/sys` is the host's inside a network
+/// namespace. Used only by tests that run outside one; production code uses
+/// [`index_of`].
 #[must_use]
-pub fn index_of(name: &str) -> Option<InterfaceIndex> {
+pub fn index_of_sysfs_unscoped(name: &str) -> Option<InterfaceIndex> {
     let text = fs::read_to_string(format!("/sys/class/net/{name}/ifindex")).ok()?;
     text.trim().parse::<u32>().ok().map(InterfaceIndex)
 }

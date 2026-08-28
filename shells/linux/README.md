@@ -118,17 +118,19 @@ value the diagnostic bundle can carry.
 | Step | On failure |
 |---|---|
 | 1. the KS-19 boot artifact is installed | `PLATFORM.SERVICE.BOOT_ARTIFACT_UNREGISTERED` at CRITICAL — **and the agent starts anyway.** PS-7 makes the artifact package-owned and says the authority "MUST NOT be a prerequisite for it to apply"; refusing would leave the host with neither the boot ruleset *nor* an agent |
-| 2. the privilege posture | **Fatal.** Still root, or holding `CAP_SYS_MODULE`/`CAP_SYS_ADMIN`/`CAP_DAC_OVERRIDE`/`CAP_SYS_PTRACE`, or missing `CAP_NET_ADMIN` — §11.2: "the authority MUST NOT continue as root 'just this once'" |
+| 2. the privilege posture | **Fatal** on: still root; holding `CAP_SYS_MODULE`/`CAP_SYS_ADMIN`/`CAP_DAC_OVERRIDE`/`CAP_SYS_PTRACE` **in the effective set**; or missing `CAP_NET_ADMIN`. §11.2: "the authority MUST NOT continue as root 'just this once'". A wide **bounding** set is a §11.9 hardening directive that did not apply, which PS-17 makes a named `PLATFORM.PRIV.SANDBOX_DEGRADED` warning rather than a refusal |
 | 3. the three clocks and the runtime | fatal; the CSPRNG is **probed at startup**, not on first use |
 | 4. the adapter's capability probe | fatal if `nft(8)` is absent — ADR-0012 §8: arming must never fail open, and PS-18 forbids starting "in a mode that cannot arm enforcement while reporting itself as running" |
 | 5. the core | `INTERNAL.ABI_VERSION_MISMATCH` (VR-4), checked before any capability is touched |
 | 6. the MI endpoint | `MGMT.UNAVAILABLE`. MI-A3: the agent verifies `/run/twinvpn`'s ownership and mode **before** binding, and binds a temporary name then `rename`s it — `unlink()`-then-`bind()` is prohibited |
 | 7. accept connections | only now (§11.6) |
 
-`twinvpnd` also **warns and continues** on three degradations, each named so an
+`twinvpnd` also **warns and continues** on four degradations, each named so an
 operator can see it rather than infer it: no recognised supervisor (PS-11), a
-missing `NoNewPrivileges` (PS-17), and group membership readable only from
-`/etc/group` (§7).
+missing `NoNewPrivileges=yes` or an unnarrowed `CapabilityBoundingSet=`
+(PS-17, each named as the unit directive it is), a TPM present that this build
+cannot use (§11.16 (l)), and group membership readable only from `/etc/group`
+(§7).
 
 ---
 
@@ -163,11 +165,36 @@ TWINVPN_LOG_LEVEL=trace TWINVPN_LOG_FORMAT=text ./target/debug/twinvpnd
 ### Running the tests
 
 ```sh
-cd shells/linux && cargo test --workspace          # 104 tests, no privilege needed
-cd ../../core   && cargo test -p twinvpn-platform-linux   # 107 tests
+cd shells/linux && cargo test --workspace                 # 105 tests, unprivileged
+cd ../../core   && cargo test -p twinvpn-platform-linux   # 114 tests, unprivileged
 ```
 
-Both suites run **unprivileged**. What that costs is in §7.
+Both suites run unprivileged, and the adapter's `tests/netns.rs` **asserts the
+refusal** in that mode rather than skipping — so a plain `cargo test` still
+checks that an unprivileged adapter names the right `reason_code`.
+
+The write path — creating a tun device, programming addresses and routes into
+table 52, installing the `fwmark` policy rules — needs `CAP_NET_ADMIN`, which an
+**unprivileged user namespace** grants inside itself:
+
+```sh
+cd core
+cargo test -p twinvpn-platform-linux --test netns --no-run
+unshare --user --map-root-user --net -- \
+  env TWINVPN_NETNS_TEST=1 ./target/debug/deps/netns-<hash> --test-threads=1
+
+# And to SEE what it programmed, through iproute2 rather than through the
+# assertions:
+cargo test -p twinvpn-platform-linux --test state_dump --no-run
+unshare --user --map-root-user --net -- \
+  env TWINVPN_NETNS_TEST=1 ./target/debug/deps/state_dump-<hash> \
+  --nocapture --test-threads=1
+```
+
+That is how the netlink write path was actually verified — including a bug it
+caught that no unit test could: `index_of` originally read `/sys/class/net`,
+which is the **host's** sysfs inside a network namespace, so a freshly created
+interface was invisible. It asks the kernel over netlink now.
 
 ---
 

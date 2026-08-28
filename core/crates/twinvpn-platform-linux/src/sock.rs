@@ -532,24 +532,42 @@ fn zeroed_msghdr() -> libc::msghdr {
 /// buffer is still live and whose `msg_controllen` is the length the kernel
 /// wrote.
 unsafe fn read_pktinfo(msg: &libc::msghdr) -> (Option<IpAddr>, Option<InterfaceIndex>) {
+    // SAFETY: the caller's contract above guarantees `msg` was filled by a
+    // successful `recvmsg` and that its control buffer is live for this call,
+    // which is exactly `CMSG_FIRSTHDR`'s requirement. It returns null when
+    // there are no control messages, and the loop checks for that.
     let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(msg) };
     while !cmsg.is_null() {
+        // SAFETY: `cmsg` is non-null (checked by the loop condition) and points
+        // into the live control buffer, either from `CMSG_FIRSTHDR` above or
+        // from `CMSG_NXTHDR` below — both of which return a pointer to a whole
+        // `cmsghdr` inside that buffer or null. The borrow lives only for this
+        // iteration and nothing mutates the buffer while it is held.
         let header = unsafe { &*cmsg };
+        // SAFETY: as above; `CMSG_DATA` is pointer arithmetic on a valid
+        // `cmsghdr` and yields a pointer to that header's data area, whose
+        // length is checked against `CMSG_LEN` before anything is read.
         let data = unsafe { libc::CMSG_DATA(cmsg) };
         match (header.cmsg_level, header.cmsg_type) {
             (libc::IPPROTO_IP, libc::IP_PKTINFO) => {
-                if header.cmsg_len
-                    >= unsafe {
-                        libc::CMSG_LEN(
-                            u32::try_from(mem::size_of::<libc::in_pktinfo>()).unwrap_or(12),
-                        )
-                    } as usize
-                {
+                // SAFETY: `CMSG_LEN` is pure arithmetic on its argument — it
+                // dereferences nothing and is `unsafe` only because `libc`
+                // declares it so.
+                let needed = unsafe {
+                    libc::CMSG_LEN(u32::try_from(mem::size_of::<libc::in_pktinfo>()).unwrap_or(12))
+                } as usize;
+                if header.cmsg_len >= needed {
                     let mut info = libc::in_pktinfo {
                         ipi_ifindex: 0,
                         ipi_spec_dst: libc::in_addr { s_addr: 0 },
                         ipi_addr: libc::in_addr { s_addr: 0 },
                     };
+                    // SAFETY: `header.cmsg_len >= needed` was checked just
+                    // above, so the data area holds at least
+                    // `size_of::<in_pktinfo>()` initialised bytes. `info` is a
+                    // live, uniquely-borrowed local of exactly that size, and
+                    // the two regions cannot overlap — one is the kernel's
+                    // control buffer, the other is this frame's stack.
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             data,
@@ -566,17 +584,20 @@ unsafe fn read_pktinfo(msg: &libc::msghdr) -> (Option<IpAddr>, Option<InterfaceI
                 }
             }
             (libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) => {
-                if header.cmsg_len
-                    >= unsafe {
-                        libc::CMSG_LEN(
-                            u32::try_from(mem::size_of::<libc::in6_pktinfo>()).unwrap_or(20),
-                        )
-                    } as usize
-                {
+                // SAFETY: as above — `CMSG_LEN` is pure arithmetic.
+                let needed = unsafe {
+                    libc::CMSG_LEN(u32::try_from(mem::size_of::<libc::in6_pktinfo>()).unwrap_or(20))
+                } as usize;
+                if header.cmsg_len >= needed {
                     let mut info = libc::in6_pktinfo {
                         ipi6_addr: libc::in6_addr { s6_addr: [0; 16] },
                         ipi6_ifindex: 0,
                     };
+                    // SAFETY: the length check above guarantees the data area
+                    // holds at least `size_of::<in6_pktinfo>()` initialised
+                    // bytes; `info` is a live local of exactly that size, and
+                    // the kernel's control buffer and this stack frame do not
+                    // overlap.
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             data,
@@ -597,6 +618,9 @@ unsafe fn read_pktinfo(msg: &libc::msghdr) -> (Option<IpAddr>, Option<InterfaceI
             }
             _ => {}
         }
+        // SAFETY: `msg` is still the caller's live `msghdr` and `cmsg` is a
+        // valid header inside its control buffer, which is `CMSG_NXTHDR`'s
+        // requirement. It returns null when the walk is done.
         cmsg = unsafe { libc::CMSG_NXTHDR(msg, cmsg) };
     }
     (None, None)
@@ -980,7 +1004,8 @@ mod tests {
         // docs/networking.md §8: local-scope multicast, hop limit 1, joined on a
         // NAMED interface — "a multicast join on 'any interface' means something
         // different on every platform".
-        let loopback_index = crate::iface::index_of("lo").unwrap_or(InterfaceIndex(1));
+        let loopback_index =
+            crate::iface::index_of_sysfs_unscoped("lo").unwrap_or(InterfaceIndex(1));
         let options = SocketOptions {
             reuse_address: true,
             multicast: Some(MulticastOptions {

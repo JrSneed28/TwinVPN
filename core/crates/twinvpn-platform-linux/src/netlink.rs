@@ -88,6 +88,17 @@ pub const REPLACE: u16 = libc::NLM_F_REPLACE as u16;
 #[allow(clippy::cast_possible_truncation)]
 pub const EXCL: u16 = libc::NLM_F_EXCL as u16;
 
+/// `NLM_F_MULTI` — "this message is one part of a multipart reply".
+///
+/// The flag that says whether a `NLMSG_DONE` is coming. A **single-part** reply
+/// — what `RTM_GETLINK` without `NLM_F_DUMP` produces — does **not** carry it
+/// and is complete on its own, so a reader that waited for `NLMSG_DONE`
+/// regardless would block forever. That is not hypothetical: it is exactly the
+/// hang `tests/netns.rs` produced the first time `index_of` asked the kernel for
+/// one interface by name.
+#[allow(clippy::cast_possible_truncation)]
+pub const MULTI: u16 = libc::NLM_F_MULTI as u16;
+
 /// `NLMSG_ALIGNTO`, and the alignment for every netlink header and attribute.
 const ALIGN: usize = 4;
 
@@ -407,7 +418,16 @@ impl NetlinkSocket {
                         return Err(io::Error::from_raw_os_error(code));
                     }
                     NLMSG_NOOP | NLMSG_OVERRUN => {}
-                    _ => out.push(msg),
+                    _ => {
+                        let multipart = msg.flags & MULTI != 0;
+                        out.push(msg);
+                        if !multipart {
+                            // A single-part reply is complete on its own: no
+                            // `NLMSG_DONE` is coming, and waiting for one is a
+                            // hang rather than a slow answer.
+                            return Ok(out);
+                        }
+                    }
                 }
             }
         }
@@ -549,6 +569,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_single_part_reply_completes_without_waiting_for_nlmsg_done() {
+        // `RTM_GETLINK` WITHOUT `NLM_F_DUMP`, filtered by name: the kernel
+        // answers with one `RTM_NEWLINK` and no `NLMSG_DONE`. A reader that
+        // waited for one would hang — which is what happened, and is why this
+        // test exists.
+        let sock = NetlinkSocket::open(0).expect("netlink is available");
+        let mut b = NlBuilder::new(libc::RTM_GETLINK, REQUEST, sock.next_seq());
+        b.payload(&[0u8; 16]);
+        b.attr(libc::IFLA_IFNAME, b"lo\0");
+        let replies = sock
+            .request(b.finish())
+            .await
+            .expect("answers, and returns");
+        assert_eq!(replies.len(), 1, "one interface, one message");
+        assert_eq!(replies[0].msg_type, libc::RTM_NEWLINK);
+        assert_eq!(
+            replies[0].flags & MULTI,
+            0,
+            "a single-part reply must not claim to be multipart"
+        );
+    }
+
+    #[tokio::test]
     async fn a_link_dump_returns_at_least_the_loopback_interface() {
         let sock = NetlinkSocket::open(0).expect("netlink is available unprivileged");
         let mut b = NlBuilder::new(libc::RTM_GETLINK, REQUEST | DUMP, sock.next_seq());
@@ -557,5 +600,8 @@ mod tests {
         let replies = sock.request(b.finish()).await.expect("dump succeeds");
         assert!(!replies.is_empty(), "every host has at least `lo`");
         assert!(replies.iter().all(|m| m.msg_type == libc::RTM_NEWLINK));
+        // And a DUMP's parts DO carry `NLM_F_MULTI`, which is what terminates
+        // the read at `NLMSG_DONE` rather than at the first message.
+        assert!(replies.iter().all(|m| m.flags & MULTI != 0));
     }
 }

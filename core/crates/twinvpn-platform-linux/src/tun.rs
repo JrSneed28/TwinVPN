@@ -202,7 +202,12 @@ impl TunnelDevice for LinuxTunnelDevice {
             let assigned = String::from_utf8_lossy(&req[..16])
                 .trim_end_matches('\0')
                 .to_owned();
+            // Asked of the kernel over netlink, NOT of `/sys/class/net`: inside
+            // a network namespace `/sys` is the host's, so a sysfs lookup
+            // returns ENODEV for an interface that plainly exists. Found by
+            // `tests/netns.rs`.
             let index = crate::iface::index_of(&assigned)
+                .await?
                 .ok_or_else(|| oserr::unavailable("ifindex", libc::ENODEV))?
                 .0;
 
