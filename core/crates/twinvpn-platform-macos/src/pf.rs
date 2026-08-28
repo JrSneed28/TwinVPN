@@ -411,7 +411,10 @@ pub fn render(contract: &NetworkContract, ruleset: Ruleset, config: &Enforcement
 
     // ---- class 8: loopback -----------------------------------------------
     // Cannot egress by construction, which is why it needs no scope qualifier.
-    let _ = writeln!(s, "pass quick on lo0 all no state label \"twinvpn.loopback\"");
+    let _ = writeln!(
+        s,
+        "pass quick on lo0 all no state label \"twinvpn.loopback\""
+    );
 
     // ---- class 7: the bootstrap exemption (KS-9) --------------------------
     // Destination-unbounded, because KS-10's BOOTSTRAP payloads are: mTLS 1.3 to

@@ -229,7 +229,11 @@ fn validate(config: &DnsConfig) -> Result<(), PlatformError> {
     {
         return Err(reject());
     }
-    for domain in config.search_domains.iter().chain(config.split_domains.iter()) {
+    for domain in config
+        .search_domains
+        .iter()
+        .chain(config.split_domains.iter())
+    {
         if !is_safe_domain(domain) {
             return Err(reject());
         }
@@ -477,8 +481,9 @@ mod tests {
         assert!(plan(&too_many_servers, "svc").is_err());
 
         let mut too_many_search = config(false);
-        too_many_search.search_domains =
-            (0..=MAX_SEARCH_DOMAINS).map(|i| format!("s{i}.x")).collect();
+        too_many_search.search_domains = (0..=MAX_SEARCH_DOMAINS)
+            .map(|i| format!("s{i}.x"))
+            .collect();
         assert!(plan(&too_many_search, "svc").is_err());
     }
 

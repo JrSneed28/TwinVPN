@@ -107,7 +107,10 @@ fn cf_string(text: &str) -> Result<CfOwned, PlatformError> {
     // signed, and a string long enough to wrap it would make CF read a negative
     // count — `ownership.md` §6 rule 9's discipline applied to an FFI length.
     let Ok(length) = core_foundation_sys::base::CFIndex::try_from(text.len()) else {
-        return Err(oserr::unavailable("CFStringCreateWithBytes", libc::EOVERFLOW));
+        return Err(oserr::unavailable(
+            "CFStringCreateWithBytes",
+            libc::EOVERFLOW,
+        ));
     };
     // SAFETY: `text.as_ptr()` is valid for `text.len()` bytes for the duration of
     // the call, which is all `CFStringCreateWithBytes` reads; it copies. The
@@ -129,7 +132,8 @@ fn cf_string(text: &str) -> Result<CfOwned, PlatformError> {
 fn cf_string_array(items: &[String]) -> Result<CfOwned, PlatformError> {
     // SAFETY: a zero capacity means "unbounded"; `kCFTypeArrayCallBacks` is a
     // static CF provides and is valid for the process's lifetime.
-    let array = unsafe { CFArrayCreateMutable(kCFAllocatorDefault, 0, &raw const kCFTypeArrayCallBacks) };
+    let array =
+        unsafe { CFArrayCreateMutable(kCFAllocatorDefault, 0, &raw const kCFTypeArrayCallBacks) };
     let owned = CfOwned::new(array.as_void_ptr(), "CFArrayCreateMutable")?;
     for item in items {
         let value = cf_string(item)?;
@@ -144,7 +148,8 @@ fn cf_string_array(items: &[String]) -> Result<CfOwned, PlatformError> {
 /// A `CFArray` of `CFNumber`.
 fn cf_number_array(items: &[i32]) -> Result<CfOwned, PlatformError> {
     // SAFETY: as above.
-    let array = unsafe { CFArrayCreateMutable(kCFAllocatorDefault, 0, &raw const kCFTypeArrayCallBacks) };
+    let array =
+        unsafe { CFArrayCreateMutable(kCFAllocatorDefault, 0, &raw const kCFTypeArrayCallBacks) };
     let owned = CfOwned::new(array.as_void_ptr(), "CFArrayCreateMutable")?;
     for item in items {
         // SAFETY: `item` is a live `i32` and `kCFNumberSInt32Type` declares

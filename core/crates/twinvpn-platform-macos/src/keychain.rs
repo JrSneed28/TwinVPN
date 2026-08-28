@@ -103,7 +103,10 @@ impl CfOwned {
 
 fn cf_string(text: &str) -> Result<CfOwned, PlatformError> {
     let Ok(length) = core_foundation_sys::base::CFIndex::try_from(text.len()) else {
-        return Err(oserr::unavailable("CFStringCreateWithBytes", libc::EOVERFLOW));
+        return Err(oserr::unavailable(
+            "CFStringCreateWithBytes",
+            libc::EOVERFLOW,
+        ));
     };
     // SAFETY: `text` is valid for `text.len()` bytes for the duration of the call,
     // which is all `CFStringCreateWithBytes` reads; it copies. `0` says the bytes
@@ -127,11 +130,7 @@ fn cf_data(bytes: &[u8]) -> Result<CfOwned, PlatformError> {
     // SAFETY: `bytes` is valid for `bytes.len()` for the duration of the call and
     // `CFDataCreate` copies.
     let reference = unsafe {
-        core_foundation_sys::data::CFDataCreate(
-            kCFAllocatorDefault,
-            bytes.as_ptr(),
-            length,
-        )
+        core_foundation_sys::data::CFDataCreate(kCFAllocatorDefault, bytes.as_ptr(), length)
     };
     CfOwned::new(reference.as_void_ptr(), "CFDataCreate")
 }
@@ -194,7 +193,11 @@ impl KeychainStore {
         // SAFETY of every `set`: the statics are CF strings CF owns for the life
         // of the process, and each local is live until the end of this function.
         unsafe {
-            set(&dictionary, kSecClass.cast(), kSecClassGenericPassword.cast());
+            set(
+                &dictionary,
+                kSecClass.cast(),
+                kSecClassGenericPassword.cast(),
+            );
             set(&dictionary, kSecAttrService.cast(), service.as_ptr());
             set(&dictionary, kSecAttrAccount.cast(), account.as_ptr());
             set(
@@ -261,7 +264,12 @@ impl Tier1Store for KeychainStore {
         // SAFETY: `query` is a live dictionary; `result` is a live pointer we own.
         // `SecItemCopyMatching` follows the Copy Rule, so a non-null result is
         // owned and is released by `CfOwned` below.
-        let status = unsafe { SecItemCopyMatching(query.as_ptr().cast::<CFDictionaryRef>().cast(), &raw mut result) };
+        let status = unsafe {
+            SecItemCopyMatching(
+                query.as_ptr().cast::<CFDictionaryRef>().cast(),
+                &raw mut result,
+            )
+        };
         if status == errSecItemNotFound {
             // **Absent is not an error.** The seam's contract: "'absent' enrols
             // and 'unavailable' must not", and collapsing the two would make a

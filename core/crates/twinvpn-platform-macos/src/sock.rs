@@ -210,8 +210,7 @@ fn apply_darwin(socket: &Socket, plan: &SocketOptionPlan) -> Result<(), Platform
                 option.level,
                 option.name,
                 std::ptr::from_ref(&value).cast(),
-                libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>())
-                    .unwrap_or(4),
+                libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).unwrap_or(4),
             )
         };
         if rc != 0 {

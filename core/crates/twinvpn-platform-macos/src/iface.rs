@@ -178,7 +178,10 @@ impl InterfaceSource for AbsentInterfaceSource {
 /// [`PlatformError::AdapterUnavailable`] when the OS supplies a name the seam
 /// refuses — over 255 bytes or carrying a control character. An adapter that
 /// truncated it would produce a name that matches the wrong interface.
-pub fn facts_from(raw: &RawInterface, owned: &BTreeSet<u32>) -> Result<InterfaceFacts, PlatformError> {
+pub fn facts_from(
+    raw: &RawInterface,
+    owned: &BTreeSet<u32>,
+) -> Result<InterfaceFacts, PlatformError> {
     Ok(InterfaceFacts {
         index: InterfaceIndex(raw.index),
         name: InterfaceName::new(&raw.name)?,

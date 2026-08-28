@@ -443,8 +443,7 @@ mod tests {
         // The RESULT overflows later, at `u64::MAX * 3 / 125` ticks, and there the
         // conversion saturates — monotone, rather than wrapping to a small value
         // that would send every deadline in the system backwards at once.
-        let result_overflows_at =
-            u64::try_from(u128::from(u64::MAX) * 3 / 125 + 1).expect("fits");
+        let result_overflows_at = u64::try_from(u128::from(u64::MAX) * 3 / 125 + 1).expect("fits");
         assert_eq!(tb.ticks_to_nanos(result_overflows_at), u64::MAX);
     }
 
@@ -487,10 +486,7 @@ mod tests {
     fn a_zero_denominator_is_refused_rather_than_dividing_by_zero_on_every_tick() {
         assert!(MachTimebase::new(0, 1).is_none());
         assert!(MachTimebase::new(1, 0).is_none());
-        assert_eq!(
-            MachTimebase::new(125, 3),
-            Some(MachTimebase::APPLE_SILICON)
-        );
+        assert_eq!(MachTimebase::new(125, 3), Some(MachTimebase::APPLE_SILICON));
     }
 
     /// **The clock-distinctness check, and an honest statement of its limit.**
@@ -523,7 +519,9 @@ mod tests {
     #[test]
     fn the_entropy_source_fills_and_two_draws_differ() {
         let entropy = SystemEntropy::new();
-        entropy.probe().expect("the platform CSPRNG must be readable");
+        entropy
+            .probe()
+            .expect("the platform CSPRNG must be readable");
         let mut a = [0u8; 32];
         let mut b = [0u8; 32];
         entropy.fill(&mut a).expect("fills");
@@ -535,8 +533,7 @@ mod tests {
 
     #[test]
     fn a_boot_session_uuid_parses_and_a_malformed_one_does_not() {
-        let id =
-            BootSessionId::parse("A1B2C3D4-0000-0000-0000-0000000000FF").expect("canonical");
+        let id = BootSessionId::parse("A1B2C3D4-0000-0000-0000-0000000000FF").expect("canonical");
         assert_eq!(
             id.boot_id().as_bytes(),
             &[0xA1, 0xB2, 0xC3, 0xD4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF]

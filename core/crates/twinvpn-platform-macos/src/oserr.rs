@@ -393,11 +393,7 @@ mod tests {
 
     #[test]
     fn a_missing_entitlement_is_named_and_never_softened_into_a_retry() {
-        let e = from_os_status(
-            sec::MISSING_ENTITLEMENT,
-            "SecItemAdd",
-            Context::SecureStore,
-        );
+        let e = from_os_status(sec::MISSING_ENTITLEMENT, "SecItemAdd", Context::SecureStore);
         assert_eq!(e.reason_code().as_str(), "AUTH.KEY_STORE_UNAVAILABLE");
         // PS-18: the shell turns this into a startup refusal. It must never look
         // like something a backoff will fix.
@@ -417,7 +413,11 @@ mod tests {
 
     #[test]
     fn an_sc_access_error_is_a_privilege_refusal_and_not_an_adapter_fault() {
-        let e = from_sc_error(sc::ACCESS_ERROR, "SCDynamicStoreSetValue", Context::Resolver);
+        let e = from_sc_error(
+            sc::ACCESS_ERROR,
+            "SCDynamicStoreSetValue",
+            Context::Resolver,
+        );
         assert_eq!(e.reason_code().as_str(), "PLATFORM.ADAPTER_UNAVAILABLE");
         assert!(matches!(e, PlatformError::NotPermitted(_)));
     }

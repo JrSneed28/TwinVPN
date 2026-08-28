@@ -303,9 +303,15 @@ mod tests {
         c.addresses.v4 = vec![p4([100, 64, 0, 0], 10)];
         let doc = render(&c, "203.0.113.7").expect("renders");
         assert_eq!(doc["ipv4"]["subnet_masks"][0], "255.192.0.0");
-        assert_eq!(doc["ipv4"]["included_routes"][0]["subnet_mask"], "255.192.0.0");
+        assert_eq!(
+            doc["ipv4"]["included_routes"][0]["subnet_mask"],
+            "255.192.0.0"
+        );
         // The v6 half carries a LENGTH, because that is what NEIPv6Route takes.
-        assert_eq!(doc["ipv6"]["included_routes"][0]["network_prefix_length"], 48);
+        assert_eq!(
+            doc["ipv6"]["included_routes"][0]["network_prefix_length"],
+            48
+        );
     }
 
     #[test]
@@ -376,8 +382,8 @@ mod tests {
         // the seam carries one. Emitting an empty array — present, not absent —
         // is how Swift is told "there are none" rather than "decide for
         // yourself".
-        let doc = render(&full_tunnel_contract(3, Ruleset::Blocked), "203.0.113.7")
-            .expect("renders");
+        let doc =
+            render(&full_tunnel_contract(3, Ruleset::Blocked), "203.0.113.7").expect("renders");
         assert_eq!(doc["ipv4"]["excluded_routes"], json!([]));
         assert_eq!(doc["ipv6"]["excluded_routes"], json!([]));
     }
@@ -388,10 +394,7 @@ mod tests {
         let a = render_json(&c, "203.0.113.7").expect("renders");
         let b = render_json(&c, "203.0.113.7").expect("renders");
         assert_eq!(a, b);
-        assert_eq!(
-            prefix_families(&c.addresses.v4),
-            vec![AddressFamily::V4]
-        );
+        assert_eq!(prefix_families(&c.addresses.v4), vec![AddressFamily::V4]);
     }
 
     #[test]
@@ -399,13 +402,10 @@ mod tests {
         // The kill switch is pf's (ADR-0012 §11.6), not the settings object's. A
         // posture field here would be a second, weaker enforcement point that a
         // reader could mistake for the real one.
-        let blocked = render(&full_tunnel_contract(5, Ruleset::Blocked), "203.0.113.7")
-            .expect("renders");
-        let protected = render(
-            &full_tunnel_contract(5, Ruleset::Protected),
-            "203.0.113.7",
-        )
-        .expect("renders");
+        let blocked =
+            render(&full_tunnel_contract(5, Ruleset::Blocked), "203.0.113.7").expect("renders");
+        let protected =
+            render(&full_tunnel_contract(5, Ruleset::Protected), "203.0.113.7").expect("renders");
         assert_eq!(blocked, protected);
     }
 }

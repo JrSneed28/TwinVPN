@@ -65,10 +65,8 @@ pub const CTLIOCGINFO: libc::c_ulong = iowr(b'N', 3, core::mem::size_of::<CtlInf
 const fn iowr(group: u8, number: u8, size: usize) -> libc::c_ulong {
     const IOC_INOUT: u64 = 0xC000_0000;
     const IOCPARM_MASK: u64 = 0x1fff;
-    (IOC_INOUT
-        | (((size as u64) & IOCPARM_MASK) << 16)
-        | ((group as u64) << 8)
-        | (number as u64)) as libc::c_ulong
+    (IOC_INOUT | (((size as u64) & IOCPARM_MASK) << 16) | ((group as u64) << 8) | (number as u64))
+        as libc::c_ulong
 }
 
 /// `<sys/kern_control.h>`: `struct ctl_info`.

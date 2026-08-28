@@ -323,8 +323,8 @@ mod tests {
         // The R-6 shape: a posture table with an empty scope reads back as
         // `Blocked` and would satisfy a naive reconciler. `covers_a_scope` is what
         // makes it visible.
-        let installed = parse_tables("tv_posture_blocked\ntv_scope4_n0\ntv_scope6_n0\n")
-            .expect("our anchor");
+        let installed =
+            parse_tables("tv_posture_blocked\ntv_scope4_n0\ntv_scope6_n0\n").expect("our anchor");
         assert_eq!(installed.ruleset, Ruleset::Blocked);
         assert!(!installed.covers_a_scope());
     }
