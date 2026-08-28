@@ -1,0 +1,33 @@
+# twinvpn-unblock — ADR-0012 KS-20a's offline recovery command
+#
+# Owner: desktop-linux.
+#
+# A SEPARATE BINARY, not a `twinvpnctl` subcommand, and the reason is the whole
+# design: the case it exists for is "the authority will not start". A subcommand
+# would reach the agent over the management socket, and that socket exists only
+# while the agent is running — so the one situation the command is for is the one
+# situation in which it could not work.
+#
+# The dependency list is the structural half of that claim. It links the platform
+# adapter and NOTHING ELSE: no `twinvpnd`, so no MI module and no socket; no
+# `twinvpn-core`, so no ABI check and no store to be poisoned; no `twinvpn-env`,
+# so no runtime whose failure might be the very thing being recovered from. A
+# reviewer checks the claim by reading these six lines.
+[package]
+name    = "twinvpn-unblock"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "ADR-0012 KS-20a's privileged, local, network-independent unblock command for Linux"
+publish = false
+
+[[bin]]
+name = "twinvpn-unblock"
+path = "src/main.rs"
+
+[dependencies]
+twinvpn-platform-linux = { workspace = true }
+twinvpn-platform       = { workspace = true }
+libc                   = { workspace = true }

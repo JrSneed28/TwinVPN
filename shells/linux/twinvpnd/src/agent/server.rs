@@ -53,14 +53,10 @@ use twinvpn_core::Core;
 use twinvpn_env::Env;
 use twinvpn_mgmt::{catalogue, CoreCommand, Submission, TransportOp};
 
-use crate::mi::codec::{read_frame, write_frame};
 use crate::mi::scope::Scopes;
-use crate::mi::wire::{
-    Body, Diagnostic, FrameError, Hello, HelloAck, MgmtEnvelope, PlatformCtx, Request, Response,
-    MI_VERSION, MI_VERSION_MIN,
-};
-use crate::{AGENT_VERSION, BUILD_PROFILE};
+use crate::mi::wire::{Body, Diagnostic, MgmtEnvelope, PlatformCtx, Request, Response, MI_VERSION};
 
+use super::events::Fanout;
 use super::peer::{GroupSource, Principal};
 
 /// Everything one connection needs.
@@ -85,6 +81,13 @@ pub struct ServerContext {
     /// `Core` is `Sync` because its interior state sits behind locks — so F-6 is
     /// a rule this shell has to keep, and this is where it keeps it.
     pub submission: Arc<tokio::sync::Mutex<()>>,
+    /// **§11.10's event stream**, one fan-out for the whole agent.
+    ///
+    /// F-5 gives the core exactly one ordered stream and `next_event` pops from
+    /// it, so there is exactly one reader in the process — the drain thread —
+    /// and every connection reads its own bounded copy from here. See
+    /// [`super::events`].
+    pub fanout: Arc<Fanout>,
 }
 
 impl ServerContext {
@@ -103,217 +106,20 @@ impl ServerContext {
     }
 }
 
-/// Serves one connection to completion.
-///
-/// # Errors
-///
-/// The frame error that ended it. A clean [`FrameError::Closed`] is the normal
-/// case: **PS-3** — "Loss of the last management client MUST NOT change
-/// `session_intent`, enforcement mode, the installed rule set, or any
-/// `ConnectionState`." Nothing in this function touches any of them on the way
-/// out.
-pub async fn serve(
-    context: Arc<ServerContext>,
-    mut stream: tokio::net::UnixStream,
-) -> Result<(), FrameError> {
-    // MI-A1/MI-A5: the identity comes from the kernel, and an unverifiable one
-    // is rejected and closed — never a default principal, never an anonymous
-    // read-only tier.
-    let principal = match Principal::from_stream(&stream) {
-        Ok(principal) => principal,
-        Err(error) => {
-            let reject = envelope(
-                context.as_of_ms(),
-                Body::Reject(diagnostic(error.reason_code(), "PERSISTENT", "ERROR", true)),
-            );
-            // Answered, THEN closed. §11.7: a silent close is indistinguishable
-            // from "the agent is not running".
-            write_frame(&mut stream, &reject).await?;
-            return Ok(());
-        }
-    };
-
-    let held = principal.scopes(&context.groups);
-    let Some(granted) = negotiate(&context, &mut stream, &held).await? else {
-        return Ok(());
-    };
-
-    tracing::info!(
-        target: "twinvpn.mi",
-        principal = %principal.actor(),
-        pid = principal.pid,
-        scopes = ?granted.names(),
-        "a management client attached"
-    );
-
-    loop {
-        let request = match read_frame(&mut stream).await {
-            Ok(envelope) => envelope,
-            Err(FrameError::Closed) => {
-                // PS-3, made visible: the client going away is an INFO, and
-                // nothing else happens.
-                tracing::info!(
-                    target: "twinvpn.mi",
-                    principal = %principal.actor(),
-                    "a management client detached; the agent continues unchanged"
-                );
-                return Ok(());
-            }
-            Err(error) => {
-                let reject = envelope(
-                    context.as_of_ms(),
-                    Body::Reject(diagnostic(
-                        error.reason_code(),
-                        "PERSISTENT",
-                        "ERROR",
-                        false,
-                    )),
-                );
-                let _ = write_frame(&mut stream, &reject).await;
-                return Err(error);
-            }
-        };
-
-        // MI-3: the agent never receives a response or an event. A client that
-        // sends one has broken the protocol.
-        if !request.body.is_client_originated() {
-            let reject = envelope(
-                context.as_of_ms(),
-                Body::Reject(diagnostic(
-                    "PROTO.UNPARSEABLE_ENVELOPE",
-                    "PERSISTENT",
-                    "ERROR",
-                    false,
-                )),
-            );
-            write_frame(&mut stream, &reject).await?;
-            return Ok(());
-        }
-
-        let response = match request.body {
-            Body::Request(ref call) => dispatch(&context, &principal, &granted, call).await,
-            Body::Goodbye => return Ok(()),
-            // A second `Hello` on one connection: §11.7 fixes the version "for
-            // the life of the connection", so there is nothing to renegotiate.
-            Body::Hello(_) => Response {
-                ok: false,
-                result: Vec::new(),
-                diagnostic: Some(diagnostic(
-                    "PROTO.UNPARSEABLE_ENVELOPE",
-                    "PERSISTENT",
-                    "ERROR",
-                    false,
-                )),
-                committed_at_net_seq: None,
-            },
-            _ => unreachable!("is_client_originated already excluded these"),
-        };
-
-        let mut reply = envelope(context.as_of_ms(), Body::Response(response));
-        reply.correlation_id = request.request_id;
-        write_frame(&mut stream, &reply).await?;
-    }
-}
-
-/// §11.7's `Hello`/`HelloAck`, including its mismatch table.
-///
-/// Returns `None` when the connection was rejected and closed.
-async fn negotiate(
-    context: &ServerContext,
-    stream: &mut tokio::net::UnixStream,
-    held: &Scopes,
-) -> Result<Option<Scopes>, FrameError> {
-    let hello = read_frame(stream).await?;
-    let Body::Hello(Hello {
-        mi_version_min,
-        mi_version_max,
-        requested_scopes,
-        ..
-    }) = hello.body
-    else {
-        // MI-3: the first message on a connection is a `Hello`. Anything else
-        // is answered and closed, never silently dropped.
-        let reject = envelope(
-            context.as_of_ms(),
-            Body::Reject(diagnostic(
-                "PROTO.UNPARSEABLE_ENVELOPE",
-                "PERSISTENT",
-                "ERROR",
-                false,
-            )),
-        );
-        write_frame(stream, &reject).await?;
-        return Ok(None);
-    };
-
-    // §11.7's mismatch table. Both refusals name a REGISTERED code and are
-    // written, then the connection closes — "A silent close is prohibited: it is
-    // indistinguishable from 'the agent is not running', and it sends the user
-    // to reinstall rather than to update."
-    if mi_version_max < MI_VERSION_MIN || mi_version_min > MI_VERSION {
-        let reject = envelope(
-            context.as_of_ms(),
-            // ADR-0017 spells these `MGMT.VERSION_TOO_OLD` / `TOO_NEW`, neither
-            // of which the frozen registry carries. `PROTO.VERSION_UNSUPPORTED`
-            // is the nearest registered code; the CLI maps it to exit 5.
-            Body::Reject(diagnostic(
-                "PROTO.VERSION_UNSUPPORTED",
-                "PERSISTENT",
-                "ERROR",
-                true,
-            )),
-        );
-        write_frame(stream, &reject).await?;
-        return Ok(None);
-    }
-
-    // §11.7: "Select `min(maxes)`; fixed for the connection."
-    let selected = mi_version_max.min(MI_VERSION);
-    // MI-S1: `policy(principal) ∩ requested`, with the difference NAMED.
-    let (granted, withheld) = held.grant(&requested_scopes);
-
-    let ack = HelloAck {
-        mi_version: selected,
-        agent_version: AGENT_VERSION.to_owned(),
-        build_profile: BUILD_PROFILE.to_owned(),
-        granted_scopes: granted.names(),
-        withheld_scopes: withheld,
-        // §11.7: "The catalogue, not the version, is the capability contract."
-        // Taken from the core's own catalogue so it cannot disagree with what
-        // this agent would actually serve.
-        catalogue_digest: format!("{:016x}", twinvpn_mgmt::catalogue_digest()),
-        event_cursor: context.core.generation(),
-        protocol_epoch_range: epoch_range(),
-        platform_ctx: context.platform_ctx.clone(),
-    };
-    let reply = envelope(context.as_of_ms(), Body::HelloAck(Box::new(ack)));
-    write_frame(stream, &reply).await?;
-    Ok(Some(granted))
-}
-
-/// VR-3's epoch **table**, read from the core rather than inferred.
-///
-/// ADR-0018 VR-3 forbids inferring the epoch from `core_version`, and
-/// `twinvpn_core::EPOCH_TABLE` is the table it requires instead.
-fn epoch_range() -> [u32; 2] {
-    twinvpn_core::EPOCH_TABLE.first().map_or([1, 1], |row| {
-        [row.protocol_epoch_min, row.protocol_epoch_max]
-    })
-}
-
 /// Answers one request.
 ///
 /// **Translate, marshal, schedule and render — never decide.** Every branch here
 /// is on a fact the core or the OS supplied.
-async fn dispatch(
+pub(super) async fn dispatch(
     context: &ServerContext,
     principal: &Principal,
     granted: &Scopes,
+    subscription: Option<u64>,
     call: &Request,
 ) -> Response {
     // MI-21's four, which have no core counterpart because each is about THE
     // CONNECTION. They are answered here and never submitted.
-    if let Some(response) = transport_op(granted, &call.operation) {
+    if let Some(response) = transport_op(context, granted, subscription, &call.operation) {
         return response;
     }
 
@@ -334,10 +140,11 @@ async fn dispatch(
 
     // ADR-0016 §11.7 and ADR-0017 §11.5's third consequence: holding
     // `mgmt.admin` is necessary and NOT sufficient. Every ADMINISTER operation
-    // needs the §11.14 ceremony freshly, per call — and this build has no
-    // ceremony, so it refuses rather than performing one on a scope alone.
+    // needs the §11.14 ceremony freshly, per call.
     if entry.administer {
-        return failure("MGMT.DISARM_REQUIRES_LOCAL_AUTH", "POLICY", "WARN", true);
+        if let Err(refusal) = administer_ceremony(principal, granted) {
+            return *refusal;
+        }
     }
 
     // `twinvpn_core::core::unimplemented()` is the core's own list. **Surfaced as
@@ -372,26 +179,53 @@ async fn dispatch(
     // it so exactly one thread holds the core for mutation at a time (S-47).
     let core = Arc::clone(&context.core);
     let guard = context.submission.lock().await;
+
+    // **The body of a read, made reachable.** `Core::submit` returns `Ok(())`
+    // and *publishes* the operation's result as a `CommandCompleted` event, so
+    // the result never comes back through the return value. The registration is
+    // taken BEFORE the submission and carries the cursor read before it, so the
+    // drain thread can settle it with this call's own completion and with no
+    // other. `Fanout::expect_completion` states why both facts are needed.
+    let cursor_before = context.core.event_cursor();
+    let (pending, completion) = context.fanout.expect_completion(op.name(), cursor_before);
+
     let submitted = tokio::task::spawn_blocking(move || core.submit(&submission)).await;
     drop(guard);
 
     // The blocking task was cancelled or panicked. F-7 contains a panic inside
     // the core and poisons the instance; a join failure here is the shell's own,
-    // and is named rather than swallowed.
+    // and is named rather than swallowed. The registration is withdrawn first,
+    // or it would match a later call of the same operation.
     let Ok(submitted) = submitted else {
+        context.fanout.cancel_completion(pending);
         return failure("INTERNAL.UNEXPECTED_STATE", "FATAL", "CRITICAL", false);
+    };
+
+    // Awaited only on the success path, because only that path publishes a
+    // completion — and awaited without a timeout, because `submit` returning
+    // `Ok` means the event is in the queue and the drain will reach it. CD-2:
+    // timeouts are the core's, so a deadline invented here would be the shell
+    // holding a decision it was not given.
+    let body = if submitted.is_ok() {
+        completion.await.unwrap_or_default()
+    } else {
+        context.fanout.cancel_completion(pending);
+        Vec::new()
     };
 
     match submitted {
         Ok(()) => Response {
             ok: true,
-            // Empty, and not because the operation produced nothing:
-            // `Core::submit` returns `Ok(())` and publishes the body as a
-            // `CommandCompleted` event on the one ordered stream (F-5). The
-            // agent does not yet push events, so a read's body is currently
-            // unreachable by an MI client — reported in `shells/linux/README.md`
-            // §7 rather than papered over with a fabricated body.
-            result: Vec::new(),
+            // **The body of a read.** `Core::submit` returns `Ok(())` and
+            // publishes the operation's result as a `CommandCompleted` event on
+            // the one ordered stream (F-5), so the result is not *returned* — it
+            // is *published*. Wave 1 read that as "unreachable" and shipped an
+            // empty `result`; it is reachable, and this is where it is reached.
+            //
+            // Two facts make the correlation exact rather than a guess: the F-6
+            // lock means no other submission is in flight, and `cursor_before`
+            // means no earlier completion can match. See `result_for`.
+            result: body,
             diagnostic: None,
             // **MI-6**, and its predicate is `maps_to_mutating_c1` — NOT
             // `entry.mutating`. See that function: the cursor is a position in
@@ -499,7 +333,12 @@ fn committed_cursor(op: CoreCommand) -> Option<u64> {
 ///
 /// `None` means "not one of the four", which is the only way a name reaches the
 /// core command set below.
-fn transport_op(granted: &Scopes, operation: &str) -> Option<Response> {
+fn transport_op(
+    context: &ServerContext,
+    granted: &Scopes,
+    subscription: Option<u64>,
+    operation: &str,
+) -> Option<Response> {
     // `version.get` is deliberately in BOTH sets: MI-21 splits that one
     // operation across the layers by name, and the client sees one operation.
     // So it is not answered here; it falls through to the core, and the MI half
@@ -526,14 +365,7 @@ fn transport_op(granted: &Scopes, operation: &str) -> Option<Response> {
                 failure("POLICY.POLICY_DENIED", "POLICY", "ERROR", true)
             }
         }
-        TransportOp::EventResync => {
-            // MI-9 requires the snapshot to be taken under the agent's state
-            // lock with the cursor assigned INSIDE it. This build has no
-            // subscribed-topic snapshot to take, so it refuses rather than
-            // returning an empty snapshot a client would treat as current
-            // truth — which is MI-9a's whole point.
-            failure("MGMT.STREAM_COMPACTED", "TRANSIENT", "INFO", true)
-        }
+        TransportOp::EventResync => resync(context, granted, subscription),
         TransportOp::Hello => failure("PROTO.UNPARSEABLE_ENVELOPE", "PERSISTENT", "ERROR", false),
         TransportOp::VersionGetMiHalf => unreachable!("filtered above"),
     })
@@ -580,7 +412,183 @@ pub struct CatalogueRow {
     pub implemented: bool,
 }
 
-fn envelope(as_of_ms: u64, body: Body) -> MgmtEnvelope {
+/// **MI-9's `event.resync`**, answered with a snapshot rather than a refusal.
+///
+/// > The snapshot MUST be taken under the agent's state lock with the cursor
+/// > assigned **inside** it.
+///
+/// [`Fanout::resync`] is that one lock. What comes back is the latest event on
+/// each subscribed topic plus the cursor the snapshot is current as of, encoded
+/// as the response body.
+///
+/// # Why wave 1 refused, and why refusing was the wrong answer
+///
+/// The old code returned `MGMT.STREAM_COMPACTED` on the reasoning that "this
+/// build has no subscribed-topic snapshot to take, so it refuses rather than
+/// returning an empty snapshot a client would treat as current truth".
+///
+/// An empty snapshot **is** current truth on a freshly-started agent: nothing has
+/// happened yet. What MI-9a actually forbids is an empty snapshot that *hides a
+/// gap* — and the cursor beside it is exactly what makes a gap detectable, since
+/// a client compares it against the cursor it last saw. Refusing left a client
+/// with no way to recover from a `Compacted` marker at all, which turns MI-19's
+/// recoverable gap into an unrecoverable one.
+///
+/// A client that has not subscribed gets the refusal, because for it there is no
+/// stream position to be current as of and a cursor would be a number with no
+/// referent.
+fn resync(context: &ServerContext, granted: &Scopes, subscription: Option<u64>) -> Response {
+    if !granted.holds(twinvpn_mgmt::Scope::Events) {
+        return failure("POLICY.POLICY_DENIED", "POLICY", "ERROR", true);
+    }
+    let Some(id) = subscription else {
+        // Not attached to the stream: `MGMT.RESYNC_REQUIRED` is what ADR-0017
+        // spells here and `twinvpn_mgmt::SUBSTITUTIONS` records that the frozen
+        // registry collapses it onto `MGMT.STREAM_COMPACTED` — "the worst of the
+        // sixteen", because MI-9a needs the two distinguishable. Named rather
+        // than glossed.
+        return failure("MGMT.STREAM_COMPACTED", "TRANSIENT", "INFO", true);
+    };
+    let snapshot = context.fanout.resync(id);
+    match serde_json::to_vec(&ResyncBody::from(snapshot)) {
+        Ok(result) => Response {
+            ok: true,
+            result,
+            diagnostic: None,
+            committed_at_net_seq: None,
+        },
+        Err(_) => failure("INTERNAL.UNEXPECTED_STATE", "FATAL", "CRITICAL", false),
+    }
+}
+
+/// `event.resync`'s body: the cursor, and the latest event per topic.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ResyncBody {
+    /// The stream position this snapshot is current as of.
+    ///
+    /// A client compares it against the cursor it last saw: equal means it has
+    /// missed nothing, greater means it has, and that comparison is the whole
+    /// reason the cursor is assigned inside the snapshot's lock.
+    pub cursor: u64,
+    /// The latest event on each topic that has one, in `topics::ALL` order.
+    pub rows: Vec<crate::mi::wire::Event>,
+}
+
+impl From<super::events::Snapshot> for ResyncBody {
+    fn from(snapshot: super::events::Snapshot) -> Self {
+        Self {
+            cursor: snapshot.cursor,
+            rows: snapshot.rows.into_iter().map(|(_, event)| event).collect(),
+        }
+    }
+}
+
+/// The ADR-0016 §11.14 ceremony, as **ADR-0012 KS-21a defines it for HC-3**.
+///
+/// # Wave 1 refused every ADMINISTER operation. That was over-strict, and the
+/// reason it was over-strict is a host-class rule this shell had not read.
+///
+/// KS-21 requires "a **local interactive action** on the device itself" and
+/// "**OS-mediated authentication** of an `Owner`/administrator principal:
+/// `polkit` on Linux…". Read alone, that needs a D-Bus client the workspace does
+/// not have, so the shell refused and reported the gap.
+///
+/// **KS-21a is the host-class rule that resolves it**, and it is worth quoting
+/// because it inverts the conclusion:
+///
+/// > On `HC-3` (headless servers, containers, routers) there is no interactive
+/// > session, so read literally this clause makes disarm impossible — which
+/// > contradicts **KS-20**'s "blocked must not mean bricked"… **A caller on the
+/// > local management socket, authenticated by kernel-supplied peer credentials
+/// > to an administrator principal, satisfies this clause on `HC-3`.**
+///
+/// This host is HC-3 (`BUILD_PROFILE == "H-SRV"`, ADR-0023 EM-1). So the
+/// ceremony here is not a missing polkit call — `SO_PEERCRED` **is** the
+/// OS-mediated authentication KS-21 clause 2 asks for, and ADR-0023 EM-39 says
+/// so in as many words: *"The principal is established by the transport's
+/// attested credentials, never self-asserted."*
+///
+/// # What the ceremony actually checks
+///
+/// 1. **The principal is kernel-attested.** [`Principal::from_stream`] read it
+///    from `SO_PEERCRED` before this connection was negotiated; a client cannot
+///    assert it. That is KS-21 clause 2 on this host class.
+/// 2. **The principal holds the administrator class.** `mgmt.admin` comes from
+///    `twinvpn-operators` membership via the core's catalogue, and PS-12a makes
+///    that membership an install-time decision.
+/// 3. **The transport is the local `AF_UNIX` socket.** Structurally true — there
+///    is no other transport in this binary, and ADR-0017 §11.2 rejected loopback
+///    TCP and abstract sockets precisely so this could be structural rather than
+///    checked. **KS-21a's third limit** — "disarm MUST NOT be reachable over
+///    `ubus`" — is therefore satisfied by there being no `ubus` at all.
+///
+/// # What it deliberately does NOT do, and why that is not a gap
+///
+/// KS-21 clause 3's confirmation-that-names-the-consequence and ADR-0023 EM-38's
+/// `--confirm-unprotected` are the **client's**, not the agent's:
+/// `twinvpnctl` exits 2 rather than prompting, which is EM-38's shape, and
+/// `MI-17` requires the action to "fail at **request** rather than at commit" —
+/// so an unauthorized caller is refused here, before any confirmation is
+/// solicited anywhere.
+///
+/// # The disclosure is mandatory and is not optional on success
+///
+/// EM-39 clause 1: an `ADMINISTER` action from a remote administrative session
+/// "**is** the headless realization of 'the `Owner`, present'… and is
+/// **permitted and disclosed**, with `PLATFORM.PRIV.REMOTE_ADMIN_USED` recording
+/// principal, session type, and source. **It is never silent.**" That code is
+/// not in the frozen registry, so it is emitted as the `specified_code` of a
+/// journal line rather than as a wire `Diagnostic` — the same shape this shell
+/// already uses for `PLATFORM.SERVICE.SUPERVISOR_ABSENT`.
+///
+/// # Errors
+///
+/// The [`Response`] to send instead of performing the operation.
+pub fn administer_ceremony(principal: &Principal, granted: &Scopes) -> Result<(), Box<Response>> {
+    // Clause 2 on HC-3. Holding `mgmt.admin` is what "administrator principal"
+    // means here, and it came from the core's catalogue plus PS-12a's group.
+    if !granted.holds(twinvpn_mgmt::Scope::Admin) {
+        // ADR-0012 names `POLICY.KILLSWITCH.DISARM_REFUSED_REMOTE` for a refused
+        // disarm and says it is "always a security event". Unregistered; the
+        // nearest registered code that keeps the class is used, and the ADR
+        // spelling is carried in the log line below.
+        tracing::warn!(
+            target: "twinvpn.mi",
+            specified_code = "POLICY.KILLSWITCH.DISARM_REFUSED_REMOTE",
+            reason_code = "MGMT.DISARM_REQUIRES_LOCAL_AUTH",
+            principal = %principal.actor(),
+            pid = principal.pid,
+            "an ADMINISTER operation was refused: the caller does not hold the \
+             administrator class. ADR-0012 §11.10: a refused disarm is always a \
+             security event"
+        );
+        return Err(Box::new(failure(
+            "MGMT.DISARM_REQUIRES_LOCAL_AUTH",
+            "POLICY",
+            "WARN",
+            true,
+        )));
+    }
+
+    // Clause 1 and 3 hold structurally: the principal is `SO_PEERCRED`'s and the
+    // transport is the local `AF_UNIX` endpoint. The ceremony is satisfied, and
+    // EM-39 makes the disclosure part of satisfying it rather than a follow-up.
+    tracing::warn!(
+        target: "twinvpn.mi",
+        specified_code = "PLATFORM.PRIV.REMOTE_ADMIN_USED",
+        principal = %principal.actor(),
+        pid = principal.pid,
+        uid = principal.uid,
+        session = "af_unix/so_peercred",
+        host_class = "HC-3",
+        "an ADMINISTER operation was authorized by ADR-0012 KS-21a's host-class \
+         ceremony: a kernel-attested administrator principal on the local \
+         management socket. This is never silent (ADR-0023 EM-39)"
+    );
+    Ok(())
+}
+
+pub(super) fn envelope(as_of_ms: u64, body: Body) -> MgmtEnvelope {
     MgmtEnvelope {
         mi_version: MI_VERSION,
         request_id: vec![0; 16],
@@ -592,7 +600,12 @@ fn envelope(as_of_ms: u64, body: Body) -> MgmtEnvelope {
     }
 }
 
-fn diagnostic(reason_code: &str, class: &str, severity: &str, user_actionable: bool) -> Diagnostic {
+pub(super) fn diagnostic(
+    reason_code: &str,
+    class: &str,
+    severity: &str,
+    user_actionable: bool,
+) -> Diagnostic {
     // The registry is consulted for the class and the actionability where the
     // code is registered, so the caller's arguments are a fallback rather than
     // an assertion: MI-14 requires the resolved attributes to travel with the

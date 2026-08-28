@@ -10,7 +10,12 @@
 # THIS MANIFEST IS OWNED BY THE INTEGRATION LEAD.
 [workspace]
 resolver = "2"
-members = ["twinvpnd", "twinvpnctl"]
+# `twinvpn-unblock` is the third member, added by `desktop-linux` under an
+# explicit one-file grant from the integration lead — ADR-0012 KS-20a makes the
+# offline unblock command MANDATORY on Linux ("without it, a bug in this ADR
+# bricks connectivity"), it must be a separate binary rather than a `twinvpnctl`
+# subcommand, and a separate binary cannot exist without a line here.
+members = ["twinvpnd", "twinvpnctl", "twinvpn-unblock"]
 
 [workspace.package]
 version      = "0.1.0"

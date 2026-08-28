@@ -72,10 +72,20 @@ fn rtmsg(family: u8, dst_len: u8, table: u8, rtype: u8) -> [u8; 12] {
 
 /// `struct fib_rule_hdr`, which shares `rtmsg`'s layout.
 fn fib_rule_hdr(family: u8, table: u8, action: u8) -> [u8; 12] {
+    fib_rule_hdr_flags(family, table, action, 0)
+}
+
+/// The same, with `fib_rule_hdr.flags` set.
+///
+/// The trailing four bytes of the header are `__u32 flags`, and the only flag
+/// this adapter sets is [`fib::INVERT`]. Written as a separate constructor so
+/// the ordinary rules cannot acquire a flag by accident.
+fn fib_rule_hdr_flags(family: u8, table: u8, action: u8, flags: u32) -> [u8; 12] {
     let mut out = [0u8; 12];
     out[0] = family;
     out[4] = table;
     out[7] = action;
+    out[8..12].copy_from_slice(&flags.to_le_bytes());
     out
 }
 
@@ -96,6 +106,12 @@ mod fib {
     pub const SUPPRESS_PREFIXLEN: u16 = 14;
     /// `FRA_TABLE` — the 32-bit table id, since `fib_rule_hdr.table` is a `u8`.
     pub const TABLE: u16 = 15;
+    /// `FIB_RULE_INVERT` — "match everything this rule does NOT select".
+    ///
+    /// The flag that makes the fwmark rule read `not fwmark <mark> lookup 52`.
+    /// See [`super::add_rule`] for why the inverted sense is the correct one and
+    /// what the un-inverted one did.
+    pub const INVERT: u32 = 0x0000_0002;
 }
 
 const fn af(family: AddressFamily) -> u8 {
@@ -399,12 +415,45 @@ pub const SUPPRESS_PRIORITY: u32 = 31_999;
 ///
 /// Two rules, not one:
 ///
-/// - **`suppress_prefixlength 0`** on the `main` table, so a lookup that would
-///   have matched only a default route falls through instead. Without it, the
-///   host's own default route wins for our own encapsulated packets and the
-///   tunnel's traffic never reaches the underlay.
-/// - **`fwmark <mark> lookup 52`**, so our own marked packets take the underlay
-///   table. This is the loop guard §7.2 calls "the real" one.
+/// - **`suppress_prefixlength 0`** on the `main` table (priority 31999), so a
+///   lookup that would have matched only a default route falls through instead.
+///   Without it, the host's own default route wins for protected traffic and the
+///   tunnel carries nothing.
+/// - **`not fwmark <mark> lookup 52`** (priority 32000): everything that is
+///   *not* the tunnel's own encapsulated traffic is looked up in table 52, where
+///   the contract's overlay routes live. Our own marked packets do **not** match
+///   it, fall through to `main`, and take the underlay. This is the loop guard
+///   §7.2 calls "the real" one.
+///
+/// # The inversion is load-bearing, and the un-inverted form was a leak
+///
+/// Wave 1 installed `fwmark <mark> lookup 52` — **without** the inversion — and
+/// the two rules then read:
+///
+/// ```text
+/// 31999: from all lookup main suppress_prefixlength 0
+/// 32000: from all fwmark 0x7677 lookup 52
+/// 32766: from all lookup main
+/// ```
+///
+/// Measured against a real kernel with `ip route get` (`tests/matrix.rs`), an
+/// ordinary application's packet to `100.64.0.5` — the protected overlay space —
+/// resolved to **`dev underlay0`**: rule 31999 suppressed `main`'s default,
+/// rule 32000 did not match an unmarked packet, and rule 32766 found the default
+/// route again. Table 52 held the correct overlay route the whole time and
+/// **nothing ever looked in it**, so the tunnel carried no traffic at all and
+/// every packet to a peer left untunneled. Both families, identically.
+///
+/// That is not a subtle degradation; it is the routing half of the product not
+/// working, and it was invisible to every test that checked `program()` returned
+/// `Ok` or that table 52 contained the right route — both of which were true.
+/// Only the kernel's own FIB answer showed it.
+///
+/// With the inversion the same lookup resolves to `dev twin0`, an unprotected
+/// destination still resolves to `underlay0` (ADR-0012 KS-3a: traffic outside
+/// the protected set is not governed by this table), and a *marked* packet —
+/// ours — still resolves to `underlay0`, which is the loop guard doing its job.
+/// All three are asserted in `tests/matrix.rs` against `ip route get`.
 async fn add_rule(
     sock: &NetlinkSocket,
     family: AddressFamily,
@@ -449,7 +498,12 @@ async fn add_rule(
         .unwrap_or(0x605),
         sock.next_seq(),
     );
-    b.payload(&fib_rule_hdr(af(family), netlink::TABLE, fib::ACT_TO_TBL));
+    b.payload(&fib_rule_hdr_flags(
+        af(family),
+        netlink::TABLE,
+        fib::ACT_TO_TBL,
+        fib::INVERT,
+    ));
     b.attr_u32(fib::PRIORITY, RULE_PRIORITY);
     b.attr_u32(fib::FWMARK, mark);
     b.attr_u32(fib::TABLE, u32::from(netlink::TABLE));
@@ -469,16 +523,25 @@ async fn del_rule(
     family: AddressFamily,
     mark: u32,
 ) -> Result<(), PlatformError> {
-    for (priority, table, fwmark) in [
-        (RULE_PRIORITY, netlink::TABLE, Some(mark)),
-        (SUPPRESS_PRIORITY, libc::RT_TABLE_MAIN, None),
+    for (priority, table, fwmark, flags) in [
+        (RULE_PRIORITY, netlink::TABLE, Some(mark), fib::INVERT),
+        (SUPPRESS_PRIORITY, libc::RT_TABLE_MAIN, None, 0),
     ] {
         let mut b = NlBuilder::new(
             libc::RTM_DELRULE,
             u16::try_from(libc::NLM_F_REQUEST | libc::NLM_F_ACK).unwrap_or(0x5),
             sock.next_seq(),
         );
-        b.payload(&fib_rule_hdr(af(family), table, fib::ACT_TO_TBL));
+        // The flags are part of the rule's identity: a delete that omitted
+        // `INVERT` would not match the rule `add_rule` installed, and the
+        // "already gone" arm below would swallow the mismatch as success —
+        // leaving a policy rule behind that outlives the process.
+        b.payload(&fib_rule_hdr_flags(
+            af(family),
+            table,
+            fib::ACT_TO_TBL,
+            flags,
+        ));
         b.attr_u32(fib::PRIORITY, priority);
         if let Some(mark) = fwmark {
             b.attr_u32(fib::FWMARK, mark);

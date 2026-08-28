@@ -26,22 +26,29 @@
 //!
 //! | Form | Dies with the tunnel object | This build |
 //! |---|---|---|
-//! | `systemd-resolved` `SetLinkDNS` + `SetLinkDomains(["~."])` + `SetLinkDefaultRoute(true)` | ✔ per-link config discarded with the link | **not implemented** — see below |
-//! | Owner-tagged `/etc/resolv.conf` rewrite | ✘ | **implemented** |
+//! | `systemd-resolved` `SetLinkDNS` + `SetLinkDomains(["~."])` + `SetLinkDefaultRoute(true)` | ✔ per-link config is discarded with the link | **implemented** — [`crate::resolved`] |
+//! | Owner-tagged `/etc/resolv.conf` rewrite | ✘ | **implemented**, as the fallback |
 //!
-//! The `systemd-resolved` path is the preferred one and is **not** implemented
-//! here, because it is a D-Bus API and no D-Bus client is in the workspace's
-//! dependency set (`core/Cargo.toml` is the integration lead's). That is
-//! reported, not hidden: [`ResolverBackend::detect`] notices `resolved` is
-//! running and returns [`ResolverBackend::ResolvedUnavailable`], which the
-//! adapter surfaces as `DNS.PLATFORM.SCOPED_API_UNAVAILABLE` — a registered
-//! code — rather than silently using the weaker form and reporting success.
+//! [`apply_scoped`] takes the preferred path where the host offers it and the
+//! `resolv.conf` path where it does not, and [`ResolverBackend::detect`] is the
+//! one place that decision is made. Wave 1 implemented only the second, because
+//! `org.freedesktop.resolve1` is a D-Bus API and no D-Bus client is in the
+//! workspace's dependency set; [`crate::resolved`] reaches it through
+//! `resolvectl(1)` — `systemd`'s own client for that interface — which needs no
+//! new dependency and is the same mechanism this crate already uses for
+//! `nft(8)`. The trade is stated there rather than glossed.
 //!
-//! ADR-0011 §11.9 is explicit about what that costs and what still holds:
-//! the `resolv.conf` rewrite "races NetworkManager/`dhclient`" and is "the
-//! weakest desktop case", but **"containment is the guarantee, not the file"** —
-//! [`crate::nft`]'s class-6 denial of 53/853 off the overlay is what actually
-//! prevents the leak, and it is installed either way.
+//! **Which path was taken never changes the guarantee.** ADR-0011 §11.9:
+//!
+//! > Containment is always ADR-0012 §11.2 class 6 + Tier 2 — one dual-family
+//! > object, interface-scoped, default-deny — and **it is the guarantee**.
+//!
+//! [`crate::nft`]'s class-6 denial of 53/853 off the overlay is installed on
+//! both paths. What DN-21 buys is *steering*, and DN-15 is careful that steering
+//! is not security: "a build that filters records but does not block egress is a
+//! leaking build that produces prettier timeouts". The `resolv.conf` rewrite
+//! "races NetworkManager/`dhclient`" and is "the weakest desktop case" — that is
+//! why the preferred path is preferred, not why it is required.
 
 use std::fs;
 use std::io::Write as _;
@@ -67,11 +74,22 @@ pub const RESOLV_CONF: &str = "/etc/resolv.conf";
 pub const OWNER_TAG: &str = "# twinvpn-owned";
 
 /// Which resolver mechanism this host offers.
+///
+/// Three states and not two, because "`resolved` is in force" and "we can reach
+/// its D-Bus interface" are different questions with different answers, and
+/// collapsing them would report the same thing for a host that has no `resolved`
+/// at all and one that has `resolved` and no `resolvectl`. The first is normal;
+/// the second is a packaging problem an operator can fix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolverBackend {
-    /// `systemd-resolved` is running and is the form DN-21 prefers — but this
-    /// build has no D-Bus client, so the preferred path is **unavailable** and
-    /// says so rather than degrading silently.
+    /// `systemd-resolved` is in force **and** reachable. DN-21's preferred form:
+    /// the configuration lives inside the link and dies with it.
+    Resolved,
+    /// `systemd-resolved` is in force and the client that reaches it is absent,
+    /// so the preferred path cannot be taken on this host.
+    ///
+    /// Surfaced as `DNS.PLATFORM.SCOPED_API_UNAVAILABLE` — a registered code —
+    /// rather than silently using the weaker form and reporting success.
     ResolvedUnavailable,
     /// No `resolved`; the owner-tagged `/etc/resolv.conf` rewrite applies.
     ResolvConf,
@@ -88,10 +106,33 @@ impl ResolverBackend {
         let stub_present =
             fs::read_to_string(RESOLV_CONF).is_ok_and(|text| text.contains("127.0.0.53"));
         let unit_running = Path::new("/run/systemd/resolve/stub-resolv.conf").exists();
-        if stub_present || unit_running {
-            Self::ResolvedUnavailable
+        if !(stub_present || unit_running) {
+            return Self::ResolvConf;
+        }
+        if crate::resolved::binary().is_some() {
+            Self::Resolved
         } else {
-            Self::ResolvConf
+            Self::ResolvedUnavailable
+        }
+    }
+
+    /// Whether DN-21's preferred form is what this host will take.
+    #[must_use]
+    pub const fn is_scoped(self) -> bool {
+        matches!(self, Self::Resolved)
+    }
+
+    /// The registered `reason_code` a host takes the weaker path under, or
+    /// `None` where the preferred one applies.
+    ///
+    /// Named so the adapter's posture reports *why* rather than merely *that*.
+    #[must_use]
+    pub const fn degradation(self) -> Option<&'static str> {
+        match self {
+            Self::Resolved => None,
+            Self::ResolvedUnavailable | Self::ResolvConf => {
+                Some("DNS.PLATFORM.SCOPED_API_UNAVAILABLE")
+            }
         }
     }
 }
@@ -319,6 +360,95 @@ pub fn apply(config: &DnsConfig, restore_point_path: &Path) -> Result<RestorePoi
     Ok(point)
 }
 
+/// **DN-19's `apply`, taking DN-21's preferred path where the host offers it.**
+///
+/// ```text
+/// RestorePoint persisted ─► platform scoped-DNS applied ─► read back
+/// ```
+///
+/// The restore point is written **first on both paths**, and that is deliberate
+/// even though DN-21's own table says a per-link configuration "needs no
+/// restoration at all". DN-18 admits no exception — "written and flushed
+/// **before** the mutation, never after" — and DN-21 itself calls the restore
+/// point on this path "belt-and-braces" rather than unnecessary. Keeping it
+/// costs one `fsync` and covers the case that is easy to forget: a `resolved`
+/// restarted while our link exists.
+///
+/// # The read-back is not optional
+///
+/// On the scoped path the mutation is confirmed against `resolvectl status`,
+/// not against the fact that three invocations exited zero — the same discipline
+/// as the nftables read-back, and for the same reason. A link with our servers
+/// and no default route resolves nothing through us while reporting success at
+/// every step.
+///
+/// # Errors
+///
+/// The restore-point write's error, **before any mutation**, or the mutation's.
+/// A scoped apply that cannot be confirmed is an error even though every call
+/// succeeded.
+pub fn apply_scoped(
+    config: &DnsConfig,
+    restore_point_path: &Path,
+    link: &str,
+) -> Result<(RestorePoint, ResolverBackend), PlatformError> {
+    let backend = ResolverBackend::detect();
+    if !backend.is_scoped() {
+        // The fallback, with the degradation named rather than silent.
+        tracing::warn!(
+            target: "twinvpn.platform.linux.resolver",
+            reason_code = backend.degradation().unwrap_or("DNS.PLATFORM.SCOPED_API_UNAVAILABLE"),
+            ?backend,
+            "taking ADR-0011 DN-21's weaker Linux form: the owner-tagged \
+             /etc/resolv.conf rewrite. Containment is unaffected — the class-6 \
+             denial is installed either way (§11.9)"
+        );
+        return apply(config, restore_point_path).map(|point| (point, backend));
+    }
+
+    // DN-18: the restore point is persisted and flushed BEFORE the mutation, on
+    // this path too.
+    let point = RestorePoint::capture(Path::new(RESOLV_CONF))?;
+    write_atomic(restore_point_path, &point.encode(), 0o600)?;
+
+    crate::resolved::apply(link, config)?;
+
+    // The read-back. What `resolved` says, not what our calls returned.
+    let state = crate::resolved::read_back(link)?;
+    if !state.is_scoped() {
+        // Leave nothing half-applied: a link with servers and no default route
+        // is a steering failure, and reverting is cheaper than reasoning about
+        // which of the three calls did not take.
+        let _ = crate::resolved::revert(link);
+        return Err(oserr::unavailable("resolvectl.readback", libc::EPROTO));
+    }
+    Ok((point, backend))
+}
+
+/// Undoes [`apply_scoped`]'s mutation.
+///
+/// DN-19's teardown: "point host away (restore `RestorePoint`) → reconciler
+/// confirms → unbind stub — **never unbind-then-restore**".
+///
+/// On the scoped path there is nothing to restore, which is DN-21's whole
+/// argument: per-link configuration is additive, so the host's prior
+/// configuration was never overwritten and reverting the link is the complete
+/// teardown.
+///
+/// # Errors
+///
+/// The revert's failure, or the restore's.
+pub fn revert_scoped(
+    backend: ResolverBackend,
+    point: &RestorePoint,
+    link: &str,
+) -> Result<(), PlatformError> {
+    if backend.is_scoped() {
+        return crate::resolved::revert(link);
+    }
+    point.restore()
+}
+
 /// Writes `contents` to `path` atomically, and durably.
 ///
 /// Temp file → `fsync` → `rename` → `fsync` the directory. The directory fsync
@@ -500,13 +630,71 @@ mod tests {
     }
 
     #[test]
-    fn the_preferred_resolved_path_is_reported_absent_rather_than_silently_downgraded() {
-        // DN-21 prefers `systemd-resolved`; this build has no D-Bus client, so
-        // the honest answer is that the preferred API is unavailable.
+    fn the_backend_distinguishes_no_resolved_from_unreachable_resolved() {
+        // Three states, not two. "This host has no `resolved`" is normal; "this
+        // host has `resolved` and no `resolvectl`" is a packaging problem an
+        // operator can fix — and collapsing them would report the same thing for
+        // both and leave nobody able to act.
         let backend = ResolverBackend::detect();
-        assert!(matches!(
-            backend,
-            ResolverBackend::ResolvedUnavailable | ResolverBackend::ResolvConf
-        ));
+        match backend {
+            ResolverBackend::Resolved => {
+                assert!(backend.is_scoped());
+                assert_eq!(backend.degradation(), None);
+                assert!(crate::resolved::binary().is_some());
+            }
+            ResolverBackend::ResolvedUnavailable => {
+                assert!(!backend.is_scoped());
+                assert_eq!(
+                    backend.degradation(),
+                    Some("DNS.PLATFORM.SCOPED_API_UNAVAILABLE")
+                );
+                assert!(crate::resolved::binary().is_none(), "that IS the state");
+            }
+            ResolverBackend::ResolvConf => {
+                assert!(!backend.is_scoped());
+                assert_eq!(
+                    backend.degradation(),
+                    Some("DNS.PLATFORM.SCOPED_API_UNAVAILABLE")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_degradation_this_module_names_is_registered() {
+        for backend in [
+            ResolverBackend::Resolved,
+            ResolverBackend::ResolvedUnavailable,
+            ResolverBackend::ResolvConf,
+        ] {
+            if let Some(code) = backend.degradation() {
+                assert!(
+                    twinvpn_types::ReasonCode::lookup(code).is_some(),
+                    "{code} is not in the frozen registry"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_scoped_apply_writes_the_restore_point_before_any_mutation_on_either_path() {
+        // DN-18 admits no exception, and DN-21 calls the restore point on the
+        // scoped path "belt-and-braces" rather than unnecessary. The ordering is
+        // asserted the same way the fallback's is: make the restore-point write
+        // fail and check the host was left untouched.
+        let before = fs::read(RESOLV_CONF).ok();
+        let err = apply_scoped(
+            &config(),
+            Path::new("/proc/definitely/not/a/writable/path/restore"),
+            "twin0",
+        )
+        .expect_err("the restore point cannot be written");
+        assert!(err.os_detail().is_some());
+        assert_eq!(
+            before,
+            fs::read(RESOLV_CONF).ok(),
+            "DN-18: no host resolver configuration may be written before the \
+             restore point is persisted, on EITHER path"
+        );
     }
 }
