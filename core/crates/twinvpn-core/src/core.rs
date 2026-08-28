@@ -243,6 +243,18 @@ impl Core {
     /// **F-5.** Non-blocking. Every outcome, including a rejection, arrives as an
     /// event on the one ordered stream.
     ///
+    /// # THIS METHOD EXECUTES NOTHING
+    ///
+    /// It is an admission gate: poison check, ADR-0008 precondition,
+    /// [`UNIMPLEMENTED`] check, `generation` bump, `CommandCompleted` with an
+    /// **empty** result. No component is called. 33 of the 47 catalogue
+    /// operations — `session.connect` among them — pass every check and report
+    /// success having done no work.
+    ///
+    /// `Ok(())` means *"the submission was admissible"* and nothing more. Do not
+    /// read it as evidence that anything happened. See this crate's `README.md`
+    /// §6.1.
+    ///
     /// # Errors
     ///
     /// A [`Diagnostic`] when the instance is poisoned or the operation is not
