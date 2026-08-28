@@ -253,18 +253,23 @@ impl IpHelper {
             let Some(address) = (unsafe { addr::from_sockaddr(&row.Address) }) else {
                 continue;
             };
-            // ADR-0010 §11.1 allocates a `/32` and a `/128`, so the address is
-            // reported as a host prefix rather than at its on-link length: an
-            // `IpPrefix` at the on-link length would have host bits set and
-            // would not construct at all.
-            let Ok(prefix) =
-                twinvpn_types::IpPrefix::new(address, address.family().max_prefix_len())
+            // The address exactly as the OS reported it, at the on-link prefix
+            // length beside it. This used to force `max_prefix_len()` — a `/32`
+            // or a `/128` — because an `IpPrefix` at the real on-link length
+            // would have host bits set and would not construct at all, so the
+            // read-back could not represent what the OS actually held. That is
+            // the seam defect `InterfaceAddress` closes, and it mattered here:
+            // a read-back that reported `/32` for an address the OS holds at
+            // `/24` produces a diff against the desired plan on every
+            // reconciliation.
+            let Ok(interface_address) =
+                twinvpn_types::InterfaceAddress::new(address, u32::from(row.OnLinkPrefixLength))
             else {
                 continue;
             };
             out.push(AddressRow {
                 luid: overlay,
-                address: prefix,
+                address: interface_address,
                 skip_as_source: row.SkipAsSource,
             });
         }
