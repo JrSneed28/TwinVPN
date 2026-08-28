@@ -497,6 +497,34 @@ fn dn_4_refuses_anything_that_is_not_one_well_formed_query() {
     assert!(stub::resolver_socket_port_permitted(853));
     assert!(!stub::resolver_socket_port_permitted(22));
     assert!(!stub::resolver_socket_port_permitted(1080));
+    // D-5: 443 is not permitted on the strength of the port alone. DoH is real
+    // (DN-23) but KS-10 bounds it by DESTINATION, so a port-only check must not
+    // open it.
+    assert!(
+        !stub::resolver_socket_port_permitted(443),
+        "a port-only predicate cannot express 'to a known-DoH endpoint'"
+    );
+}
+
+#[test]
+fn doh_is_permitted_only_to_a_known_endpoint_and_never_on_the_port_alone() {
+    // KS-10's full rule: 53 and 853 always, 443 only to the known-DoH list.
+    for port in [53u16, 853] {
+        assert!(stub::resolver_socket_permitted(port, false));
+        assert!(stub::resolver_socket_permitted(port, true));
+    }
+    assert!(
+        stub::resolver_socket_permitted(443, true),
+        "DN-23 makes DoH a selectable upstream transport"
+    );
+    assert!(
+        !stub::resolver_socket_permitted(443, false),
+        "and KS-10 bounds it to the known-DoH endpoint list"
+    );
+    // Everything else is refused whatever the destination claims to be.
+    for port in [22u16, 80, 1080, 8080] {
+        assert!(!stub::resolver_socket_permitted(port, true), "port {port}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -587,4 +615,34 @@ fn a_restore_point_whose_token_no_longer_matches_is_detected() {
         !rp.matches_installed(&[8u8; 32]),
         "a stale restore point would restore the wrong thing"
     );
+}
+
+#[test]
+fn a_restore_point_never_renders_the_host_configuration_it_holds() {
+    // D-4: `prior` is the user's verbatim resolver configuration. A derived
+    // `Debug` meant the first `tracing::debug!` that formatted one printed it.
+    use twinvpn_dns::restore::RestorePoint;
+    let rp = RestorePoint::new(
+        b"nameserver 192.0.2.1\nsearch corp.example.\n".to_vec(),
+        vec!["link:3".into(), "nrpt:{guid}".into()],
+        [7u8; 32],
+        "twinvpn".into(),
+    );
+    let rendered = format!("{rp:?}");
+
+    for secret in ["192.0.2.1", "nameserver", "corp.example", "link:3", "nrpt"] {
+        assert!(
+            !rendered.contains(secret),
+            "Debug leaked {secret:?}: {rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("redacted"),
+        "the redaction must be visible rather than the field silently omitted: {rendered}"
+    );
+    // The owner tag is ours, not the user's, and a bug report needs it.
+    assert!(rendered.contains("twinvpn"));
+    // The accessor stays available and greppable, which is the point: reaching
+    // the bytes is deliberate, not accidental.
+    assert_eq!(rp.prior().len(), 42);
 }

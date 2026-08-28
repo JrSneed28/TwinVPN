@@ -22,7 +22,7 @@ use twinvpn_types::{codes, Component, Diagnostic, EvidenceValue, ReasonCode};
 /// back.
 ///
 /// DN-18: written and flushed **before** the mutation, never after.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RestorePoint {
     /// The prior configuration, byte-for-byte as the platform reported it.
     ///
@@ -88,14 +88,31 @@ impl RestorePoint {
     }
 }
 
-impl core::fmt::Debug for RestorePointRedactionMarker {
+impl core::fmt::Debug for RestorePoint {
+    /// Redacted. `prior` is the host's **verbatim** previous resolver
+    /// configuration — the user's DNS servers and search domains — and
+    /// `object_ids` names the platform objects that hold it.
+    ///
+    /// `ownership.md` §6 rule 11 forbids observability capturing what the user
+    /// did not ask to have captured, and `twinvpn_platform::InterfaceName` sets
+    /// the precedent: a value that identifies a user's network gets a redacted
+    /// `Debug` so it cannot reach a log through a derive on some enclosing
+    /// struct. A derived `Debug` here (defect D-4) meant the first
+    /// `tracing::debug!` that formatted a restore point would print it.
+    ///
+    /// The sizes are rendered because they are useful in a bug report and
+    /// disclose nothing about the contents.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("<redacted>")
+        f.debug_struct("RestorePoint")
+            .field("prior", &format_args!("<{} B redacted>", self.prior.len()))
+            .field(
+                "object_ids",
+                &format_args!("<{} redacted>", self.object_ids.len()),
+            )
+            .field("owner_tag", &self.owner_tag)
+            .finish_non_exhaustive()
     }
 }
-
-#[doc(hidden)]
-pub struct RestorePointRedactionMarker;
 
 /// The assertion §11.6(1) of ADR-0015 requires: **protection is asserted, not
 /// assumed**.

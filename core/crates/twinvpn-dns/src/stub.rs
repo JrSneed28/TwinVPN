@@ -180,13 +180,42 @@ pub fn accepts(shape: MessageShape) -> bool {
             .is_none_or(|b| b <= EDNS_BUFSIZE_CEILING)
 }
 
-/// KS-10: a `RESOLVER` socket carries DNS and nothing else.
+/// The ports a `RESOLVER` socket may reach **on the strength of the port
+/// alone**.
 ///
-/// > A `RESOLVER` socket MUST NOT be usable for any non-DNS payload, and an
-/// > implementation that multiplexes one is non-conforming.
+/// KS-10: "DNS only: UDP/TCP 53, TCP 853, and **the known-DoH endpoint list**."
+///
+/// 443 is deliberately **absent**. DoH is a real upstream transport — ADR-0011
+/// DN-23 makes it selectable for the `protected` scope — but KS-10 authorises it
+/// by **destination**, not by port, and a port-only predicate cannot express
+/// "443 to a known-DoH endpoint". Permitting 443 here (defect D-5) let a
+/// `RESOLVER` socket reach *any* host on 443 on the strength of the port.
+///
+/// Use [`resolver_socket_permitted`] for the real check.
 #[must_use]
 pub const fn resolver_socket_port_permitted(port: u16) -> bool {
-    // UDP/TCP 53 and TCP 853 (DoT). DoH is the known-endpoint list, which is a
-    // destination question rather than a port one.
-    matches!(port, 53 | 853 | 443)
+    matches!(port, 53 | 853)
+}
+
+/// Whether a `RESOLVER`-class socket may carry traffic to `port`.
+///
+/// The full KS-10 rule, with DN-23's DoH case expressed the way KS-10 bounds it:
+///
+/// | Port | Permitted when |
+/// |---|---|
+/// | 53 | always — Do53, UDP or TCP |
+/// | 853 | always — DoT (RFC 7858) |
+/// | 443 | **only** when the destination is in the known-DoH endpoint list (RFC 8484) |
+/// | anything else | never |
+///
+/// The list itself is `twinvpn-enforce`'s and ships with the build (ADR-0011
+/// §11.9); this crate takes the membership answer rather than holding the list,
+/// because the same list is what the enforcement layer denies off-overlay.
+#[must_use]
+pub const fn resolver_socket_permitted(port: u16, destination_is_known_doh: bool) -> bool {
+    match port {
+        53 | 853 => true,
+        443 => destination_is_known_doh,
+        _ => false,
+    }
 }

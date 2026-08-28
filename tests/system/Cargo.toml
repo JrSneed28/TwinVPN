@@ -68,6 +68,3 @@ path = "../chaos/outage_and_failover.rs"
 name = "compatibility_golden_vectors"
 path = "../compatibility/golden_vectors.rs"
 
-[[test]]
-name = "defect_tripwires"
-path = "../defects/tripwires.rs"

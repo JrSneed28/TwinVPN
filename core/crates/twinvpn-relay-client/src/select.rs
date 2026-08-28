@@ -25,6 +25,17 @@ use crate::map::{AdminState, Relay};
 /// The base score. One point ≡ one millisecond of RTT.
 pub const BASE: i32 = 1000;
 
+/// §11.2's floor on the measured-RTT term.
+pub const RTT_FLOOR: i32 = -250;
+/// §11.2's floor on the measured-loss term.
+pub const LOSS_FLOOR: i32 = -120;
+/// §11.2's floor on the measured-jitter term.
+pub const JITTER_FLOOR: i32 = -40;
+/// §11.2's floor on the region-locality term.
+pub const LOCALITY_FLOOR: i32 = -200;
+/// §11.2's floor on the circuit-breaker term (ADR-0006 §11.3 rule 3).
+pub const BREAKER_FLOOR: i32 = -400;
+
 /// Everything measured or reported about one relay.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Observations {
@@ -53,11 +64,14 @@ pub struct Observations {
 /// §11.2's table, term by term.
 #[must_use]
 pub fn score(relay: &Relay, obs: Observations) -> i32 {
-    let rtt = -i32::try_from(obs.ewma_rtt_ms).unwrap_or(i32::MAX).max(-250);
-    let loss = -(i32::try_from(obs.loss_pct.saturating_mul(8)).unwrap_or(i32::MAX)).max(-120);
-    let jitter = -i32::try_from(obs.ewma_jitter_ms / 2)
-        .unwrap_or(i32::MAX)
-        .max(-40);
+    // Each measurement term is floored by clamping the MAGNITUDE and then
+    // negating. Writing it as `-x.max(-250)` parses as `-(x.max(-250))` with
+    // `x >= 0`, so the floor never fires and the penalty is unbounded — defect
+    // D-2. `penalty()` exists so the shape cannot be written wrongly three times
+    // over.
+    let rtt = penalty(u64::from(obs.ewma_rtt_ms), RTT_FLOOR);
+    let loss = penalty(u64::from(obs.loss_pct).saturating_mul(8), LOSS_FLOOR);
+    let jitter = penalty(u64::from(obs.ewma_jitter_ms) / 2, JITTER_FLOOR);
 
     // Server rank × freshness: 1.0 at age <= 1 h, decaying linearly to 0.0 at
     // 24 h. Capped at +100, which is what makes a 100 ms measured advantage win
@@ -93,17 +107,36 @@ pub fn score(relay: &Relay, obs: Observations) -> i32 {
 
     let draining = i32::from(relay.admin_state == AdminState::Draining) * -300;
 
+    // The two caller-supplied deltas are clamped to the bounds §11.2's table
+    // declares for them. They arrive from other crates — the locality term from
+    // the region ranker, the breaker penalty from `twinvpn-session` — and an
+    // out-of-range value from either would break the composition rule just as
+    // thoroughly as an inert floor did.
+    let locality = obs.region_locality_penalty.clamp(LOCALITY_FLOOR, 0);
+    let breaker = obs.breaker_penalty.clamp(BREAKER_FLOOR, 0);
+
     BASE + rtt
         + loss
         + jitter
         + rank
         + obs.health.delta()
         + load
-        + obs.region_locality_penalty
+        + locality
         + bind_history
         + self_hosted
         + draining
-        + obs.breaker_penalty
+        + breaker
+}
+
+/// One measurement term: clamp the magnitude to `floor`, then negate.
+///
+/// The clamp is on the **positive** magnitude precisely because that is where
+/// D-2 went wrong — negating first and flooring after is a no-op for any
+/// non-negative input.
+fn penalty(magnitude: u64, floor: i32) -> i32 {
+    let bound = u64::try_from(-i64::from(floor)).unwrap_or(u64::MAX);
+    let clamped = magnitude.min(bound);
+    -i32::try_from(clamped).unwrap_or(-floor)
 }
 
 /// The server's maximum possible contribution (§11.2's composition rule).
