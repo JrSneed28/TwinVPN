@@ -369,14 +369,22 @@ fn report(
 
     let diagnostic = match error {
         ClientError::Rejected(d) | ClientError::Failed(d) => (**d).clone(),
+        // A transport failure: the agent never named a diagnostic, so this
+        // client builds the honest minimum. `Diagnostic::of` is not used here
+        // because the code came off the transport error rather than out of the
+        // agent's registry, and MI-14's attributes are the AGENT's to resolve.
         _ => mi::Diagnostic {
             reason_code: code.clone(),
             class: "TRANSIENT".to_owned(),
             severity: "ERROR".to_owned(),
+            terminal: false,
             user_actionable: true,
+            remediation_class: String::new(),
+            scope: String::new(),
+            doc_anchor: String::new(),
             summary_key: None,
             next_action_key: None,
-            evidence: Vec::new(),
+            evidence: serde_json::Value::Null,
         },
     };
 

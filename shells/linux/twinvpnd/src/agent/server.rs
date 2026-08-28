@@ -610,29 +610,36 @@ pub(super) fn diagnostic(
     // code is registered, so the caller's arguments are a fallback rather than
     // an assertion: MI-14 requires the resolved attributes to travel with the
     // code, resolved from the AGENT's own registry at emission.
-    let resolved = twinvpn_types::ReasonCode::lookup(reason_code);
-    Diagnostic {
-        reason_code: reason_code.to_owned(),
-        class: resolved.map_or_else(
-            || class.to_owned(),
-            |code| format!("{:?}", code.class()).to_uppercase(),
-        ),
-        severity: resolved.map_or_else(
-            || severity.to_owned(),
-            |code| format!("{:?}", code.severity()).to_uppercase(),
-        ),
-        user_actionable: resolved
-            .map_or(user_actionable, twinvpn_types::ReasonCode::user_actionable),
-        summary_key: resolved.map(|code| code.summary_key().to_owned()),
-        // **R-15.** Hardcoding `None` here made the next action unrecoverable for
-        // every MI client that is not in this workspace: the key is the ONLY
-        // thing on the wire a client can render from (MI-15 forbids the sentence
-        // itself), so dropping it left a client with a diagnostic it could not
-        // act on. Taken from the registry, like the summary key beside it.
-        next_action_key: resolved
-            .and_then(twinvpn_types::ReasonCode::next_action_key)
-            .map(str::to_owned),
-        evidence: Vec::new(),
+    // `Diagnostic::of` resolves EVERY MI-14 attribute from the agent's own
+    // registry, which is what this function used to do by hand for four of the
+    // eight. The caller's arguments remain the fallback for a code the registry
+    // does not have — X-1: the registry carries 201 codes and the ADRs name
+    // roughly 490 — and nothing else here re-derives anything.
+    match twinvpn_types::ReasonCode::lookup(reason_code) {
+        Some(code) => Diagnostic {
+            summary_key: Some(code.summary_key().to_owned()),
+            ..Diagnostic::of(code)
+        },
+        // An unregistered code. The attributes cannot be resolved, so the
+        // caller's are carried and the MI-14 fields the registry would have
+        // supplied are left empty rather than guessed.
+        None => Diagnostic {
+            reason_code: reason_code.to_owned(),
+            class: class.to_owned(),
+            severity: severity.to_owned(),
+            terminal: false,
+            user_actionable,
+            remediation_class: String::new(),
+            scope: String::new(),
+            doc_anchor: String::new(),
+            summary_key: None,
+            // **R-15.** Hardcoding `None` for a REGISTERED code made the next
+            // action unrecoverable for every MI client outside this workspace:
+            // the key is the only thing MI-15 lets travel. For an unregistered
+            // one there is no key to carry.
+            next_action_key: None,
+            evidence: serde_json::Value::Null,
+        },
     }
 }
 
@@ -649,22 +656,30 @@ fn failure(reason_code: &str, class: &str, severity: &str, user_actionable: bool
 fn from_core(source: &twinvpn_types::Diagnostic) -> Diagnostic {
     let code = source.code();
     Diagnostic {
-        reason_code: code.as_str().to_owned(),
-        class: format!("{:?}", code.class()).to_uppercase(),
-        severity: format!("{:?}", code.severity()).to_uppercase(),
-        user_actionable: code.user_actionable(),
         summary_key: Some(code.summary_key().to_owned()),
-        // **R-15.** As above: the key is the only thing MI-15 lets travel, so
-        // dropping it left a client unable to render a next action at all.
-        next_action_key: code.next_action_key().map(str::to_owned),
         // Typed evidence only, and already restricted to the code's declared
-        // fields by the core.
-        evidence: source
-            .evidence()
-            .entries()
-            .iter()
-            .map(|e| (e.key().to_owned(), evidence_text(e.value())))
-            .collect(),
+        // fields by the core. A JSON object rather than the pairs of strings
+        // this shell used to build: MI-15 says *typed* evidence, and
+        // stringifying an integer at the wire makes a consumer parse it back and
+        // guess the type.
+        evidence: serde_json::Value::Object(
+            source
+                .evidence()
+                .entries()
+                .iter()
+                .map(|e| {
+                    (
+                        e.key().to_owned(),
+                        serde_json::Value::String(evidence_text(e.value())),
+                    )
+                })
+                .collect(),
+        ),
+        // **R-15.** The key is the only thing MI-15 lets travel, so dropping it
+        // left a client unable to render a next action at all. `Diagnostic::of`
+        // carries it, along with the four MI-14 attributes this shell used to
+        // omit.
+        ..Diagnostic::of(code)
     }
 }
 

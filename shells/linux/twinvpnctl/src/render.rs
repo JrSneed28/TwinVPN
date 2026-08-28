@@ -164,14 +164,33 @@ impl Rendered {
 
         // The typed evidence the agent sent, bound for substitution into the
         // catalogue pattern's named placeholders.
+        //
+        // The wire carries a JSON object now rather than pairs of strings —
+        // MI-15 says *typed* evidence, and stringifying an integer at the wire
+        // makes this client parse it back and guess the type. Each JSON scalar
+        // maps to the `EvidenceValue` it already is; anything else is rendered
+        // as its JSON text, which is what a `{placeholder}` substitution needs.
         let evidence: Vec<twinvpn_diag::Binding> = diagnostic
             .evidence
-            .iter()
-            .map(|(key, value)| twinvpn_diag::Binding {
-                key: key.clone(),
-                value: twinvpn_types::EvidenceValue::Text(value.clone()),
+            .as_object()
+            .map(|map| {
+                map.iter()
+                    .map(|(key, value)| twinvpn_diag::Binding {
+                        key: key.clone(),
+                        value: match value {
+                            serde_json::Value::String(text) => {
+                                twinvpn_types::EvidenceValue::Text(text.clone())
+                            }
+                            serde_json::Value::Number(n) => n.as_i64().map_or_else(
+                                || twinvpn_types::EvidenceValue::Text(n.to_string()),
+                                twinvpn_types::EvidenceValue::Int,
+                            ),
+                            other => twinvpn_types::EvidenceValue::Text(other.to_string()),
+                        },
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
         let resolved = twinvpn_diag::render(&diagnostic.reason_code, &evidence, locale, platform);
 
@@ -270,14 +289,21 @@ mod tests {
     }
 
     fn diagnostic(code: &str, severity: &str, actionable: bool) -> Diagnostic {
+        // An unregistered-code shape: the four MI-14 attributes the registry
+        // would have supplied are empty rather than guessed, which is exactly
+        // what the agent emits for a code it cannot resolve.
         Diagnostic {
             reason_code: code.to_owned(),
             class: "POLICY".to_owned(),
             severity: severity.to_owned(),
+            terminal: false,
             user_actionable: actionable,
+            remediation_class: String::new(),
+            scope: String::new(),
+            doc_anchor: String::new(),
             summary_key: None,
             next_action_key: None,
-            evidence: Vec::new(),
+            evidence: serde_json::Value::Null,
         }
     }
 

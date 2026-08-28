@@ -258,6 +258,7 @@ mod tests {
             remediation_class: String::new(),
             scope: String::new(),
             doc_anchor: String::new(),
+            summary_key: None,
             next_action_key: None,
             evidence: serde_json::Value::Null,
         })
@@ -272,7 +273,7 @@ mod tests {
             ClientError::Rejected(diagnostic("PROTO.VERSION_UNSUPPORTED")),
             ClientError::Rejected(diagnostic("PLATFORM.ADAPTER_UNAVAILABLE")),
             ClientError::Rejected(diagnostic("MGMT.UNAVAILABLE")),
-            ClientError::Frame(FrameError::TooLarge),
+            ClientError::Frame(FrameError::TooLarge { declared: 0 }),
             ClientError::UnexpectedBody,
         ];
         for case in &cases {

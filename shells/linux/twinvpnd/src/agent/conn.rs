@@ -41,9 +41,10 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::mi::codec::TransportError;
 use crate::mi::codec::{read_frame, write_frame};
 use crate::mi::scope::Scopes;
-use crate::mi::wire::{Body, FrameError, Hello, HelloAck, Response, MI_VERSION, MI_VERSION_MIN};
+use crate::mi::wire::{Body, Hello, HelloAck, Response, MI_VERSION, MI_VERSION_MIN};
 use crate::{AGENT_VERSION, BUILD_PROFILE};
 
 use super::events::{Delivery, SUBSCRIBER_WATERMARK};
@@ -54,12 +55,12 @@ use super::server::{self, ServerContext};
 ///
 /// # Errors
 ///
-/// The frame error that ended it. A clean [`FrameError::Closed`] is the normal
+/// The frame error that ended it. A clean [`TransportError::Closed`] is the normal
 /// case.
 pub async fn serve(
     context: Arc<ServerContext>,
     stream: tokio::net::UnixStream,
-) -> Result<(), FrameError> {
+) -> Result<(), TransportError> {
     // MI-A1/MI-A5: the identity comes from the kernel, and an unverifiable one
     // is rejected and closed — never a default principal, never an anonymous
     // read-only tier. Read before the split, because `SO_PEERCRED` is a property
@@ -148,7 +149,7 @@ async fn request_loop<R, W>(
     subscription: Option<u64>,
     reader: &mut R,
     writer: &Arc<tokio::sync::Mutex<W>>,
-) -> Result<(), FrameError>
+) -> Result<(), TransportError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -157,7 +158,7 @@ where
         // Never inside a `select!`: see this module's documentation.
         let request = match read_frame(reader).await {
             Ok(envelope) => envelope,
-            Err(FrameError::Closed) => {
+            Err(TransportError::Closed) => {
                 // PS-3, made visible: the client going away is an INFO, and
                 // nothing else happens.
                 tracing::info!(
@@ -171,7 +172,7 @@ where
                 let reject = server::envelope(
                     context.as_of_ms(),
                     Body::Reject(server::diagnostic(
-                        error.reason_code(),
+                        error.reason_code().as_str(),
                         "PERSISTENT",
                         "ERROR",
                         false,
@@ -275,7 +276,7 @@ async fn negotiate<R, W>(
     reader: &mut R,
     writer: &Arc<tokio::sync::Mutex<W>>,
     held: &Scopes,
-) -> Result<Option<(Scopes, bool)>, FrameError>
+) -> Result<Option<(Scopes, bool)>, TransportError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,

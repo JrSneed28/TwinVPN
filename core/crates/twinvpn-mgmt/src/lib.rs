@@ -59,6 +59,7 @@
 pub mod catalogue;
 pub mod codes;
 pub mod command;
+pub mod envelope;
 pub mod transport;
 
 pub use catalogue::{
@@ -66,4 +67,9 @@ pub use catalogue::{
 };
 pub use codes::{substituted, Substitution, SUBSTITUTIONS};
 pub use command::{CoreCommand, Submission};
+pub use envelope::{
+    declared_length, decode_body, decode_frame, encode_frame, Body, Compacted, Diagnostic, Event,
+    FrameError, Hello, HelloAck, MgmtEnvelope, PlatformCtx, Request, Response, LENGTH_PREFIX_BYTES,
+    MAX_ENVELOPE_BYTES, MI_VERSION, MI_VERSION_MIN,
+};
 pub use transport::{assert_closed, TransportOp};
