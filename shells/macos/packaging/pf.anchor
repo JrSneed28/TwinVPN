@@ -1,0 +1,238 @@
+#
+# The KS-19 boot ruleset for macOS: what protects the host between the network
+# stack coming up and the system extension being activated.
+#
+# Installed at  /etc/twinvpn/pf.anchor  (ADR-0016 §11.5's macOS row).
+# Loaded into anchor  "twinvpn"  from /etc/pf.conf (ADR-0012 §11.6's macOS row:
+# "`pf` anchor `twinvpn` (both families) + `NEPacketTunnelNetworkSettings`
+# carrying `IPv4Settings` and `IPv6Settings`").
+# Applied by  com.twinvpn.ksd  with RunAtLoad=true — the package-owned boot
+# artifact of ADR-0016 PS-7, which is deliberately NOT the authority.
+#
+# ADR-0012 §11.8's boot row:
+#   boot: OS applies boot ruleset -> network stack comes up -> agent starts
+#         (the deny predates the first packet the host can emit)
+#
+# ---------------------------------------------------------------- WHAT THIS IS
+#
+# `RULESET_BLOCKED` for a host that has **no contract yet**, so the Tier-1
+# protected scope is not yet known. It denies the one thing protected on every
+# TwinVPN host regardless of contract: the overlay address space itself —
+# ADR-0010 §11.1's IPv4 `100.64.0.0/10` (RFC 6598) and the pinned product ULA
+# `fd7c:9e5d:2a10::/48` (AP-1, "a pinned constant, identical in every build").
+#
+# It deliberately does **not** default-deny all egress, and it deliberately does
+# **not** contain all DNS. ADR-0012 **KS-3a**: the traffic-class table is
+# "exhaustive over the Tier-1 protected set, which is mode-dependent; traffic
+# outside that set is not governed by this table and is not dropped by it." A
+# boot ruleset that denied everything would take the host off the network before
+# the authority could tell it not to — including the ssh session an operator
+# needs to fix it. This mirrors `shells/linux/packaging/killswitch.nft` exactly.
+#
+# The authority **replaces** this content at runtime by loading its own rules
+# into the same anchor with `pfctl -a twinvpn -f -`, which pf applies as one
+# transaction — KS-17's atomic swap, never a remove-then-add (KS-23).
+#
+# ------------------------------------------------------------------------ KS-5
+#
+# Every IPv4 rule below has its IPv6 counterpart on the adjacent line. pf has no
+# `inet`+`inet6` union address family, so — unlike nftables' single `inet` table
+# — the structural guarantee cannot come from "there is no second object to
+# forget". It comes instead from the adapter's renderer (`pf.rs`
+# `emit_scope_drop`), which is one function emitting both families and has no
+# call site that can emit one without the other. THIS FILE IS HAND-WRITTEN AND
+# THEREFORE DOES NOT HAVE THAT GUARANTEE; it has a test in the adapter that
+# parses it and asserts both families are present. Stated, not assumed.
+#
+# --------------------------------------------------------------------- LABELS
+#
+# `label` is pf's per-rule counter, read back with `pfctl -a twinvpn -s labels`.
+# It is the macOS equivalent of the nftables named counter, and it is what makes
+# the ProtectionAssertion a QUERY of the kernel rather than a belief (ADR-0015
+# §11.6 rule 1, ownership.md §8 W-24). Nothing here is derived from the fact
+# that a load call returned success.
+#
+# UNVERIFIED: the exact column layout of `pfctl -s labels` on Apple's pf fork
+# (OpenBSD 4.x-derived) has not been observed on a Mac by this domain. The
+# adapter's parser is written against the OpenBSD 4.x format
+# (`name evaluations packets bytes ...`) and tolerates trailing columns.
+#
+# ------------------------------------------------------------------ NO LOGGING
+#
+# No rule carries `log`. A `log` rule copies matched packets to `pflog0`, where
+# `tcpdump` can read them — that is a tunnel-payload capture channel, and
+# ADR-0015 §11.4 forbids one. Counters are sufficient for the canary.
+#
+
+# ---------------------------------------------------------------------------
+# Tables. `persist` keeps a table that is momentarily empty from being garbage
+# collected, which is what makes an empty portal table representable at all.
+# ---------------------------------------------------------------------------
+
+# The Tier-1 baseline protected set. A FLOOR beneath a real contract's scope,
+# never a substitute for it: on a full-tunnel host the protected set is
+# everything, and two prefixes under-cover it. The authority re-renders the
+# applied contract's own scope into the runtime anchor.
+table <twinvpn_protected_v4> persist { 100.64.0.0/10 }
+table <twinvpn_protected_v6> persist { fd7c:9e5d:2a10::/48 }
+
+# ADR-0012 KS-15's captive-portal grant set: "a `pf` table entry with expiry
+# sweep", lifetime <= 300 s. Declared `persist` and EMPTY here — the boot
+# artifact never grants a portal, and the expiry sweep is the authority's, not
+# this file's. Present so the runtime anchor's rules have a table to reference
+# rather than failing to parse on a fresh host.
+table <twinvpn_portal> persist
+
+# ---------------------------------------------------------------------------
+# The read-back's answer, held by pf itself (CB-6, W-24).
+#
+# pf has no named counters, so where nftables carries the posture and the
+# generation as `counter posture_blocked` / `counter gen_<n>` objects, macOS
+# carries them as MARKER TABLES. `pfctl -a twinvpn -s Tables` lists them
+# structurally — a table name is not free text a parser has to guess at, which
+# is the same reason the Linux adapter encodes state as a counter rather than as
+# a rule comment. They are kernel-resident so they survive a core crash (CB-6),
+# they are removed with the anchor by an uninstall, and they are readable by a
+# privileged local unblock command with the authority absent (KS-20a).
+#
+# No members and no references, by design. `persist` is therefore load-bearing:
+# without it pf discards a table that no rule mentions, and the markers would
+# vanish the moment they were loaded.
+#
+# The adapter's `pfread::parse_tables` reads exactly these names.
+#
+# Generation 0 and posture BLOCKED are the TRUTHFUL boot-time answer: the KS-19
+# artifact IS the blocked ruleset (KS-17 — two rulesets, never zero), and no
+# contract has been applied. The authority replaces the whole anchor on its
+# first apply, in one `pfctl -a twinvpn -f -` transaction, which is KS-23's
+# atomic swap rather than a remove-then-add.
+#
+# `tv_posture_protected` is deliberately ABSENT and must stay absent: both
+# posture tables present at once is a ruleset nobody rendered, and the parser
+# resolves that ambiguity to `Blocked` — the fail-closed direction.
+#
+# The `_n1` suffixes are the SCOPE CARDINALITY per family — R-6's detector. The
+# posture says what was intended; these say how many prefixes the Tier-2 deny
+# actually covers, so that "BLOCKED over 1 prefix" and "BLOCKED over nothing"
+# are different readings rather than the same one. This anchor's deny covers
+# exactly one prefix in each family — `100.64.0.0/10` in <twinvpn_protected_v4>
+# and `fd7c:9e5d:2a10::/48` in <twinvpn_protected_v6> — so both are `n1`. **If a
+# prefix is ever added to or removed from either table above, these two names
+# must change with it**: a wrong count is worse than no count, because it makes
+# a shrinking scope invisible to the read-back that exists to catch it.
+table <tv_posture_blocked> persist
+table <tv_gen_0> persist
+table <tv_scope4_n1> persist
+table <tv_scope6_n1> persist
+
+# ---------------------------------------------------------------------------
+# Filtering.
+#
+# pf is LAST-MATCH-WINS unless a rule carries `quick`. Every rule here carries
+# `quick` and the order below IS the precedence, so that reading the file top to
+# bottom is reading the decision procedure. A non-`quick` mix would make the
+# disposition of a packet depend on rules further down that a reader has not got
+# to yet, which is how a "fail-closed" ruleset comes to permit something.
+#
+# `set skip on lo0` is NOT used: `set` statements are only legal in the main
+# ruleset, never inside an anchor. Class 8 is an explicit pass instead.
+# ---------------------------------------------------------------------------
+
+# Class 8 — loopback. Permitted; cannot egress by construction. `no state`
+# because a state entry per loopback flow is pure overhead on a path that
+# cannot leave the host.
+pass quick on lo0 all no state label "twinvpn.loopback"
+
+# Class 7 — the bootstrap exception (KS-9). ADR-0012 §11.5's macOS predicate is
+# verbatim "`pf` anchor keyed to the tunnel provider's owning uid plus the
+# provider's socket set". The uid half is expressible here; the socket-set half
+# is NOT — pf has no socket-identity match — so this file implements the
+# WEAKER half alone and says so. The authority's runtime anchor is where the
+# registered-socket scoping of KS-9(2) lives, and KS-9a forbids that
+# registration being an IPC operation.
+#
+# UNVERIFIED: the `user` keyword. It exists in OpenBSD pf and FreeBSD pf and
+# matches only LOCALLY ORIGINATED packets — which is a property KS-2 wants, since
+# a forwarded packet has no owning uid and therefore cannot match this rule and
+# cannot borrow the exemption. Whether Apple's pf fork retained `user` has not
+# been checked on a Mac by this domain. If it did not, this rule fails to parse,
+# `pfctl -f` rejects the whole anchor, and the KS-19 artifact does not load at
+# all — which is why the installer validates with `pfctl -n -f` before
+# committing (see install.sh).
+#
+# `_twinvpn` is the service account of ADR-0016 §11.7's macOS row, created by
+# the installer. It is spelled as a NAME here; pf resolves it at parse time, so
+# the anchor must be loaded after the account exists.
+pass out quick inet  from any to any user _twinvpn keep state label "twinvpn.exempt.v4"
+pass out quick inet6 from any to any user _twinvpn keep state label "twinvpn.exempt.v6"
+
+# Class 5 — underlay DHCP / DHCPv6 / ND / RA. Permitted as link-local control
+# traffic only. ADR-0010 §11.5(5) is explicit that blocking them breaks the
+# underlay itself. There is no overlay interface at boot, so these are not
+# qualified `on ! utunN`; the authority's runtime anchor scopes them off the
+# overlay so they cannot become a hole in the tunnel.
+pass out quick inet  proto udp from any port 68  to any port 67  keep state label "twinvpn.underlay.dhcp4"
+pass out quick inet6 proto udp from any port 546 to any port 547 keep state label "twinvpn.underlay.dhcp6"
+# ICMPv6 133-137: router solicit/advert, neighbour solicit/advert, redirect.
+# Written NUMERICALLY rather than with pf's symbolic names (`routersol`,
+# `routeradv`, `neighbrsol`, `neighbradv`, `redir`) because the symbolic set
+# differs between pf forks and a name Apple's fork does not know is a parse
+# error that takes the whole boot artifact with it. The numbers are RFC 4443's
+# and do not vary.
+pass out quick inet6 proto icmp6 icmp6-type { 133, 134, 135, 136, 137 } keep state label "twinvpn.underlay.nd"
+
+# Class 9 — link-local unicast, both families. Not routable off-link by
+# definition; required for ND and IPv4LL.
+pass out quick inet  from any to 169.254.0.0/16 keep state label "twinvpn.linklocal.v4"
+pass out quick inet6 from any to fe80::/10      keep state label "twinvpn.linklocal.v6"
+
+# ---- the Tier-2 deny ------------------------------------------------------
+#
+# Class 6, the DNS half, gets its OWN rule and its OWN label ahead of the
+# general deny — not because it is a different disposition, but because
+# ADR-0011 §11.12's negative canary asks a different question from ADR-0012's
+# ("was my off-tunnel DNS query dropped" rather than "was my off-tunnel
+# protected packet dropped") and therefore needs its own number.
+#
+# It is SCOPED TO THE PROTECTED TABLES, not to every destination. A blanket
+# `block ... port 53` in the boot artifact would take the host off name
+# resolution entirely before the authority exists, which is exactly the
+# KS-3a over-reading. Full class-6 containment — all DNS in full-tunnel mode —
+# is mode-dependent and therefore belongs to the authority's runtime anchor,
+# where the mode is known. `shells/linux/packaging/killswitch.nft` draws the
+# same line and for the same reason.
+block drop out quick inet  proto { tcp, udp } from any to <twinvpn_protected_v4> port { 53, 853 } label "twinvpn.deny.dns"
+block drop out quick inet6 proto { tcp, udp } from any to <twinvpn_protected_v6> port { 53, 853 } label "twinvpn.deny.dns"
+
+# Classes 1-3. No interface is exempt: no overlay interface exists yet. Both
+# families, adjacent, as KS-5 requires.
+block drop out quick inet  from any to <twinvpn_protected_v4> label "twinvpn.deny.v4"
+block drop out quick inet6 from any to <twinvpn_protected_v6> label "twinvpn.deny.v6"
+
+# KS-2 — the forwarding path. "Forwarded traffic is protected by the same Tier-2
+# rule and is NEVER eligible for any exemption in §11.2."
+#
+# **This is satisfied, but not by a rule of its own, and the difference is worth
+# reading.** pf has no hook distinct from `out` for forwarded packets: a
+# forwarded packet traverses `out` on its egress interface and therefore already
+# meets the two `block drop out quick ... <twinvpn_protected_*>` rules above.
+# What makes the exemption unreachable for it is that pf's `user` keyword
+# matches only LOCALLY ORIGINATED traffic — a forwarded packet has no owning
+# uid, so it cannot match `user _twinvpn` and cannot borrow class 7. That is a
+# structural property of pf rather than discipline in this file.
+#
+# The labels `twinvpn.deny.fwd.v4` / `twinvpn.deny.fwd.v6` are therefore NOT
+# emitted here. They belong to the authority's runtime anchor, where the overlay
+# interface exists and `on ! utunN` can separate the two paths so the canary can
+# tell "we dropped a forwarded protected packet" from "we dropped a locally
+# originated one".
+#
+# **A rule that was written and then deliberately removed, recorded so it is not
+# re-added:** an inbound counterpart
+# (`block drop in quick inet from any to <twinvpn_protected_v4>`) would give the
+# forwarding path its own label at boot. It is wrong. `100.64.0.0/10` is RFC 6598
+# *carrier* shared address space, and a Mac behind a CGNAT ISP legitimately holds
+# an address in it — so an inbound deny over that table would black-hole the
+# host's own underlay before the authority ever ran. `shells/linux/packaging/
+# killswitch.nft` hooks `output` and `forward` and deliberately never `input`,
+# for the same reason.

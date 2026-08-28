@@ -1,0 +1,556 @@
+//! `twinvpn-bridge` — the Swift ↔ Rust ABI of the macOS packet-tunnel system
+//! extension.
+//!
+//! **Authority:** `shells/macos/twinvpn-bridge/include/twinvpn_bridge.h` (the
+//! ABI of record for this boundary); ADR-0018 §11.4, §11.6, F-1, F-2, F-3, F-4,
+//! F-6, F-7, CB-2, DP-4; ADR-0015 §11.2 and §6 rule 6;
+//! `docs/implementation/ownership.md` §8 **W-24** and **W-25**.
+//!
+//! **Owner:** `desktop-macos`.
+//!
+//! # Why this crate exists beside `twinvpn.h`
+//!
+//! `core/ffi/include/twinvpn.h` is the shell↔core ABI, and `ownership.md` §8
+//! records two findings against it: the F-9 vtable has **no socket capability
+//! and no interface enumeration** (W-25), and it offers `set_ruleset` with **no
+//! getter and no `current_generation`** (W-24). A Swift-only extension bound to
+//! it could therefore do neither NAT traversal nor a `ProtectionAssertion` —
+//! the two things a VPN datapath most needs.
+//!
+//! So the vtable, the marshalling and the object lifetimes live here, in Rust,
+//! over `twinvpn-platform-macos`. The consequence that matters for review:
+//! every line of it is type-checked by `make cross-check` for
+//! `aarch64-apple-darwin` with `-D warnings`, and **executed** by `cargo test`
+//! on the Linux host. It is not unverified Swift.
+//!
+//! # The shape of every entry point
+//!
+//! Each `extern "C"` function below is the same five steps and nothing else:
+//!
+//! 1. wrap the whole body in [`abi::contained`] — **F-7**, without exception;
+//! 2. resolve the handle and the slices, turning a null into a typed error
+//!    rather than a dereference;
+//! 3. validate the correlation id **before** anything proportional to its
+//!    length is allocated (§6 rule 9);
+//! 4. call one method on [`ext::TvbExt`];
+//! 5. write the out-parameters and return `TVB_OK` / `TVB_ERR` / `TVB_TIMEOUT`.
+//!
+//! There is no branch in this file whose condition is a TwinVPN domain fact
+//! (CB-2). The three result codes say which *shape* an outcome took and never
+//! what it means.
+//!
+//! # `unsafe`
+//!
+//! This is the one crate under `shells/` that cannot carry
+//! `#![forbid(unsafe_code)]`: it **is** the FFI boundary. DP-4 permits `unsafe`
+//! here, `#![deny(unsafe_op_in_unsafe_fn)]` is on, and every block carries a
+//! `// SAFETY:` comment naming its invariant.
+
+#![deny(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs)]
+#![warn(clippy::pedantic)]
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::module_name_repetitions)]
+
+pub mod abi;
+pub mod correlation;
+pub mod envelope;
+pub mod ext;
+pub mod log;
+pub mod port;
+pub mod report;
+
+use std::time::Duration;
+
+use twinvpn_types::codes;
+
+use abi::{contained, ext_of, slice_of, slice_of_raw, write_out, TvbBuf, TvbSlice};
+use correlation::CorrelationId;
+use ext::{CoreHandle, TvbExt};
+use report::{fail, fail_code, fail_panic, resolve};
+
+/// `TVB_ABI_MAJOR`.
+pub const TVB_ABI_MAJOR: u32 = 1;
+
+/// `TVB_ABI_MINOR`.
+pub const TVB_ABI_MINOR: u32 = 0;
+
+/// `TVB_OK` — success; `*err` untouched.
+pub const TVB_OK: i32 = 0;
+
+/// `TVB_ERR` — failure; `*err` holds an ADR-0015 §11.2 envelope.
+pub const TVB_ERR: i32 = 1;
+
+/// `TVB_TIMEOUT` — nothing arrived. **Not a failure.**
+pub const TVB_TIMEOUT: i32 = 2;
+
+// ---------------------------------------------------------------------------
+// Instance-free entry points
+// ---------------------------------------------------------------------------
+
+/// `uint32_t tvb_abi_major(void);`
+#[no_mangle]
+pub extern "C" fn tvb_abi_major() -> u32 {
+    contained(|| TVB_ABI_MAJOR).unwrap_or(0)
+}
+
+/// `uint32_t tvb_abi_minor(void);`
+#[no_mangle]
+pub extern "C" fn tvb_abi_minor() -> u32 {
+    contained(|| TVB_ABI_MINOR).unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+/// `int32_t tvb_ext_start(tvb_slice, tvb_slice, tvb_ext **, tvb_buf **);`
+///
+/// # Safety
+///
+/// `config_json` and `correlation_id` are valid for the duration of the call;
+/// `out` and `err` are null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_ext_start(
+    config_json: TvbSlice,
+    correlation_id: TvbSlice,
+    out: *mut *mut TvbExt,
+    err: *mut *mut TvbBuf,
+) -> i32 {
+    const CALL: &str = "tvb_ext_start";
+    let result = contained(|| {
+        // SAFETY: both slices obey the ABI contract by this function's own.
+        let Some(config) = (unsafe { slice_of(config_json) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::PROTO_MALFORMED_MESSAGE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        // SAFETY: as above.
+        let Some(cid) = (unsafe { slice_of(correlation_id) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::PROTO_MALFORMED_MESSAGE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        let correlation = match CorrelationId::validated(cid) {
+            Ok(correlation) => correlation,
+            // SAFETY: `err`'s contract is unchanged.
+            Err(diagnostic) => {
+                return unsafe { fail(CALL, &diagnostic, &CorrelationId::absent(), err) }
+            }
+        };
+        if out.is_null() {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe { fail_code(CALL, codes::INTERNAL_UNEXPECTED_STATE, &correlation, err) };
+        }
+        // The configuration document is OPAQUE here and is validated by the core
+        // against `limits.json`, which is where those limits live. Its LENGTH is
+        // logged; its bytes are not.
+        log::counted(CALL, "config_bytes", config.len() as u64, &correlation);
+        let instance = Box::into_raw(Box::new(TvbExt::new(CoreHandle::Unwired)));
+        // SAFETY: `out` is non-null by the branch above and writable by this
+        // function's contract. Ownership of the instance passes to the caller,
+        // who releases it with `tvb_ext_free`.
+        unsafe { write_out(out, instance) };
+        log::entered(CALL, &correlation);
+        TVB_OK
+    });
+    // SAFETY: `err`'s contract is unchanged.
+    result.unwrap_or_else(|| unsafe { fail_panic(CALL, err) })
+}
+
+/// `int32_t tvb_ext_stop(tvb_ext *, int32_t, tvb_slice, tvb_buf **);`
+///
+/// # Safety
+///
+/// As the ABI's own contract.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_ext_stop(
+    ext: *mut TvbExt,
+    reason: i32,
+    correlation_id: TvbSlice,
+    err: *mut *mut TvbBuf,
+) -> i32 {
+    const CALL: &str = "tvb_ext_stop";
+    let result = contained(|| {
+        // SAFETY: the ABI contract, delegated.
+        match unsafe { resolve(CALL, ext.cast_const(), correlation_id, err) } {
+            Ok((instance, correlation)) => {
+                instance.stop(reason, &correlation);
+                TVB_OK
+            }
+            Err(code) => code,
+        }
+    });
+    // SAFETY: `err`'s contract is unchanged.
+    result.unwrap_or_else(|| unsafe { fail_panic(CALL, err) })
+}
+
+/// `void tvb_ext_free(tvb_ext *);`
+///
+/// # Safety
+///
+/// `ext` is null, or a pointer from `tvb_ext_start` that has **not** been freed.
+/// Freeing twice is undefined behaviour — which is why `CoreBridge.swift` calls
+/// this from `deinit` and nowhere else.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_ext_free(ext: *mut TvbExt) {
+    let _ = contained(|| {
+        if ext.is_null() {
+            return;
+        }
+        // SAFETY: non-null by the branch above, and by this function's contract
+        // it came from `Box::into_raw` in `tvb_ext_start` and has not been
+        // released. Reboxing reclaims exactly that allocation.
+        drop(unsafe { Box::from_raw(ext) });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+/// `int32_t tvb_ext_next_settings(tvb_ext *, uint32_t, tvb_buf **, tvb_buf **);`
+///
+/// # Safety
+///
+/// As the ABI's own contract.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_ext_next_settings(
+    ext: *mut TvbExt,
+    timeout_ms: u32,
+    doc: *mut *mut TvbBuf,
+    err: *mut *mut TvbBuf,
+) -> i32 {
+    const CALL: &str = "tvb_ext_next_settings";
+    let result = contained(|| {
+        // SAFETY: null is checked rather than dereferenced.
+        let Some(instance) = (unsafe { ext_of(ext.cast_const()) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::INTERNAL_UNEXPECTED_STATE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        match instance.next_settings(Duration::from_millis(u64::from(timeout_ms))) {
+            Ok(Some(document)) => {
+                // SAFETY: `doc` is null or writable by the ABI contract, and
+                // ownership of the buffer passes to the caller.
+                unsafe { write_out(doc, TvbBuf::into_raw(document)) };
+                TVB_OK
+            }
+            Ok(None) => TVB_TIMEOUT,
+            // SAFETY: `err`'s contract is unchanged.
+            Err(diagnostic) => unsafe { fail(CALL, &diagnostic, &CorrelationId::absent(), err) },
+        }
+    });
+    // SAFETY: `err`'s contract is unchanged.
+    result.unwrap_or_else(|| unsafe { fail_panic(CALL, err) })
+}
+
+// ---------------------------------------------------------------------------
+// The packet path
+// ---------------------------------------------------------------------------
+
+/// `int32_t tvb_ext_inject_inbound(tvb_ext *, const uint8_t *, size_t, int32_t, tvb_buf **);`
+///
+/// # Safety
+///
+/// `pkt` is null with `len == 0`, or points to `len` valid bytes for the
+/// duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_ext_inject_inbound(
+    ext: *mut TvbExt,
+    pkt: *const u8,
+    len: usize,
+    family: i32,
+    err: *mut *mut TvbBuf,
+) -> i32 {
+    const CALL: &str = "tvb_ext_inject_inbound";
+    let result = contained(|| {
+        // SAFETY: null is checked rather than dereferenced.
+        let Some(instance) = (unsafe { ext_of(ext.cast_const()) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::INTERNAL_UNEXPECTED_STATE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        // SAFETY: the `(ptr, len)` pair obeys the ABI contract by this
+        // function's own, and `slice_of_raw` handles the `(NULL, 0)` shape.
+        let Some(packet) = (unsafe { slice_of_raw(pkt, len) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::PROTO_MALFORMED_MESSAGE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        match instance.inject_inbound(packet, family) {
+            Ok(()) => TVB_OK,
+            // SAFETY: `err`'s contract is unchanged.
+            Err(diagnostic) => unsafe { fail(CALL, &diagnostic, &CorrelationId::absent(), err) },
+        }
+    });
+    // SAFETY: `err`'s contract is unchanged.
+    result.unwrap_or_else(|| unsafe { fail_panic(CALL, err) })
+}
+
+/// `int32_t tvb_ext_next_outbound(tvb_ext *, uint32_t, tvb_buf **, int32_t *, tvb_buf **);`
+///
+/// # Safety
+///
+/// As the ABI's own contract.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_ext_next_outbound(
+    ext: *mut TvbExt,
+    timeout_ms: u32,
+    pkt: *mut *mut TvbBuf,
+    family: *mut i32,
+    err: *mut *mut TvbBuf,
+) -> i32 {
+    const CALL: &str = "tvb_ext_next_outbound";
+    let result = contained(|| {
+        // SAFETY: null is checked rather than dereferenced.
+        let Some(instance) = (unsafe { ext_of(ext.cast_const()) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::INTERNAL_UNEXPECTED_STATE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        match instance.next_outbound(Duration::from_millis(u64::from(timeout_ms))) {
+            Ok(Some((packet, wire))) => {
+                // The family is written FIRST, so a caller that reads it after a
+                // successful return never sees a stale value beside a fresh
+                // buffer.
+                // SAFETY: `family` is null or writable by the ABI contract.
+                unsafe { write_out(family, wire) };
+                // SAFETY: `pkt` is null or writable; ownership passes out.
+                unsafe { write_out(pkt, TvbBuf::into_raw(packet)) };
+                TVB_OK
+            }
+            Ok(None) => TVB_TIMEOUT,
+            // SAFETY: `err`'s contract is unchanged.
+            Err(diagnostic) => unsafe { fail(CALL, &diagnostic, &CorrelationId::absent(), err) },
+        }
+    });
+    // SAFETY: `err`'s contract is unchanged.
+    result.unwrap_or_else(|| unsafe { fail_panic(CALL, err) })
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle facts
+// ---------------------------------------------------------------------------
+
+/// `int32_t tvb_ext_sleep(tvb_ext *, tvb_slice, tvb_buf **);`
+///
+/// # Safety
+///
+/// As the ABI's own contract.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_ext_sleep(
+    ext: *mut TvbExt,
+    correlation_id: TvbSlice,
+    err: *mut *mut TvbBuf,
+) -> i32 {
+    const CALL: &str = "tvb_ext_sleep";
+    // SAFETY: delegated to `report`, whose contract is this one.
+    unsafe { report(CALL, ext, correlation_id, err, TvbExt::report_sleep) }
+}
+
+/// `int32_t tvb_ext_wake(tvb_ext *, tvb_slice, tvb_buf **);`
+///
+/// # Safety
+///
+/// As the ABI's own contract.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_ext_wake(
+    ext: *mut TvbExt,
+    correlation_id: TvbSlice,
+    err: *mut *mut TvbBuf,
+) -> i32 {
+    const CALL: &str = "tvb_ext_wake";
+    // SAFETY: delegated to `report`.
+    unsafe { report(CALL, ext, correlation_id, err, TvbExt::report_wake) }
+}
+
+/// `int32_t tvb_ext_network_changed(tvb_ext *, tvb_slice, tvb_buf **);`
+///
+/// # Safety
+///
+/// As the ABI's own contract.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_ext_network_changed(
+    ext: *mut TvbExt,
+    correlation_id: TvbSlice,
+    err: *mut *mut TvbBuf,
+) -> i32 {
+    const CALL: &str = "tvb_ext_network_changed";
+    // SAFETY: delegated to `report`.
+    unsafe {
+        report(
+            CALL,
+            ext,
+            correlation_id,
+            err,
+            TvbExt::report_network_changed,
+        )
+    }
+}
+
+/// The shared shape of the three lifecycle-fact entries.
+///
+/// Each of them **reports** and returns; none asserts, renders or decides.
+///
+/// # Safety
+///
+/// As the ABI's own contract.
+unsafe fn report(
+    call: &'static str,
+    ext: *mut TvbExt,
+    correlation_id: TvbSlice,
+    err: *mut *mut TvbBuf,
+    body: fn(&TvbExt, &CorrelationId),
+) -> i32 {
+    let result = contained(|| {
+        // SAFETY: the ABI contract, delegated.
+        match unsafe { resolve(call, ext.cast_const(), correlation_id, err) } {
+            Ok((instance, correlation)) => {
+                body(instance, &correlation);
+                TVB_OK
+            }
+            Err(code) => code,
+        }
+    });
+    // SAFETY: `err`'s contract is unchanged.
+    result.unwrap_or_else(|| unsafe { fail_panic(call, err) })
+}
+
+// ---------------------------------------------------------------------------
+// The management hop
+// ---------------------------------------------------------------------------
+
+/// `int32_t tvb_ext_app_message(tvb_ext *, tvb_slice, tvb_buf **, tvb_buf **);`
+///
+/// **Refuses by name in this wave.** The MI server lives in `twinvpnd` and no
+/// in-process MI is wired into the extension, so `MGMT.UNAVAILABLE` — whose
+/// registered condition is "the local management interface is not reachable" —
+/// is the truthful answer rather than an empty success.
+///
+/// # Safety
+///
+/// As the ABI's own contract.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_ext_app_message(
+    ext: *mut TvbExt,
+    req: TvbSlice,
+    resp: *mut *mut TvbBuf,
+    err: *mut *mut TvbBuf,
+) -> i32 {
+    const CALL: &str = "tvb_ext_app_message";
+    let result = contained(|| {
+        // SAFETY: null is checked rather than dereferenced.
+        let Some(instance) = (unsafe { ext_of(ext.cast_const()) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::INTERNAL_UNEXPECTED_STATE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        // SAFETY: the slice obeys the ABI contract by this function's own.
+        let Some(request) = (unsafe { slice_of(req) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::PROTO_MALFORMED_MESSAGE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        let _ = (instance, resp);
+        // The request's LENGTH, never its bytes: an MI envelope can carry a
+        // `pairing_secret` (MI-P1), and §6 rule 11 forbids logging one.
+        log::counted(
+            CALL,
+            "request_bytes",
+            request.len() as u64,
+            &CorrelationId::absent(),
+        );
+        // SAFETY: `err`'s contract is unchanged.
+        unsafe { fail_code(CALL, codes::MGMT_UNAVAILABLE, &CorrelationId::absent(), err) }
+    });
+    // SAFETY: `err`'s contract is unchanged.
+    result.unwrap_or_else(|| unsafe { fail_panic(CALL, err) })
+}
+
+// ---------------------------------------------------------------------------
+// Buffers
+// ---------------------------------------------------------------------------
+
+/// `tvb_slice tvb_buf_bytes(const tvb_buf *);`
+///
+/// # Safety
+///
+/// `buf` is null, or a live buffer from this crate that has not been freed.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_buf_bytes(buf: *const TvbBuf) -> TvbSlice {
+    contained(|| {
+        // SAFETY: null is checked rather than dereferenced.
+        match unsafe { ext_of(buf) } {
+            Some(buffer) => TvbSlice::borrowing(buffer.bytes()),
+            None => TvbSlice::empty(),
+        }
+    })
+    .unwrap_or_else(TvbSlice::empty)
+}
+
+/// `void tvb_buf_free(tvb_buf *);`
+///
+/// # Safety
+///
+/// `buf` is null, or a buffer from this crate that has **not** been freed.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_buf_free(buf: *mut TvbBuf) {
+    let _ = contained(|| {
+        // SAFETY: `TvbBuf::release` tolerates null and reclaims exactly the
+        // allocation `into_raw` produced.
+        unsafe { TvbBuf::release(buf) };
+    });
+}
+
+#[cfg(test)]
+mod tests;

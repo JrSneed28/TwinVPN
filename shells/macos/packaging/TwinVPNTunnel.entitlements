@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Entitlements for com.twinvpn.app.sysext — the NE packet-tunnel SYSTEM
+  extension.
+
+  Authority: ADR-0016 §11.9's macOS row (verbatim below), §12.6 / MX-1,
+  P-06; ADR-0020's macOS rows for the two storage shapes; ADR-0021
+  (notarization).
+
+  ADR-0016 §11.9's macOS row, verbatim, for this component:
+
+    "sysext: hardened runtime, library validation **on**,
+     `disable-library-validation` / `allow-dyld-environment-variables` /
+     `allow-unsigned-executable-memory` / `get-task-allow` all **absent** in
+     release; `com.apple.developer.networking.networkextension =
+     [packet-tunnel-provider-systemextension]`"
+
+  Every one of those four "absent" entitlements is absent from this file, and
+  their absence is the point: each one, if present, would re-open the code-
+  injection surface that ADR-0016 §11.9 closes and that ADR-0018 §11.16 (f)
+  depends on ("MUST NOT require writable-executable memory"). A reviewer should
+  check this file for what is NOT here at least as carefully as for what is.
+
+  ADR-0016 P-06 is the standing risk: "Apple grants the NetworkExtension
+  entitlement for `packet-tunnel-provider-systemextension` (macOS)". Until they
+  do, this file describes a build that cannot be signed. Nothing here has been
+  signed, submitted, or validated by this domain.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      THE ONE THAT APPLE MUST GRANT.
+
+      `packet-tunnel-provider-systemextension` is the SYSTEM-extension value.
+      The bare `packet-tunnel-provider` value is the iOS / app-extension one;
+      ADR-0016 §11.2 uses both, one per platform, and they are not
+      interchangeable.
+
+      Without it: systemextensionsd refuses the activation request and the
+      provider never runs. There is no degraded mode — the tunnel simply does
+      not exist. ADR-0016 §14(2) makes the grant a falsifiable schedule trigger
+      and names MX-3 (a LaunchDaemon owning utun directly) as the fallback,
+      never MX-2.
+    -->
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>packet-tunnel-provider-systemextension</string>
+    </array>
+
+    <!--
+      The VPN API entitlement.
+
+      ADR-0016 §11.9 lists `com.apple.developer.networking.vpn.api = [allow-vpn]`
+      explicitly for iOS/iPadOS and does NOT list it in the macOS row.
+
+      UNVERIFIED: whether a macOS packet-tunnel system extension needs it. It is
+      required to install a NETunnelProviderManager configuration, which the
+      CONTAINING APP does (see TwinVPNApp.entitlements), so the app carries it
+      and this bundle may not need it at all. It is included here because a
+      missing VPN entitlement fails at profile-install time with an opaque
+      NEVPNError rather than at build time, and a granted-but-unused entitlement
+      is a smaller defect than a missing required one. **If a Mac build shows it
+      is unnecessary, delete it** — an unnecessary entitlement is still surface.
+    -->
+    <key>com.apple.developer.networking.vpn.api</key>
+    <array>
+        <string>allow-vpn</string>
+    </array>
+
+    <!--
+      The keychain access group shared with the containing app.
+
+      ADR-0016 §11.4 records the residual this creates, and it is NOT hypothetical
+      on macOS: "the keychain access group cannot be scoped below app identity",
+      so anything in this group can use DeviceKey as a signing oracle.
+
+      On macOS the mitigation ADR-0020's macOS row supplies is that the
+      DEVELOPER-ID DAEMON shape does not use this group at all — it uses the
+      System keychain (/Library/Keychains/System.keychain) with an item ACL
+      created by SecAccessCreateWithOwnerAndACL and bound to the Team-signed
+      binary, which IS scopable below app identity. This group therefore holds
+      only items that the app and the extension genuinely share, and NEVER the
+      identity key.
+
+      ADR-0016 §11.5's HC-1 row is the rule this discharges: the key handle MUST
+      be openable by the authority with no user logged in, and MUST be
+      UNOPENABLE by the unprivileged client. A per-user keychain cannot do the
+      first; this group cannot do the second. Only the System keychain does both,
+      which is why the identity lives there and not here.
+    -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.twinvpn.shared</string>
+    </array>
+
+    <!--
+      The app group, shared with the containing app.
+
+      Used for the diagnostic ring-buffer hand-off and for nothing else on
+      macOS. ADR-0016 §11.2's iOS table puts bundle generation and redaction in
+      the APP because of the extension's memory ceiling; macOS has no such
+      ceiling, but keeping the split identical across the two Apple platforms is
+      what stops the diagnostic path being two different programs.
+
+      NOT used for the store root. ADR-0020's macOS row puts the store root at
+      /Library/Application Support/TwinVPN/ (root:wheel 0700), which is outside
+      any app group container — because an app-group container is user-writable
+      by construction and a root authority must not read its state from a
+      directory an unprivileged process can rewrite.
+
+      UNVERIFIED: the `group.` prefix requirement and whether App Groups behave
+      identically for a Developer-ID (non-App-Store) macOS build. Apple documents
+      App Groups for macOS as requiring a Team-ID prefix rather than the `group.`
+      prefix used on iOS; both spellings appear in Apple's own samples.
+    -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>$(TeamIdentifierPrefix)com.twinvpn.shared</string>
+    </array>
+
+    <!--
+      DELIBERATELY ABSENT, each named because its absence is a requirement and
+      not an omission (ADR-0016 §11.9's macOS row):
+
+        com.apple.security.cs.disable-library-validation
+          - would let an unsigned or differently-signed dylib load into a root
+            process. §11.9 requires library validation ON.
+        com.apple.security.cs.allow-dyld-environment-variables
+          - would restore the DYLD_* injection path that com.twinvpn.twinvpnd's
+            pinned PATH and Q10 exist to close.
+        com.apple.security.cs.allow-unsigned-executable-memory
+        com.apple.security.cs.allow-jit
+          - the MemoryDenyWriteExecute analogue. ADR-0018 §11.16 (f) requires the
+            core to link "without writable-executable memory"; a Rust static
+            library needs neither.
+        com.apple.security.get-task-allow
+          - debugger attach. Present in a debug build ONLY; its presence in a
+            notarized artifact is a release-blocking defect and
+            the `codesign` entitlements dump of SIGNING.md §4 is how it is caught.
+        com.apple.security.app-sandbox
+          - a system extension is not sandboxed; it runs as root. The App
+            Sandbox belongs to the containing app (TwinVPNApp.entitlements).
+    -->
+</dict>
+</plist>

@@ -1,0 +1,70 @@
+#
+# The two lines a TwinVPN package adds to /etc/pf.conf.
+#
+# **This file is not installed anywhere.** It is the exact text `install.sh`
+# splices into the host's `/etc/pf.conf`, kept as its own file so that what the
+# installer writes is reviewable without reading shell quoting.
+#
+# Authority: ADR-0012 §11.6's macOS row ("`pf` anchor `twinvpn` (both families)
+# … `LaunchDaemon` `RunAtLoad` + `/etc/pf.conf` anchor reference"), ADR-0016
+# §11.5's macOS row (the artifact is `/etc/twinvpn/pf.anchor`, applied by
+# `com.twinvpn.ksd`), ADR-0016 PS-7 (the artifact is package-owned; the
+# authority MUST NOT rewrite it as a runtime action).
+#
+# ---------------------------------------------------------- WHERE THESE GO
+#
+# pf parses /etc/pf.conf in a FIXED SECTION ORDER and rejects the whole file if
+# a rule appears in the wrong section:
+#
+#   1. macros            (name = value)
+#   2. tables            (table <name> …)
+#   3. options           (set …)
+#   4. traffic normalization  (scrub …)
+#   5. queueing          (altq / queue …)
+#   6. translation       (nat / rdr / binat …)
+#   7. filtering         (block / pass / anchor …)
+#
+# `anchor` and `load anchor` are **filtering** statements, so both lines below
+# belong in section 7 — after Apple's own `scrub-anchor`/`nat-anchor`/
+# `rdr-anchor`/`dummynet-anchor` lines and beside the stock
+# `anchor "com.apple/*"`. Putting them earlier is a parse error, and a parse
+# error in /etc/pf.conf means pf loads NOTHING: the failure mode is a host with
+# no filtering at all, which is the opposite of what this artifact is for.
+# `install.sh` runs `pfctl -n -f /etc/pf.conf` and refuses to commit a file that
+# does not parse.
+#
+# The stock macOS /etc/pf.conf ends with:
+#
+#   anchor "com.apple/*"
+#   load anchor "com.apple" from "/etc/pf.anchors/com.apple"
+#
+# and these two lines go immediately after it.
+#
+# ------------------------------------------------------- WHY TWO LINES, NOT ONE
+#
+# `anchor "twinvpn"`  creates the attachment point and evaluates whatever is
+# loaded there. `load anchor "twinvpn" from …` populates it at parse time from
+# the package's file. The authority later replaces the CONTENT with
+# `pfctl -a twinvpn -f -`, which pf applies as one transaction (KS-17's atomic
+# swap) and which does not touch /etc/pf.conf at all — PS-7's "the authority
+# MUST NOT rewrite it as a runtime action", made structural: the authority has
+# no reason to open this file and does not.
+#
+# The `/*` form is the recursive one: it evaluates the anchor AND any
+# sub-anchors beneath it, which is what lets the authority nest a per-generation
+# ruleset under `twinvpn/gen` without editing /etc/pf.conf again.
+#
+# ------------------------------------------------------------ THE RESIDUAL
+#
+# ADR-0012 §11.6's macOS limitation row, verbatim:
+#
+#   "Recovery and safe boot do not load the LaunchDaemon. A device booted to
+#    Recovery is unprotected. Disclosed; Recovery has no user session running
+#    ordinary applications."
+#
+# Nothing in this file or in `com.twinvpn.ksd` changes that, and nothing should
+# be read as if it does.
+#
+
+anchor "twinvpn/*"
+load anchor "twinvpn" from "/etc/twinvpn/pf.anchor"

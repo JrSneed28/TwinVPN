@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.twinvpn.twinvpnd — the authority's LaunchDaemon. Installed at
+  /Library/LaunchDaemons/com.twinvpn.twinvpnd.plist.
+
+  Authority: ADR-0016 §11.2 (the macOS component table and its "macOS,
+  normatively" paragraph), §11.5 (the macOS durability row), §11.6 (the start
+  sequence), §11.9 (the hardening table), PS-1, PS-9, PS-10, PS-11, PS-17,
+  PS-18; ADR-0017 §11.2's macOS row and MI-A3.
+
+  ================================================== WHAT THIS JOB IS, EXACTLY
+
+  ADR-0016 §11.2's macOS row lists five components:
+
+    com.twinvpn.sysext   NE system extension, root      <- THE AUTHORITY
+    com.twinvpn.ksd      LaunchDaemon, root, minimal    <- the KS-19 artifact
+    TwinVPN.app          per-user, sandboxed
+    twinvpn              CLI, user
+    twinvpn-unblock      privileged, separate executable
+
+  and "macOS, normatively" says "the system extension is the authority".
+
+  **This job is therefore NOT the authority in ADR-0016's sense**, and the
+  divergence is deliberate and reported rather than papered over. It exists
+  because the seam this product actually binds is the RUST crate, not
+  twinvpn.h's F-9 vtable: ownership.md §8 W-24 and W-25 record that the vtable
+  carries no socket capability, no interface enumeration, no installed_ruleset
+  read-back and no current_generation, so a Swift system extension bound only to
+  the C ABI cannot do NAT traversal and cannot produce a ProtectionAssertion at
+  all. This daemon hosts the Rust core and the macOS platform adapter, owns pf
+  and the MI endpoint, and the system extension is a thin packet-tunnel
+  provider over the same core.
+
+  THE CONSEQUENCE, STATED: there are two root components of ours besides ksd,
+  and ADR-0016 §11.2's macOS row names only one. Reconciling that is the
+  integration lead's, not this domain's. See shells/macos/README.md §7.
+
+  ================================================== WHAT THIS PLIST CANNOT DO
+
+  ADR-0016 §11.9's hardening table has a rich Linux column
+  (ProtectSystem=strict, PrivateDevices, RestrictAddressFamilies,
+  SystemCallFilter, MemoryDenyWriteExecute, …). launchd has NO equivalent for
+  any of it. On macOS those controls come from three other places:
+
+    - the hardened runtime and library validation, set at CODESIGN time
+      (see packaging/SIGNING.md), which is the MemoryDenyWriteExecute analogue;
+    - the App Sandbox, which a root LaunchDaemon does not use;
+    - the kernel's own SIP, which is not ours to configure.
+
+  So a reader must NOT infer from the shortness of this file that the macOS
+  authority is less contained than the Linux one — the containment simply is not
+  expressed here. PS-17 requires a directive that fails to apply to be named
+  rather than silently skipped; the honest statement is that most of §11.9's
+  table has no launchd expression at all, and shells/macos/README.md §7 records
+  it as a gap.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.twinvpn.twinvpnd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Application Support/TwinVPN/twinvpnd</string>
+    </array>
+
+    <!-- PS-1: the authority is a supervised process whose lifetime is
+         independent of any UI process or login session (R-25). RunAtLoad plus a
+         system-domain LaunchDaemon is what makes it independent of a console
+         seat. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!--
+      ADR-0016 §11.5's macOS supervisor row: KeepAlive={SuccessfulExit:false},
+      launchd's 10 s throttle.
+
+      Restart on a crash; do NOT restart on a clean exit, because a clean exit is
+      what an administered stop looks like and restarting it would make a
+      deliberate stop unachievable.
+
+      **KeepAlive is not crash-loop containment.** §11.5 again: "launchd has no
+      burst limit, so the authority maintains its OWN durable restart counter
+      (S-40) and latches quarantine itself." PS-9's bounded containment and
+      PS-10's "restart MUST NOT disarm enforcement" are discharged in twinvpnd's
+      own code, not by these two keys. If this plist looks like it contains a
+      crash loop, it does not; it only spaces one out.
+    -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!--
+      ADR-0016 §11.7's macOS row: the service account is `_twinvpn` and the
+      operator group is `_twinvpn_op`. The installer creates both; the authority
+      never does.
+
+      **This job nevertheless runs as root, and that is a stated gap rather than
+      an oversight.** The Linux unit drops to User=twinvpn with
+      AmbientCapabilities=CAP_NET_ADMIN, so it never runs as root at all
+      (§11.2: "the authority MUST NOT continue as root 'just this once'"). macOS
+      has no capability model: programming routes, opening a utun via
+      PF_SYSTEM/SYSPROTO_CONTROL and running pfctl all require uid 0 outright.
+      There is no macOS spelling of "CAP_NET_ADMIN and nothing else".
+
+      The honest posture is: root, with the surface reduced by the fact that the
+      Rust binary links no interpreter, has no plugin path, and reads no
+      configuration file. `_twinvpn` remains the owner of the state directory and
+      the MI endpoint's group, so the DAC boundary between the authority and an
+      unprivileged client is real even though the authority itself is uid 0.
+      Recorded in shells/macos/README.md §7.
+    -->
+    <key>UserName</key>
+    <string>root</string>
+    <key>GroupName</key>
+    <string>wheel</string>
+
+    <!-- Interactive latency without a UI: the authority answers MI calls and
+         must not be App-Napped while a client is waiting. `Adaptive` lets
+         launchd promote it when it has active work and demote it when idle. -->
+    <key>ProcessType</key>
+    <string>Adaptive</string>
+
+    <!--
+      ADR-0017 MI-A3: the endpoint's directory "MUST be created by the OS init
+      system with a privileged owner and no non-privileged write", and "the
+      agent MUST verify the directory's ownership and mode before binding and
+      MUST refuse to bind into a directory it does not own."
+
+      launchd has NO RuntimeDirectory= equivalent. macOS does not create
+      /var/run/twinvpn for us. So the directory is created by the INSTALLER
+      (install.sh, 0755 root:wheel) rather than by the supervisor, and twinvpnd
+      verifies it at start exactly as the Linux agent does. That is a weaker
+      discharge of MI-A3 than the Linux one — the installer runs once, the
+      supervisor runs every boot, and a /var/run wiped by the OS on reboot would
+      leave the directory absent rather than wrong. twinvpnd therefore treats an
+      ABSENT directory as a startup failure (MGMT.UNAVAILABLE), never as licence
+      to create one itself with whatever ownership it happens to have.
+
+      DELIBERATELY NO `Sockets` KEY. ADR-0017 MI-A3 and §10.3 prohibit socket
+      activation: "the activation socket outlives the agent, so a client
+      connects successfully then hangs instead of getting MGMT.UNAVAILABLE."
+      launchd socket activation has exactly that shape, so it is not used.
+
+      DELIBERATELY NO `MachServices` KEY IN THIS WAVE. ADR-0017 §11.2's macOS
+      row wants NSXPCConnection to `com.twinvpn.agent.mgmt` with audit-token
+      attestation as the PREFERRED binding, and AF_UNIX at
+      /var/run/twinvpn/mgmt.sock for non-XPC clients such as the CLI. This wave
+      implements the AF_UNIX half only. Declaring the Mach service here without
+      a server for it would advertise a channel that hangs — the same failure
+      MI-A3 rejects socket activation for. Recorded in README §7.
+    -->
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+
+    <!-- Logging goes to os_log via the process itself; these paths catch a
+         pre-logging-init panic and nothing else. ADR-0015 §11.4: never a key, a
+         session key, a tunnel payload, a pairing secret or a token — and a
+         panic message is none of those. -->
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/twinvpn/twinvpnd.err.log</string>
+
+    <!--
+      ADR-0016 Q10: no inherited search path, preload variable or plugin
+      directory that could supply executable code to a privileged process.
+      PATH is pinned so `pfctl`, `route` and `scutil` resolve to the system
+      binaries and to nothing else. DYLD_* variables are absent, and the
+      hardened runtime's library validation (SIGNING.md) is what makes their
+      absence enforced rather than merely intended.
+
+      TWINVPN_MGMT_SOCKET and TWINVPN_LOG_* are NOT set here: every one has a
+      default and the default is the production value, so setting them would
+      only create a second place for the truth to live.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/sbin:/sbin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

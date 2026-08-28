@@ -1,0 +1,40 @@
+# twinvpn-bridge - the Swift <-> Rust ABI of the macOS system extension.
+#
+# Owner: desktop-macos.
+#
+# A `staticlib` because the Swift `NEPacketTunnelProvider` links it into the
+# system extension bundle, and an `rlib` as well so `twinvpnd` can use the same
+# `TvbExt` machinery in-process without going through C.
+#
+# THE ONE CRATE IN THIS SHELL THAT CANNOT FORBID `unsafe`. Every other crate
+# under `shells/` carries `#![forbid(unsafe_code)]`; this one is the FFI
+# boundary itself, so it carries `#![deny(unsafe_op_in_unsafe_fn)]` and a
+# `// SAFETY:` comment on every block instead. DP-4 permits that here.
+#
+# `futures-core` is the one dependency NOT inherited from the workspace: it is
+# needed only to IMPLEMENT `twinvpn_platform_macos::utun::PacketPort`, whose
+# methods return `BoxFuture`, and no other crate in this shell names it. The
+# bridge itself never awaits anything -- Swift calls blocking C functions -- so
+# it is a type dependency and not a runtime one.
+[package]
+name        = "twinvpn-bridge"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the Swift/Rust bridge for the macOS packet-tunnel system extension"
+
+[lib]
+name       = "twinvpn_bridge"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+twinvpn-platform-macos = { workspace = true }
+twinvpn-platform       = { workspace = true }
+twinvpn-types          = { workspace = true }
+twinvpn-env            = { workspace = true }
+tracing                = { workspace = true }
+serde_json             = { workspace = true }
+libc                   = { workspace = true }
+futures-core           = "0.3"
