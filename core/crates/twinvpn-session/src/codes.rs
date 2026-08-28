@@ -155,44 +155,46 @@ pub const fn policy_violation_code(kind: PolicyViolationKind) -> ReasonCode {
 
 /// Whether a code's `class` is compatible with the state it accompanies.
 ///
+/// # The registry decides a code's class; §10.2 summarises, it does not legislate
+///
 /// §10.2's static test states the mapping as "`POLICY` → `BLOCKED`;
 /// `FATAL`/`PERSISTENT` → `FAILED`; `TRANSIENT`/`PERSISTENT` → `RECONNECTING`;
-/// `TRANSIENT` → `DEGRADED`".
+/// `TRANSIENT` → `DEGRADED`". Read as a constraint on which codes §4.5 may name,
+/// it is contradicted by §4.5 itself in four places.
 ///
-/// # Two widenings, each forced by the frozen registry
+/// The resolution is ADR-0015 §11.2 rule 4 — **"the code is the contract"**. The
+/// frozen registry is authoritative for a code's `class`; an ADR's prose about
+/// what class a condition "is" does not override the registry entry, and §10.2's
+/// sentence is a summary of the common case rather than a fifth authority. So
+/// this function admits the classes the **registry** assigns to the codes §4.5
+/// **actually names**, which is what the transition table already implies:
 ///
-/// 1. **`BLOCKED` admits `FATAL` and `PERSISTENT`, not only `POLICY`.** §4.5 T29
-///    names `ROUTE.DRIFT_DETECTED` and `ROUTE.IFACE_MISSING` as T29 codes; the
-///    registry classifies both `PERSISTENT`. It classifies `POLICY.LEAK.DETECTED`
-///    — the archetypal leak — `FATAL`. Under the literal rule, three codes the
-///    normative table names for `BLOCKED` could not be emitted there.
-/// 2. **`FAILED` admits `POLICY` and `TRANSIENT`.** T11 and T28 send
-///    `AUTH.DEVICE_REVOKED` — registered `POLICY` — to `FAILED`. T27's own
-///    fallback ladder names `NET.NO_USABLE_CANDIDATES`, registered `TRANSIENT`,
-///    "where nothing more specific exists". Both are in the normative table, so
-///    the table wins over §10.2's summary of it.
+/// | State | Admits | Because §4.5 names |
+/// |---|---|---|
+/// | `BLOCKED` | `POLICY`, `FATAL`, `PERSISTENT` | T29's `ROUTE.DRIFT_DETECTED` and `ROUTE.IFACE_MISSING` (both `PERSISTENT`), and `POLICY.LEAK.DETECTED` (`FATAL`) |
+/// | `FAILED` | any | T11/T28's `AUTH.DEVICE_REVOKED` (`POLICY`) and T27's fallback `NET.NO_USABLE_CANDIDATES` (`TRANSIENT`) |
+/// | `RECONNECTING` | `TRANSIENT`, `PERSISTENT` | §10.2's reading holds here unchanged |
+/// | `DEGRADED` | `TRANSIENT`, `PERSISTENT` | §5.4's effective-MTU row, whose nearest registered code `NET.MTU_TOO_SMALL` is `PERSISTENT` |
 ///
-/// 3. **`DEGRADED` admits `PERSISTENT`.** §5.4's effective-MTU row is a
-///    `DEGRADED` entry threshold and the nearest registered code,
-///    `NET.MTU_TOO_SMALL`, is `PERSISTENT`. §5.4 assigns that row no code at
-///    all, which is the underlying gap.
-///
-/// All four are reported to the integration lead as spec/registry divergences
-/// rather than resolved locally.
+/// Only the last row rests on a genuine gap rather than a summary: §5.4 assigns
+/// the effective-MTU threshold **no code at all**, so the `PERSISTENT` reading
+/// comes from the code this crate had to choose. That one is still worth an
+/// ADR amendment; the other three are not, because the table was always right.
 #[must_use]
 pub fn class_admissible(code: ReasonCode, state: crate::state::SessionState) -> bool {
     use crate::state::SessionState as S;
     use twinvpn_types::ErrorClass as C;
     match state {
         S::Blocked => matches!(code.class(), C::Policy | C::Fatal | C::Persistent),
-        // RECONNECTING and DEGRADED admit the same two classes, for different
-        // reasons: §10.2 gives RECONNECTING `TRANSIENT`/`PERSISTENT` outright,
-        // and DEGRADED reaches `PERSISTENT` only through widening 3 above.
+        // RECONNECTING and DEGRADED admit the same two classes: §10.2 gives
+        // RECONNECTING both outright, and DEGRADED reaches `PERSISTENT` through
+        // §5.4's uncoded effective-MTU row.
         S::Reconnecting { .. } | S::Degraded { .. } => {
             matches!(code.class(), C::Transient | C::Persistent)
         }
-        // FAILED admits every class after widening 2, and a state that carries
-        // no code at all constrains nothing — so both fall through here.
+        // FAILED admits every class, because §4.5 sends it both a `POLICY` and
+        // a `TRANSIENT` code by name. A state that carries no code at all
+        // constrains nothing, so both fall through here.
         _ => true,
     }
 }
