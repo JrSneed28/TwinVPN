@@ -24,50 +24,51 @@
 //! Getting the second one backwards is the failure LC-8 names, so this module
 //! exists to make it right once, in one place, with a test that reads both.
 //!
-//! # Why `CLOCK_BOOTTIME` is read through `/proc/uptime` and not `clock_gettime`
+//! # `CLOCK_BOOTTIME` is read with `clock_gettime(2)`
 //!
-//! **This is a real conflict between two rules, reported rather than
-//! sidestepped.** CB-3 and DP-4 put platform-specific code and `unsafe` in a
-//! `twinvpn-platform-*` crate — this one. But ADR-0018 CD-3's deny-list, as
-//! `core/xtask/src/checks.rs` implements it, excludes exactly one path
-//! (`crates/twinvpn-env/src/binding/`) and denies the needle `clock_gettime`
-//! **everywhere else, including here**. Verified by running the lint against a
-//! deliberate probe, not assumed. The shells are outside the lint's reach but
-//! carry `#![forbid(unsafe_code)]`, so there is no location in the tree that
-//! holds both permissions at once.
+//! Wave 1 read it out of `/proc/uptime` instead, because two of our own lints
+//! contradicted each other: CB-3 and DP-4 put platform-specific code and
+//! `unsafe` in a `twinvpn-platform-*` crate — this one — while ADR-0018 CD-3's
+//! deny-list denied the needle `clock_gettime` *everywhere* outside
+//! `twinvpn-env`'s binding directory, including here. That conjunction was
+//! unsatisfiable: no location in the tree could legally read a platform clock.
+//! It is `ownership.md` §8 **W-36**, and the disposition was "one exemption in
+//! `checks.rs` for `twinvpn-platform-*`".
 //!
-//! `/proc/uptime`'s first field is written by the kernel from
-//! `ktime_get_boottime_ts64()` — the same clock `CLOCK_BOOTTIME` reads — so it
-//! is **genuinely suspend-inclusive**, which is the property that is invisible
-//! when it is wrong. It costs one `read(2)` of a ~30-byte pseudo-file and
-//! quantises to 10 ms. Every documented consumer of this clock — the suspend
-//! gap, the rekey window, NAT binding lifetime, `T_REHYDRATE`, and LC-8 F2's
-//! long-horizon policy deadlines (`T_TRUST_HARD`, `T_IK_OVERLAP`) — is a
-//! seconds-to-days quantity, so 10 ms is not a functional cost. It is stated
-//! here rather than glossed.
+//! That exemption now exists — `core/xtask/src/checks.rs`'s
+//! `CD3_PLATFORM_PRIMITIVES` and `cd3_crate_may_read_platform_primitives` —
+//! so the workaround is **deleted** and the syscall is called directly. The
+//! difference is not cosmetic: `/proc/uptime` quantises to 10 ms and costs an
+//! `open`/`read`/`close` of a pseudo-file per reading, where `clock_gettime` is
+//! a vDSO call with nanosecond resolution and no file descriptor at all. LC-8's
+//! consumers are seconds-to-days quantities, so the *quantisation* was not a
+//! functional defect; the syscall is still the primitive the ADR's own
+//! per-platform table names, and reading a formatted pseudo-file to obtain it
+//! was a workaround, not a design.
 //!
-//! The preferred fix is one line in `checks.rs`: exempt the platform-time
-//! needles for `twinvpn-platform-*` crates, exactly as `cb3_crate_is_exempt`
-//! already exempts them for `target_os`. Reported to the integration lead.
+//! The one property that must not be lost in the change is **suspend
+//! inclusion**: `CLOCK_BOOTTIME` counts time spent suspended and
+//! `CLOCK_MONOTONIC` does not, and substituting the second for the first
+//! "compiles, passes every test that does not suspend, and fails only on a
+//! device that actually sleeps". `the_clock_id_is_boottime_and_not_monotonic`
+//! pins the constant, and `boottime_is_never_behind_monotonic` asserts the
+//! ordering the two clocks must always satisfy on any host.
 
 use std::fs;
-use std::io::Read;
 use std::sync::Arc;
 
 use twinvpn_env::{BootId, BootIdSource, ElapsedClock, ElapsedInstant, Entropy, EnvError};
 
-/// The path the suspend-inclusive reading comes from.
+/// The `clockid_t` this clock reads, named so a test can pin it.
 ///
-/// A constant so a test can assert *which* file is read: reading
-/// `/proc/uptime`'s first field is the whole difference between this clock and
-/// the monotonic one, and a silent change to another source would be exactly
-/// LC-8's invisible defect.
-pub const BOOTTIME_SOURCE: &str = "/proc/uptime";
+/// The whole difference between this clock and the monotonic one is this
+/// constant. `CLOCK_MONOTONIC` here would compile, pass every test on a host
+/// that has never suspended, and be wrong on every device that sleeps — which
+/// is LC-8's "invisible on CI" failure exactly.
+pub const BOOTTIME_CLOCK_ID: libc::clockid_t = libc::CLOCK_BOOTTIME;
 
-/// The suspend-**inclusive** clock: Linux `CLOCK_BOOTTIME`.
-///
-/// See the module documentation for why the reading comes through
-/// `/proc/uptime` rather than `clock_gettime(CLOCK_BOOTTIME)`.
+/// The suspend-**inclusive** clock: Linux `CLOCK_BOOTTIME`, read with
+/// `clock_gettime(2)`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BootTimeElapsedClock;
 
@@ -84,100 +85,109 @@ impl BootTimeElapsedClock {
         Arc::new(Self)
     }
 
-    /// The raw reading in microseconds, or `None` if the file could not be read
-    /// or parsed.
+    /// The raw reading in microseconds, or `None` if the kernel refused.
     ///
     /// Separated from [`ElapsedClock::now`] so a test can see the failure that
-    /// `now` has to absorb.
+    /// `now` has to absorb, and so the `unsafe` block has exactly one caller.
     #[must_use]
     pub fn read_micros() -> Option<u64> {
-        let text = fs::read_to_string(BOOTTIME_SOURCE).ok()?;
-        parse_uptime_micros(&text)
+        Self::read_micros_of(BOOTTIME_CLOCK_ID)
+    }
+
+    /// The same reading, for an arbitrary `clockid_t`.
+    ///
+    /// Present so `boottime_is_never_behind_monotonic` can read
+    /// `CLOCK_MONOTONIC` through the identical code path: comparing the two
+    /// clocks is only meaningful if the *only* difference between the readings
+    /// is the clock id.
+    #[must_use]
+    pub fn read_micros_of(clock: libc::clockid_t) -> Option<u64> {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `timespec` is two integers with no invalid bit patterns, so
+        // the zeroed local above is a valid initial value. `clock_gettime`
+        // writes through the pointer and reads nothing else, and the pointee is
+        // a local that outlives the call. The return code is checked before the
+        // struct is read, so a failed call never produces a reading. This is the
+        // syscall CB-3 and DP-4 place in this crate, and CD-3's W-36 exemption
+        // (`cd3_crate_may_read_platform_primitives`) permits here.
+        let rc = unsafe { libc::clock_gettime(clock, &raw mut ts) };
+        if rc != 0 {
+            return None;
+        }
+        micros_of(ts.tv_sec, ts.tv_nsec)
     }
 }
 
-/// Parses `/proc/uptime`'s first field into microseconds.
+/// Converts a `timespec` to microseconds.
 ///
-/// The format is two space-separated decimal seconds values with two fractional
-/// digits. Parsed by hand rather than through a float so the conversion is
-/// exact: `f64` round-tripping introduces a sub-microsecond error that turns a
-/// monotone sequence into an occasionally-decreasing one, and
-/// [`ElapsedInstant`]'s interval arithmetic saturates a non-monotone pair to
-/// zero — which would silently swallow real elapsed time.
-fn parse_uptime_micros(text: &str) -> Option<u64> {
-    let field = text.split_ascii_whitespace().next()?;
-    let (secs, frac) = match field.split_once('.') {
-        Some((s, f)) => (s, f),
-        None => (field, ""),
-    };
-    let secs: u64 = secs.parse().ok()?;
-    // Right-pad or truncate the fraction to exactly six digits (microseconds).
-    let mut micros: u64 = 0;
-    let mut digits = 0;
-    for byte in frac.bytes() {
-        if digits == 6 {
-            break;
-        }
-        let d = (byte as char).to_digit(10)?;
-        micros = micros * 10 + u64::from(d);
-        digits += 1;
-    }
-    while digits < 6 {
-        micros *= 10;
-        digits += 1;
-    }
-    secs.checked_mul(1_000_000)?.checked_add(micros)
+/// A negative `tv_sec` is not a value `CLOCK_BOOTTIME` can produce; it is
+/// refused rather than cast, because `as u64` on a negative would turn a
+/// nonsense reading into an enormous one, and every interval computed from it
+/// into an expiry far in the future.
+fn micros_of(secs: libc::time_t, nanos: libc::c_long) -> Option<u64> {
+    let secs = u64::try_from(secs).ok()?;
+    let nanos = u64::try_from(nanos).ok()?;
+    secs.checked_mul(1_000_000)?.checked_add(nanos / 1_000)
 }
 
 impl ElapsedClock for BootTimeElapsedClock {
     fn now(&self) -> ElapsedInstant {
-        // A clock read has no error channel, by the trait's design. `/proc` is
-        // mounted on every Linux host TwinVPN supports and this file has existed
-        // since 0.99; if it is unreadable the process is in an environment where
-        // no reading is meaningful. Returning ORIGIN rather than panicking keeps
-        // a hostile /proc from being a crash vector, and the value is
-        // monotonically wrong in the safe direction: every interval measures as
-        // zero, so nothing expires early.
+        // A clock read has no error channel, by the trait's design.
+        // `clock_gettime(CLOCK_BOOTTIME)` fails only with EINVAL on a kernel
+        // that does not know the clock id, which is every Linux since 2.6.39 and
+        // therefore none that TwinVPN supports. Returning ORIGIN rather than
+        // panicking keeps a broken vDSO from being a crash vector, and the value
+        // is wrong in the safe direction: every interval measures as zero, so
+        // nothing expires early.
         ElapsedInstant::from_micros(Self::read_micros().unwrap_or(0))
     }
 }
 
-/// The platform CSPRNG, read from `/dev/urandom`.
+/// The platform CSPRNG, read with `getrandom(2)`.
 ///
-/// # Why `/dev/urandom` and not `getrandom(2)`
+/// # Why the syscall and not `/dev/urandom`
 ///
-/// Same conflict as the clock above: CD-3 denies the needle `getrandom`
-/// everywhere outside `twinvpn-env`'s binding directory, including here. On
-/// Linux since 3.17 `/dev/urandom` and `getrandom(GRND_NONBLOCK)` draw from the
-/// same CSPRNG; the difference is that `/dev/urandom` can return bytes before
-/// the pool is initialised very early in boot. That window is closed here by
-/// [`SystemEntropy::probe`], which the shell calls at startup and which fails
-/// loudly rather than proceeding with a possibly-unseeded pool.
+/// Wave 1 opened `/dev/urandom` for the same W-36 reason the clock read
+/// `/proc/uptime`: CD-3 denied the needle `getrandom` here. The exemption now
+/// exists, and the syscall is strictly better than the device in two ways that
+/// matter for a key source:
 ///
-/// [`Entropy::fill`] **never** falls back to a weaker source. `EntropyUnavailable`
-/// is propagated, because "a silent downgrade here is indistinguishable from
-/// working, and the value it produces is the one every nonce and key depends on".
-#[derive(Debug)]
-pub struct SystemEntropy {
-    path: &'static str,
-}
-
-impl Default for SystemEntropy {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// 1. **It blocks until the pool is initialised.** `/dev/urandom` returns bytes
+///    from an uninitialised pool very early in boot; `getrandom(2)` with no
+///    flags does not. On an embedded or router target — ADR-0023's `H-EMB` and
+///    `H-CTR` profiles — that window is real, and a nonce drawn inside it is
+///    predictable.
+/// 2. **It needs no file descriptor.** A `chroot` or a `seccomp` filter or an
+///    exhausted fd table can make `open("/dev/urandom")` fail; there is nothing
+///    between this call and the kernel.
+///
+/// [`Entropy::fill`] **never** falls back to a weaker source.
+/// `EntropyUnavailable` is propagated, because "a silent downgrade here is
+/// indistinguishable from working, and the value it produces is the one every
+/// nonce and key depends on".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemEntropy;
 
 impl SystemEntropy {
     /// The pool-initialisation flag. `1` once the CSPRNG is seeded.
     const READY_FLAG: &'static str = "/proc/sys/kernel/random/entropy_avail";
 
+    /// The largest number of bytes one `getrandom(2)` call is guaranteed to
+    /// return without a short read on Linux.
+    ///
+    /// The kernel documents 256 for the urandom source. Larger requests may be
+    /// interrupted by a signal, so [`Entropy::fill`] loops rather than assuming
+    /// one call fills the buffer — a short read that went unnoticed would leave
+    /// the tail of a key buffer holding whatever was there before.
+    const MAX_PER_CALL: usize = 256;
+
     /// Binds the platform CSPRNG.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            path: "/dev/urandom",
-        }
+        Self
     }
 
     /// Binds it as a shared capability.
@@ -190,15 +200,16 @@ impl SystemEntropy {
     ///
     /// # Errors
     ///
-    /// [`EnvError::EntropyUnavailable`] if the device cannot be read, or if the
+    /// [`EnvError::EntropyUnavailable`] if the syscall is unavailable, or if the
     /// kernel reports an unseeded pool.
     pub fn probe(&self) -> Result<(), EnvError> {
         let mut probe = [0u8; 32];
         self.fill(&mut probe)?;
-        // `entropy_avail` is advisory on a modern kernel (the CSPRNG stays
-        // seeded once initialised) but a zero here on an early-boot embedded
-        // target is the one case worth refusing. Absence of the file is not a
-        // failure: it means a kernel or a container that does not export it.
+        // `entropy_avail` is advisory on a modern kernel — `getrandom(2)` would
+        // have blocked rather than returned unseeded bytes — but a zero here on
+        // an early-boot embedded target is still worth refusing. Absence of the
+        // file is not a failure: it means a kernel or a container that does not
+        // export it.
         if let Ok(text) = fs::read_to_string(Self::READY_FLAG) {
             if text.trim() == "0" {
                 return Err(EnvError::EntropyUnavailable);
@@ -210,12 +221,41 @@ impl SystemEntropy {
 
 impl Entropy for SystemEntropy {
     fn fill(&self, dst: &mut [u8]) -> Result<(), EnvError> {
-        if dst.is_empty() {
-            return Ok(());
+        let mut filled = 0usize;
+        while filled < dst.len() {
+            let chunk = (dst.len() - filled).min(Self::MAX_PER_CALL);
+            // SAFETY: the pointer is derived from a mutable slice this call
+            // holds exclusively, and `chunk` is at most the remaining length, so
+            // the kernel writes only within `dst`. `flags = 0` selects the
+            // urandom source and blocks until it is initialised rather than
+            // returning unseeded bytes. The return value is checked before any
+            // byte is treated as written.
+            let written = unsafe {
+                libc::getrandom(
+                    dst.as_mut_ptr().add(filled).cast::<libc::c_void>(),
+                    chunk,
+                    0,
+                )
+            };
+            if written < 0 {
+                let errno = std::io::Error::last_os_error().raw_os_error();
+                // EINTR is a signal, not a failure: retry rather than propagate,
+                // because a caller that treated a signal as "no entropy" would
+                // fail a handshake for a reason unrelated to entropy.
+                if errno == Some(libc::EINTR) {
+                    continue;
+                }
+                return Err(EnvError::EntropyUnavailable);
+            }
+            let written = usize::try_from(written).map_err(|_| EnvError::EntropyUnavailable)?;
+            if written == 0 {
+                // Never a spin: a zero-length return with a non-empty request is
+                // a broken source, not a retry condition.
+                return Err(EnvError::EntropyUnavailable);
+            }
+            filled += written;
         }
-        let mut file = fs::File::open(self.path).map_err(|_| EnvError::EntropyUnavailable)?;
-        file.read_exact(dst)
-            .map_err(|_| EnvError::EntropyUnavailable)
+        Ok(())
     }
 }
 
@@ -283,18 +323,52 @@ mod tests {
     use twinvpn_env::MonotonicClock;
 
     #[test]
-    fn the_uptime_field_parses_exactly_and_not_through_a_float() {
-        assert_eq!(parse_uptime_micros("12.34 56.78\n"), Some(12_340_000));
-        assert_eq!(parse_uptime_micros("0.00 0.00"), Some(0));
-        assert_eq!(
-            parse_uptime_micros("59750.54 935371.51"),
-            Some(59_750_540_000)
+    fn a_timespec_converts_exactly_and_a_negative_one_is_refused() {
+        assert_eq!(micros_of(12, 340_000_000), Some(12_340_000));
+        assert_eq!(micros_of(0, 0), Some(0));
+        assert_eq!(micros_of(59_750, 540_000_000), Some(59_750_540_000));
+        // Sub-microsecond nanoseconds truncate rather than round: an interval
+        // must never measure LONGER than it was.
+        assert_eq!(micros_of(0, 999), Some(0));
+        assert_eq!(micros_of(0, 1_999), Some(1));
+        // A negative reading is not a value CLOCK_BOOTTIME can produce, and
+        // casting it would produce an enormous positive one.
+        assert_eq!(micros_of(-1, 0), None);
+        assert_eq!(micros_of(0, -1), None);
+    }
+
+    #[test]
+    fn the_clock_id_is_boottime_and_not_monotonic() {
+        // The entire suspend-inclusion property is this one constant. A build
+        // that changed it would pass every other test in this file on a host
+        // that has never suspended, which is LC-8's stated failure mode.
+        assert_eq!(BOOTTIME_CLOCK_ID, libc::CLOCK_BOOTTIME);
+        assert_ne!(BOOTTIME_CLOCK_ID, libc::CLOCK_MONOTONIC);
+        assert_ne!(BOOTTIME_CLOCK_ID, libc::CLOCK_REALTIME);
+    }
+
+    #[test]
+    fn boottime_is_never_behind_monotonic() {
+        // CLOCK_BOOTTIME == CLOCK_MONOTONIC + accumulated suspend time, so the
+        // difference is >= 0 always and > 0 on a host that has suspended. Both
+        // readings go through the same code path, so the only difference between
+        // them is the clock id — which is what makes the comparison meaningful.
+        let boot = BootTimeElapsedClock::read_micros_of(libc::CLOCK_BOOTTIME).expect("boottime");
+        let mono =
+            BootTimeElapsedClock::read_micros_of(libc::CLOCK_MONOTONIC).expect("monotonic");
+        assert!(
+            boot >= mono,
+            "CLOCK_BOOTTIME ({boot} us) must never read behind CLOCK_MONOTONIC \
+             ({mono} us): the difference is accumulated suspend time"
         );
-        // No fractional part, and extra precision, both accepted.
-        assert_eq!(parse_uptime_micros("7 8"), Some(7_000_000));
-        assert_eq!(parse_uptime_micros("1.1234567 2"), Some(1_123_456));
-        assert_eq!(parse_uptime_micros("not-a-number x"), None);
-        assert_eq!(parse_uptime_micros(""), None);
+    }
+
+    #[test]
+    fn an_unknown_clock_id_is_a_none_and_never_a_panic() {
+        // The failure `ElapsedClock::now` has to absorb, made visible. A clock
+        // read has no error channel, so this is the only place the refusal is
+        // observable.
+        assert_eq!(BootTimeElapsedClock::read_micros_of(-424_242), None);
     }
 
     #[test]
@@ -302,8 +376,9 @@ mod tests {
         let clock = BootTimeElapsedClock::new();
         let a = clock.now();
         // Busy-spin rather than sleep: CD-3 bans the runtime's time module and
-        // `std::thread::sleep` would make this test a timing dependency. Ten
-        // milliseconds of work is one `/proc/uptime` tick.
+        // `std::thread::sleep` would make this test a timing dependency.
+        // `clock_gettime` resolves to nanoseconds, so this terminates in a few
+        // iterations rather than in a 10 ms `/proc/uptime` tick.
         let mut b = clock.now();
         for _ in 0..2_000_000u64 {
             b = clock.now();
@@ -311,7 +386,7 @@ mod tests {
                 break;
             }
         }
-        assert!(b >= a, "an elapsed reading must never go backwards");
+        assert!(b > a, "a nanosecond-resolution clock must advance");
         assert!(a.as_micros() > 0, "a booted host has non-zero boot time");
     }
 
@@ -328,7 +403,9 @@ mod tests {
     /// 1. The two clocks have **different origins**. `SystemMonotonicClock`
     ///    zeroes at construction; this one is absolute since boot. A build that
     ///    substituted the monotonic clock would read near zero.
-    /// 2. The reading agrees with the kernel's own boot-time accounting.
+    /// 2. The clock id is pinned by
+    ///    `the_clock_id_is_boottime_and_not_monotonic`, and the ordering by
+    ///    `boottime_is_never_behind_monotonic`.
     #[test]
     fn the_elapsed_clock_is_not_the_monotonic_clock() {
         let monotonic = SystemMonotonicClock::new();
@@ -359,6 +436,16 @@ mod tests {
         assert_ne!(a, [0u8; 32], "an all-zero draw is a broken source");
         // A zero-length fill is a no-op, not an error.
         entropy.fill(&mut []).expect("empty fill");
+
+        // Larger than one `getrandom(2)` call: the loop must fill the WHOLE
+        // buffer. A short read that went unnoticed would leave the tail holding
+        // whatever was there before, which for a key buffer is zeros.
+        let mut long = vec![0u8; 4096];
+        entropy.fill(&mut long).expect("fills a long buffer");
+        assert!(
+            long[4000..].iter().any(|b| *b != 0),
+            "the tail past the first getrandom(2) call was not filled"
+        );
     }
 
     #[test]
