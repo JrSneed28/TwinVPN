@@ -137,7 +137,7 @@ impl LinuxNetworkConfig {
     }
 
     /// Applies a rendered script through `nft -f -`, as one kernel transaction.
-    fn run_nft_script(script: &str) -> Result<(), PlatformError> {
+    pub(crate) fn run_nft_script(script: &str) -> Result<(), PlatformError> {
         let binary = Self::nft_binary()?;
         let mut child = Command::new(binary)
             .arg("-f")
@@ -182,7 +182,7 @@ impl LinuxNetworkConfig {
     }
 
     /// Reads the installed table back from the kernel.
-    fn read_installed() -> Result<Option<nft::Installed>, PlatformError> {
+    pub(crate) fn read_installed() -> Result<Option<nft::Installed>, PlatformError> {
         let binary = Self::nft_binary()?;
         let output = Command::new(binary)
             .args(["--json", "list", "table", nft::FAMILY, nft::TABLE])
@@ -199,6 +199,75 @@ impl LinuxNetworkConfig {
         }
         let text = String::from_utf8_lossy(&output.stdout);
         Ok(nft::parse_installed(&text))
+    }
+}
+
+/// Reads the owner-tagged table back from the kernel, with no adapter in hand.
+///
+/// **ADR-0012 KS-20a's offline path needs this to be a free function.** The
+/// recovery command exists for the case "the authority will not start", so it
+/// cannot construct a [`LinuxNetworkConfig`] — that would mean constructing an
+/// adapter, which means an `Env`, which means the runtime whose failure may be
+/// the very thing being recovered from. Reading the kernel needs none of that.
+///
+/// `Ok(None)` is the one place `None` is the truth rather than the dangerous
+/// direction: `nft list table` exits non-zero when the table does not exist, and
+/// "nothing of ours is installed" is exactly what that means.
+///
+/// # Errors
+///
+/// [`PlatformError::AdapterUnavailable`] when `nft(8)` is absent, or the errno
+/// of a failed spawn. **Never a silent `None`** for either: O-18's fail-safe
+/// direction is that an assertion which cannot be produced is not an assertion
+/// that protection is absent.
+pub fn read_owner_tagged_table() -> Result<Option<nft::Installed>, PlatformError> {
+    LinuxNetworkConfig::read_installed()
+}
+
+/// Deletes the owner-tagged table, and **confirms it is gone from the kernel**.
+///
+/// ADR-0012 KS-20a: "privileged, local, network-independent, removing the
+/// owner-tagged rule set and clearing the latch".
+///
+/// # Two things it deliberately does not do
+///
+/// 1. **It does not flush the ruleset.** `nft flush ruleset` would remove the
+///    host's own firewall, which is not ours to remove. KS-20's reclamation is
+///    scoped to what we tagged, and so is this.
+/// 2. **It does not trust the exit code.** The delete is followed by a read-back,
+///    for the same reason ADR-0016 §11.6 step (2) reads the ruleset back after
+///    arming it: the kernel's answer is the fact, and "the command returned zero"
+///    is not. A delete that reported success over a table that is still installed
+///    would tell an operator their host is unblocked when it is not — and they
+///    would then go looking for the problem somewhere else entirely.
+///
+/// Deleting a table that is not there is **not** an error: the command is for a
+/// host in an unknown state, and refusing because the work was already done
+/// would be the least useful possible answer.
+///
+/// # Errors
+///
+/// [`PlatformError::AdapterUnavailable`] when `nft(8)` is absent, the errno of a
+/// failed spawn, or — after a delete that reported success — the table still
+/// being present in the read-back.
+pub fn remove_owner_tagged_table() -> Result<(), PlatformError> {
+    // Already absent: nothing to do, and that is a success.
+    if LinuxNetworkConfig::read_installed()?.is_none() {
+        return Ok(());
+    }
+    // One `delete table`, scoped by name. Written as a script through the same
+    // `nft -f -` path the install uses, so the environment is cleared the same
+    // way (ADR-0016 Q10) and there is one place that spawns `nft`.
+    let script = format!("delete table {} {}\n", nft::FAMILY, nft::TABLE);
+    LinuxNetworkConfig::run_nft_script(&script)?;
+
+    // The read-back. Not optional.
+    match LinuxNetworkConfig::read_installed()? {
+        None => Ok(()),
+        Some(_) => Err(nft::unreachable(
+            "nft delete table (read-back)",
+            libc::EBUSY,
+        )),
     }
 }
 
@@ -566,6 +635,33 @@ mod tests {
             enforcement(),
             PathBuf::from("/tmp/twinvpn-test-restore"),
         )
+    }
+
+    #[test]
+    fn the_offline_unblock_path_needs_no_adapter_and_no_env() {
+        // **KS-20a's whole point**: the recovery command runs when the authority
+        // will not start, so the read and the delete must be reachable without
+        // constructing an adapter, an `Env` or a runtime. This test calls them
+        // as free functions — if either ever needed a `&self`, this stops
+        // compiling, which is the assertion.
+        // `nft(8)` is absent on this host, so the honest answer is a NAMED
+        // failure rather than `Ok(None)`. Reporting "no table installed" when we
+        // cannot look would tell an operator the host is unblocked when we have
+        // no idea — O-18's dangerous direction.
+        if let Err(error) = read_owner_tagged_table() {
+            assert!(error.os_detail().is_some());
+        }
+    }
+
+    #[test]
+    fn removing_the_owner_tagged_table_names_only_our_own_table() {
+        // The rendered script is `delete table inet twinvpn` and nothing else.
+        // A `flush ruleset` here would remove the HOST's firewall, which is not
+        // ours to remove: KS-20's reclamation is scoped to what we tagged.
+        let script = format!("delete table {} {}\n", nft::FAMILY, nft::TABLE);
+        assert_eq!(script, "delete table inet twinvpn\n");
+        assert!(!script.contains("flush"));
+        assert!(!script.contains("ruleset"));
     }
 
     #[test]

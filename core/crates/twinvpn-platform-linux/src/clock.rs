@@ -347,18 +347,27 @@ mod tests {
         assert_ne!(BOOTTIME_CLOCK_ID, libc::CLOCK_REALTIME);
     }
 
+    /// `CLOCK_BOOTTIME` is `CLOCK_MONOTONIC` plus accumulated suspend time, so
+    /// the difference is `>= 0` always and `> 0` on a host that has slept. Both
+    /// readings go through the same code path, so the only difference between
+    /// them is the clock id — which is what makes the comparison meaningful.
+    ///
+    /// **The read order is load-bearing**, and getting it wrong is how this test
+    /// first failed. On a host that has never suspended the two clocks are equal,
+    /// so the microsecond that elapses *between* the two syscalls is the entire
+    /// margin: reading boottime first made the later monotonic read one
+    /// microsecond larger and the assertion fail on a correct implementation.
+    /// Monotonic is therefore read **first**, so the elapsed read is separated
+    /// from it by the suspend delta *plus* the read gap, both non-negative.
     #[test]
     fn boottime_is_never_behind_monotonic() {
-        // CLOCK_BOOTTIME == CLOCK_MONOTONIC + accumulated suspend time, so the
-        // difference is >= 0 always and > 0 on a host that has suspended. Both
-        // readings go through the same code path, so the only difference between
-        // them is the clock id — which is what makes the comparison meaningful.
-        let boot = BootTimeElapsedClock::read_micros_of(libc::CLOCK_BOOTTIME).expect("boottime");
         let mono = BootTimeElapsedClock::read_micros_of(libc::CLOCK_MONOTONIC).expect("monotonic");
+        let boot = BootTimeElapsedClock::read_micros_of(libc::CLOCK_BOOTTIME).expect("boottime");
         assert!(
             boot >= mono,
             "CLOCK_BOOTTIME ({boot} us) must never read behind CLOCK_MONOTONIC \
-             ({mono} us): the difference is accumulated suspend time"
+             ({mono} us) read before it: the difference is accumulated suspend \
+             time plus the gap between the two reads, and both are non-negative"
         );
     }
 

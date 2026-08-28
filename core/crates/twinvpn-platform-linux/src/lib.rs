@@ -85,6 +85,7 @@ pub mod netcfg;
 pub mod netlink;
 pub mod nft;
 pub mod oserr;
+pub mod resolved;
 pub mod resolver;
 pub mod route;
 pub mod shutdown;
@@ -206,10 +207,11 @@ impl LinuxPlatformAdapter {
             tun_present: std::path::Path::new(tun::TUN_CLONE).exists(),
             tpm_present: custody::tpm_resource_manager_present(),
             hardware_backed_identity: self.identity.element_name() != "absent",
-            resolved_in_force: matches!(
+            resolved_in_force: !matches!(
                 resolver::ResolverBackend::detect(),
-                resolver::ResolverBackend::ResolvedUnavailable
+                resolver::ResolverBackend::ResolvConf
             ),
+            resolver_backend: resolver::ResolverBackend::detect(),
         }
     }
 }
@@ -239,9 +241,22 @@ pub struct AdapterPosture {
     pub tpm_present: bool,
     /// Whether the identity element is genuinely hardware-backed (§11.16 (l)).
     pub hardware_backed_identity: bool,
-    /// Whether `systemd-resolved` is in force — in which case DN-21's preferred
-    /// mechanism applies and this build cannot use it.
+    /// Whether `systemd-resolved` is in force, i.e. whether DN-21's preferred
+    /// mechanism is the one that applies on this host.
+    ///
+    /// **Not the same question as whether we can use it.** A host can have
+    /// `resolved` in force and no `resolvectl` to reach it; that is
+    /// [`AdapterPosture::resolver_backend`]'s
+    /// [`resolver::ResolverBackend::ResolvedUnavailable`], and it is a packaging
+    /// problem an operator can fix rather than a property of the host.
     pub resolved_in_force: bool,
+    /// **Which of DN-21's two Linux forms this host will actually take**, and
+    /// why, in one value.
+    ///
+    /// Reported rather than inferred from the boolean above, because
+    /// `ResolverBackend::degradation` names the registered code the weaker path
+    /// is taken under and a boolean cannot.
+    pub resolver_backend: resolver::ResolverBackend,
 }
 
 impl PlatformAdapter for LinuxPlatformAdapter {
@@ -364,6 +379,13 @@ mod tests {
         // `tpm_present` and `hardware_backed_identity` are SEPARATE facts.
         let _ = posture.tpm_present;
         let _ = posture.resolved_in_force;
+        // DN-21's two forms are a three-state value, and the third state —
+        // `resolved` in force with no client to reach it — is the one a boolean
+        // could not carry.
+        assert_eq!(
+            posture.resolver_backend.is_scoped(),
+            posture.resolver_backend == resolver::ResolverBackend::Resolved
+        );
         let _ = posture.tun_present;
     }
 }
