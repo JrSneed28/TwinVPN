@@ -3,6 +3,16 @@
 #
 # Owner: desktop-macos. This manifest is owned by that domain; the WORKSPACE
 # manifest at core/Cargo.toml is owned by the integration lead.
+#
+# THE HOST THIS IS DEVELOPED ON IS LINUX. Everything above the syscall shim is
+# deliberately target-free so that `cargo test -p twinvpn-platform-macos` EXECUTES
+# it here: the pf anchor text and its `pfctl` read-back parse, the route
+# programme, the NEPacketTunnelNetworkSettings document, the resolver programme,
+# the PF_ROUTE message decoder, the mach timebase arithmetic, the errno /
+# OSStatus / SCError mapping and the power-event state machine all run on Linux.
+# `make cross-check` type-checks the whole crate for aarch64-apple-darwin against
+# the real Darwin sys crates with `-D warnings`, which is a COMPILE proof and
+# never a behaviour proof.
 [package]
 name    = "twinvpn-platform-macos"
 version.workspace      = true
@@ -27,7 +37,13 @@ zeroize          = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation-sys      = { workspace = true }
-security-framework-sys   = { workspace = true }
+# `OSX_10_15` is what exposes `kSecUseDataProtectionKeychain`, which ADR-0020's
+# macOS system-extension row requires (`kSecUseDataProtectionKeychain = true`).
+# The default feature set is `OSX_10_13`, on which the symbol does not exist and
+# the data-protection keychain cannot be selected at all. The version floor this
+# implies -- macOS 10.15 -- is far below the Apple-silicon and T2 hardware that
+# row is about, so it costs nothing.
+security-framework-sys   = { workspace = true, features = ["OSX_10_15"] }
 system-configuration-sys = { workspace = true }
 
 [dev-dependencies]
