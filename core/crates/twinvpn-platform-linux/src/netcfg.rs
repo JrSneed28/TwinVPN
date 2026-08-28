@@ -69,6 +69,15 @@ struct Generation {
     id: ContractGeneration,
     applied: AppliedState,
     restore_point: Option<RestorePoint>,
+    /// The contract this generation installed.
+    ///
+    /// **Held so `set_ruleset` can re-render it.** Review finding **R-6**: a
+    /// posture swap that rendered a *synthetic empty* contract emitted zero
+    /// Tier-2 drop rules and its `delete table` then replaced the real ones. The
+    /// Tier-1 scope does not change across a swap — only whether the overlay is
+    /// an exception to it — so the swap must re-render **this**, which is what
+    /// KS-17's "atomic swap between the two" actually means.
+    contract: NetworkContract,
 }
 
 /// Linux's transactional network configuration.
@@ -264,6 +273,7 @@ impl NetworkConfig for LinuxNetworkConfig {
                 id: contract.generation,
                 applied,
                 restore_point,
+                contract: contract.clone(),
             });
             Ok(())
         })
@@ -337,26 +347,31 @@ impl NetworkConfig for LinuxNetworkConfig {
             // "It does not tear down enforcement", and a swap TO `Blocked` on
             // the way down is the safe direction — refusing it would be the
             // unsafe one.
+            // **R-6.** The swap re-renders the SAME generation's contract with
+            // the other posture, so the Tier-1 scope is unchanged and only the
+            // overlay exception moves. Rendering a synthetic empty contract here
+            // — which this did — emits zero drop rules and the script's `delete
+            // table` then replaces the real ones: a "fail-closed" swap that
+            // opens the host.
+            //
+            // KS-1 is the rule that makes re-rendering mandatory rather than
+            // tidy: a scope may never be narrowed and a ruleset widened in two
+            // steps, and a swap that forgot the scope is exactly that narrowing.
             let contract = {
                 let history = self
                     .history
                     .lock()
                     .map_err(|_| oserr::unavailable("netcfg.lock", libc::EDEADLK))?;
-                // The swap re-renders the SAME generation with the other
-                // posture, so the Tier-1 scope is unchanged and only the
-                // overlay exception moves. KS-1: a scope may never be narrowed
-                // and a ruleset widened in two steps.
-                history
-                    .iter()
-                    .find(|g| g.id == generation)
-                    .map(|_| generation)
+                history.iter().find(|g| g.id == generation).map_or_else(
+                    // No contract has been applied under this id. The baseline
+                    // in `nft::render` is what keeps even this table
+                    // fail-closed: it drops the product's own address space in
+                    // both families rather than nothing.
+                    || baseline_contract(generation, ruleset),
+                    |g| g.contract.clone(),
+                )
             };
-            let generation = contract.unwrap_or(generation);
-            let script = nft::render(
-                &synthetic_contract(generation, ruleset),
-                ruleset,
-                &self.enforcement,
-            );
+            let script = nft::render(&contract, ruleset, &self.enforcement);
             tokio::task::spawn_blocking(move || Self::run_nft_script(&script))
                 .await
                 .map_err(|_| oserr::unavailable("nft.join", libc::ECANCELED))?
@@ -484,20 +499,42 @@ fn read_system_resolvers() -> PerFamily<Vec<twinvpn_types::IpAddr>> {
     out
 }
 
-/// The minimal contract a bare `set_ruleset` re-renders from.
+/// The contract a `set_ruleset` renders from when **no contract has been
+/// applied yet** — the very first arm, at startup, before the core has computed
+/// anything.
 ///
-/// A ruleset swap does not change the Tier-1 scope, only whether the overlay is
-/// an exception to it — so the scope comes from the generation already applied
-/// wherever there is one, and this is the empty base for the very first
-/// `RULESET_BLOCKED` install, before any contract exists. Its scope is empty,
-/// which in `RULESET_BLOCKED` means "nothing is yet declared protected" — the
-/// correct pre-arming state, and not "everything is permitted", because the
-/// table is still installed and every later `apply` widens the drop.
-fn synthetic_contract(generation: ContractGeneration, ruleset: Ruleset) -> NetworkContract {
+/// Its routes are [`nft::baseline_protected`]'s: the product's own overlay
+/// address space, both families, which is the same pair
+/// `packaging/killswitch.nft` carries and is a constant of the product rather
+/// than a scope this adapter chose (ADR-0010 §11.1, AP-1).
+///
+/// **It is never empty.** Review finding R-6: an empty scope renders a table
+/// with zero drop rules under `policy accept`, and the script's `delete table`
+/// replaces whatever was protecting the host with it. A pre-arming table that
+/// drops the overlay space is the honest floor; a pre-arming table that drops
+/// nothing is a hole with a `posture_blocked` counter on it.
+fn baseline_contract(generation: ContractGeneration, ruleset: Ruleset) -> NetworkContract {
+    let baseline = nft::baseline_protected();
+    let route_for = |family: AddressFamily| -> Vec<twinvpn_platform::RouteEntry> {
+        baseline
+            .iter()
+            .filter(|p| p.family() == family)
+            .map(|destination| twinvpn_platform::RouteEntry {
+                destination: *destination,
+                via: None,
+                // No overlay interface exists before the first `apply`, and the
+                // Tier-2 drop does not read the interface — only the
+                // `RULESET_PROTECTED` exception does, and that names the
+                // interface by NAME from `EnforcementConfig`, not by index.
+                interface: twinvpn_platform::InterfaceIndex(0),
+                metric: None,
+            })
+            .collect()
+    };
     NetworkContract {
         generation,
         addresses: PerFamily::new(Vec::new(), Vec::new()),
-        routes: PerFamily::new(Vec::new(), Vec::new()),
+        routes: PerFamily::new(route_for(AddressFamily::V4), route_for(AddressFamily::V6)),
         dns: twinvpn_platform::DnsConfig {
             resolvers: PerFamily::new(Vec::new(), Vec::new()),
             search_domains: Vec::new(),
@@ -571,7 +608,7 @@ mod tests {
         // Rediscovering the interface by name would turn a rename race into a
         // route on the wrong link.
         let c = config();
-        let contract = synthetic_contract(ContractGeneration(1), Ruleset::Blocked);
+        let contract = baseline_contract(ContractGeneration(1), Ruleset::Blocked);
         let err = c.apply(&contract).await.expect_err("no interface yet");
         assert_eq!(err.os_detail().map(|d| d.call), Some("overlay.index"));
     }
@@ -585,7 +622,7 @@ mod tests {
             PathBuf::from("/tmp/twinvpn-test-restore"),
         );
         latch.begin();
-        let contract = synthetic_contract(ContractGeneration(1), Ruleset::Blocked);
+        let contract = baseline_contract(ContractGeneration(1), Ruleset::Blocked);
         match c.apply(&contract).await {
             Err(PlatformError::ShuttingDown) => {}
             other => panic!("expected ShuttingDown, got {other:?}"),
@@ -657,15 +694,76 @@ mod tests {
         );
     }
 
+    /// **R-6, as the assertion that would have caught it.**
+    ///
+    /// The pre-arming table is rendered before any contract exists. It must
+    /// still DROP something: a table with zero Tier-2 rules under `policy
+    /// accept` protects nothing, and the script's `delete table` replaces
+    /// whatever was there with it.
     #[test]
-    fn the_synthetic_contract_for_a_bare_swap_declares_no_scope_rather_than_a_guessed_one() {
-        let c = synthetic_contract(ContractGeneration(3), Ruleset::Blocked);
-        assert!(c.routes.v4.is_empty() && c.routes.v6.is_empty());
-        assert_eq!(c.mtu, crate::tun::MTU_FLOOR);
-        // The table is still installed with both posture and generation
-        // counters, so a read-back after a bare swap still answers.
+    fn the_pre_arming_table_drops_the_overlay_space_rather_than_nothing() {
+        let c = baseline_contract(ContractGeneration(3), Ruleset::Blocked);
+        assert!(
+            !c.routes.v4.is_empty() && !c.routes.v6.is_empty(),
+            "an empty scope renders zero drop rules — R-6"
+        );
         let script = nft::render(&c, Ruleset::Blocked, &enforcement());
         assert!(script.contains("counter posture_blocked { }"));
         assert!(script.contains("counter gen_3 { }"));
+        // Both families, and the product's own address space in each.
+        assert!(script.contains("ip daddr 100.64.0.0/10 counter name \"deny_v4\" drop"));
+        assert!(script.contains("ip6 daddr fd7c:9e5d:2a10::/48 counter name \"deny_v6\" drop"));
+        // And the read-back can SEE the cardinality, so "BLOCKED over nothing"
+        // is a value rather than an invisible state.
+        assert!(script.contains("counter scope_v4_1 { }"));
+        assert!(script.contains("counter scope_v6_1 { }"));
+    }
+
+    /// **R-6's core case.** A posture swap must not narrow the scope.
+    #[test]
+    fn a_posture_swap_re_renders_the_applied_contracts_scope_and_never_an_empty_one() {
+        let applied = contract_with_scope(ContractGeneration(7));
+        let protected = nft::render(&applied, Ruleset::Protected, &enforcement());
+        // The swap renders the SAME contract with the other posture...
+        let mut blocked_contract = applied.clone();
+        blocked_contract.ruleset = Ruleset::Blocked;
+        let blocked = nft::render(&blocked_contract, Ruleset::Blocked, &enforcement());
+
+        for script in [&protected, &blocked] {
+            assert!(
+                script.contains("ip daddr 0.0.0.0/1 counter name \"deny_v4\" drop"),
+                "the swap dropped the contract's own scope"
+            );
+            assert!(script.contains("ip6 daddr ::/1 counter name \"deny_v6\" drop"));
+            assert!(script.contains("counter scope_v4_2 { }"));
+            assert!(script.contains("counter scope_v6_2 { }"));
+        }
+        // ...and the ONLY difference is whether the overlay is an exception.
+        assert!(protected.contains("oifname \"twin0\" ip daddr 0.0.0.0/1 accept"));
+        assert!(!blocked.contains("oifname \"twin0\" ip daddr 0.0.0.0/1 accept"));
+    }
+
+    /// A full-tunnel contract, as `docs/networking.md` §7.2's four `/1` routes.
+    fn contract_with_scope(generation: ContractGeneration) -> NetworkContract {
+        let mut contract = baseline_contract(generation, Ruleset::Protected);
+        let route = |destination| twinvpn_platform::RouteEntry {
+            destination,
+            via: None,
+            interface: twinvpn_platform::InterfaceIndex(9),
+            metric: None,
+        };
+        contract.routes = PerFamily::new(
+            crate::route::full_tunnel_destinations()
+                .into_iter()
+                .filter(|p| p.family() == AddressFamily::V4)
+                .map(route)
+                .collect(),
+            crate::route::full_tunnel_destinations()
+                .into_iter()
+                .filter(|p| p.family() == AddressFamily::V6)
+                .map(route)
+                .collect(),
+        );
+        contract
     }
 }

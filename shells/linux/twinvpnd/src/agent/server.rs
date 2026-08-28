@@ -16,8 +16,8 @@
 //!    *principal* comes from `SO_PEERCRED`. The shell compares a core-supplied
 //!    requirement against an OS-supplied fact. It invents neither, and ADR-0016
 //!    PS-12a assigns exactly this comparison to the daemon.
-//! 2. **"Is this operation implemented?"** [`twinvpn_core::is_implemented`] and
-//!    [`twinvpn_core::UNIMPLEMENTED`] answer it. The shell has no list.
+//! 2. **"Is this operation implemented?"** [`twinvpn_core::core::executes`] and
+//!    `twinvpn_core::core::unimplemented()` answer it. The shell has no list.
 //! 3. **"Did the command need an idempotency key?"** [`twinvpn_core::Core::submit`]
 //!    checks it, once, and rejects — "checking it here, once, is what keeps the
 //!    two carriages honest — the MI transport does not get to skip it". The
@@ -28,6 +28,13 @@
 //! comparison — except the `mi_version` overlap of §11.7, which is a property of
 //! *this connection* and not of TwinVPN, and which the ADR requires the transport
 //! to decide.
+//!
+//! A fourth nearly leaked and is worth naming because it *did* leak, and a review
+//! caught it: **"does this operation need a `committed_at_net_seq`?"** The shell
+//! answered it from `Entry::mutating`, which is a local fact, when MI-6's
+//! predicate is *maps to a mutating **C1** request* — a control-plane fact the
+//! ADR states and this shell must read rather than approximate. See
+//! [`C1_MAPPING`].
 //!
 //! # PS-22: no dependency edge onto the datapath
 //!
@@ -68,6 +75,16 @@ pub struct ServerContext {
     pub groups: Arc<GroupSource>,
     /// **MI-C3.** Built once, by the agent, and handed to every client verbatim.
     pub platform_ctx: PlatformCtx,
+    /// **F-6 / S-47.** Serialises submissions across connections.
+    ///
+    /// > A `tw_core*` is Send but **NOT Sync** for mutating calls: exactly one
+    /// > thread may hold it for mutation at a time (S-47).
+    ///
+    /// The agent serves every connection on its own task, so without this two
+    /// clients could submit concurrently. Rust's type system does not force it —
+    /// `Core` is `Sync` because its interior state sits behind locks — so F-6 is
+    /// a rule this shell has to keep, and this is where it keeps it.
+    pub submission: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ServerContext {
@@ -174,7 +191,7 @@ pub async fn serve(
         }
 
         let response = match request.body {
-            Body::Request(ref call) => dispatch(&context, &principal, &granted, call),
+            Body::Request(ref call) => dispatch(&context, &principal, &granted, call).await,
             Body::Goodbye => return Ok(()),
             // A second `Hello` on one connection: §11.7 fixes the version "for
             // the life of the connection", so there is nothing to renegotiate.
@@ -288,7 +305,7 @@ fn epoch_range() -> [u32; 2] {
 ///
 /// **Translate, marshal, schedule and render — never decide.** Every branch here
 /// is on a fact the core or the OS supplied.
-fn dispatch(
+async fn dispatch(
     context: &ServerContext,
     principal: &Principal,
     granted: &Scopes,
@@ -323,7 +340,7 @@ fn dispatch(
         return failure("MGMT.DISARM_REQUIRES_LOCAL_AUTH", "POLICY", "WARN", true);
     }
 
-    // `twinvpn_core::UNIMPLEMENTED` is the core's own list. **Surfaced as
+    // `twinvpn_core::core::unimplemented()` is the core's own list. **Surfaced as
     // unimplemented, not as a failure**: a command the catalogue advertises and
     // the core does not execute is a lie a client cannot detect, so the set is
     // enumerable and this reports it by name.
@@ -341,15 +358,46 @@ fn dispatch(
         actor_principal: Some(principal.actor()),
     };
 
-    match context.core.submit(&submission) {
+    // **Off the reactor, and one at a time.**
+    //
+    // `Core::submit` is non-blocking at the ABI (F-5), but the executor beneath
+    // it is not: an operation like `session.connect` calls `block_on_adapter`,
+    // which drives an adapter future to completion on the injected runtime.
+    // Calling that from a runtime worker is tokio's "Cannot start a runtime from
+    // within a runtime", which panics the connection the moment the command path
+    // is wired. That is a real defect and not a test artifact — the daemon serves
+    // every MI connection on a task of that same runtime.
+    //
+    // `spawn_blocking` moves it to a pool thread, and the F-6 lock is held across
+    // it so exactly one thread holds the core for mutation at a time (S-47).
+    let core = Arc::clone(&context.core);
+    let guard = context.submission.lock().await;
+    let submitted = tokio::task::spawn_blocking(move || core.submit(&submission)).await;
+    drop(guard);
+
+    // The blocking task was cancelled or panicked. F-7 contains a panic inside
+    // the core and poisons the instance; a join failure here is the shell's own,
+    // and is named rather than swallowed.
+    let Ok(submitted) = submitted else {
+        return failure("INTERNAL.UNEXPECTED_STATE", "FATAL", "CRITICAL", false);
+    };
+
+    match submitted {
         Ok(()) => Response {
             ok: true,
+            // Empty, and not because the operation produced nothing:
+            // `Core::submit` returns `Ok(())` and publishes the body as a
+            // `CommandCompleted` event on the one ordered stream (F-5). The
+            // agent does not yet push events, so a read's body is currently
+            // unreachable by an MI client — reported in `shells/linux/README.md`
+            // §7 rather than papered over with a fabricated body.
             result: Vec::new(),
             diagnostic: None,
-            // **MI-6.** S-47's generation is the cursor this agent can honestly
-            // report for a mutating command; a client must observe an event at
-            // or past it before telling a human the operation is complete.
-            committed_at_net_seq: entry.mutating.then(|| context.core.generation()),
+            // **MI-6**, and its predicate is `maps_to_mutating_c1` — NOT
+            // `entry.mutating`. See that function: the cursor is a position in
+            // the coordination service's C2 log, and a locally-mutating
+            // operation that never reaches C1 has none.
+            committed_at_net_seq: committed_cursor(op),
         },
         // The core's own diagnostic, carried verbatim. The shell does not
         // reclassify it and does not render it (MI-15).
@@ -360,6 +408,91 @@ fn dispatch(
             committed_at_net_seq: None,
         },
     }
+}
+
+/// The operations that **map to a mutating C1 request**, which is MI-6's actual
+/// predicate.
+///
+/// # The distinction, and why getting it wrong is worse than omitting the cursor
+///
+/// `docs/protocol.md` §5.1 and E-2 fix what `committed_at_net_seq` *is*: "a
+/// **real, monotone position in the same log**" the C2 event stream replays —
+/// the coordination service's. Its purpose is read-your-writes across the C1/C2
+/// boundary: "a device pairs a peer, gets `200 OK`, and immediately tries to
+/// connect — but its local `TrustedPeer` cache has not yet seen the pairing
+/// event."
+///
+/// So MI-6's predicate is **not** `Entry::mutating`. `session.connect` mutates a
+/// great deal — it gathers on the platform, drives the §4.5 table, admits into
+/// the candidate ledger, schedules a race and persists to the journal — and
+/// **sends no C1 request at all**. ADR-0017 §11.8's own table classifies it
+/// "naturally idempotent … the state machine already absorbs a repeat", beside
+/// `net.up` and `net.down`; §11.9 marks `committed_at_net_seq` on exactly the
+/// ceremonies that reach the coordination service.
+///
+/// This shell previously computed the cursor as
+/// `entry.mutating.then(|| core.generation())`, which was wrong twice: it
+/// applied MI-6 to purely local operations, and it reported **S-47's
+/// generation** — a per-process counter S-47 requires "**must not survive
+/// process exit**" — as if it were a durable C2 log position. A client that
+/// waited for an event "at or past" that number would believe it had discharged
+/// E-2's read-your-writes when it had not. An absent cursor tells a client MI-6
+/// does not apply; a fabricated one tells it a falsehood it cannot detect.
+///
+/// The update verbs are deliberately absent: ADR-0021 §11.18(f) puts them on the
+/// **update service**, not the coordination service's C2 log, so they have no
+/// `net_seq` either.
+pub const C1_MAPPING: [CoreCommand; 5] = [
+    // ADR-0017 MI-8: "Where an MI ceremony triggers a control-plane ceremony,
+    // the agent MUST derive the C1 `idempotency_key` deterministically from the
+    // MI key and the calling principal."
+    CoreCommand::PairBegin,
+    // §11.9: "Completion; carries `committed_at_net_seq` (MI-6)".
+    CoreCommand::PairConfirm,
+    CoreCommand::PairCancel,
+    // §11.9: "Initiates the `Owner`-signed `RevocationRecord` ceremony; carries
+    // `committed_at_net_seq`".
+    CoreCommand::DeviceRevoke,
+    // ADR-0007 succession is a control-plane fact.
+    CoreCommand::KeyRotate,
+];
+
+/// Whether `op` maps to a mutating C1 request.
+///
+/// Membership in [`C1_MAPPING`] rather than an exhaustive `match`, because
+/// `CoreCommand` is `#[non_exhaustive]` and a shell **cannot** match it
+/// exhaustively — so the compile-time guarantee the core gets is unavailable
+/// here. `a_new_core_command_must_be_classified_against_mi6` is the tripwire
+/// that replaces it: it pins the catalogue's size, so a command added upstream
+/// fails this crate's tests until someone states which side of MI-6 it falls on.
+#[must_use]
+pub fn maps_to_mutating_c1(op: CoreCommand) -> bool {
+    C1_MAPPING.contains(&op)
+}
+
+/// The `committed_at_net_seq` this build can honestly report.
+///
+/// **Always `None`, and the reason is structural rather than an omission.** A
+/// cursor exists only for an operation in [`C1_MAPPING`], and every one of those
+/// needs a control-plane transport this build does not have (`ownership.md` §8
+/// W-12: there is no `ControlTransport`). All five are therefore refused by
+/// `twinvpn_core::core::executes` before they reach this point, so no response
+/// that would need a cursor is ever produced.
+///
+/// Written as a function rather than a literal `None` so that the day a C2
+/// transport lands there is one place to supply the cursor, with a test already
+/// asserting which operations require it.
+#[must_use]
+fn committed_cursor(op: CoreCommand) -> Option<u64> {
+    if !maps_to_mutating_c1(op) {
+        return None;
+    }
+    // No C2 log exists in this build, so there is no position to report. An
+    // operation reaching here would be a defect — a C1-mapping operation this
+    // build claims to execute — and `None` is still the safe answer: a client
+    // that receives no cursor knows it has no read-your-writes guarantee, which
+    // is the truth.
+    None
 }
 
 /// MI-21's closed set of four.
@@ -478,7 +611,14 @@ fn diagnostic(reason_code: &str, class: &str, severity: &str, user_actionable: b
         user_actionable: resolved
             .map_or(user_actionable, twinvpn_types::ReasonCode::user_actionable),
         summary_key: resolved.map(|code| code.summary_key().to_owned()),
-        next_action_key: None,
+        // **R-15.** Hardcoding `None` here made the next action unrecoverable for
+        // every MI client that is not in this workspace: the key is the ONLY
+        // thing on the wire a client can render from (MI-15 forbids the sentence
+        // itself), so dropping it left a client with a diagnostic it could not
+        // act on. Taken from the registry, like the summary key beside it.
+        next_action_key: resolved
+            .and_then(twinvpn_types::ReasonCode::next_action_key)
+            .map(str::to_owned),
         evidence: Vec::new(),
     }
 }
@@ -501,14 +641,52 @@ fn from_core(source: &twinvpn_types::Diagnostic) -> Diagnostic {
         severity: format!("{:?}", code.severity()).to_uppercase(),
         user_actionable: code.user_actionable(),
         summary_key: Some(code.summary_key().to_owned()),
-        next_action_key: None,
+        // **R-15.** As above: the key is the only thing MI-15 lets travel, so
+        // dropping it left a client unable to render a next action at all.
+        next_action_key: code.next_action_key().map(str::to_owned),
         // Typed evidence only, and already restricted to the code's declared
         // fields by the core.
         evidence: source
             .evidence()
             .entries()
             .iter()
-            .map(|e| (e.key().to_owned(), format!("{:?}", e.value())))
+            .map(|e| (e.key().to_owned(), evidence_text(e.value())))
             .collect(),
+    }
+}
+
+/// A canonical address, as text.
+fn address_text(address: twinvpn_types::IpAddr) -> String {
+    match address {
+        twinvpn_types::IpAddr::V4(a) => std::net::Ipv4Addr::from(a.octets()).to_string(),
+        twinvpn_types::IpAddr::V6(a) => std::net::Ipv6Addr::from(a.octets()).to_string(),
+    }
+}
+
+/// One evidence value, as the text a renderer substitutes into a sentence.
+///
+/// `format!("{:?}")` was wrong for the same reason a summary key is: the
+/// renderer substitutes this into `{placeholder}` slots, and `Uint(1280)` is not
+/// what belongs in "the path MTU is {mtu}". Each variant is written out so the
+/// substituted text is the value, not the value's Rust spelling.
+fn evidence_text(value: &twinvpn_types::EvidenceValue) -> String {
+    use twinvpn_types::EvidenceValue as V;
+    match value {
+        V::Text(text) => text.clone(),
+        V::Int(n) => n.to_string(),
+        V::Uint(n) | V::DurationMs(n) => n.to_string(),
+        V::Bool(b) => b.to_string(),
+        // An address is `SENSITIVE` under ADR-0015 §11.4 and is carried here in
+        // full, deliberately: the MI is a local channel to a kernel-attested
+        // principal who already holds `mgmt.status`, and it is THEIR OWN
+        // address. Redacting it would make a local diagnostic unusable for the
+        // one person entitled to read it. Tier-2 telemetry is a different
+        // surface with a different rule.
+        V::Address(address) => address_text(*address),
+        V::Prefix(prefix) => format!("{}/{}", address_text(prefix.address()), prefix.prefix_len()),
+        V::Family(family) => match family {
+            twinvpn_types::AddressFamily::V4 => "IPv4".to_owned(),
+            twinvpn_types::AddressFamily::V6 => "IPv6".to_owned(),
+        },
     }
 }

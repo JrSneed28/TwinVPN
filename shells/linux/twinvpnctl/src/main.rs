@@ -65,6 +65,40 @@ mod exit {
     pub const MAX_PERMITTED: u8 = 63;
 }
 
+/// The locale renders default to.
+///
+/// ADR-0019 ships one source locale, and `twinvpn_diag::render`'s fallback
+/// chain counts a request for anything else as a lower rung — which is the
+/// number §11.5 asks to be *measurable*. `--locale` overrides it.
+const DEFAULT_LOCALE: &str = "en";
+
+/// The agent's `platform_ctx`, as the resolver's own type.
+///
+/// **MI-C3**: the agent supplied it and every client uses it verbatim, so a CLI
+/// and a GUI on one host render the same next action for the same diagnostic.
+/// An unrecognised platform name resolves to the NEUTRAL variant rather than to
+/// this host's own (LT-3b).
+fn platform_context(ctx: &mi::PlatformCtx) -> twinvpn_diag::PlatformContext {
+    let tag = match ctx.platform.to_ascii_uppercase().as_str() {
+        "LINUX" => Some("LINUX"),
+        "OPENWRT" => Some("OPENWRT"),
+        "ANDROID" => Some("ANDROID"),
+        "IOS" => Some("IOS"),
+        "IPADOS" => Some("IPADOS"),
+        "MACOS" => Some("MACOS"),
+        "WINDOWS" => Some("WINDOWS"),
+        _ => None,
+    };
+    twinvpn_diag::PlatformContext {
+        platform: tag,
+        os_version: if ctx.os_version.is_empty() {
+            None
+        } else {
+            Some(ctx.os_version.clone())
+        },
+    }
+}
+
 /// How output is rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Output {
@@ -121,6 +155,12 @@ fn run(args: &[String], stdout_is_tty: bool) -> Result<u8, String> {
     let mut output = Output::default_for(stdout_is_tty);
     let mut positional: Vec<&str> = Vec::new();
     let mut confirmed = false;
+    // **CD-2 / LT-3b: explicit, never ambient.** `LANG` is deliberately NOT
+    // read. A rendering that changes with the operator's environment makes an
+    // incident record vary between the person who saw the failure and the person
+    // reading the transcript, and ADR-0023's whole surface exists to be a
+    // reliable incident record on a machine with no window to screenshot.
+    let mut locale = DEFAULT_LOCALE.to_owned();
 
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -139,6 +179,9 @@ fn run(args: &[String], stdout_is_tty: bool) -> Result<u8, String> {
             // the offline unblock command, and reconciling the two rules is what
             // EM-39(3)'s named flag is for.
             "--confirm-unprotected" => confirmed = true,
+            "--locale" => {
+                locale = iter.next().ok_or("--locale needs a value")?.clone();
+            }
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag: {other}"));
             }
@@ -166,6 +209,7 @@ fn run(args: &[String], stdout_is_tty: bool) -> Result<u8, String> {
             },
             output,
             stdout_is_tty,
+            locale,
         ));
     }
 
@@ -201,11 +245,12 @@ fn run(args: &[String], stdout_is_tty: bool) -> Result<u8, String> {
         },
         output,
         stdout_is_tty,
+        locale,
     ))
 }
 
 /// Connects, calls, renders, and maps the outcome to an exit code.
-fn call(request: mi::wire::Request, output: Output, stdout_is_tty: bool) -> u8 {
+fn call(request: mi::wire::Request, output: Output, stdout_is_tty: bool, locale: String) -> u8 {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()
@@ -231,7 +276,18 @@ fn call(request: mi::wire::Request, output: Output, stdout_is_tty: bool) -> u8 {
         .await
         {
             Ok(client) => client,
-            Err(error) => return report(&error, output, stdout_is_tty),
+            // No `HelloAck` arrived, so there is no agent-supplied
+            // `platform_ctx`. LT-3b: an absent platform resolves to the NEUTRAL
+            // variant and MUST NOT fall back to this host's own.
+            Err(error) => {
+                return report(
+                    &error,
+                    output,
+                    stdout_is_tty,
+                    &locale,
+                    &twinvpn_diag::PlatformContext::neutral(),
+                )
+            }
         };
 
         match client
@@ -279,7 +335,12 @@ fn call(request: mi::wire::Request, output: Output, stdout_is_tty: bool) -> u8 {
                 }
                 exit::OK
             }
-            Err(error) => report(&error, output, stdout_is_tty),
+            // **MI-C3.** The agent's `platform_ctx`, used verbatim — never one
+            // this client constructed from its own build constants.
+            Err(error) => {
+                let platform = platform_context(client.platform_ctx());
+                report(&error, output, stdout_is_tty, &locale, &platform)
+            }
         }
     })
 }
@@ -288,7 +349,13 @@ fn call(request: mi::wire::Request, output: Output, stdout_is_tty: bool) -> u8 {
 ///
 /// **The code goes to stderr in every output mode**, "so a `set -e` script that
 /// does not parse JSON still gets it".
-fn report(error: &ClientError, output: Output, stdout_is_tty: bool) -> u8 {
+fn report(
+    error: &ClientError,
+    output: Output,
+    stdout_is_tty: bool,
+    locale: &str,
+    platform: &twinvpn_diag::PlatformContext,
+) -> u8 {
     let code = error.reason_code().to_owned();
     let exit = exit_for(&code);
 
@@ -315,7 +382,8 @@ fn report(error: &ClientError, output: Output, stdout_is_tty: bool) -> u8 {
 
     match output {
         Output::Human => {
-            let rendered = render::Rendered::from_diagnostic("UNKNOWN", &diagnostic);
+            let rendered =
+                render::Rendered::from_diagnostic("UNKNOWN", &diagnostic, locale, platform);
             // EM-43: colour is applied ONLY when all three conditions hold, and
             // the `[CRIT]`/`[ERR!]` token is present either way — severity is
             // never carried by colour alone.
