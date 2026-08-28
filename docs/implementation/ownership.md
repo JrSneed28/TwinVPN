@@ -1,6 +1,8 @@
-# Implementation wave 1 — ownership, layout, and the rules every agent works under
+# Implementation — ownership, layout, and the rules every agent works under
 
-**Status:** authoritative for the first production implementation wave.
+**Status:** authoritative for the production implementation waves. §§1–8 are
+wave 1; **§9 is wave 2, the desktop platform runtimes**, and everything in §§1–7
+still binds there.
 **Owner:** the integration lead. An implementation domain does not edit this file.
 
 Phase 1 wins wherever it and the wave-1 objective disagree. Three places they do,
@@ -21,7 +23,9 @@ the layout. It is reproduced here with the one integration-lead addition marked.
 | `core/ffi/include/twinvpn.h` | hand-written; **the ABI of record** | `core-composition` |
 | `services/` | server-side artifacts — **integration-lead placement, not an ADR one** | `control-plane`, `rendezvous-connectivity`, `relay-plane` |
 | `shells/linux/` | `twinvpnd` + `twinvpnctl` (Rust) | `desktop-linux` |
-| `shells/{windows,macos,ios,android,openwrt}/` | per-platform shells | wave 2 (§5) |
+| `shells/windows/` | `twinvpnsvc` + `twinvpnctl` (Rust) | `desktop-windows` (**wave 2**, §9) |
+| `shells/macos/` | `twinvpnd` (Rust) + the NE packet-tunnel provider (Swift) | `desktop-macos` (**wave 2**, §9) |
+| `shells/{ios,android,openwrt}/` | per-platform shells | wave 3 |
 | `build/` | toolchain pins, target definitions, budgets | `infrastructure` |
 | `infra/` | compose, deployment, observability, local orchestration | `infrastructure` |
 | `lab/` | TwinLab; **never shipped** | `test-engineering` |
@@ -35,16 +39,27 @@ lead — consistent with the wave-1 ownership map and with
 `scripts/check_freeze_scope.py`, which already names `services` among the
 production paths it guards. It is a decision, recorded as one, not an ADR.
 
-**Four cargo workspaces, not one.** `core/`, `services/`, `shells/linux/` and
-`lab/` are separate workspaces. §11.12 makes `/core` "one cargo workspace"; the
-others are separate *artifacts*, and separating the workspaces means no domain
-silently acquires another's dependency graph, each domain owns its own manifests,
-and the ADR-0018 T1 lints have an exact crate set to run over.
+**Separate cargo workspaces, not one.** `core/`, `services/`, `shells/linux/`,
+`lab/` and `tests/` are separate workspaces, and wave 2 adds `shells/windows/`
+and `shells/macos/`. §11.12 makes `/core` "one cargo workspace"; the others are
+separate *artifacts*, and separating the workspaces means no domain silently
+acquires another's dependency graph, each domain owns its own manifests, and the
+ADR-0018 T1 lints have an exact crate set to run over.
+
+**The two wave-2 shell workspaces are deliberately NOT in the `Makefile`'s
+`WORKSPACES`.** That variable drives the host build, the host test run and the
+host clippy pass, and neither shell compiles for `x86_64-unknown-linux-gnu` — a
+Windows service and a launchd daemon are not host artifacts. They are reached
+instead by `make cross-check`, which is a **compile** proof for their targets and
+says so at the target. Putting them in `WORKSPACES` would turn a true statement
+about the host gate into a false one.
 
 **The workspace manifests — `core/Cargo.toml`, `services/Cargo.toml`,
-`shells/linux/Cargo.toml`, `lab/Cargo.toml`, `rust-toolchain.toml` and the
-`Makefile` — are owned by the integration lead.** A crate's own `Cargo.toml` is
-owned by the crate's domain. This is the shared-manifest rule from `CLAUDE.md`.
+`shells/linux/Cargo.toml`, `lab/Cargo.toml`, `tests/Cargo.toml`,
+`rust-toolchain.toml` and the `Makefile` — are owned by the integration lead.**
+A crate's own `Cargo.toml` is owned by the crate's domain. This is the
+shared-manifest rule from `CLAUDE.md`. Wave 2's two new shell workspace manifests
+are created by their domains and pass to the integration lead on integration.
 
 ---
 
@@ -64,6 +79,8 @@ a request to the integration lead, not an edit.
 | `rendezvous-connectivity` | `services/{rendezvous,presence}` | **not** the portable NAT traversal — that is `core-dataplane`'s `twinvpn-path` |
 | `relay-plane` | `services/{relay,relay-directory,relay-health}` | |
 | `desktop-linux` | `shells/linux/`, `core/crates/twinvpn-platform-linux` | the platform adapter *implementation* is a shell-side concern under CB-3 |
+| `desktop-windows` | `shells/windows/`, `core/crates/twinvpn-platform-windows` | **wave 2.** Same CB-3 split as `desktop-linux` |
+| `desktop-macos` | `shells/macos/`, `core/crates/twinvpn-platform-macos` | **wave 2.** Same CB-3 split. The Swift extension is inside `shells/macos/`, not a sibling domain — CB-2 is what keeps it thin |
 | `infrastructure` | `infra/`, `docker-compose.yml`, `build/`, `.github/workflows/` | CI files only as assigned |
 | `test-engineering` | `lab/`, `tests/` | may **read** everything; writes nowhere else |
 | `security-review` | reviews; **files findings, does not silently rewrite** another domain's component |
@@ -169,6 +186,15 @@ cannot be compiled, let alone exercised, on the Linux host this wave runs on.
 Producing shell code that has never been built would be the failure mode the
 wave-1 objective names in its last line: declaring completion because something
 looked done. Wave 2 needs a macOS builder and a Windows builder.
+
+> **Amended by §9.2.** Half of that reasoning no longer holds. `cargo check` and
+> `clippy` need no linker, so the `x86_64-pc-windows-msvc` and
+> `aarch64-apple-darwin` rust-std install on this host and wave-2 Rust **is**
+> built here, against the real platform crates, with `-D warnings`. What still
+> holds exactly as written: nothing links, nothing runs, and no Swift compiles at
+> all. §9.2 replaces the built/not-built binary with the four categories a wave-2
+> report must keep apart, and a macOS builder and a Windows builder are still
+> owed for the rows `cross-check` cannot reach.
 
 The generated Swift, Kotlin and C# bindings those shells consume **are** built
 and verified here every gate run (`make verify-bindings`), so the contract half
@@ -355,3 +381,83 @@ Ranked by consequence. **S-1/D1 is the root of most of the rest.**
 
 Plus the capability-name-bound defect already recorded in §4.3, which remains the
 only one with a live workaround in production code.
+
+---
+
+## 9. Wave 2 — the desktop platform runtimes
+
+**Status:** authoritative for the second implementation wave. Everything in §§1–7
+still binds; this section says only what is different.
+
+### 9.1 Scope
+
+The three desktop runtimes of `docs/application-architecture.md` §7, built
+against the Phase 1 application architecture, the shared core and the frozen
+contracts:
+
+| Domain | Deliverable |
+|---|---|
+| `desktop-windows` | the `TwinVPNService` privileged service, the virtual adapter, route management on both families, DNS, the WFP kill switch, the named-pipe MI, protected credential storage, service startup/recovery, network-change handling, diagnostics |
+| `desktop-macos` | the NetworkExtension system extension and packet-tunnel provider, the shared-core bridge, Keychain custody, routing and DNS, lifecycle, network-change handling, sleep/wake recovery, diagnostics |
+| `desktop-linux` | completing the wave-1 shell: the event stream, the PS-1 lock, `twinvpn-unblock`, the `systemd-resolved` scoped path, headless gateway operation, and the test matrix |
+
+**The protocol is not reimplemented per platform.** Each domain implements the
+`twinvpn-platform` trait and binds the same core; CB-1 puts everything else above
+the seam, and CB-2's falsification test is the check. A second copy of a TwinVPN
+decision in a shell is a defect in wave 2 exactly as it was in wave 1.
+
+### 9.2 What "done" can mean on this host, and what it cannot
+
+`ownership.md` §5 deferred Windows and macOS because their platform surfaces
+"cannot be compiled, let alone exercised, on the Linux host this wave runs on",
+and named the failure mode to avoid: *shell code that has never been built*.
+Wave 2 splits that sentence, because half of it is now false and half is still
+exactly true. **Four categories, and a report that blurs them is the defect:**
+
+| Category | What it means | How it is obtained |
+|---|---|---|
+| **executed** | the code ran and its assertions held | `make test` on this host; `unshare`-based netns runs for the privileged Linux paths |
+| **compiled** | type-checked against the real platform crates for the real target, `-D warnings` — **never linked, never run** | `make cross-check` (`x86_64-pc-windows-msvc`, `aarch64-apple-darwin`) |
+| **written, not compiled** | Swift. The installed toolchain is Linux-only: no Darwin SDK, no `NetworkExtension`, no `Security`, no `SystemConfiguration` | — |
+| **written, not executed** | target-gated integration tests that compile for their target and have no host to run on | — |
+
+The **compiled** row is what wave 1 could not have, and it is the reason wave 2
+is attemptable at all: `cargo check` and `clippy` need no linker, so the two
+rust-std targets install on this host and every line of Rust in both wave-2
+adapters and both wave-2 shells is checked against the real `windows-sys` and
+Darwin sys crates. It is a real gate and it is **not** a behaviour proof.
+
+The **executed** row is bought by a design rule, not by luck, and it is the one
+instruction that decides whether wave 2 is verifiable: **every layer that can be
+target-free is target-free.** `#[cfg]` is confined to the thinnest syscall shim;
+filter and anchor construction, the route and DNS programmes rendered from a
+`RouteEntry`/`DnsConfig`, the platform-event decoding and the OS-error →
+`reason_code` mapping are pure Rust over plain data, and they run their tests
+here. This is `twinvpn-platform-linux`'s own discipline — its nftables ruleset
+text and `nft --json` parser are tested exhaustively on a host with no `nft`
+installed — generalised into the rule for the wave.
+
+### 9.3 Concurrency
+
+Each domain works in an isolated worktree with a non-overlapping file scope, per
+`CLAUDE.md`. `core/Cargo.toml`, `contracts/`, the `Makefile` and `docs/` stay
+with the integration lead. One exception is granted and recorded here:
+`desktop-linux` holds `shells/linux/Cargo.toml`'s member list for this wave,
+because `twinvpn-unblock` is a package-owned binary that cannot be added without
+it and no sibling domain touches that file.
+
+### 9.4 Integration order
+
+```
+1. desktop-linux     — it is the only one whose gate can execute end to end
+2. desktop-windows
+3. desktop-macos
+```
+
+After each, the full wave-1 gate must be green **plus** `make cross-check`:
+
+```
+make contracts && make test-contracts && make build && make lint && make test && make cross-check
+```
+
+**Do not continue integrating onto a broken `master`.**
