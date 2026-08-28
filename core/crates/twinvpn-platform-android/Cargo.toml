@@ -1,0 +1,38 @@
+# twinvpn-platform-android - the Android (bionic, VpnService) implementation of
+# the twinvpn-platform trait (CB-3 permits `cfg` here; CD-3 permits the platform
+# time/entropy primitives).
+#
+# Owner: mobile-android. This manifest is owned by that domain; the WORKSPACE
+# manifest at core/Cargo.toml is owned by the integration lead.
+#
+# ADR-0018 §11.9 row 3 / build/budgets.toml: the core artifact for this target is
+# a CDYLIB, <= 6 MB stripped PER ABI, 16 KiB load alignment (C-12). Every
+# dependency added here is spent against that ceiling, per ABI.
+[package]
+name    = "twinvpn-platform-android"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the Android implementation of the twinvpn-platform trait (CB-3 permits cfg here)"
+
+[dependencies]
+twinvpn-types    = { workspace = true }
+twinvpn-env      = { workspace = true }
+twinvpn-platform = { workspace = true }
+thiserror        = { workspace = true }
+libc             = { workspace = true }
+socket2          = { workspace = true }
+tokio            = { workspace = true, features = ["net", "rt", "sync", "io-util"] }
+tracing          = { workspace = true }
+futures-core     = { workspace = true }
+serde_json       = { workspace = true }
+zeroize          = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni         = { workspace = true }
+ndk-context = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "io-util", "macros"] }

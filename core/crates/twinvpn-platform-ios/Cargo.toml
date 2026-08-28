@@ -1,0 +1,40 @@
+# twinvpn-platform-ios - the iOS/iPadOS (Darwin, app-extension) implementation of
+# the twinvpn-platform trait (CB-3 permits `cfg` here; CD-3 permits the platform
+# time/entropy primitives).
+#
+# Owner: mobile-ios. This manifest is owned by that domain; the WORKSPACE
+# manifest at core/Cargo.toml is owned by the integration lead.
+#
+# ADR-0018 §11.9 row 1 / build/budgets.toml: the core artifact for this target is
+# a STATICLIB linked into the NEPacketTunnelProvider extension, <= 12 MB stripped,
+# core RSS <= 9 MB inside ADR-0022's 12 MB provider budget (PB-6, C-3). Every
+# dependency added here is spent against that ceiling.
+[package]
+name    = "twinvpn-platform-ios"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the iOS/iPadOS implementation of the twinvpn-platform trait (CB-3 permits cfg here)"
+
+[dependencies]
+twinvpn-types    = { workspace = true }
+twinvpn-env      = { workspace = true }
+twinvpn-platform = { workspace = true }
+thiserror        = { workspace = true }
+libc             = { workspace = true }
+socket2          = { workspace = true }
+tokio            = { workspace = true, features = ["net", "rt", "sync", "io-util"] }
+tracing          = { workspace = true }
+futures-core     = { workspace = true }
+serde_json       = { workspace = true }
+zeroize          = { workspace = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+core-foundation-sys      = { workspace = true }
+security-framework-sys   = { workspace = true }
+system-configuration-sys = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "io-util", "macros"] }

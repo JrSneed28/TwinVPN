@@ -37,6 +37,8 @@ members = [
   "crates/twinvpn-platform-linux",
   "crates/twinvpn-platform-windows",
   "crates/twinvpn-platform-macos",
+  "crates/twinvpn-platform-ios",
+  "crates/twinvpn-platform-android",
   "xtask",
 ]
 
@@ -80,6 +82,8 @@ twinvpn-core           = { path = "crates/twinvpn-core" }
 twinvpn-platform-linux = { path = "crates/twinvpn-platform-linux" }
 twinvpn-platform-windows = { path = "crates/twinvpn-platform-windows" }
 twinvpn-platform-macos = { path = "crates/twinvpn-platform-macos" }
+twinvpn-platform-ios   = { path = "crates/twinvpn-platform-ios" }
+twinvpn-platform-android = { path = "crates/twinvpn-platform-android" }
 
 # -- general ----------------------------------------------------------------
 thiserror       = "2.0"
@@ -95,14 +99,20 @@ hex             = "0.4"
 socket2         = "0.6"
 libc            = "0.2"
 
-# -- per-target platform FFI. Declared here so the two wave-2 adapter crates
-# name a pinned version like every other dependency; each is reachable ONLY
-# from a [target.'cfg(...)'] block in the adapter that needs it, so a Linux
+# -- per-target platform FFI. Declared here so the wave-2 and wave-3 adapter
+# crates name a pinned version like every other dependency; each is reachable
+# ONLY from a [target.'cfg(...)'] block in the adapter that needs it, so a Linux
 # build never resolves them. CB-3 keeps them out of every other crate.
 windows-sys              = "0.61"
 core-foundation-sys      = "0.8"
 security-framework-sys   = "2.14"
 system-configuration-sys = "0.6"
+# wave 3, Android only. `jni` is the JNI calling convention, not a decision
+# surface: CB-2 confines it to marshalling between the Kotlin shell and this
+# adapter. `ndk-context` yields the JavaVM/Context the shell registered, so the
+# adapter never discovers ambient state (CD-2).
+jni                      = "0.21"
+ndk-context              = "0.1"
 
 # -- async ------------------------------------------------------------------
 # CD-1/CD-2: the runtime is a capability behind `twinvpn-env`. No crate outside

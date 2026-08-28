@@ -461,3 +461,157 @@ make contracts && make test-contracts && make build && make lint && make test &&
 ```
 
 **Do not continue integrating onto a broken `master`.**
+
+---
+
+## 10. Wave 3 — the mobile platform runtimes
+
+**Status:** authoritative for the third implementation wave. Everything in
+§§1–7 still binds, and §9.2's four categories bind unchanged; this section says
+only what is different.
+
+**Ordering note, stated rather than glossed.** §1 places `shells/{ios,android}`
+in wave 3 and §5 defers them behind wave 2, whose two desktop runtimes are today
+*scaffolded* (commit `5fae6ea`) and not implemented. Wave 3 is being run
+**ahead of wave 2's completion, by explicit instruction**. Nothing in wave 3
+depends on `shells/windows` or `shells/macos` existing — both mobile domains
+bind the same `twinvpn-platform` trait and the same core that wave 1 shipped —
+so the waves are independent in fact, not merely by assertion. What is *lost* by
+reordering is the macOS runtime as a worked precedent for the Apple half; the
+`desktop-linux` shell is the precedent wave 3 uses instead.
+
+### 10.1 Scope
+
+| Domain | Owns | Deliverable |
+|---|---|---|
+| `mobile-ios` | `shells/ios/`, `core/crates/twinvpn-platform-ios` | the SwiftUI app, the `NEPacketTunnelProvider` NetworkExtension, the shared-core bridge, Keychain + Secure Enclave custody, the VPN-permission lifecycle, network-change and Wi-Fi↔cellular roaming, lock/unlock, background-supported operation, diagnostics, the pairing foundation |
+| `mobile-android` | `shells/android/`, `core/crates/twinvpn-platform-android` | the Kotlin app, the Jetpack Compose UI, `VpnService`, the foreground-service lifecycle, the shared-core bridge, Android Keystore custody, connectivity changes and Wi-Fi↔cellular roaming, Doze handling, always-on/lockdown integration, diagnostics, the pairing foundation |
+
+Same CB-3 split as every other platform domain: the trait is
+`core-foundation`'s, the implementation is the shell domain's.
+
+**The protocol is not reimplemented per platform.** §9.1's sentence binds here
+verbatim. A second copy of a TwinVPN decision in a mobile shell is a defect in
+wave 3 exactly as it was in waves 1 and 2, and CB-2's falsification test is the
+check: with both mobile shells deleted and the mock adapter bound, the core must
+still make every decision correctly.
+
+### 10.2 The two prohibitions the objective states, and where they bite
+
+1. **No dependency on keeping the screen awake.** No wake lock, no
+   `isIdleTimerDisabled`, no "keep-alive by staying foreground". On Android the
+   sanctioned mechanism is the foreground service with its persistent
+   notification plus `setUnderlyingNetworks`; on iOS it is the extension's own
+   lifecycle plus on-demand rules. `docs/networking.md` §5.4 names both.
+2. **No undocumented background-execution tricks.** Keepalives ride the tunnel
+   socket's own kernel-side timer where the platform offers one, never an
+   app-side alarm cadence chosen to defeat Doze. An iOS provider that survives
+   only because of an undocumented behaviour is *written, not verified* by
+   definition, and would be reported as working on a device farm long before it
+   was reported as broken by a user.
+
+### 10.3 What "done" can mean on this host — wave 3's row of §9.2's table
+
+Wave 3 sits **worse** than wave 2 on this host, and the report must say so:
+
+| Category | Wave-3 content | How it is obtained |
+|---|---|---|
+| **executed** | every target-free layer of both adapters — OS-error → `reason_code` mapping, `NEPacketTunnelNetworkSettings` / `VpnService.Builder` programme rendering from a `RouteEntry`/`DnsConfig`, event decoding, posture computation | `make test` on this host |
+| **compiled** | every line of Rust in both adapters, type-checked against the real Darwin and bionic sys crates, `-D warnings`, **never linked, never run** | `make cross-check` (`aarch64-apple-ios`, `aarch64-linux-android`) |
+| **written, not compiled** | **all Swift and all Kotlin.** There is no Xcode, no Darwin SDK, no `NetworkExtension`, no JDK, no Gradle, no Android SDK and no NDK on this host | — |
+| **written, not executed** | the XCTest and instrumented-test suites, and every real-device lifecycle test | — |
+
+§9.2's design rule is therefore **more** binding here, not less: **every layer
+that can be target-free is target-free**, `#[cfg]` is confined to the thinnest
+syscall shim, and everything a reviewer would want to see exercised runs its
+tests on this Linux host. A mobile domain that pushes logic up into Swift or
+Kotlin has moved it from *executed* to *written, not compiled* — and, under
+CB-2, has probably moved a decision into a shell as well. The two failures have
+the same shape and the same fix.
+
+**A device farm is owed.** The rows `cross-check` cannot reach need a macOS
+builder with Xcode and an Android builder with the SDK and NDK, plus real
+devices for the lifecycle matrix. Wave 3 does not close that debt; it writes the
+tests that will discharge it and says plainly that they have not run.
+
+### 10.4 W-24 / W-25 on a Swift or Kotlin shell — integration-lead ruling
+
+§8's W-24 and W-25 record that `twinvpn.h`'s F-9 vtable carries **no**
+`installed_ruleset` read-back, **no** `current_generation`, **no** socket
+provider and **no** interface enumerator, so *a shell bound only to that vtable
+cannot do NAT traversal and cannot produce a `ProtectionAssertion` at all*.
+`shells/linux` escapes this by linking `twinvpn-platform-linux` as a Rust crate.
+A Swift or Kotlin shell cannot do that, which is exactly the case W-24 and W-25
+say "needs ADR-0018 §11.4 amended, or an explicit acceptance".
+
+**Ruling, for wave 3, recorded as a decision and not as an amendment:** neither.
+The missing capabilities stay **in Rust, in-process**, inside
+`twinvpn-platform-{ios,android}`, and the Swift/Kotlin side reaches them through
+a per-platform `extern "C"` bridge exported by that same adapter crate. That
+bridge is **not** an ABI of record, is **not** `twinvpn.h`, and acquires **no**
+compatibility obligation: both sides are compiled from one commit into one
+artifact, which is precisely the same-process scope VR-2 already carves out. It
+is internal linkage, and it is versionless because there is nothing for it to be
+compatible *with*.
+
+Consequences, stated so they are not discovered later:
+
+- Sockets, the NAT ladder, interface enumeration and change events, ruleset
+  read-back and `current_generation` are Rust on both mobile targets. Swift and
+  Kotlin marshal; they do not decide (CB-2).
+- The bridge surface is **not** permitted to grow a TwinVPN domain fact. An
+  entry that takes or returns a `ConnectionState`, a `reason_code` class, a
+  policy verdict or a candidate priority is a CB-2 violation on the wrong side
+  of the line, and is a finding.
+- **This does not discharge W-24 or W-25.** ADR-0018 §11.4 still needs the
+  amendment they ask for, because the *general* claim "a vtable-only shell can
+  assert protection" remains false. Wave 3 removes the blocker for two shells;
+  it does not close the defect. Both mobile domains report it again, in their
+  own words, if their implementation contradicts this ruling.
+
+### 10.5 The mobile test matrix
+
+Both domains cover, and report per §9.2 category:
+
+foreground/background · lock/unlock · network changes · cellular↔Wi-Fi
+migration · tunnel restart · process termination · restored connection ·
+revoked peers · kill-switch behaviour · IPv4 leaks · IPv6 leaks · DNS leaks.
+
+Two rules on how they are covered:
+
+1. **Every row that can be a host-runnable test over the mock adapter MUST be
+   one.** A roaming migration is `MIGRATING` rather than `RECONNECTING`
+   (`docs/networking.md` §5.4) — that is a core decision, testable here with no
+   device. A revoked peer, a restored connection and a kill-switch posture are
+   the same. Writing these only as device tests would put them in the
+   *written, not executed* row for no reason.
+2. **The genuinely device-bound rows are written as real-device lifecycle tests
+   and reported as unrun.** Process termination by the OS, Doze, extension
+   memory-limit kill, and the iOS attach-to-arm window ADR-0012 §11.9's P09
+   *measures* rather than assumes, are in this set.
+
+Leak coverage is **both families and DNS on every platform**, per ADR-0010 R1:
+an IPv4 story with a weaker IPv6 story is the asymmetry that ADR forbids, and
+§4.2 already refuses to let address family become a namespace.
+
+### 10.6 Concurrency
+
+Each domain works in an isolated worktree with a non-overlapping file scope, per
+`CLAUDE.md` and §9.3. `core/Cargo.toml`, `contracts/`, the `Makefile`, `build/`
+and `docs/` stay with the integration lead — including this file. The two
+adapter crate directories and their own `Cargo.toml`s are the domains'.
+
+### 10.7 Integration order
+
+```
+1. mobile-android  — more of its surface is reachable from a Linux host
+2. mobile-ios
+```
+
+After each, the wave-1 gate must be green **plus** `make cross-check`:
+
+```
+make contracts && make test-contracts && make build && make lint && make test && make cross-check
+```
+
+**Do not continue integrating onto a broken `master`.**

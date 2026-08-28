@@ -26,7 +26,7 @@ BASELINE   := $(CONTRACTS)/.baseline.binpb
 .PHONY: help bootstrap toolchains contracts contracts-lint contracts-gen \
         contracts-breaking contracts-freshness verify-bindings test-contracts \
         build lint test clean gate freeze freeze-scope build-rust lint-rust \
-        test-rust fmt arch-lint doc-check infra-bootstrap infra-check infra-up \
+        test-rust fmt arch-lint doc-check cross-check infra-bootstrap infra-check infra-up \
         infra-up-v6 infra-down budgets budgets-images redaction-check
 
 help:
@@ -43,6 +43,7 @@ help:
 	@echo "  make gate             the contract freeze gate (all of the above)"
 	@echo "  make freeze-scope     assert the contract freeze is declared and unbroken"
 	@echo "  make arch-lint        the ADR-0018 T1 architectural lints (CD-3, CD-I2, CD-I5, CB-3)"
+	@echo "  make cross-check      COMPILE-ONLY proof for the non-host targets (win/mac/ios/android)"
 	@echo ""
 	@echo "  make infra-check      compose topology + collector redaction invariants (no Docker needed)"
 	@echo "  make infra-up         bring the local plane up (dual stack); infra-up-v6 for IPv6-only"
@@ -298,8 +299,18 @@ fmt:
 # three adapters, and `twinvpn-platform-linux` does not compile for Darwin (nor
 # should it). Each shell workspace holds only its own platform's crates, so
 # `--workspace` is right there.
+#
+# WAVE 3 (mobile) joins this target on exactly the same terms. `aarch64-apple-ios`
+# and `aarch64-linux-android` rust-std install here too, so both mobile adapters
+# are type-checked against the real Darwin and bionic sys crates with
+# `-D warnings`. NOTHING Swift and NOTHING Kotlin is reached: there is no Xcode,
+# no Darwin SDK, no JDK, no Android SDK and no NDK on this host, so
+# `shells/ios` and `shells/android` are WRITTEN, NOT COMPILED in ownership.md
+# 9.2's sense, and no `make` target may claim otherwise.
 WIN_TARGET := x86_64-pc-windows-msvc
 MAC_TARGET := aarch64-apple-darwin
+IOS_TARGET := aarch64-apple-ios
+AND_TARGET := aarch64-linux-android
 
 cross-check:
 	@echo "==> cross-check twinvpn-platform-windows ($(WIN_TARGET))"
@@ -318,7 +329,15 @@ cross-check:
 	  ( cd shells/macos && $(CARGO) clippy --workspace --all-targets \
 	      --target $(MAC_TARGET) -- -D warnings ) || exit 1; \
 	fi
+	@echo "==> cross-check twinvpn-platform-ios ($(IOS_TARGET))"
+	@cd core && $(CARGO) clippy -p twinvpn-platform-ios --all-targets \
+	    --target $(IOS_TARGET) -- -D warnings
+	@echo "==> cross-check twinvpn-platform-android ($(AND_TARGET))"
+	@cd core && $(CARGO) clippy -p twinvpn-platform-android --all-targets \
+	    --target $(AND_TARGET) -- -D warnings
 	@echo "==> cross-check OK (compile only -- nothing was linked or run)"
+	@echo "    NOT covered: Swift (shells/ios), Kotlin (shells/android) -- no"
+	@echo "    Darwin SDK, no JDK/Android SDK/NDK on this host. ownership.md 9.2."
 
 # ADR-0018 CD-3 / CD-I2 / CD-I5 / CB-3. Owned by core-foundation.
 arch-lint:
