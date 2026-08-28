@@ -209,6 +209,171 @@
       "createdAt": "2026-08-27T14:05:22.434Z",
       "model": "sonnet",
       "modelRoutedBy": "default"
+    },
+    "agent-1787858563630-lgm655": {
+      "agentId": "agent-1787858563630-lgm655",
+      "agentType": "coordinator",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-27T19:22:43.630Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1787858569706-0exl1d": {
+      "agentId": "agent-1787858569706-0exl1d",
+      "agentType": "coder",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-27T19:22:49.706Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1787858582810-vqj8xy": {
+      "agentId": "agent-1787858582810-vqj8xy",
+      "agentType": "coder",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-27T19:23:02.810Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1787858588761-e7gbf1": {
+      "agentId": "agent-1787858588761-e7gbf1",
+      "agentType": "coder",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-27T19:23:08.761Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1787858594261-mxicv3": {
+      "agentId": "agent-1787858594261-mxicv3",
+      "agentType": "coder",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-27T19:23:14.261Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1787858600877-9siipw": {
+      "agentId": "agent-1787858600877-9siipw",
+      "agentType": "coder",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-27T19:23:20.877Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1787858608128-07x6px": {
+      "agentId": "agent-1787858608128-07x6px",
+      "agentType": "coder",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-27T19:23:28.128Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1787858613253-uojncl": {
+      "agentId": "agent-1787858613253-uojncl",
+      "agentType": "coder",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-27T19:23:33.254Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1787858617800-az1z5c": {
+      "agentId": "agent-1787858617800-az1z5c",
+      "agentType": "tester",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-27T19:23:37.800Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1787858623291-m92eti": {
+      "agentId": "agent-1787858623291-m92eti",
+      "agentType": "security-architect",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-27T19:23:43.291Z",
+      "model": "opus",
+      "modelRoutedBy": "default"
+    },
+    "agent-1787858629574-3v0arn": {
+      "agentId": "agent-1787858629574-3v0arn",
+      "agentType": "reviewer",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-27T19:23:49.574Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
     }
   },
   "version": "3.0.0"
