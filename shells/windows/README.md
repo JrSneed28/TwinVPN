@@ -105,7 +105,7 @@ cd core && cargo clippy -p twinvpn-platform-windows --all-targets \
     --target x86_64-pc-windows-msvc -- -D warnings
 cd ../shells/windows
 cargo clippy -p twinvpnctl --all-targets --target x86_64-pc-windows-msvc -- -D warnings
-cargo clippy -p twinvpnsvc --no-default-features --all-targets \
+cargo clippy -p twinvpnsvc --no-default-features --features service --all-targets \
     --target x86_64-pc-windows-msvc -- -D warnings
 
 # The behaviour proof, such as it is: the target-free layers, on Linux.
@@ -327,6 +327,23 @@ Each of these is a gap this wave did not close, with the reason.
    platform** — `packaging/` declares it so the MSI's component list is right the
    day it lands.
 
+2a. **The service does not yet listen.** `mi::dacl::pipe_sddl` renders the
+   security descriptor and `service::server::serve` is written and exercised end
+   to end over `tokio::io::duplex` — but nothing calls
+   `ConvertStringSecurityDescriptorToSecurityDescriptorW` or opens a
+   `named_pipe::ServerOptions` accept loop, and nothing wires
+   `win32::scm`'s dispatcher to `service::scm`'s transition function.
+   `main.rs::serve` **refuses by name** rather than reporting itself ready
+   (PS-18). So on a Windows host this binary would complete its start sequence
+   and then decline to accept connections, which is the correct direction and is
+   not a working service. **These two are the largest single gap in this
+   directory.**
+
+2b. **No power-event registration.** `classify_power_event`, `classify_wake` and
+   LC-24's `ResumeSequence` are written and tested; `PowerSettingRegisterNotification`
+   is never called, and `SERVICE_CONTROL_POWEREVENT` never reaches them because
+   of 2a. The ordering is proven; the delivery is not built.
+
 3a. **`twinvpn-restore.exe` does not exist.** ADR-0011 DN-20's restore service —
    the package-owned artifact that repairs a host whose agent will not start, on
    the platform the ADR calls "the highest-risk for D7". The restore point's
@@ -483,6 +500,21 @@ Each of these is a gap this wave did not close, with the reason.
     holding the WFP session — the ordering PS-21 forbids. The `.wxs` says so; the
     service-side entry point is not written.
 
+17f. **`Principal::account` is always `None`.** A client is attributed by SID
+    rather than by account name, so MI-18's `actor_principal` is never absent —
+    only less readable. `LookupAccountSidW` can block on a domain round trip and
+    the attach path is the wrong place for one.
+
+17g. **`win32::token::service_sid` always refuses.** The service SID is injected
+    at construction (CD-2) rather than resolved from the service name, because a
+    shell that discovered its own principal would be deciding which principal it
+    is.
+
+17h. **No event stream.** `event.subscribe` reaches the core and the core accepts
+    it; the service does not yet push `Event` frames. This is inherited from the
+    core rather than a Windows gap — `shells/linux/README.md` §7 item 2 records
+    the same thing with the same consequence.
+
 18. **Protected Process Light is not claimed.** ADR-0016 §11.9 says so and
     records it as future work: it requires ELAM signing, which is a Microsoft
     process this project has not started.
@@ -557,11 +589,14 @@ is emitted and the specified spelling travels beside it in the log's
 | `POLICY.LEAK.EGRESS_OBSERVED` (ADR-0012 §11.9) | `POLICY.LEAK.DETECTED` | the distinction between "the canary observed egress" and "a leak was detected" |
 | `PLATFORM.RESUMED` (ADR-0022 LC-24 step 5) | `NET.RESUME_OK` | the `PLATFORM` domain. The class (`TRANSIENT`) and severity (`INFO`) are right, and the measured gap travels as evidence either way |
 | `PLATFORM.SERVICE.UI_DETACHED` (ADR-0016 PS-3) | — | **not emitted**; the *behaviour* PS-3 requires — the last client disconnecting changes nothing — is asserted by a test, which is the half that matters |
+| `PLATFORM.PRIV.CLIENT_UNAUTHORIZED` (ADR-0017 §11.12) | `POLICY.POLICY_DENIED` | **the costliest substitution here.** §11.12 gives the specified code its own exit code — **4**, authorization refused — and `POLICY.POLICY_DENIED` reads as a policy verdict, which tells a correct script to stop retrying something a group membership would fix |
+| `PLATFORM.PRIV.REMOTE_ADMIN_REFUSED` (PS-14) | `POLICY.POLICY_DENIED` | the *reason*. An administrator on RDP is told "denied" rather than "denied **because this is a remote session**", and the remediation — walk to the console — is the part that is lost |
+| `PLATFORM.PRIV.DROP_FAILED`, `PLATFORM.PRIV.CAPABILITY_MISSING` (PS-18) | `PLATFORM.ADAPTER_UNAVAILABLE` | the `PRIV` subdomain, and the FATAL/terminal classification |
 | `PLATFORM.SERVICE.SUPERVISOR_ABSENT` (PS-11), `PLATFORM.SERVICE.QUARANTINED` (PS-9), `PLATFORM.PRIV.CAPABILITY_MISSING` (PS-18), `PLATFORM.PRIV.CLIENT_UNAUTHORIZED` / `ADMIN_AUTH_REQUIRED` / `REMOTE_ADMIN_REFUSED` (PS-12, PS-14) | — | **not emitted as codes.** Each condition is detected and refused; what is missing is the registered name to refuse it *with*. `PLATFORM.PRIV.SANDBOX_DEGRADED` is registered and is used for the PS-17 warnings it actually owns |
 
 ---
 
-## 9. Two contradictions this domain did not resolve
+## 9. What this domain found and did not resolve
 
 1. **ADR-0016 §11.6 and ADR-0022 LC-12 disagree about the service start type.**
    §11.6's supervision table says `SERVICE_AUTO_START` **with delayed start**;
@@ -571,12 +606,42 @@ is emitted and the specified spelling travels beside it in the log's
    it is reasoned, and it names the trade. The conflict is recorded in
    `packaging/TwinVPN.wxs` beside the element it decides. **Needs a decision.**
 
+1a. **`ownership.md` §6 rule 6 requires `causation_id` to be preserved across
+   every component boundary, and ADR-0015 specifies it nowhere.** §11.3's
+   `Diagnostic` carries `correlation_id` only, and MI-15 forbids adding a field
+   to the MI envelope. This shell therefore carries the pair *locally* — a
+   `Correlation` value threaded through its own boundaries — and **never emits
+   `causation_id` over MI**, because there is no field for it and inventing one
+   would be the second contract MI-20 forbids.
+
 2. **`twinvpn_mgmt::catalogue_digest()` returns a `u64`; ADR-0017 §11.7's
    `HelloAck.catalogue_digest` is a string.** This build renders the integer with
    `to_string()`. §11.7 makes the digest "the capability contract", so if the
    digest ever becomes a hex or base64 form, the two sides will disagree
    *silently* — a client would compute one spelling, the agent another, and the
    mismatch would look like a catalogue change rather than an encoding one.
+
+3. **`windows-sys` 0.61 binds no `SE_GROUP_*` constant.** `SE_GROUP_ENABLED` is
+   a literal in `win32/token.rs`, and it is **the bit the whole authorization
+   model turns on**: a filtered administrator token still carries the
+   `Administrators` SID, as *deny-only*, so a check that looked at membership
+   rather than at the enabled bit would grant `ADMINISTER` to every
+   administrator account whether or not the client had elevated. There is
+   nothing in the crate to assert the literal against, unlike the eighty-eight
+   `WIN32_ERROR` constants the adapter does check.
+
+4. **`FWP_E_*` and `NTE_*` are likewise unbound in `windows-sys` 0.61.** Fifteen
+   of the adapter's status literals therefore cannot be compared against the
+   platform's own headers. What is checked instead is that each survives the
+   crate's own signed round-trip and that its facility bits put it in the family
+   `oserr` keys on — strictly weaker than the direct comparison the other
+   seventy-three get, and said so in the module.
+
+5. **W-43 has landed.** `twinvpn-env`'s `TokioRuntime` now calls `.enable_io()`,
+   so this shell carries no equivalent of `shells/linux/README.md` §7 item 2b's
+   I/O-driver refusal. Recorded here rather than silently omitted, because a
+   reader comparing the two shells' start sequences would otherwise wonder where
+   the step went.
 
 ---
 
