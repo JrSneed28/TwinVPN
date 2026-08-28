@@ -494,8 +494,9 @@ of the following hold:
    predicate: Linux/OpenWrt — `cgroup v2` path match **and** `fwmark` set via `SO_MARK` by the
    agent; Windows — WFP `FWPM_CONDITION_ALE_APP_ID` for the signed binary **and**
    `FWPM_CONDITION_ALE_USER_ID` for the service SID; macOS — `pf` anchor keyed to the tunnel
-   provider's owning uid plus the provider's socket set; iOS/Android — implicit, the provider's
-   own sockets are excluded from its own tunnel by construction.
+   provider's owning uid plus the provider's socket set; iOS — implicit, the provider's own
+   sockets are excluded from its own tunnel by construction; **Android — NOT implicit; see
+   KS-9c**, where the exclusion is an explicit per-descriptor call the implementation must make.
 2. It is emitted on a **socket registered with the enforcement layer** at bind time.
    Unregistered sockets of the same process do not match.
    **Corrected (KS-9a): the registration MUST NOT be specified as IPC.** This clause originally
@@ -530,6 +531,38 @@ achieved granularity as a **value** the `ProtectionAssertion` and the diagnostic
 — `desktop-macos` records it as `ExemptPredicate` with a `ks9_complete()` reading, and
 `desktop-windows` as `Ks9Residual`. A reviewer must be able to read the granularity off the
 running system rather than infer it from this table.
+
+**Amendment KS-9c — clause 1's "by construction" is true on iOS and FALSE on Android, and the
+difference is an action an implementation must take rather than a property it inherits.** Wave 3
+built both mobile runtimes; `mobile-android` reported it from the implementation.
+
+Clause 1 originally grouped iOS and Android as one row: *"the provider's own sockets are excluded
+from its own tunnel by construction"*. That is exact on iOS — `NEPacketTunnelProvider`'s own
+traffic does not enter the tunnel it provides, and there is nothing for an implementation to do.
+On Android it is the opposite of the truth:
+
+| Platform | Mechanism | Is the agent's own socket excluded? |
+|---|---|---|
+| **iOS / iPadOS** | `NEPacketTunnelProvider` | **Yes, by construction.** Nothing to do |
+| **Android** | `VpnService` claiming `0.0.0.0/0` **and** `::/0` | **No.** The claim captures *every* socket in the device, including the agent's own. Exclusion requires an explicit **`VpnService.protect(int)` per file descriptor**, before the socket is used |
+
+**Why this is a defect and not a wording preference.** An implementation that read clause 1
+literally would not call `protect()`, and its relay and control-plane sockets would be routed into
+the very tunnel they exist to establish. That is not a leak — it is a **bootstrap deadlock**: the
+socket that must reach the relay to bring the tunnel up is captured by the tunnel that is not up.
+It fails closed rather than open, which is the safe direction, but it fails *silently and always*,
+and it would be diagnosed as a NAT-traversal problem rather than as this.
+
+**Normatively:** on Android the bootstrap exemption of clause 1 is realized by `VpnService.protect`
+on **every** descriptor the agent originates traffic from, applied **before** first use, and an
+adapter MUST NOT return an unprotected descriptor to a caller that will send on it. Failure to
+protect is `KS-12`'s case — registration failure denies egress — not a degraded permit.
+`mobile-android` implements it this way: `sock::bind_udp` protects before bind and refuses to
+return an unprotected socket.
+
+The residual is the window between socket creation and `protect()`, which is why the call belongs
+inside the adapter's own bind path and not at any call site above it. There is no Android API that
+makes it atomic, and stating that is preferable to implying the platform does it for us.
 
 **Why this is bounded rather than open.** The exemption's safety was never resting on socket
 granularity alone: KS-10 argues it from **what can enter the exempt sockets** — no proxy, no
