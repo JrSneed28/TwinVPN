@@ -2,6 +2,32 @@
 #
 # Owner: relay-plane. The WORKSPACE manifest at services/Cargo.toml is owned by the
 # integration lead and must not be edited from this domain.
+#
+# Every dependency below is already declared in services/Cargo.toml's
+# [workspace.dependencies]; this manifest names no version, so no domain can
+# drift one.
+#
+# ===========================================================================
+# THE CRYPTOGRAPHY IS `twinvpn-crypto`'S, NOT THIS CRATE'S.
+# ===========================================================================
+# ADR-0018 CD-I2 makes `twinvpn-crypto` the only crate permitted a cryptographic
+# dependency, and ownership.md §6 forbids inventing primitives. The relay needs
+# three it may not implement itself (ADR-0005 C1): COSE_Sign1/Ed25519
+# verification for the RelayCapabilityToken and the RelayEpochFloor, a truncated
+# BLAKE2s frame MAC under K_leg, and a one-way digest for the daily relay_sub
+# re-hash.
+#
+# The workspace now declares `twinvpn-crypto` as a permitted edge for the relay
+# plane, chosen over four primitive crates because of DP-8: at most two crypto
+# providers fleet-wide, both passing the identical golden-vector corpus. Four
+# primitive crates here would be a SECOND provider whose agreement with the
+# core's is untested. Depending on `twinvpn-crypto` is not itself a cryptographic
+# dependency -- it is the crate that encapsulates them.
+#
+# The injected seam (`crate::crypto::RelayCrypto`) is KEPT: it is what let the
+# admission policy be tested with no provider at all, and `crypto::FailClosed`
+# remains the default when none is configured. `crate::provider` binds the real
+# one behind it.
 [package]
 name    = "twinvpn-relay"
 version.workspace      = true
@@ -12,14 +38,22 @@ repository.workspace   = true
 description = "the ciphertext-only relay data plane: BIND/BOUND, pair_tag forwarding (ADR-0005)"
 publish = false
 
+[lib]
+name = "twinvpn_relay"
+path = "src/lib.rs"
+
 [[bin]]
 name = "twinvpn-relay"
 path = "src/main.rs"
 
 [dependencies]
 twinvpn-schema = { workspace = true }
+twinvpn-crypto = { workspace = true }
 twinvpn-types  = { workspace = true }
 thiserror      = { workspace = true }
 tracing        = { workspace = true }
 twinvpn-service-common = { workspace = true }
-tokio = { workspace = true }
+tokio      = { workspace = true }
+bytes      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }

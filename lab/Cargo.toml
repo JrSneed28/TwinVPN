@@ -21,9 +21,16 @@ repository   = "https://github.com/twinvpn/twinvpn"
 [workspace.dependencies]
 twinlab           = { path = "twinlab" }
 twinvpn-types     = { path = "../core/crates/twinvpn-types" }
-twinvpn-env       = { path = "../core/crates/twinvpn-env" }
+twinvpn-env       = { path = "../core/crates/twinvpn-env", features = ["test-support"] }
 twinvpn-schema    = { path = "../core/crates/twinvpn-schema" }
 twinvpn-core      = { path = "../core/crates/twinvpn-core" }
+
+# Requested by test-engineering. The mock adapter and the virtual clock are
+# behind features because ADR-0018 CD-5 makes them the payoff of the CB-2 split:
+# binding the mock exercises 100% of the decision logic on a plain Linux runner.
+twinvpn-crypto    = { path = "../core/crates/twinvpn-crypto" }
+twinvpn-platform  = { path = "../core/crates/twinvpn-platform", features = ["mock"] }
+twinvpn-session   = { path = "../core/crates/twinvpn-session" }
 
 thiserror  = "2.0"
 anyhow     = "1.0"

@@ -17,7 +17,11 @@ twinvpn-env           = { workspace = true }
 twinvpn-schema        = { workspace = true }
 thiserror             = { workspace = true }
 snow                  = { workspace = true }
-x25519-dalek          = { workspace = true }
+# `static_secrets` is required because the L-DATA static key is, by definition,
+# static: ADR-0001 §7.2 has one X25519 static per device, hardware-wrapped and
+# unsealed into the locked allocator, and `EphemeralSecret` cannot represent it.
+# A per-crate feature, not a workspace-manifest change.
+x25519-dalek          = { workspace = true, features = ["static_secrets"] }
 ed25519-dalek         = { workspace = true }
 p256                  = { workspace = true }
 chacha20poly1305      = { workspace = true }
@@ -30,6 +34,16 @@ rand_core             = { workspace = true }
 ciborium              = { workspace = true }
 coset                 = { workspace = true }
 bytes                 = { workspace = true }
+libc                  = { workspace = true }
+
+[features]
+# Deterministic signing fixtures for other crates' tests. CD-I2 covers
+# dev-dependencies, so a crate that needs a signature in a test takes it from
+# here rather than naming `p256` itself. Never enabled in a shipped build.
+test-support = []
 
 [dev-dependencies]
 proptest              = { workspace = true }
+# `test-support` gives the virtual clock an `Env` needs in a test. It is never
+# enabled in a shipped build; `core/README.md` §3 records that.
+twinvpn-env           = { workspace = true, features = ["test-support"] }

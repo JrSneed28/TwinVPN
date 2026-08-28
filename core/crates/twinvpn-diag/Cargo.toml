@@ -11,16 +11,17 @@ license.workspace      = true
 repository.workspace   = true
 description = "the Tier-0 ring, event emission, redaction classification and bundle assembly (ADR-0015)"
 
+# Only what is actually used. A manifest that names an unused dependency makes
+# a false statement about the graph, and CD-I2 and CD-I5 are graph checks.
 [dependencies]
 twinvpn-types         = { workspace = true }
 twinvpn-env           = { workspace = true }
 twinvpn-schema        = { workspace = true }
-twinvpn-store         = { workspace = true }
 thiserror             = { workspace = true }
-serde                 = { workspace = true }
-serde_json            = { workspace = true }
 prost                 = { workspace = true }
-bytes                 = { workspace = true }
+
+[build-dependencies]
+serde_json            = { workspace = true }
 
 [dev-dependencies]
 proptest              = { workspace = true }

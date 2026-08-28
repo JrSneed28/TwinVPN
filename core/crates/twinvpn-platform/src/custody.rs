@@ -36,6 +36,7 @@
 
 use futures_core::future::BoxFuture;
 use twinvpn_types::{DeviceId, IdentityId};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::error::PlatformError;
 
@@ -100,14 +101,14 @@ impl core::fmt::Debug for Signature {
 /// greppable**: [`SharedSecret::expose_for_kdf`] is the only accessor, it is
 /// named for its one legitimate use, and it consumes `self` so the value cannot
 /// be used twice. There is no `Clone`, no `Copy`, and no `Debug` that shows a
-/// byte.
+/// byte. The taken bytes come back inside a `Zeroizing`, so the caller's copy
+/// scrubs itself too rather than the guarantee ending at this type's boundary.
 ///
-/// The scrub in `Drop` is **best-effort and stated as such**: a guaranteed erase
-/// needs a volatile write, which `#![forbid(unsafe_code)]` rules out here and
-/// which `zeroize` provides — but `zeroize` is classified among the cryptographic
-/// dependencies CD-I2 restricts to `twinvpn-crypto`. A caller that needs a
-/// guaranteed scrub moves the value into that crate's locked allocator, which is
-/// what `expose_for_kdf` exists to feed.
+/// The scrub is `zeroize`'s volatile write with a compiler fence, not an
+/// elidable `fill(0)`. `zeroize` is memory hygiene and implements no
+/// cryptography, so CD-I2 does not restrict it to `twinvpn-crypto` — see the
+/// exemption and its reasoning in `core/xtask/src/checks.rs`.
+#[derive(ZeroizeOnDrop)]
 pub struct SharedSecret(Vec<u8>);
 
 impl SharedSecret {
@@ -120,10 +121,11 @@ impl SharedSecret {
     /// Takes the bytes, consuming the secret.
     ///
     /// Named for its one legitimate destination so that every use of a shared
-    /// secret outside a KDF is visible in a `grep`.
+    /// secret outside a KDF is visible in a `grep`. The result is `Zeroizing`,
+    /// so the scrub follows the bytes instead of stopping at this type.
     #[must_use]
-    pub fn expose_for_kdf(mut self) -> Vec<u8> {
-        core::mem::take(&mut self.0)
+    pub fn expose_for_kdf(mut self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(core::mem::take(&mut self.0))
     }
 
     /// The secret's length, which is not secret.
@@ -142,14 +144,6 @@ impl SharedSecret {
 impl core::fmt::Debug for SharedSecret {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "SharedSecret(<{} B redacted>)", self.0.len())
-    }
-}
-
-impl Drop for SharedSecret {
-    fn drop(&mut self) {
-        // Best-effort; see the type's documentation for why it is not a
-        // guarantee.
-        self.0.fill(0);
     }
 }
 
@@ -287,8 +281,11 @@ impl SecureItemKey {
 
 /// A Tier-1 secure item's contents.
 ///
-/// Redacted `Debug`, best-effort scrub on drop, no `Clone`. The items CB-7 puts
-/// here are the SEK, `K_bind` and the S-53 anchor — every one of them a secret.
+/// Redacted `Debug`, `zeroize` scrub on drop, no `Clone`. The items CB-7 puts
+/// here are the SEK, `K_bind` and the S-53 anchor — every one of them a secret,
+/// which is why the scrub is a volatile write rather than a store the optimiser
+/// may drop.
+#[derive(ZeroizeOnDrop)]
 pub struct SecureItem(Vec<u8>);
 
 impl SecureItem {
@@ -305,21 +302,18 @@ impl SecureItem {
     }
 
     /// The contents, consuming the item.
+    ///
+    /// `Zeroizing`, so the SEK does not outlive its use in a plain `Vec` the
+    /// caller forgot about.
     #[must_use]
-    pub fn into_bytes(mut self) -> Vec<u8> {
-        core::mem::take(&mut self.0)
+    pub fn into_bytes(mut self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(core::mem::take(&mut self.0))
     }
 }
 
 impl core::fmt::Debug for SecureItem {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "SecureItem(<{} B redacted>)", self.0.len())
-    }
-}
-
-impl Drop for SecureItem {
-    fn drop(&mut self) {
-        self.0.fill(0);
     }
 }
 

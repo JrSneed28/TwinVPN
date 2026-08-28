@@ -133,12 +133,24 @@ fn correlation_identifiers_are_visible_because_a_trace_needs_them() {
 }
 
 #[test]
-fn channel_binding_is_redacted_and_compares_without_an_early_exit() {
+fn channel_binding_is_redacted_and_compares_in_constant_time() {
     let a = ChannelBinding::from_array([1u8; 32]);
     let b = ChannelBinding::from_array([1u8; 32]);
     let c = ChannelBinding::from_array([2u8; 32]);
     assert!(a.verify_against(&b));
     assert!(!a.verify_against(&c));
+
+    // Differing in the FIRST byte and in the LAST byte are the two cases a
+    // variable-time comparison distinguishes. `subtle::ConstantTimeEq` gives a
+    // compiler barrier, so neither can short-circuit; this asserts the answer,
+    // which is all a test can observe.
+    let mut first = [1u8; 32];
+    first[0] = 9;
+    let mut last = [1u8; 32];
+    last[31] = 9;
+    assert!(!a.verify_against(&ChannelBinding::from_array(first)));
+    assert!(!a.verify_against(&ChannelBinding::from_array(last)));
+
     assert_eq!(format!("{a:?}"), "ChannelBinding(<32 B redacted>)");
     assert!(ChannelBinding::from_slice(&[0u8; 31]).is_err());
 }

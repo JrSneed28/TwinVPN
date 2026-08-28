@@ -1,0 +1,69 @@
+{
+  "corpus": "crypto-kat",
+  "authority": "docs/testing-strategy.md §2.3 — \"Known-answer vectors from the upstream specifications selected in ADR-0001. Byte-exact agreement with the published vectors.\"",
+  "dp8": "ADR-0018 DP-8 requires two cryptographic providers to pass an IDENTICAL corpus. This file IS that corpus: it names no provider, and tests/compatibility/golden_vectors.rs runs it through a `Provider` trait so a second implementation is a binding, not a second corpus.",
+  "frozen": "Vectors are generated once, reviewed, and frozen (§2.3's generation rule). A code change that alters one is a wire-format or key-schedule change, not a corpus update. Every value below is transcribed from its published specification, NOT produced by this workspace.",
+  "vectors": [
+    {
+      "id": "sha256-fips-180-4-abc",
+      "algorithm": "SHA-256",
+      "origin": "FIPS 180-4, one-block message",
+      "input_hex": "616263",
+      "expected_hex": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    },
+    {
+      "id": "sha256-fips-180-4-empty",
+      "algorithm": "SHA-256",
+      "origin": "FIPS 180-4, empty message",
+      "input_hex": "",
+      "expected_hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "sha256-fips-180-4-two-block",
+      "algorithm": "SHA-256",
+      "origin": "FIPS 180-4, two-block message (448 bits)",
+      "input_hex": "6162636462636465636465666465666765666768666768696768696a68696a6b696a6b6c6a6b6c6d6b6c6d6e6c6d6e6f6d6e6f706e6f7071",
+      "expected_hex": "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+    },
+    {
+      "id": "hkdf-sha256-rfc5869-tc1",
+      "algorithm": "HKDF-SHA-256",
+      "origin": "RFC 5869 Appendix A.1, Test Case 1",
+      "salt_hex": "000102030405060708090a0b0c",
+      "ikm_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "info_hex": "f0f1f2f3f4f5f6f7f8f9",
+      "length": 42,
+      "expected_hex": "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+    },
+    {
+      "id": "hkdf-sha256-rfc5869-tc2",
+      "algorithm": "HKDF-SHA-256",
+      "origin": "RFC 5869 Appendix A.2, Test Case 2 (longer inputs and output)",
+      "salt_hex": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+      "ikm_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+      "info_hex": "b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "length": 82,
+      "expected_hex": "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87"
+    },
+    {
+      "id": "hkdf-sha256-rfc5869-tc3",
+      "algorithm": "HKDF-SHA-256",
+      "origin": "RFC 5869 Appendix A.3, Test Case 3 (zero-length salt and info)",
+      "salt_hex": "",
+      "ikm_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "info_hex": "",
+      "length": 42,
+      "expected_hex": "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8"
+    },
+    {
+      "id": "hkdf-sha256-cd4-relay-hrw",
+      "algorithm": "HKDF-SHA-256",
+      "origin": "ADR-0018 CD-4, computed by an independent Python implementation of RFC 5869 built on hmac/hashlib. Pins TwinLab's own derivation, not an upstream one.",
+      "salt_hex": null,
+      "ikm_hex": "000102030405060708090a0b0c0d0e0f",
+      "info_hex": "7477696e6c61622f76312f72656c61792f687277",
+      "length": 32,
+      "expected_hex": "830eb2df6c871281664c56b9dbd829373513194b4971d26eebe4ca82fc4ca6bf"
+    }
+  ]
+}

@@ -28,3 +28,6 @@ build/verify/.work/
 # Cargo build output (four workspaces: core, services, shells/linux, lab)
 target/
 **/target/
+
+# Claude Code agent worktrees (transient; each has its own branch)
+.claude/worktrees/

@@ -37,12 +37,29 @@ done
 # ---------------------------------------------------------------------------
 # TLS for the four services with a device-facing wire surface.
 #
-# ADR-0002 §11.2 rung 1 is QUIC + HTTP/3 with mTLS 1.3 RAW PUBLIC KEY auth
-# (RFC 7250), not X.509 - so these certificates are scaffolding for the
-# transport, not the authentication decision. Device authentication is to the
-# DeviceIdentityKey per ADR-0001 L-CONTROL and is not weakened by anything
-# here. 0-RTT is prohibited (ownership.md §6) and is disabled in configuration,
-# not by certificate choice.
+# ===========================================================================
+# THE KEY IS THE IDENTITY. THE CERTIFICATE IS GENERATED AND IS NOT USED.
+# ===========================================================================
+# Read that literally, because the file layout suggests otherwise. ADR-0002
+# §11.2 rung 1 is TLS 1.3 with mutual RFC 7250 RAW PUBLIC KEY authentication,
+# and `rendezvous` and `presence` now implement exactly that: the server's
+# whole identity is `tls.key`, and the peer is authenticated by its public key,
+# not by a name in a certificate. ADR-0001 §6 rejected the naming system a
+# certificate implies.
+#
+# `tls.crt` is minted anyway, and each service's config requires it to EXIST,
+# because tooling and libraries in this space expect a certificate file to be
+# there. Nothing reads its contents and nothing trusts its subject, its SAN or
+# its expiry. Deleting it breaks a file-existence check; editing it changes
+# nothing at all.
+#
+# What follows from that: rotating `tls.key` rotates the server's identity and
+# every pinning peer must learn the new key. Rotating `tls.crt` accomplishes
+# nothing. Do not reason about these two files as a pair.
+#
+# Client authentication is mandatory and non-configurable in both services, and
+# 0-RTT is structurally prohibited (ADR-0001 L-CONTROL, ownership.md §6) - by
+# construction, not by certificate choice.
 # ---------------------------------------------------------------------------
 if [ "${have_openssl}" -eq 1 ]; then
   echo "==> generating development TLS material"
@@ -114,6 +131,43 @@ JSON
   fi
 done
 
+# ---------------------------------------------------------------------------
+# The pinned OwnerTrustAnchor set (S-32), TWINVPN_CP_OWNER_ANCHOR_PATH.
+#
+# One base16 COSE_Key per line. The control plane verifies Owner-signed
+# statements against these and against nothing else.
+#
+# ITS ABSENCE IS A CAPABILITY LOST, NOT A STARTUP FAILURE: with no anchor the
+# control plane still enrols, discovers and streams, and refuses every
+# Owner-authority statement with AUTH.KEY_UNAVAILABLE. A MALFORMED line IS a
+# startup failure, because a half-parsed trust anchor set is worse than none.
+#
+# The stub written here is EMPTY - comments only. That is the honest default:
+# an Owner root of trust is an Owner's to create (ADR-0007, architecture A-04),
+# and a key this script invented would be a root of trust nobody chose. Without
+# a compose mount, though, Owner-authority commands could not work anywhere but
+# a unit test, so the file and its mount exist and are ready to be filled.
+# ---------------------------------------------------------------------------
+anchors="${secrets}/control-plane/owner-anchors.hex"
+if [ ! -f "${anchors}" ]; then
+  cat > "${anchors}" <<'HEX'
+# TwinVPN OwnerTrustAnchor set (S-32) — one base16 COSE_Key per line.
+#
+# EMPTY ON PURPOSE. An empty set is fail-closed: every Owner-authority
+# statement is refused with AUTH.KEY_UNAVAILABLE, announced at startup rather
+# than discovered from a refusal. Enrolment, discovery and the C2 stream all
+# still work.
+#
+# Add your development Owner public key below to exercise Owner-authority
+# commands. Blank lines and lines starting with '#' are ignored; anything else
+# must be valid base16 or the control plane REFUSES TO START.
+HEX
+  chmod 0644 "${anchors}"
+  echo "    control-plane: OwnerTrustAnchor set stub written (EMPTY - fails closed)"
+else
+  echo "    control-plane: OwnerTrustAnchor set present, leaving alone"
+fi
+
 # RelayMap signing key. ADR-0006 §11.1: one signed COSE_Sign1/CBOR document per
 # operator group, issuer Ed25519 over the canonical encoding (ADR-0003).
 mapkey="${secrets}/relay-directory/map-signing.key"
@@ -131,9 +185,10 @@ fi
 
 echo
 echo "==> done. Next:"
-echo "    1. cp infra/.env.example .env      (then EDIT it - nothing there is a usable secret)"
+echo "    1. cp infra/env.example .env       (then EDIT it - nothing there is a usable secret)"
 echo "    2. docker compose config           (validate)"
-echo "    3. docker compose up -d postgres otel-collector prometheus tempo loki grafana"
+echo "    3. docker compose up -d"
 echo
-echo "    The six service containers exit 1 today - they are skeletons. See"
-echo "    infra/README.md, 'What works today and what does not'."
+echo "    All six services are implemented. Nothing here has been started on a"
+echo "    host with Docker yet - see infra/README.md \u00a79 for what is and is not"
+echo "    verified."

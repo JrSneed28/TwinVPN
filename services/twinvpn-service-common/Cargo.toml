@@ -2,6 +2,10 @@
 #
 # Owner: control-plane. The WORKSPACE manifest at services/Cargo.toml is owned by the
 # integration lead and must not be edited from this domain.
+#
+# Every dependency below is already declared in services/Cargo.toml's
+# [workspace.dependencies] by the integration lead; this manifest only selects
+# from that set. No version is named here, so no domain can drift a version.
 [package]
 name    = "twinvpn-service-common"
 version.workspace      = true
@@ -15,5 +19,70 @@ publish = false
 [dependencies]
 twinvpn-schema = { workspace = true }
 twinvpn-types  = { workspace = true }
+
+# The `device_id` derivation and its dCBOR encoder, for `binding::spki`.
+#
+# The same ruling the integration lead recorded on the workspace manifest for
+# `relay-plane`: depending on `twinvpn-crypto` is NOT itself a cryptographic
+# dependency (CD-I2), it is the crate that encapsulates them, so a server
+# artifact inherits the audited implementation instead of building a parallel
+# one. Re-deriving `device_id` here would be W-23's mistake — "a specified
+# derivation is not ours to improve" — and a wrong derivation names the wrong
+# device.
+twinvpn-crypto = { workspace = true }
 thiserror      = { workspace = true }
-tracing        = { workspace = true }
+
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# OpenTelemetry, ADR-0015 §11.1: permitted as an INTERNAL, infrastructure-side
+# instrumentation library only.
+tracing-opentelemetry = { workspace = true }
+opentelemetry         = { workspace = true }
+opentelemetry_sdk     = { workspace = true }
+opentelemetry-otlp    = { workspace = true }
+
+tokio  = { workspace = true }
+axum   = { workspace = true }
+
+# TLS termination, absorbed from `services/rendezvous` and `services/presence`
+# after they shipped it identically twice. ADR-0018 CD-I2 scopes the
+# crypto-dependency rule to the /core crate set; these are separate server
+# artifacts that do not link the core (ADR-0018 §11.2 rows 2.8/2.11), so they
+# terminate their own transport. Finding W-12 and the workspace manifest's own
+# comment both record that ruling.
+rustls           = { workspace = true }
+tokio-rustls     = { workspace = true }
+rustls-pemfile   = { workspace = true }
+rustls-pki-types = { workspace = true }
+
+# `test-support` only, and never shipped. rustls already links `aws-lc-rs` at
+# RUNTIME as its default provider, so this adds no crate to the lockfile and no
+# runtime cryptographic dependency -- it is named only so a test can mint an
+# ephemeral P-256 keypair rather than committing a private key to the
+# repository. NOT a workspace dependency because `services/Cargo.toml` does not
+# declare one; both consumers name the same version in their own manifests
+# today. Asked of the integration lead in README.md section 11.
+aws-lc-rs = { version = "1.18", optional = true }
+tower  = { workspace = true }
+bytes  = { workspace = true }
+prost  = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+# The ephemeral RFC 7250 key material and TLS clients that make an
+# authentication test writable. Enabled by a consumer's dev-dependency on this
+# crate, never by its dependency.
+test-support = ["dep:aws-lc-rs"]
+
+[dev-dependencies]
+# `test-util` is not in tokio's `full`; the shutdown and log-level-expiry tests
+# drive virtual time so they assert a 120 s drain without taking 120 s.
+tokio = { workspace = true, features = ["test-util"] }
+# The known-answer oracle for the SPKI conversion encodes a COSE_Key through
+# the crypto crate's own emitter, so the two paths differ in how x and y reach
+# it rather than agreeing by construction.
+twinvpn-crypto = { workspace = true }
+# The crate's own authentication tests need its own test kit.
+twinvpn-service-common = { path = ".", features = ["test-support"] }

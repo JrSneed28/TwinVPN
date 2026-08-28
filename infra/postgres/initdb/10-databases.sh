@@ -15,19 +15,37 @@
 # exists to prevent.
 #
 # ---------------------------------------------------------------------------
-# AN OWNERSHIP AMBIGUITY, REPORTED NOT RESOLVED
+# THE RELAY-FLEET OWNERSHIP QUESTION, RESOLVED (integration lead, wave 1)
 # ---------------------------------------------------------------------------
-# architecture.md §2.8 makes the Control Plane Service "the single authoritative
-# writer for membership, revocation, policy, AND RELAY-FLEET REGISTRY", while
+# architecture.md §2.8 calls the Control Plane Service "the single authoritative
+# writer for membership, revocation, policy, and relay-fleet registry", while
 # §2.12 says the Relay-Selection Service owns "the relay-fleet registry and
-# ranking (authoritative)". Both cannot be the single writer of the same state
-# under I8.
+# ranking (authoritative)". Both cannot be the single writer of one fact under
+# I8, so one of them is wrong.
 #
-# The split taken here reads them as registry-vs-ranking: `twinvpn_control`
-# holds the fleet REGISTRY (which relays exist, who operates them),
-# `twinvpn_relay_directory` holds the RANKING and aggregated HealthState that
-# ADR-0006 §11.2 computes. That is a reading, not a ruling, and the integration
-# lead has been asked to disposition it.
+# The tiebreak is that architecture.md names its OWN authority for exactly this
+# question: the state ownership table in §5, which "names a single authoritative
+# writer for every persistent fact". §5 row S-09 reads:
+#
+#     S-09 | `Relay` fleet registry + ranking | Relay-Selection Service (2.12)
+#
+# REGISTRY AND RANKING TOGETHER, to 2.12. §2.8's sentence is a prose error, and
+# an earlier revision of this file guessed the opposite way - it split registry
+# into `twinvpn_control` and left ranking here, which would have put two writers
+# on one row of §5 in the one place a local topology makes that look normal.
+#
+# So:
+#   twinvpn_relay_directory   S-09 - the fleet registry AND the ranking, plus
+#                             the aggregated HealthState ADR-0006 §11.2 scores
+#   twinvpn_control           S-30 - the `RelayCapabilityToken` issuance record,
+#                             which §5 DOES assign to the Control Plane (2.8)
+#                             and ADR-0005 §11.3 makes the relay verify OFFLINE
+#
+# S-30 living apart from S-09 is not an inconsistency; it is the whole point.
+# The issuance record is control-plane state, and the relay never reads it - it
+# verifies an Owner-rooted token against a signed issuer key set with no
+# control-plane call, which is what makes relay admission survive a partition of
+# any duration (architecture.md A-12, testing-strategy A-13).
 
 set -euo pipefail
 

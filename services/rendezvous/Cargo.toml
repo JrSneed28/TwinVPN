@@ -16,6 +16,10 @@ publish = false
 name = "twinvpn-rendezvous"
 path = "src/main.rs"
 
+[lib]
+name = "twinvpn_rendezvous"
+path = "src/lib.rs"
+
 [dependencies]
 twinvpn-schema = { workspace = true }
 twinvpn-types  = { workspace = true }
@@ -23,3 +27,25 @@ thiserror      = { workspace = true }
 tracing        = { workspace = true }
 twinvpn-service-common = { workspace = true }
 tokio = { workspace = true }
+bytes = { workspace = true }
+prost = { workspace = true }
+
+# TLS termination and channel binding live in `twinvpn-service-common` now. This
+# crate names only `tokio-rustls`, for the `TlsAcceptor` it holds and the stream
+# type it serves over; `rustls`, the raw-public-key verifier, the PEM reader and
+# the binding table are the shared crate's. Absorbed after this domain shipped
+# them identically twice (RZ-8) — and absorbing them found a `release()` defect
+# that neither copy's unit tests could see, because both released from a single
+# synthetic channel rather than a long-lived connection.
+tokio-rustls = { workspace = true }
+
+[dev-dependencies]
+# The B3 parser is the most hostile surface in the system; `ownership.md` §6
+# rules 9/10 make "never panics, never allocates unboundedly" a property rather
+# than a set of examples, and a property needs a property test.
+proptest = "1.11"
+
+# The shared TLS test kit: ephemeral RFC 7250 key material and the pinning,
+# anonymous and TLS-1.2-only clients an authentication test needs. Absorbed from
+# this domain's own `tests/common/keys.rs`, which both services carried.
+twinvpn-service-common = { workspace = true, features = ["test-support"] }

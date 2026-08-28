@@ -15,20 +15,22 @@ Read this first; everything below assumes it.
 
 | Component | State |
 |---|---|
-| `postgres`, `otel-collector`, `prometheus`, `tempo`, `loki`, `grafana` | **Come up fully.** Verified structurally; see §9 for what was and was not run on this host. |
-| `control-plane`, `rendezvous`, `presence`, `relay-a`, `relay-b`, `relay-directory`, `relay-health` | **Build and exit 1.** They are integration-lead skeletons: `eprintln!` then `exit(1)`. Their containers start, exit, and — because `restart` is `"no"` — stay exited rather than crash-looping. |
-| Anything with `depends_on: <service>: condition: service_healthy` on one of those six | **Does not start.** That is correct and visible. |
-
-So the useful command today is:
+| `postgres`, `otel-collector`, `prometheus`, `tempo`, `loki`, `grafana` | Configured and structurally validated. |
+| `control-plane`, `rendezvous`, `presence`, `relay-a`, `relay-b`, `relay-directory`, `relay-health` | **All six are implemented.** An earlier revision of this section said they were skeletons that print a line and exit 1; that stopped being true when the four service domains landed. |
 
 ```bash
-docker compose up -d postgres otel-collector prometheus tempo loki grafana
+docker compose up -d
 ```
 
-and the full `docker compose up` becomes meaningful one service at a time as
-each domain lands. This is the point of building the environment first: the
-moment a service gains behaviour it has somewhere real to run, with its ports,
-its dependencies, its health checks and its telemetry pipeline already decided.
+**But nothing in this directory has ever been started.** Docker is not
+installed on the host this was authored on, so no image has been built, no
+container has run, and the healthcheck, the busybox shim and the distroless
+runtime are all unexercised. §9 says precisely what was and was not verified,
+and the CI lanes in `.github/workflows/` exist to close that gap on a runner
+that has Docker.
+
+Read every claim below as "this is what the configuration says", not "this was
+observed".
 
 ---
 
@@ -144,11 +146,44 @@ forbids exposing a broker protocol to a device even if one existed. Adding
 Kafka or NATS would be inventing topology the ADR explicitly rejected (B-1,
 B-2, B-5).
 
-Three databases: `twinvpn_control`, `twinvpn_presence`,
-`twinvpn_relay_directory`. Presence is explicitly *eventually consistent* and
-TTL'd and is a **hint service, never an authority** (architecture.md §2.13);
-putting it in the control-plane database would place hint rows in the same
-transactional scope as revocation.
+Three databases, split along architecture.md §5's state-ownership rows rather
+than along service names:
+
+| Database | Holds | §5 row |
+|---|---|---|
+| `twinvpn_control` | membership, revocation, policy, the durable event log, and the `RelayCapabilityToken` **issuance record** | S-30 among others |
+| `twinvpn_relay_directory` | the `Relay` fleet **registry *and* ranking**, plus aggregated `HealthState` | **S-09** |
+
+**There is no presence database, and adding one would be a privacy defect.**
+An earlier revision created `twinvpn_presence`, required
+`TWINVPN_PRESENCE_DATABASE_URL`, gave presence a Postgres readiness probe and a
+`depends_on` edge. All four are gone. `docs/protocol.md` §6.1 and
+`contracts/docs/contract-matrix.md` §1 category 4 make a **durable** presence
+record *"a permanent movement and IP history of the Owner"* — the privacy
+defect itself, arriving as an infrastructure convenience — and
+`presence.proto` classifies presence as ephemeral for that reason among
+others.
+
+Presence state is a bounded in-memory table with a TTL. **Losing it on restart
+is correct**, not a gap: architecture.md §2.13 makes presence a *hint service,
+never an authority*, whose unavailability degrades reconnect *latency* and not
+reconnect *capability*, and S-11 marks the state explicitly eventually
+consistent and TTL'd.
+
+The service still *reads* `TWINVPN_DATABASE_URL` if one is present — it
+validates it, so a `.env` copied unedited still fails on `CHANGE-ME` rather
+than running with it, and then drops the value. Compose no longer supplies
+one.
+
+**On the relay-fleet row.** §2.8 and §2.12 contradict each other about who owns
+the fleet registry, and both cannot be the single writer of one fact under I8.
+§5 is architecture.md's own named authority for that question, and **S-09
+assigns registry *and* ranking together to the Relay-Selection Service (2.12)**
+— so §2.8's sentence is a prose error. The control plane keeps S-30, the
+issuance record, which §5 *does* assign to it and which the relay never reads:
+it verifies an Owner-rooted token offline against a signed issuer key set
+(ADR-0005 §11.3, architecture.md A-12). `infra/postgres/initdb/10-databases.sh`
+carries the full reasoning.
 
 ### 2.3 Two relays, and no control-plane edge
 
@@ -258,6 +293,7 @@ matters — **what happens when it is absent**.
 | Variable | Default | Required | If absent |
 |---|---|---|---|
 | `TWINVPN_SERVICE_NAME` | per-service, baked into the image | no | image default is used |
+| `TWINVPN_INSTANCE_ID` | the container `hostname` | no | **the OTel `service.instance.id` attribute has no supplier.** The collector allowlists it, so it would simply be absent from every span, metric and log. `twinvpn-service-common` takes it as an explicit caller argument rather than reading a hostname or generating entropy — correct, because an id invented per process makes fleet queries *lie*: "how many instances served this" silently becomes "how many times did anything restart". Compose supplies the container hostname, which is stable across restarts. **See §11 — the services currently derive `name-pid` and do not yet read this variable.** |
 | `TWINVPN_ENVIRONMENT` | `local` | no | `local` |
 | `TWINVPN_LOG_LEVEL` | `info` | no | `info`. ADR-0015 §11.5: `CRITICAL`/`ERROR`/`WARN`/`INFO` on by default; `DEBUG`/`TRACE` off and auto-expiring. **No level, in any build, may emit `SECRET`.** |
 | `TWINVPN_LOG_FORMAT` | `json` | no | `json` |
@@ -283,8 +319,10 @@ matters — **what happens when it is absent**.
 | `TWINVPN_CP_QUIC_ZERO_RTT` | `false` | no | **must stay false.** 0-RTT is prohibited by ADR-0001 L-CONTROL and ownership.md §6. It is named as configuration so that enabling it is a visible, reviewable act rather than a silent default. |
 | `TWINVPN_CP_TLS_CERT_PATH` | `/run/secrets/control-plane/tls.crt` | yes (file) | startup fails |
 | `TWINVPN_CP_TLS_KEY_PATH` | `/run/secrets/control-plane/tls.key` | yes (file) | startup fails |
-| `TWINVPN_CP_DATABASE_URL` ← `TWINVPN_CP_DATABASE_URL` | **none** | **YES** | **compose refuses to start** with a message naming the variable |
-| `TWINVPN_DB_MAX_CONNECTIONS` | `16` | no | 16 |
+| `TWINVPN_CP_DATABASE_URL` | **none** | **YES** | **compose refuses to start** with a message naming the variable. The key name is the *service's*: an earlier revision of `docker-compose.yml` set `TWINVPN_DATABASE_URL`, which the control plane does not read, so a fully configured stack would still have failed at startup. `check-compose.py` now fails the build on any `TWINVPN_*` variable no service reads. |
+| `TWINVPN_CP_DATABASE_MAX_CONNECTIONS` | `16` | no | 16 |
+| `TWINVPN_CP_QUORUM_REPLICAS` | `0` | no | 0 — single-writer, correct for one Postgres. ADR-0009 §11.2 makes this a **deployment** choice. Above 0, an E-1-class write with no reachable quorum is **refused** with `CONTROL.QUORUM_UNAVAILABLE`, never committed locally with a promise to reconcile — a forked revocation history is exactly what E-1 forbids. |
+| `TWINVPN_CP_OWNER_ANCHOR_PATH` | `/run/secrets/control-plane/owner-anchors.hex` | no | **a capability lost, not a startup failure.** The pinned `OwnerTrustAnchor` set (S-32), one base16 COSE_Key per line. With no file the control plane still enrols, discovers and streams, and refuses every Owner-authority statement with `AUTH.KEY_UNAVAILABLE` — announced at startup, not discovered from a refusal. A **malformed** line *is* a startup failure: a half-parsed trust anchor set is worse than none. `bootstrap-local.sh` writes an empty stub and compose mounts the directory, so Owner-authority commands are reachable outside a unit test; the stub is empty because an Owner root of trust is the Owner's to create (ADR-0007, architecture.md A-04) and a key this repository invented would be a root of trust nobody chose. |
 | `TWINVPN_CP_EVENT_BUS` | `postgres-notify` | no | §2.2 |
 | `TWINVPN_CP_WRITE_LEASE_TTL_MS` | `15000` | no | ADR-0002 N-4: exactly one writer per `TwinNet` log, held by a lease. Without the lease a write is refused with `CONTROL.WRITE_LEADER_UNAVAILABLE`, never written optimistically. |
 | `TWINVPN_CP_RETENTION_FLOOR_DAYS` | `30` | frozen | `limits.json control_plane.retention_floor_days` |
@@ -314,6 +352,24 @@ matters — **what happens when it is absent**.
 | `TWINVPN_RZ_C4_MAX_DEPTH` | `4` | frozen | half the C1 limit; the hostile boundary gets the tighter bound |
 | `TWINVPN_RZ_MAX_CANDIDATES_PER_SET` | `32` | frozen | `limits.json candidates.max_candidates_per_set` |
 | `TWINVPN_RZ_CANDIDATE_EXPIRY_MS` | `30000` | frozen | `limits.json candidates.default_expiry_ms` |
+| `TWINVPN_RZ_FRAME_READ_TIMEOUT_MS` | `5000` | no | **closes a slowloris hold its own tests found.** Without a deadline on a *partially received* frame, an attacker sends one length prefix and one byte and holds a connection and its buffer open indefinitely — having authenticated nothing. |
+| `TWINVPN_RZ_MAX_CONNECTIONS` | `16384` | no | **closes descriptor exhaustion its own tests found.** Past the ceiling `accept` is refused; without it the process runs out of file descriptors and fails at everything at once. |
+| `TWINVPN_RZ_MAX_ATTACHMENTS` | `8192` | no | unbounded attachment table |
+| `TWINVPN_RZ_MAX_MAILBOX_TARGETS` | `8192` | no | unbounded distinct-target growth |
+| `TWINVPN_RZ_MAX_MAILBOX_BYTES` | `33554432` (32 MiB) | no | unbounded retained mailbox bytes |
+| `TWINVPN_RZ_MAX_BINDINGS` | `16384` | no | unbounded `device_id`↔channel binding table |
+| `TWINVPN_RZ_BINDING_TTL_MS` | `600000` | no | a binding outlives its connection forever |
+| `TWINVPN_RZ_SOURCE_RATE_PER_SEC` | `20` | no | no per-source `CALL` rate limit. A device sends an offer, an answer and a few trickle candidate sets — single-digit frames per second per peer — so 20/s with a burst of 40 leaves a CGNAT full of real devices ample room while making a flood cost the attacker a bucket entry rather than a mailbox. |
+| `TWINVPN_RZ_SOURCE_BURST` | `40` | no | as above |
+
+> **These nine are additions, not transcriptions, and `rendezvous-connectivity`
+> was right to make them.** `limits.json` bounds **one message** — 1200 B, depth
+> 4, 32 candidates. Nothing in the frozen contracts bounds **how many** messages,
+> connections or table entries exist at once, and `ownership.md` rule 10 requires
+> every allocation an untrusted input can drive to be bounded. This is
+> `contracts/docs/trust-boundaries.md` B3: *"reachable by anyone with a UDP
+> socket"*, *"where a parser bug is a remote memory-safety bug"*. Two of them
+> close real bugs the service's own tests found.
 
 ### 4.5 `presence`
 
@@ -321,10 +377,20 @@ matters — **what happens when it is absent**.
 |---|---|---|---|
 | `TWINVPN_PRESENCE_LISTEN_QUIC` / `_TCP` | `[::]:443` | no | — |
 | `TWINVPN_PRESENCE_TLS_CERT_PATH` / `_KEY_PATH` | `/run/secrets/presence/tls.*` | yes (file) | startup fails |
-| `TWINVPN_DATABASE_URL` ← `TWINVPN_PRESENCE_DATABASE_URL` | **none** | **YES** | **compose refuses to start** |
-| `TWINVPN_PRESENCE_CONTROL_PLANE_URL` | `https://control-plane:443` | no | — |
+| `TWINVPN_PRESENCE_CONTROL_PLANE_URL` | `https://control-plane:443` | no | authorization only — **not** a readiness input, see §5 |
 | `TWINVPN_PRESENCE_HEARTBEAT_INTERVAL_MS` | `30000` | no | 30 s |
 | `TWINVPN_PRESENCE_RECORD_TTL_MS` | `180000` | no | 3 min. Records are explicitly eventually consistent and TTL'd (ADR-0009). **Presence never gates a connection attempt** — "presence says offline" MUST NOT prevent an attempt (architecture.md §2.13, S-11). |
+| `TWINVPN_PRESENCE_MAX_DEVICES` | `65536` | no | unbounded device-record table |
+| `TWINVPN_PRESENCE_FRAME_READ_TIMEOUT_MS` | `5000` | no | a slowloris hold, exactly as for rendezvous |
+| `TWINVPN_PRESENCE_MAX_CONNECTIONS` | `16384` | no | descriptor exhaustion, exactly as for rendezvous |
+| `TWINVPN_PRESENCE_MAX_BINDINGS` | `16384` | no | unbounded binding table |
+| `TWINVPN_PRESENCE_BINDING_TTL_MS` | `600000` | no | a binding outlives its connection forever |
+
+> **There is no `TWINVPN_PRESENCE_DATABASE_URL` row because presence has no
+> database.** See §2.2. The service still validates a `TWINVPN_DATABASE_URL` if
+> one reaches it — so an unedited `CHANGE-ME` still fails startup — and then
+> drops the value; `SecretString` has no `Display` and no `Serialize`, so it has
+> no rendering path even by accident.
 
 ### 4.6 `relay-a` / `relay-b`
 
@@ -348,6 +414,7 @@ matters — **what happens when it is absent**.
 | `TWINVPN_RELAY_PAIR_TAG_BUCKET_SECONDS` | `600` | frozen | `limits.json relay.pair_tag_bucket_seconds`. Rotates every 10 min so a tag cannot be used for long-term linkage. |
 | `TWINVPN_RELAY_PAIR_TAG_ACCEPTED_SKEW` | `1` | frozen | accept `bucket`, `bucket−1`, `bucket+1` |
 | `TWINVPN_RELAY_MAX_FLOWS_PER_SUBJECT` | `64` | no | ADR-0005 §11.5; exceeded ⇒ `RELAY.FLOW_LIMIT_REACHED` |
+| `TWINVPN_RELAY_MAX_TOTAL_FLOWS` | `65536` | no | **the ceiling ADR-0005 §11.5 does not provide, and `relay-plane` was right to add it.** Every limit in §11.5's table is *per `relay_sub`*. That bounds one attacker; it says nothing about how many subjects exist, so the flow table had **no memory bound at all** — against `ownership.md` rule 10. 65536 is 1024 subjects at their full per-subject allowance. The **subject table** and the **cookie gate** are sized *from* this value rather than configured separately, so one number moves all three and they cannot drift apart. |
 | `TWINVPN_RELAY_RATE_PER_SUBJECT_MBPS` | `20` | no | token bucket, **throttle not drop** ⇒ `RELAY.RATE_LIMITED` |
 | `TWINVPN_RELAY_RATE_PER_FLOW_MBPS` | `10` | no | as above |
 | `TWINVPN_RELAY_QUOTA_BYTES_PER_HOUR` | `21474836480` (20 GiB) | no | ⇒ `RELAY.QUOTA_EXCEEDED` |
@@ -393,6 +460,8 @@ matters — **what happens when it is absent**.
 |---|---|---|---|
 | `TWINVPN_PG_PASSWORD` | **none** | **YES** | `docker compose up` fails immediately, naming the variable |
 | `TWINVPN_PG_USER` / `TWINVPN_PG_DATABASE` | `twinvpn` / `twinvpn_control` | no | — |
+| `TWINVPN_CP_DATABASE_URL` | **none** | **YES** | as above. Two database URLs are required, not three — presence has none (§2.2). |
+| `TWINVPN_RELAYDIR_DATABASE_URL` | **none** | **YES** | as above |
 | `SOURCE_DATE_EPOCH` | `1756252800` | no | a fixed date, **not `now`** — ADR-0018 BM-6, so an unparameterised image build is still deterministic |
 | `TWINVPN_SOURCE_COMMIT` | `unknown` | no | image label only |
 | `TWINVPN_*_IMAGE` | the tags in `infra/docker/base-images.lock` | no | tags are used; see §7 |
@@ -416,14 +485,47 @@ stops targeting `/readyz` or the liveness path disappears.
 
 Readiness must reflect real dependency availability:
 
-| Service | `/readyz` must check |
-|---|---|
-| `control-plane` | Postgres reachable; the per-`TwinNet` write lease obtainable or knowingly held elsewhere (ADR-0002 N-4) |
-| `rendezvous` | control-plane authorization endpoint reachable |
-| `presence` | Postgres reachable |
-| `relay-a`, `relay-b` | issuer key set loaded and parsable; all configured carriages bound. **Never a control-plane call** — that would make I5 untrue |
-| `relay-directory` | Postgres reachable; signing key loaded; the current map satisfies the ≥2 alternates / ≥2 failure domains floor |
-| `relay-health` | Postgres reachable |
+| Service | Policy | `/readyz` checks |
+|---|---|---|
+| `control-plane` | `AnyDependency` | Postgres reachable; the per-`TwinNet` write lease obtainable or knowingly held elsewhere (ADR-0002 N-4) |
+| `rendezvous` | **`NoControlPlaneCalls`** | routing tables reachable and the ceilings hold. **Asks nothing of any other process** — see below |
+| `presence` | **`NoControlPlaneCalls`** | the in-memory record table is reachable and within its ceilings. **No database** — §2.2 |
+| `relay-a`, `relay-b` | `NoControlPlaneCalls` | issuer key set loaded and parsable; all configured carriages bound |
+| `relay-directory` | `AnyDependency` | Postgres reachable; signing key loaded; the current map satisfies the ≥2 alternates / ≥2 failure domains floor |
+| `relay-health` | `AnyDependency` | Postgres reachable |
+
+### Why `rendezvous` and `presence` refuse a control-plane readiness probe
+
+**This table used to say `AnyDependency` for both, with rendezvous probing "the
+control-plane authorization endpoint reachable". That was wrong, both services
+refused it, and their reasoning is worth stating rather than just correcting.**
+
+A rendezvous that reports **NOT READY** when the control plane blips is removed
+from the load balancer. Removing it stops peers exchanging candidates. Peers
+that cannot exchange candidates fall back on the control plane to reconnect.
+So a health check intended to express a dependency **puts the control plane
+back in the critical path of every reconnect** — **I5 violated by way of a
+health check**, with no line of code anywhere that calls the control plane.
+
+The same argument covers presence with an extra step: architecture.md §2.13
+makes presence a **hint service, never an authority**, whose unavailability
+degrades reconnect *latency* and not reconnect *capability*. A readiness probe
+that fails on a control-plane blip converts a latency degradation into an
+availability one.
+
+`twinvpn-service-common` makes the mistake **unrepresentable** rather than
+merely discouraged: every probe declares a `ProbeKind`, and a registry built
+with `ReadinessPolicy::NoControlPlaneCalls` **refuses to register** a
+`ControlPlane` probe. The refusal happens at wiring time, not when the control
+plane is next down.
+
+The `depends_on` edges in `docker-compose.yml` were weakened from
+`service_healthy` to `service_started` for the same reason: a startup gate is
+the same mistake one step earlier — it makes rendezvous unstartable while the
+control plane is unhealthy. **Ordering is useful; gating is not.** These two
+services still read `TWINVPN_{RZ,PRESENCE}_CONTROL_PLANE_URL` for
+*authorization*, which is a per-request concern and not a liveness
+precondition.
 
 The container `HEALTHCHECK` targets `/readyz`, because that is what
 `depends_on: condition: service_healthy` needs. It is an **HTTP request to the
@@ -604,6 +706,29 @@ near-identical Dockerfiles is the same R-31 divergence class
   root, `SOURCE_DATE_EPOCH` as a build arg defaulting to a fixed date,
   `cargo build --locked --offline`.
 
+### The TLS key is the identity; the certificate is not
+
+`bootstrap-local.sh` mints an Ed25519 key **and** a self-signed certificate for
+each wire-facing service. **Only the key matters.**
+
+`rendezvous` and `presence` terminate TLS 1.3 with **mutual RFC 7250 raw-public-key
+authentication** — client auth mandatory and non-configurable, 0-RTT
+structurally prohibited. In that mode the server's whole identity is `tls.key`
+and the peer is authenticated by its public key, not by a name in a
+certificate; ADR-0001 §6 rejected the naming system a certificate implies.
+
+`tls.crt` is generated anyway, and each service's config requires it to
+**exist**, because tooling in this space expects a certificate file to be
+there. Nothing reads its contents and nothing trusts its subject, its SAN or
+its expiry. Two consequences an operator will otherwise get wrong:
+
+- Rotating `tls.key` **rotates the server's identity**, and every pinning peer
+  must learn the new key.
+- Rotating `tls.crt` accomplishes **nothing**. Its 90-day expiry is not a
+  deadline.
+
+Do not reason about the two files as a pair.
+
 ### Base image pinning — an honest gap
 
 ADR-0018 DP-2 pins dependencies **by digest**, because a mutable pointer
@@ -641,7 +766,10 @@ will not work. Probe from a container that does have one (`prometheus`,
 | Symptom | First thing to check |
 |---|---|
 | `docker compose up` fails instantly naming a variable | a required secret is unset. That is the `${VAR:?}` guard working — set it in `.env`. |
-| A service container exits 1 immediately with `not implemented` | expected today. See §0. |
+| A service exits naming a missing `TWINVPN_*` variable | compose and the service disagree on the key name. Run `python3 build/verify/check-compose.py`, which fails on any `TWINVPN_*` variable no service reads — that check exists because this exact mismatch shipped once (`TWINVPN_DATABASE_URL` vs `TWINVPN_CP_DATABASE_URL`). |
+| An Owner-authority command is refused with `AUTH.KEY_UNAVAILABLE` | the `OwnerTrustAnchor` set is empty. `bootstrap-local.sh` writes an empty stub on purpose; add your development Owner public key to `infra/secrets/control-plane/owner-anchors.hex`. This is a capability lost, not a fault. |
+| The control plane refuses to **start**, citing the anchor path | a **malformed** line in that file. Empty is fine; unparseable base16 is not. |
+| `rendezvous` or `presence` is up while the control plane is down | **correct.** §5 explains why their readiness must not depend on it. |
 | A service is `unhealthy` | `curl http://127.0.0.1:1900N/readyz`. Readiness reflects **dependencies**; check those before the service. |
 | A service never starts | it has a `service_healthy` edge onto something that is not healthy. `docker compose ps` shows which. |
 | Ports "already allocated" | something else holds `8443`/`41641`/`15432`/`13000`. `check-compose.py` catches collisions *within* the topology, not against the rest of your machine. |
@@ -680,12 +808,15 @@ mode the wave-1 objective names in its last line.
 | Check | Result |
 |---|---|
 | All 18 YAML files parse; no duplicate keys, tabs or trailing whitespace | pass |
-| `build/verify/check-compose.py` — secrets, bind sources, port collisions, wildcard binds, relay independence, relay floors, v6 override coverage, product-ULA-as-underlay | pass, 0 warnings |
+| `build/verify/check-compose.py --strict` — secrets, bind sources, port collisions, wildcard binds, relay independence, relay floors, v6 override coverage, product-ULA-as-underlay, **env-key coverage, presence-has-no-database, the Owner anchor mount, and the readiness edges** | pass, **0 warnings on a freshly bootstrapped tree** |
+| …its env-key coverage check, **negative-controlled**: reinstating the old `TWINVPN_DATABASE_URL` on `control-plane` | FAIL, naming the variable and the service |
+| …its secret check, **negative-controlled three ways**: a key force-added to the index, a key excluded from the ignore rule, and git made unavailable | FAIL / FAIL / degraded-with-reason, as designed |
 | `build/verify/check-otel-redaction.py` — allowlist, filter-order, Tier-2 `abi_*` strip, correlation preserved, no service graph | pass, **and negative-controlled**: flipping `allow_all_keys` to `true` and removing `correlation_id` makes it fail with both diagnoses |
 | `build/budgets.toml` parses; `check-budgets.py --list` and `--check-image-pins` | pass |
 | All three Grafana dashboards are valid JSON with `uid`, `title`, panels | pass |
 | `bash -n` on every shell script | pass |
-| `make lint`, `make test-contracts` | pass — see the completion report |
+| `make lint`, `make test-contracts` | pass — 35801 contract checks, 0 failures |
+| `make arch-lint` (ADR-0018 CD-3 / CD-I2 / CD-I5 / CB-3) | pass — core-foundation has landed `core/xtask`, so the named CI job is green |
 
 **NOT verified here — Docker is not installed on this host:**
 
@@ -711,7 +842,19 @@ mode the wave-1 objective names in its last line.
 
 ---
 
-## 10. Related
+## 10. Open requests to other domains
+
+Recorded here rather than in a commit message, because they outlive the commit.
+
+| # | Request | Owner | Why it matters |
+|---|---|---|---|
+| 1 | Read **`TWINVPN_INSTANCE_ID`** in `twinvpn-service-common` and pass it as the `instance_id` argument. | `control-plane` (owns `twinvpn-service-common`) | Compose now supplies a stable per-container value (§4.2). The services currently derive `format!("{service_name}-{pid}")`, so `service.instance.id` changes on every restart and every fleet query that groups by it is wrong — "how many instances served this" silently becomes "how many times did anything restart". The collector already allowlists the attribute; only the supplier is missing. |
+| 2 | Widen the doc comment on `ReadinessPolicy::NoControlPlaneCalls`. | `control-plane` | It reads *"**The relays.**"*, but `rendezvous` and `presence` now use it too, for a different and equally load-bearing reason (§5). A reader checking whether the policy applies to them will conclude it does not. |
+| 3 | Confirm the `depends_on` weakening from `service_healthy` to `service_started` on `rendezvous` and `presence`. | integration lead | It follows from the readiness ruling — a startup gate is the same I5 mistake one step earlier — but it is an inference from that ruling rather than something explicitly asked for, and it is one line per service to reverse. |
+
+---
+
+## 11. Related
 
 - `docs/adr/ADR-0002` — control-plane messaging and event bus
 - `docs/adr/ADR-0005`, `ADR-0006` — relay architecture, discovery and failover

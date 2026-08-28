@@ -1282,7 +1282,9 @@ dependencies = [
 name = "twinvpn-core"
 version = "0.1.0"
 dependencies = [
+ "futures-core",
  "proptest",
+ "prost",
  "thiserror",
  "tracing",
  "twinvpn-cp-client",
@@ -1310,9 +1312,12 @@ name = "twinvpn-cp-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures-core",
  "proptest",
  "prost",
  "thiserror",
+ "tracing",
+ "twinvpn-cp-client",
  "twinvpn-env",
  "twinvpn-platform",
  "twinvpn-schema",
@@ -1332,6 +1337,7 @@ dependencies = [
  "coset",
  "ed25519-dalek",
  "hkdf",
+ "libc",
  "p256",
  "proptest",
  "rand_core 0.9.5",
@@ -1350,15 +1356,12 @@ dependencies = [
 name = "twinvpn-diag"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "proptest",
  "prost",
- "serde",
  "serde_json",
  "thiserror",
  "twinvpn-env",
  "twinvpn-schema",
- "twinvpn-store",
  "twinvpn-types",
 ]
 
@@ -1405,10 +1408,14 @@ dependencies = [
 name = "twinvpn-ffi"
 version = "0.1.0"
 dependencies = [
- "libc",
+ "futures-core",
+ "prost",
  "twinvpn-core",
  "twinvpn-diag",
  "twinvpn-env",
+ "twinvpn-mgmt",
+ "twinvpn-platform",
+ "twinvpn-schema",
  "twinvpn-types",
 ]
 
@@ -1461,6 +1468,7 @@ dependencies = [
  "twinvpn-env",
  "twinvpn-platform",
  "twinvpn-types",
+ "zeroize",
 ]
 
 [[package]]
@@ -1540,13 +1548,16 @@ name = "twinvpn-store"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures-core",
  "proptest",
  "prost",
  "thiserror",
+ "tracing",
  "twinvpn-crypto",
  "twinvpn-env",
  "twinvpn-platform",
  "twinvpn-schema",
+ "twinvpn-store",
  "twinvpn-types",
 ]
 
@@ -1563,6 +1574,7 @@ dependencies = [
  "twinvpn-platform",
  "twinvpn-schema",
  "twinvpn-store",
+ "twinvpn-trust",
  "twinvpn-types",
 ]
 
@@ -1586,7 +1598,9 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "serde_json",
+ "subtle",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

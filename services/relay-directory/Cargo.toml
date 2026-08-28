@@ -2,6 +2,16 @@
 #
 # Owner: relay-plane. The WORKSPACE manifest at services/Cargo.toml is owned by the
 # integration lead and must not be edited from this domain.
+#
+# No cryptographic dependency, for the same CD-I2 reason as `relay`: the COSE_Sign1
+# map signature is taken as an injected seam (`crate::sign::MapSigner`) whose default
+# provider signs nothing. See src/sign.rs and README.md §7.
+#
+# No `sqlx` either, and that is a stated limitation rather than a design choice:
+# `sqlx` is declared in services/Cargo.toml's workspace set but no member has ever
+# built it, so it is absent from services/Cargo.lock and cannot be resolved on this
+# host. The fleet registry is therefore behind `fleet::FleetStore`, with the Postgres
+# implementation deferred. See README.md §8.
 [package]
 name    = "twinvpn-relay-directory"
 version.workspace      = true
@@ -12,14 +22,23 @@ repository.workspace   = true
 description = "the signed relay map and relay-selection surface (ADR-0006, S-09)"
 publish = false
 
+[lib]
+name = "twinvpn_relay_directory"
+path = "src/lib.rs"
+
 [[bin]]
 name = "twinvpn-relay-directory"
 path = "src/main.rs"
 
 [dependencies]
 twinvpn-schema = { workspace = true }
+twinvpn-crypto = { workspace = true }
 twinvpn-types  = { workspace = true }
 thiserror      = { workspace = true }
 tracing        = { workspace = true }
 twinvpn-service-common = { workspace = true }
-tokio = { workspace = true }
+tokio      = { workspace = true }
+axum       = { workspace = true }
+bytes      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }

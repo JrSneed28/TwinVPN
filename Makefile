@@ -13,7 +13,7 @@ SHELL := /bin/bash
 # server artifacts, the Linux shell and TwinLab are SEPARATE artifacts and
 # therefore separate workspaces, so that no domain silently acquires another's
 # dependency graph and each domain owns its own manifests.
-WORKSPACES := core services shells/linux lab
+WORKSPACES := core services shells/linux lab tests
 CARGO      := cargo
 
 BUF        := ./node_modules/.bin/buf
@@ -26,7 +26,8 @@ BASELINE   := $(CONTRACTS)/.baseline.binpb
 .PHONY: help bootstrap toolchains contracts contracts-lint contracts-gen \
         contracts-breaking contracts-freshness verify-bindings test-contracts \
         build lint test clean gate freeze freeze-scope build-rust lint-rust \
-        test-rust fmt arch-lint
+        test-rust fmt arch-lint infra-bootstrap infra-check infra-up \
+        infra-up-v6 infra-down budgets budgets-images redaction-check
 
 help:
 	@echo "TwinVPN"
@@ -42,6 +43,11 @@ help:
 	@echo "  make gate             the contract freeze gate (all of the above)"
 	@echo "  make freeze-scope     assert the contract freeze is declared and unbroken"
 	@echo "  make arch-lint        the ADR-0018 T1 architectural lints (CD-3, CD-I2, CD-I5, CB-3)"
+	@echo ""
+	@echo "  make infra-check      compose topology + collector redaction invariants (no Docker needed)"
+	@echo "  make infra-up         bring the local plane up (dual stack); infra-up-v6 for IPv6-only"
+	@echo "  make infra-down       tear it down"
+	@echo "  make budgets          the ADR-0018 §11.9 artifact budgets"
 	@echo ""
 	@echo "  workspaces: $(WORKSPACES)"
 
@@ -197,7 +203,7 @@ build-rust:
 # ---------------------------------------------------------------------------
 # lint
 # ---------------------------------------------------------------------------
-lint: contracts-lint lint-rust
+lint: contracts-lint lint-rust redaction-check
 	@echo "==> linting python"
 	@python3 -m compileall -q $(CONTRACTS)/tests >/dev/null
 	@echo "==> linting javascript"
@@ -224,6 +230,53 @@ fmt:
 arch-lint:
 	@echo "==> ADR-0018 T1 architectural lints"
 	@cd core && $(CARGO) run -q -p xtask -- lint
+
+# ---------------------------------------------------------------------------
+# infrastructure
+# ---------------------------------------------------------------------------
+# The one infrastructure check that runs in `lint`: it asserts that telemetry
+# CANNOT capture a tunnel payload, a key or a correlation-breaking service
+# graph. That is a security invariant, so it must hold on every developer
+# machine and not only on one with a container runtime -- and unlike the
+# topology check it has no runtime precondition.
+redaction-check:
+	@echo "==> collector redaction is structural"
+	@python3 build/verify/check-otel-redaction.py
+
+# Local secret directories and development key material. Idempotent.
+infra-bootstrap:
+	@bash infra/scripts/bootstrap-local.sh
+
+# Structural invariants over the compose topology and the collector's privacy
+# controls. Needs only PyYAML, so it runs WITHOUT Docker -- which is why it is a
+# prerequisite of `lint` rather than of `infra-up`: the invariant that telemetry
+# cannot capture a tunnel payload must be checked on every developer machine,
+# not only on one that happens to have a container runtime.
+infra-check: infra-bootstrap redaction-check
+	@echo "==> compose topology"
+	@python3 build/verify/check-compose.py --strict
+	@if command -v docker >/dev/null 2>&1; then \
+	  docker compose config --quiet && echo "    compose schema OK"; \
+	else \
+	  echo "    note: docker not installed; compose SCHEMA not validated"; \
+	fi
+
+infra-up: infra-check
+	@docker compose up -d --wait postgres otel-collector prometheus tempo loki grafana
+
+infra-up-v6: infra-check
+	@docker compose -f docker-compose.yml -f infra/compose/ipv6-only.yml \
+	  up -d --wait postgres otel-collector prometheus tempo loki grafana
+
+infra-down:
+	@docker compose down -v --remove-orphans
+
+# ADR-0018 §11.9 artifact budgets. BM-4: a breach is a failure, not a re-run.
+budgets:
+	@python3 build/verify/check-budgets.py --list
+
+budgets-images:
+	@python3 build/verify/check-budgets.py --check-image-pins
 
 # ---------------------------------------------------------------------------
 # test

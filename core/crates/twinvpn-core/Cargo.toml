@@ -2,6 +2,22 @@
 #
 # Owner: core-composition. This manifest is owned by that agent; the WORKSPACE manifest
 # at core/Cargo.toml is owned by the integration lead and must not be edited here.
+#
+# ---------------------------------------------------------------------------
+# THE `core-lite` PROFILE (ADR-0018 §11.12)
+# ---------------------------------------------------------------------------
+# "A feature profile of the SAME source containing twinvpn-schema, twinvpn-crypto
+# (verification only), twinvpn-store, twinvpn-trust and twinvpn-diag, and NO
+# data-plane crate."
+#
+# Realized as: every data-plane crate AND the control-plane client are `optional`,
+# and the `full` feature is what turns them on. `--no-default-features` therefore
+# produces a dependency graph that CANNOT CONTAIN a data-plane crate - not because
+# the code avoids calling them, but because cargo never compiles them.
+#
+# `crates/twinvpn-core/tests/core_lite_profile.rs` asserts that property against
+# THIS FILE, so a data-plane dependency that loses its `optional = true` fails a
+# test rather than silently growing the iOS app-process artifact.
 [package]
 name    = "twinvpn-core"
 version.workspace      = true
@@ -11,7 +27,35 @@ license.workspace      = true
 repository.workspace   = true
 description = "the composition root - the ONLY crate that may name both planes (ADR-0018 CD-I5)"
 
+[features]
+default = ["full"]
+
+# The complete client: both planes, wired through the store and never to each
+# other (CD-I5).
+full = [
+  "dep:twinvpn-cp-client",
+  "dep:twinvpn-tunnel",
+  "dep:twinvpn-path",
+  "dep:twinvpn-relay-client",
+  "dep:twinvpn-route",
+  "dep:twinvpn-dns",
+  "dep:twinvpn-enforce",
+  "dep:twinvpn-gateway",
+  "dep:twinvpn-session",
+]
+
+# ADR-0018 §11.12's parse-and-verify-only profile. A marker feature: it adds
+# nothing, because the profile IS the absence of `full`. Declaring it lets
+# `CoreBuildIdentity.profile` (S-46) name the artifact truthfully rather than
+# inferring it, which is VR-3's rule applied to the profile field.
+core-lite = []
+
+# The mock platform binding, for CD-5's "the whole composed core on a plain Linux
+# CI runner". Never shipped.
+test-support = ["twinvpn-platform/mock", "twinvpn-env/test-support"]
+
 [dependencies]
+# -- always present: the core-lite set (§11.12) -----------------------------
 twinvpn-types         = { workspace = true }
 twinvpn-env           = { workspace = true }
 twinvpn-schema        = { workspace = true }
@@ -19,19 +63,28 @@ twinvpn-platform      = { workspace = true }
 twinvpn-crypto        = { workspace = true }
 twinvpn-store         = { workspace = true }
 twinvpn-trust         = { workspace = true }
-twinvpn-cp-client     = { workspace = true }
-twinvpn-tunnel        = { workspace = true }
-twinvpn-path          = { workspace = true }
-twinvpn-relay-client  = { workspace = true }
-twinvpn-route         = { workspace = true }
-twinvpn-dns           = { workspace = true }
-twinvpn-enforce       = { workspace = true }
-twinvpn-gateway       = { workspace = true }
-twinvpn-session       = { workspace = true }
 twinvpn-diag          = { workspace = true }
 twinvpn-mgmt          = { workspace = true }
+
+# -- the control-plane client: OPTIONAL, absent from core-lite --------------
+twinvpn-cp-client     = { workspace = true, optional = true }
+
+# -- the data plane: OPTIONAL, absent from core-lite ------------------------
+twinvpn-tunnel        = { workspace = true, optional = true }
+twinvpn-path          = { workspace = true, optional = true }
+twinvpn-relay-client  = { workspace = true, optional = true }
+twinvpn-route         = { workspace = true, optional = true }
+twinvpn-dns           = { workspace = true, optional = true }
+twinvpn-enforce       = { workspace = true, optional = true }
+twinvpn-gateway       = { workspace = true, optional = true }
+twinvpn-session       = { workspace = true, optional = true }
+
 thiserror             = { workspace = true }
 tracing               = { workspace = true }
+futures-core          = { workspace = true }
+prost                 = { workspace = true }
 
 [dev-dependencies]
 proptest              = { workspace = true }
+twinvpn-platform      = { workspace = true, features = ["mock"] }
+twinvpn-env           = { workspace = true, features = ["test-support"] }

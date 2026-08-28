@@ -1,0 +1,73 @@
+# twinvpn-system-tests — the tests that cross a domain boundary.
+#
+# Owner: test-engineering.
+#
+# Every other test in this repository lives inside one domain. These do not:
+# each one composes at least two components that different agents wrote, which is
+# where the defects this domain exists to find actually are.
+[package]
+name    = "twinvpn-system-tests"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "integration, chaos, compatibility and end-to-end tests that cross a domain boundary"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+twinvpn-types        = { workspace = true }
+twinvpn-env          = { workspace = true }
+twinvpn-schema       = { workspace = true }
+twinvpn-crypto       = { workspace = true }
+twinvpn-platform     = { workspace = true }
+twinvpn-session      = { workspace = true }
+twinvpn-path         = { workspace = true }
+twinvpn-relay-client = { workspace = true }
+twinvpn-tunnel       = { workspace = true }
+twinvpn-route        = { workspace = true }
+twinvpn-dns          = { workspace = true }
+twinvpn-enforce      = { workspace = true }
+twinvpn-core         = { workspace = true }
+twinlab              = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+prost      = { workspace = true }
+
+# ---------------------------------------------------------------------------
+# The four test levels ownership.md §1 assigns to `tests/`, kept as four
+# directories rather than one flat `tests/` folder so that a reader can see the
+# level a file belongs to without opening it.
+# ---------------------------------------------------------------------------
+
+[[test]]
+name = "e2e_session_lifecycle"
+path = "../e2e/session_lifecycle.rs"
+
+[[test]]
+name = "e2e_fail_closed_leak"
+path = "../e2e/fail_closed_leak.rs"
+
+[[test]]
+name = "integration_dual_stack_parity"
+path = "../integration/dual_stack_parity.rs"
+
+[[test]]
+name = "integration_cross_component_agreement"
+path = "../integration/cross_component_agreement.rs"
+
+[[test]]
+name = "chaos_outage_and_failover"
+path = "../chaos/outage_and_failover.rs"
+
+[[test]]
+name = "compatibility_golden_vectors"
+path = "../compatibility/golden_vectors.rs"
+
+[[test]]
+name = "defect_tripwires"
+path = "../defects/tripwires.rs"

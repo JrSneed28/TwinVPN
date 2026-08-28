@@ -236,15 +236,46 @@ fn in_cfg_predicate(blanked: &str, at: usize) -> bool {
 /// The crate permitted a cryptographic dependency.
 pub const CD_I2_EXEMPT_CRATE: &str = "twinvpn-crypto";
 
+/// Crates that are listed in `core/Cargo.toml`'s cryptography block but are
+/// **not** cryptographic implementations, and are therefore permitted anywhere.
+///
+/// # The ruling, and why it is an interpretation rather than an amendment
+///
+/// CD-I2's text is "a dependency on a cryptographic **implementation**", and
+/// ADR-0018 §11.7 states its purpose: it "is P2's static half" — a reviewer
+/// asking *what cryptography do we use* has exactly one crate to read.
+///
+/// Neither of these answers that question. `zeroize` is memory hygiene: a
+/// volatile write and a compiler fence. `subtle` is constant-time comparison
+/// primitives. Neither implements a cipher, a hash, a KDF, a signature scheme or
+/// a key exchange, so neither adds a line to the answer a reviewer is looking
+/// for.
+///
+/// Reading CD-I2 to forbid them makes the security **worse**, which cannot be
+/// what a rule that exists to make cryptography auditable intends: without
+/// `zeroize` a secret's scrub is an elidable `fill(0)`, and without `subtle` a
+/// channel-binding comparison is data-dependent with no compiler barrier. Both
+/// of those were live residuals in this workspace before this exemption.
+///
+/// Integration-lead ruling, 2026-08-27. Recorded here, at the exemption, so the
+/// next reader sees why two names sit on a different list rather than assuming
+/// an oversight.
+///
+/// **This is the whole exemption.** Every other name in that block — `sha2`,
+/// `hkdf`, `snow`, `chacha20poly1305` and the rest — remains restricted, and
+/// `cd_i2_still_fires_on_a_real_crypto_crate_beside_an_exempt_one` asserts the
+/// hole did not widen.
+pub const CD_I2_NOT_CRYPTO_IMPLEMENTATIONS: &[&str] = &["zeroize", "subtle"];
+
 /// Crate names that count as a cryptographic implementation.
 ///
-/// The first block is exactly the set `core/Cargo.toml` lists under its own
-/// "cryptography: CD-I2 restricts these to `twinvpn-crypto`" heading — the
-/// integration lead's classification, honoured rather than re-litigated here.
-/// The second block covers the common alternatives a crate might reach for
-/// instead, so the rule cannot be sidestepped by picking a different library.
+/// The first block is `core/Cargo.toml`'s own "cryptography: CD-I2 restricts
+/// these to `twinvpn-crypto`" heading, **less** the two names in
+/// [`CD_I2_NOT_CRYPTO_IMPLEMENTATIONS`]. The second block covers the common
+/// alternatives a crate might reach for instead, so the rule cannot be
+/// sidestepped by picking a different library.
 pub const CRYPTO_CRATES: &[&str] = &[
-    // core/Cargo.toml's declared crypto block
+    // core/Cargo.toml's declared crypto block, less the two exemptions above
     "snow",
     "x25519-dalek",
     "ed25519-dalek",
@@ -253,8 +284,6 @@ pub const CRYPTO_CRATES: &[&str] = &[
     "blake2",
     "sha2",
     "hkdf",
-    "zeroize",
-    "subtle",
     "rand_core",
     "ciborium",
     "coset",
@@ -300,6 +329,11 @@ pub fn cd_i2(workspace: &Workspace) -> Vec<Violation> {
             continue;
         }
         for dep in &package.dependencies {
+            // The exemption is applied first and explicitly, so the two lists
+            // cannot silently disagree if a name is ever added to both.
+            if CD_I2_NOT_CRYPTO_IMPLEMENTATIONS.contains(&dep.as_str()) {
+                continue;
+            }
             if CRYPTO_CRATES.contains(&dep.as_str()) {
                 out.push(Violation {
                     rule: "CD-I2",

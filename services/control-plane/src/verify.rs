@@ -1,0 +1,1015 @@
+//! Who signed this, and were they allowed to?
+//!
+//! **Authority:** `contracts/proto/twinvpn/v1/identity.proto` (a
+//! `SignedStatement` is opaque COSE_Sign1 and "the signature MUST be verified
+//! over the RECEIVED OCTETS; an implementation MUST NOT re-serialize before
+//! verifying"), `policy.proto` ("the control plane WAREHOUSES AND DISTRIBUTES;
+//! IT CANNOT AUTHOR"), `protocol.md` §7, ADR-0007 N-25, finding **W-4**.
+//!
+//! # This module is where "authenticated but not trusted" is made mechanical
+//!
+//! [`StatementKind::required_authority`] is the exact table
+//! `twinvpn-cp-client`'s `ports::StatementKind` carries, transcribed so the
+//! server refuses what the client would refuse. A `PolicyBundle` that verified
+//! against a *device* key is not a policy bundle; a `RouteAdvertisement` that
+//! verified against the *`Owner`* chain is a coordination service minting
+//! routes, which is the capability Rule B exists to remove.
+//!
+//! # The verifier is real, and it is still fail-closed
+//!
+//! [`CryptoVerifier`] verifies COSE_Sign1 **over the received octets** through
+//! `twinvpn-crypto` — the audited provider, the one the client verifies with.
+//! Using it rather than a second implementation is DP-8: two providers "double
+//! the assurance surface" and must pass the identical golden-vector corpus, and
+//! an agreement this service cannot test is not an agreement.
+//!
+//! Which key a statement must verify against is the caller's decision, not the
+//! verifier's, and [`SignerKey`] makes it one:
+//!
+//! - [`SignerKey::Device`] — the calling device's own `DeviceIdentityKey`, which
+//!   this service holds from registration. **Fully bound**: `PairingAttestation`,
+//!   `IdentitySuccession`, `TunnelKeyBinding`, `RouteAdvertisement` and
+//!   `ExitNodeOffer` are verified for real.
+//! - [`SignerKey::OwnerAnchors`] — the pinned `OwnerTrustAnchor` set (S-32).
+//!   With none configured, [`CryptoVerifier`] answers `AUTH.KEY_UNAVAILABLE` and
+//!   **admits nothing**, so a `RevocationStatement` or a `PolicyBundle` is
+//!   refused rather than admitted on trust. That is not an unfinished stub: a
+//!   control plane that admitted an unverifiable revocation would be granting
+//!   authority it does not have, and a design in which a compromised control
+//!   plane could grant authority is a defect rather than a tradeoff.
+//!
+//! **What is still an integration item:** evaluating the `Owner` *delegation
+//! chain* — whether the OSK that signed carries `ENROLL`, `POLICY` or `REVOKE`,
+//! and whether its delegation is current for the anchor version. That is
+//! `twinvpn-trust`'s (S-32), and this artifact does not link it. Configuring an
+//! anchor key here therefore buys signature verification against a pinned key
+//! set, not power scoping; `README.md` §7 says so rather than implying more.
+
+use bytes::Bytes;
+use twinvpn_service_common::forward::Verbatim;
+use twinvpn_service_common::{Channel, Reject, ServiceError};
+
+use crate::codes;
+
+/// Bounds and retains a COSE_Sign1 statement, **with no structural assumption**.
+///
+/// [`Verbatim::from_opaque`] is the B4 constructor: the channel's byte cap and
+/// nothing else. That is the correct one here and
+/// [`Verbatim::from_received`] is not — `from_received` walks the *protobuf*
+/// wire format, and `identity.proto` says a `SignedStatement` is "opaque
+/// COSE_Sign1 octets", deterministic CBOR inside COSE. A protobuf record scan
+/// over CBOR rejects it as `PROTO.UNPARSEABLE_ENVELOPE`, refusing exactly the
+/// payloads ADR-0003 §11 B2 requires to be forwarded verbatim.
+///
+/// # Errors
+///
+/// [`Reject::SizeExceeded`] past the C1 envelope cap. The statement travels
+/// inside a C1 message, so the envelope cap is its bound; a second per-statement
+/// cap could disagree with the first.
+pub fn opaque_statement(bytes: Bytes) -> Result<Verbatim, Reject> {
+    Verbatim::from_opaque(bytes, Channel::ControlAndTelemetry)
+}
+
+/// Which CDDL statement type a verified payload turned out to be.
+///
+/// Narrowed to the ones this service sees on C1. Mirrors
+/// `identity.proto`'s `SignedStatementType` and `twinvpn-cp-client`'s
+/// `ports::StatementKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum StatementKind {
+    /// `RevocationStatement` — `Owner`-authority signed.
+    RevocationStatement,
+    /// `PolicyBundle` — `Owner`-authored. This service distributes; it cannot
+    /// author.
+    PolicyBundle,
+    /// `PairingAttestation` — signed by a pairing device.
+    PairingAttestation,
+    /// `IdentitySuccession` — **dual-signed** by the old *and* the new IK.
+    IdentitySuccession,
+    /// `TunnelKeyBinding` — IK-signed.
+    TunnelKeyBinding,
+    /// `RouteAdvertisement` — signed by the advertiser.
+    RouteAdvertisement,
+    /// `ExitNodeOffer` — signed by the offerer.
+    ExitNodeOffer,
+    /// `RelayEpochFloor` — `Owner`-signed, monotone.
+    RelayEpochFloor,
+    /// `PairingRevocation` — **`Owner`-signed**. `pairing.proto`: "A device MUST
+    /// NOT be able to revoke a pairing on its own authority any more than it can
+    /// revoke a peer."
+    PairingRevocation,
+    /// `OwnerDelegation` — the enrolment proof an OSK with `ENROLL` signs.
+    OwnerDelegation,
+}
+
+impl StatementKind {
+    /// A stable, non-localised tag.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            StatementKind::RevocationStatement => "revocation_statement",
+            StatementKind::PolicyBundle => "policy_bundle",
+            StatementKind::PairingAttestation => "pairing_attestation",
+            StatementKind::IdentitySuccession => "identity_succession",
+            StatementKind::TunnelKeyBinding => "tunnel_key_binding",
+            StatementKind::RouteAdvertisement => "route_advertisement",
+            StatementKind::ExitNodeOffer => "exit_node_offer",
+            StatementKind::RelayEpochFloor => "relay_epoch_floor",
+            StatementKind::PairingRevocation => "pairing_revocation",
+            StatementKind::OwnerDelegation => "owner_delegation",
+        }
+    }
+
+    /// Which authority must have signed this for it to mean anything.
+    #[must_use]
+    pub const fn required_authority(self) -> SigningAuthority {
+        match self {
+            StatementKind::RevocationStatement
+            | StatementKind::PolicyBundle
+            | StatementKind::RelayEpochFloor
+            | StatementKind::PairingRevocation
+            | StatementKind::OwnerDelegation => SigningAuthority::Owner,
+            StatementKind::PairingAttestation
+            | StatementKind::IdentitySuccession
+            | StatementKind::TunnelKeyBinding
+            | StatementKind::RouteAdvertisement
+            | StatementKind::ExitNodeOffer => SigningAuthority::Device,
+        }
+    }
+
+    /// The same type, as `twinvpn-crypto` names it.
+    ///
+    /// A total match, so a statement type added here without a crypto
+    /// counterpart is a compile error rather than a verification that silently
+    /// checks the wrong CDDL shape.
+    #[must_use]
+    pub const fn as_crypto_kind(self) -> twinvpn_crypto::StatementKind {
+        use twinvpn_crypto::StatementKind as K;
+        match self {
+            // `pairing.proto`'s PairingRevocation shares the CDDL shape:
+            // both are Owner statements withdrawing something, and the CDDL
+            // has one type for them. Listed separately so this match stays
+            // total over the server's own enum.
+            #[allow(clippy::match_same_arms)]
+            StatementKind::RevocationStatement => K::RevocationStatement,
+            StatementKind::PolicyBundle => K::PolicyBundle,
+            StatementKind::PairingAttestation => K::PairingAttestation,
+            StatementKind::IdentitySuccession => K::IdentitySuccession,
+            StatementKind::TunnelKeyBinding => K::TunnelKeyBinding,
+            StatementKind::RouteAdvertisement => K::RouteAdvertisement,
+            StatementKind::ExitNodeOffer => K::ExitNodeOffer,
+            StatementKind::RelayEpochFloor => K::RelayEpochFloor,
+            // `pairing.proto`'s PairingRevocation is an Owner statement about
+            // one relationship. The CDDL carries it as a RevocationStatement
+            // shape; naming it here keeps the two tables total.
+            StatementKind::PairingRevocation => K::RevocationStatement,
+            StatementKind::OwnerDelegation => K::OwnerDelegation,
+        }
+    }
+
+    /// Whether this statement requires **two** signatures.
+    ///
+    /// `IdentitySuccession` is dual-signed by the old *and* the new IK: "a
+    /// single-signature rotation would let a stolen key rotate itself into
+    /// permanence; an old-key-only signature would let a compromised old key
+    /// install an attacker's new key."
+    #[must_use]
+    pub const fn is_dual_signed(self) -> bool {
+        matches!(self, StatementKind::IdentitySuccession)
+    }
+}
+
+/// Who a signature must chain to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SigningAuthority {
+    /// The pinned `OwnerTrustAnchor` and its delegation chain (S-32).
+    Owner,
+    /// A `DeviceIdentityKey`, verified against the device's known identity.
+    Device,
+}
+
+/// A statement whose signature verified **over the received octets**.
+#[derive(Debug, Clone)]
+pub struct Verified {
+    /// The type found *inside* the signed payload, not the wire's hint.
+    pub kind: StatementKind,
+    /// The authority the signature chained to.
+    pub authority: SigningAuthority,
+    /// Whoever signed, as a stable key id, for the audit row.
+    pub signer_key_id: String,
+    /// The exact octets that were verified, retained for forwarding.
+    pub octets: Verbatim,
+    /// `not_before_ms` from the signed payload.
+    pub not_before_ms: u64,
+    /// `not_after_ms` from the signed payload.
+    pub not_after_ms: u64,
+}
+
+/// Why verification failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum VerifyFailure {
+    /// The signature did not verify against the required authority.
+    #[error("signature did not verify")]
+    BadSignature,
+    /// The payload's own type did not match what the caller dispatched on.
+    #[error("statement type mismatch")]
+    TypeMismatch,
+    /// The signer is not permitted to author this statement type.
+    #[error("wrong signing authority")]
+    WrongAuthority,
+    /// Non-canonical deterministic CBOR. **Rejected, never normalized** —
+    /// normalizing attacker input before verification is a signature-bypass
+    /// pattern.
+    #[error("non-canonical CBOR")]
+    NonCanonical,
+    /// An unrecognized `crit` member. Ignoring one turns a future *tightening*
+    /// into a silent no-op.
+    #[error("unrecognized critical field")]
+    UnknownCriticalField,
+    /// The statement's own validity window has passed.
+    #[error("statement expired")]
+    Expired,
+    /// The trust anchor needed to verify is not available.
+    #[error("no trust anchor")]
+    NoAnchor,
+    /// Only one signature on a statement that requires two.
+    #[error("missing the second signature")]
+    MissingCosignature,
+}
+
+impl VerifyFailure {
+    /// The registered `reason_code` for this failure.
+    #[must_use]
+    pub fn into_error(self) -> ServiceError {
+        match self {
+            VerifyFailure::BadSignature
+            | VerifyFailure::TypeMismatch
+            | VerifyFailure::MissingCosignature => codes::bare(codes::SIGNATURE_INVALID),
+            VerifyFailure::WrongAuthority => codes::bare(codes::WRONG_SIGNING_AUTHORITY),
+            VerifyFailure::NonCanonical => {
+                codes::bare(twinvpn_types::codes::PROTO_NON_CANONICAL_CBOR)
+            }
+            VerifyFailure::UnknownCriticalField => {
+                codes::bare(twinvpn_types::codes::PROTO_UNKNOWN_CRITICAL_FIELD)
+            }
+            VerifyFailure::Expired => codes::bare(twinvpn_types::codes::AUTH_STATEMENT_EXPIRED),
+            VerifyFailure::NoAnchor => codes::bare(codes::NO_TRUST_ANCHOR),
+        }
+    }
+}
+
+/// Whose key a statement must verify against.
+///
+/// The **caller** chooses, not the verifier. A verifier that picked the key
+/// would be choosing whether a statement is `Owner`-authority or
+/// device-authority, which is exactly the decision
+/// [`StatementKind::required_authority`] exists to fix in one table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignerKey<'a> {
+    /// The pinned `OwnerTrustAnchor` set (S-32), held by the verifier.
+    OwnerAnchors,
+    /// One device's `DeviceIdentityKey`, as COSE_Key octets — the value this
+    /// service recorded at registration, never one the request supplied.
+    Device(&'a [u8]),
+}
+
+impl SignerKey<'_> {
+    /// The authority a signature against this key establishes.
+    #[must_use]
+    pub const fn authority(&self) -> SigningAuthority {
+        match self {
+            SignerKey::OwnerAnchors => SigningAuthority::Owner,
+            SignerKey::Device(_) => SigningAuthority::Device,
+        }
+    }
+}
+
+/// Signature verification, as this service needs it.
+///
+/// An implementation MUST verify over the received octets, MUST NOT
+/// re-serialize, MUST reject non-canonical CBOR rather than normalize it, MUST
+/// reject an unrecognized `crit` member, and MUST return the type it found
+/// *inside* the signed payload rather than the wire's hint.
+pub trait StatementVerifier: Send + Sync {
+    /// Verifies one COSE_Sign1 statement against `signer`.
+    ///
+    /// `expected` is the caller's dispatch expectation. An implementation MUST
+    /// compare it against the type inside the verified payload and fail on a
+    /// mismatch rather than trusting the caller or the wire.
+    ///
+    /// # Errors
+    ///
+    /// [`VerifyFailure`].
+    fn verify(
+        &self,
+        octets: &Verbatim,
+        expected: StatementKind,
+        now_ms: u64,
+        signer: SignerKey<'_>,
+    ) -> Result<Verified, VerifyFailure>;
+}
+
+/// A verifier that admits nothing at all.
+///
+/// Not the shipped default any more — [`CryptoVerifier`] is — but kept as the
+/// posture a deployment gets when it has neither an anchor nor a device key, and
+/// as the thing `an_unbound_verifier_admits_nothing` pins so a future change
+/// that makes refusal optional breaks a test whose name says what was lost.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RefuseUnverifiable;
+
+impl StatementVerifier for RefuseUnverifiable {
+    fn verify(
+        &self,
+        _octets: &Verbatim,
+        _expected: StatementKind,
+        _now_ms: u64,
+        _signer: SignerKey<'_>,
+    ) -> Result<Verified, VerifyFailure> {
+        Err(VerifyFailure::NoAnchor)
+    }
+}
+
+/// COSE_Sign1 verification through `twinvpn-crypto`.
+///
+/// Holds the pinned `OwnerTrustAnchor` key set. An empty set is not an error at
+/// construction and is a refusal at use: a deployment with no anchor still
+/// enrols devices whose statements are device-signed, and cannot revoke or
+/// author policy.
+#[derive(Debug, Default)]
+pub struct CryptoVerifier {
+    owner: Vec<twinvpn_crypto::PublicVerifyingKey>,
+}
+
+impl CryptoVerifier {
+    /// Binds a verifier to a pinned anchor key set.
+    ///
+    /// Each entry is COSE_Key octets for a public verifying key. A key carrying
+    /// a private half is refused by `twinvpn-crypto` itself (CD-I4 held at the
+    /// boundary), so a mis-provisioned secret cannot be loaded here by accident.
+    ///
+    /// # Errors
+    ///
+    /// `AUTH.ANCHOR_VERSION_UNSUPPORTED` when an entry is not a parsable
+    /// COSE_Key of a supported algorithm. Startup fails rather than running with
+    /// a partially-loaded anchor set, because a partially-loaded set silently
+    /// refuses statements a correctly-configured one would admit.
+    pub fn new(owner_anchor_cose_keys: &[Vec<u8>]) -> Result<Self, ServiceError> {
+        let mut owner = Vec::with_capacity(owner_anchor_cose_keys.len());
+        for k in owner_anchor_cose_keys {
+            owner.push(
+                twinvpn_crypto::PublicVerifyingKey::from_cose_key(
+                    k,
+                    twinvpn_crypto::StatementKind::OwnerTrustAnchor,
+                )
+                .map_err(|_| codes::bare(twinvpn_types::codes::AUTH_ANCHOR_VERSION_UNSUPPORTED))?,
+            );
+        }
+        Ok(Self { owner })
+    }
+
+    /// Whether any `Owner`-authority statement can be admitted at all.
+    #[must_use]
+    pub fn has_owner_anchor(&self) -> bool {
+        !self.owner.is_empty()
+    }
+}
+
+impl StatementVerifier for CryptoVerifier {
+    fn verify(
+        &self,
+        octets: &Verbatim,
+        expected: StatementKind,
+        _now_ms: u64,
+        signer: SignerKey<'_>,
+    ) -> Result<Verified, VerifyFailure> {
+        let kind = expected.as_crypto_kind();
+
+        // The candidate set. For a device it is exactly one key — the one this
+        // service recorded — so "it verified" and "that device signed it" are
+        // the same statement.
+        let device_key;
+        let candidates: &[twinvpn_crypto::PublicVerifyingKey] = match signer {
+            SignerKey::OwnerAnchors => {
+                if self.owner.is_empty() {
+                    return Err(VerifyFailure::NoAnchor);
+                }
+                &self.owner
+            }
+            SignerKey::Device(cose) => {
+                if cose.is_empty() {
+                    return Err(VerifyFailure::NoAnchor);
+                }
+                device_key = twinvpn_crypto::PublicVerifyingKey::from_cose_key(cose, kind)
+                    .map_err(|_| VerifyFailure::WrongAuthority)?;
+                std::slice::from_ref(&device_key)
+            }
+        };
+
+        let mut last = VerifyFailure::BadSignature;
+        for key in candidates {
+            match twinvpn_crypto::verify_cose_sign1(octets.as_bytes(), kind, key) {
+                Ok(statement) => {
+                    return Ok(Verified {
+                        kind: expected,
+                        authority: signer.authority(),
+                        signer_key_id: statement.key_id().map(hex_lower).unwrap_or_default(),
+                        octets: octets.clone(),
+                        not_before_ms: 0,
+                        not_after_ms: not_after_of(expected, &statement),
+                    });
+                }
+                // Only a signature mismatch is worth trying the next anchor:
+                // a malformed or non-canonical envelope is malformed against
+                // every key, and re-running the parse would just be slower.
+                Err(twinvpn_crypto::CryptoError::SignatureInvalid { .. }) => {
+                    last = VerifyFailure::BadSignature;
+                }
+                Err(other) => return Err(map_crypto_error(&other)),
+            }
+        }
+        Err(last)
+    }
+}
+
+/// Reads the statement's own `not_after_ms`, where its CDDL declares one.
+///
+/// A `RevocationStatement` has none, and that is correct rather than an
+/// omission: ADR-0009 §11.4 makes every denial permanent — "denials are monotone
+/// accumulations, not leases" — so a revocation that expired would un-revoke a
+/// stolen device by doing nothing.
+fn not_after_of(
+    expected: StatementKind,
+    statement: &twinvpn_crypto::cose::VerifiedStatement,
+) -> u64 {
+    use twinvpn_crypto::statements as st;
+    match expected {
+        StatementKind::PairingAttestation => {
+            st::decode_pairing_attestation(statement).map_or(0, |s| s.not_after_ms)
+        }
+        StatementKind::IdentitySuccession => {
+            st::decode_identity_succession(statement).map_or(0, |s| s.not_after_ms)
+        }
+        StatementKind::PolicyBundle => {
+            st::decode_policy_bundle(statement).map_or(0, |s| s.not_after_ms)
+        }
+        StatementKind::OwnerDelegation => {
+            st::decode_owner_delegation(statement).map_or(0, |s| s.not_after_ms)
+        }
+        StatementKind::RouteAdvertisement => {
+            st::decode_route_advertisement(statement).map_or(0, |s| s.not_after_ms)
+        }
+        StatementKind::ExitNodeOffer => {
+            st::decode_exit_node_offer(statement).map_or(0, |s| s.not_after_ms)
+        }
+        StatementKind::RelayEpochFloor => {
+            st::decode_relay_epoch_floor(statement).map_or(0, |s| s.not_after_ms)
+        }
+        // A revocation and a pairing revocation are permanent by design; a
+        // TunnelKeyBinding's window is checked by the peer that pins the key.
+        StatementKind::RevocationStatement
+        | StatementKind::PairingRevocation
+        | StatementKind::TunnelKeyBinding => 0,
+    }
+}
+
+/// Maps `twinvpn-crypto`'s failures onto this service's registered codes.
+fn map_crypto_error(err: &twinvpn_crypto::CryptoError) -> VerifyFailure {
+    use twinvpn_crypto::CryptoError as E;
+    match err {
+        E::NonCanonicalCbor { .. } => VerifyFailure::NonCanonical,
+        E::UnknownCriticalField { .. } | E::MissingCriticalField { .. } => {
+            VerifyFailure::UnknownCriticalField
+        }
+        E::StatementExpired { .. } => VerifyFailure::Expired,
+        E::SignatureInvalid { .. } | E::MalformedCose { .. } | E::BindingInvalid { .. } => {
+            VerifyFailure::BadSignature
+        }
+        // Everything else — an unsupported algorithm, an unusable key — is "this
+        // signer cannot have authored this", which is what WrongAuthority says.
+        _ => VerifyFailure::WrongAuthority,
+    }
+}
+
+/// Lowercase hex, for the `signer_key_id` audit field. Never a secret: a `kid`
+/// is a public identifier by construction.
+fn hex_lower(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(DIGITS[usize::from(b >> 4)] as char);
+        out.push(DIGITS[usize::from(b & 0x0f)] as char);
+    }
+    out
+}
+
+/// Verifies, then re-checks the authority table and the validity window.
+///
+/// A verifier could in principle return a `Verified` whose `authority` does not
+/// match the kind's `required_authority`. This wrapper is the second check, so
+/// the table is enforced by this crate and not only by whoever binds the port.
+///
+/// # Errors
+///
+/// [`ServiceError`] with the registered code for the failure.
+pub fn admit(
+    verifier: &dyn StatementVerifier,
+    octets: &Verbatim,
+    expected: StatementKind,
+    now_ms: u64,
+    signer: SignerKey<'_>,
+) -> Result<Verified, ServiceError> {
+    // The caller must present the key the TYPE requires. A `PolicyBundle`
+    // offered against a device key never reaches the verifier at all — this is
+    // the table enforced before any signature arithmetic, so a verifier bug
+    // cannot make an Owner-only statement device-signable.
+    if signer.authority() != expected.required_authority() {
+        return Err(VerifyFailure::WrongAuthority.into_error());
+    }
+    let claim = verifier
+        .verify(octets, expected, now_ms, signer)
+        .map_err(VerifyFailure::into_error)?;
+    if claim.kind != expected {
+        return Err(VerifyFailure::TypeMismatch.into_error());
+    }
+    if claim.authority != expected.required_authority() {
+        return Err(VerifyFailure::WrongAuthority.into_error());
+    }
+    if claim.not_after_ms != 0 && now_ms > claim.not_after_ms {
+        return Err(VerifyFailure::Expired.into_error());
+    }
+    if now_ms < claim.not_before_ms {
+        return Err(VerifyFailure::Expired.into_error());
+    }
+    Ok(claim)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing {
+    //! A scripted verifier, for tests. **Never shipped**, exactly as
+    //! `twinvpn-cp-client`'s `testing` and `twinvpn-env`'s `test-support` are
+    //! never shipped.
+
+    use super::{
+        SignerKey, SigningAuthority, StatementKind, StatementVerifier, Verified, VerifyFailure,
+    };
+    use twinvpn_service_common::forward::Verbatim;
+
+    /// A verifier that accepts anything, attributing it to a chosen authority.
+    ///
+    /// Its whole purpose is to let a test exercise the *server's* authority
+    /// table without a cryptographic implementation: point it at
+    /// [`SigningAuthority::Device`] and a `PolicyBundle` must still be refused,
+    /// because refusing it is this crate's rule, not the verifier's.
+    #[derive(Debug, Clone)]
+    pub struct ScriptedVerifier {
+        /// What every verification will claim to have chained to.
+        pub authority: SigningAuthority,
+        /// What every verification will claim the payload's type was.
+        pub kind: Option<StatementKind>,
+        /// The window every verified statement will carry.
+        pub not_after_ms: u64,
+    }
+
+    impl ScriptedVerifier {
+        /// A verifier that attributes everything to the `Owner`.
+        #[must_use]
+        pub const fn owner() -> Self {
+            Self {
+                authority: SigningAuthority::Owner,
+                kind: None,
+                not_after_ms: 0,
+            }
+        }
+
+        /// A verifier that attributes everything to a device.
+        #[must_use]
+        pub const fn device() -> Self {
+            Self {
+                authority: SigningAuthority::Device,
+                kind: None,
+                not_after_ms: 0,
+            }
+        }
+
+        /// Forces the payload type it reports, to exercise the mismatch path.
+        #[must_use]
+        pub const fn claiming(mut self, kind: StatementKind) -> Self {
+            self.kind = Some(kind);
+            self
+        }
+
+        /// Gives every statement a bounded lifetime.
+        #[must_use]
+        pub const fn expiring_at(mut self, not_after_ms: u64) -> Self {
+            self.not_after_ms = not_after_ms;
+            self
+        }
+    }
+
+    impl StatementVerifier for ScriptedVerifier {
+        fn verify(
+            &self,
+            octets: &Verbatim,
+            expected: StatementKind,
+            _now_ms: u64,
+            _signer: SignerKey<'_>,
+        ) -> Result<Verified, VerifyFailure> {
+            if octets.is_empty() {
+                return Err(VerifyFailure::BadSignature);
+            }
+            Ok(Verified {
+                kind: self.kind.unwrap_or(expected),
+                // Deliberately the SCRIPTED authority and not the signer's: this
+                // double is how a test drives `admit`'s own authority re-check,
+                // which must hold even against a verifier that lies.
+                authority: self.authority,
+                signer_key_id: "scripted".to_owned(),
+                octets: octets.clone(),
+                not_before_ms: 0,
+                not_after_ms: self.not_after_ms,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::ScriptedVerifier;
+    use super::{
+        admit, opaque_statement, CryptoVerifier, RefuseUnverifiable, SignerKey, SigningAuthority,
+        StatementKind,
+    };
+
+    fn octets() -> twinvpn_service_common::forward::Verbatim {
+        // Deliberately NOT protobuf. A real COSE_Sign1 is CBOR, and the whole
+        // point of the opaque framing is that it accepts one.
+        opaque_statement(bytes::Bytes::from_static(b"\xd2\x84\x43cose")).expect("within cap")
+    }
+
+    /// A deterministic ES256 device identity, from `twinvpn-crypto`'s own test
+    /// kit. CD-I2 covers dev-dependencies, so a signature in a test comes from
+    /// the audited crate rather than from a `p256` this crate names itself.
+    fn fixture(seed: &[u8]) -> twinvpn_crypto::testkit::FixtureIdentity {
+        twinvpn_crypto::testkit::FixtureIdentity::from_seed(seed)
+    }
+
+    /// A real COSE_Sign1 over a canonical payload, as wire octets.
+    fn signed(
+        id: &twinvpn_crypto::testkit::FixtureIdentity,
+    ) -> twinvpn_service_common::forward::Verbatim {
+        use twinvpn_crypto::emit::Item;
+        let payload = Item::Map(vec![(Item::Uint(1), Item::Uint(7))]);
+        opaque_statement(bytes::Bytes::from(id.sign(&payload))).expect("within cap")
+    }
+
+    #[test]
+    fn an_unbound_verifier_admits_nothing() {
+        // Fail closed. If this test ever needs changing, read the module docs
+        // first: a permissive default here is a control plane that can grant
+        // authority.
+        for kind in [
+            StatementKind::RevocationStatement,
+            StatementKind::PolicyBundle,
+        ] {
+            let err = admit(
+                &RefuseUnverifiable,
+                &octets(),
+                kind,
+                0,
+                SignerKey::OwnerAnchors,
+            )
+            .expect_err("refuses");
+            assert_eq!(err.code().as_str(), "AUTH.KEY_UNAVAILABLE");
+        }
+        let err = admit(
+            &RefuseUnverifiable,
+            &octets(),
+            StatementKind::RouteAdvertisement,
+            0,
+            SignerKey::Device(b"key"),
+        )
+        .expect_err("refuses");
+        assert_eq!(err.code().as_str(), "AUTH.KEY_UNAVAILABLE");
+    }
+
+    #[test]
+    fn the_real_verifier_admits_no_owner_statement_without_an_anchor() {
+        // The shipped posture: a deployment with no pinned OwnerTrustAnchor can
+        // enrol and stream, and cannot revoke or author policy. Refusing is the
+        // correct answer, not a gap to paper over.
+        let v = CryptoVerifier::new(&[]).expect("an empty anchor set loads");
+        assert!(!v.has_owner_anchor());
+        for kind in [
+            StatementKind::RevocationStatement,
+            StatementKind::PolicyBundle,
+            StatementKind::RelayEpochFloor,
+            StatementKind::PairingRevocation,
+        ] {
+            let err = admit(&v, &octets(), kind, 0, SignerKey::OwnerAnchors)
+                .expect_err("no anchor, no admission");
+            assert_eq!(err.code().as_str(), "AUTH.KEY_UNAVAILABLE");
+        }
+    }
+
+    #[test]
+    fn the_real_verifier_refuses_a_statement_that_is_not_a_cose_sign1() {
+        // Verification is over the RECEIVED OCTETS and nothing is normalised
+        // first: `\xd2\x84\x43cose` is CBOR-shaped and is not a valid signed
+        // statement, so it is refused rather than repaired.
+        let v = CryptoVerifier::new(&[]).expect("loads");
+        let err = admit(
+            &v,
+            &octets(),
+            StatementKind::RouteAdvertisement,
+            0,
+            SignerKey::Device(&fixture(b"a").cose_key()),
+        )
+        .expect_err("not a statement");
+        assert!(
+            matches!(
+                err.code().as_str(),
+                "AUTH.BINDING_INVALID" | "PROTO.NON_CANONICAL_CBOR"
+            ),
+            "unexpected code {}",
+            err.code().as_str()
+        );
+    }
+
+    #[test]
+    fn a_real_signature_verifies_and_the_wrong_device_key_does_not() {
+        // End to end through `twinvpn-crypto`: a genuine COSE_Sign1 over the
+        // received octets, verified against the key this service recorded for
+        // the signer. This is the property every device-authority statement
+        // rests on, and it is exercised rather than asserted.
+        let v = CryptoVerifier::new(&[]).expect("loads");
+        let alice = fixture(b"alice");
+        let mallory = fixture(b"mallory");
+        let statement = signed(&alice);
+
+        let verified = admit(
+            &v,
+            &statement,
+            StatementKind::RouteAdvertisement,
+            0,
+            SignerKey::Device(&alice.cose_key()),
+        )
+        .expect("alice signed it");
+        assert_eq!(verified.authority, SigningAuthority::Device);
+        assert_eq!(
+            verified.octets.as_bytes(),
+            statement.as_bytes(),
+            "the verified octets are the RECEIVED octets, never a re-encoding"
+        );
+
+        // The same statement against a different device's key. This is the
+        // check that stops one device advertising under another's name.
+        let err = admit(
+            &v,
+            &statement,
+            StatementKind::RouteAdvertisement,
+            0,
+            SignerKey::Device(&mallory.cose_key()),
+        )
+        .expect_err("mallory did not sign it");
+        assert_eq!(err.code().as_str(), "AUTH.BINDING_INVALID");
+    }
+
+    #[test]
+    fn a_flipped_byte_breaks_the_signature() {
+        // Verification is over the octets as they arrived: change one and it
+        // fails, which is what "MUST NOT re-serialize before verifying" buys.
+        let v = CryptoVerifier::new(&[]).expect("loads");
+        let alice = fixture(b"alice");
+        let mut octets = alice.sign(&twinvpn_crypto::emit::Item::Map(vec![(
+            twinvpn_crypto::emit::Item::Uint(1),
+            twinvpn_crypto::emit::Item::Uint(7),
+        )]));
+        let last = octets.len() - 1;
+        octets[last] ^= 0x01;
+        let tampered = opaque_statement(bytes::Bytes::from(octets)).expect("within cap");
+        let err = admit(
+            &v,
+            &tampered,
+            StatementKind::RouteAdvertisement,
+            0,
+            SignerKey::Device(&alice.cose_key()),
+        )
+        .expect_err("tampered");
+        assert_eq!(err.code().as_str(), "AUTH.BINDING_INVALID");
+    }
+
+    #[test]
+    fn an_owner_signed_statement_verifies_against_the_pinned_anchor() {
+        let owner_key = fixture(b"owner");
+        let v = CryptoVerifier::new(&[owner_key.cose_key()]).expect("loads");
+        assert!(v.has_owner_anchor());
+        let statement = signed(&owner_key);
+        let verified = admit(
+            &v,
+            &statement,
+            StatementKind::RevocationStatement,
+            0,
+            SignerKey::OwnerAnchors,
+        )
+        .expect("the pinned anchor signed it");
+        assert_eq!(verified.authority, SigningAuthority::Owner);
+
+        // A statement signed by someone who is NOT the anchor is refused — this
+        // is what stops a compromised control plane minting a revocation.
+        let impostor = signed(&fixture(b"impostor"));
+        let err = admit(
+            &v,
+            &impostor,
+            StatementKind::RevocationStatement,
+            0,
+            SignerKey::OwnerAnchors,
+        )
+        .expect_err("not the Owner");
+        assert_eq!(err.code().as_str(), "AUTH.BINDING_INVALID");
+    }
+
+    #[test]
+    fn the_real_verifier_refuses_a_device_key_it_cannot_parse() {
+        let v = CryptoVerifier::new(&[]).expect("loads");
+        let err = admit(
+            &v,
+            &octets(),
+            StatementKind::RouteAdvertisement,
+            0,
+            SignerKey::Device(b"not a COSE_Key"),
+        )
+        .expect_err("unusable key");
+        assert_eq!(err.code().as_str(), "AUTH.UNEXPECTED_DELEGATION");
+    }
+
+    #[test]
+    fn an_anchor_set_that_does_not_parse_fails_at_construction() {
+        // Startup fails rather than running with a partially-loaded anchor set:
+        // a partial set silently refuses statements a correct one would admit,
+        // which reads as an outage rather than as a misconfiguration.
+        let err = CryptoVerifier::new(&[b"not a COSE_Key".to_vec()]).expect_err("refuses");
+        assert_eq!(err.code().as_str(), "AUTH.ANCHOR_VERSION_UNSUPPORTED");
+    }
+
+    #[test]
+    fn coordination_cannot_author_policy_and_the_owner_cannot_mint_a_route() {
+        // The two rows protocol.md §7 calls load-bearing, asserted at the SERVER.
+        assert_eq!(
+            StatementKind::PolicyBundle.required_authority(),
+            SigningAuthority::Owner
+        );
+        assert_eq!(
+            StatementKind::RouteAdvertisement.required_authority(),
+            SigningAuthority::Device
+        );
+        assert_eq!(
+            StatementKind::RevocationStatement.required_authority(),
+            SigningAuthority::Owner
+        );
+
+        // A caller offering a POLICY BUNDLE against a device key never reaches
+        // the verifier: `admit` checks the table first, so no verifier bug can
+        // make an Owner-only statement device-signable.
+        let err = admit(
+            &ScriptedVerifier::device(),
+            &octets(),
+            StatementKind::PolicyBundle,
+            0,
+            SignerKey::Device(b"key"),
+        )
+        .expect_err("wrong authority at the caller");
+        assert_eq!(err.code().as_str(), "AUTH.UNEXPECTED_DELEGATION");
+
+        // And a verifier that LIES — presented with the device key the table
+        // requires, but claiming the Owner chain signed — is caught afterwards.
+        // That is what makes this crate's rule this crate's, not the binding's.
+        let err = admit(
+            &ScriptedVerifier::owner(),
+            &octets(),
+            StatementKind::RouteAdvertisement,
+            0,
+            SignerKey::Device(b"key"),
+        )
+        .expect_err("wrong authority at the verifier");
+        assert_eq!(err.code().as_str(), "AUTH.UNEXPECTED_DELEGATION");
+    }
+
+    #[test]
+    fn the_type_inside_the_payload_wins_over_the_callers_expectation() {
+        // identity.proto: `statement_type` is "A HINT for dispatch only … An
+        // attacker controls this value."
+        let v = ScriptedVerifier::owner().claiming(StatementKind::RelayEpochFloor);
+        let err = admit(
+            &v,
+            &octets(),
+            StatementKind::RevocationStatement,
+            0,
+            SignerKey::OwnerAnchors,
+        )
+        .expect_err("type mismatch");
+        assert_eq!(err.code().as_str(), "AUTH.BINDING_INVALID");
+    }
+
+    #[test]
+    fn an_expired_statement_is_refused() {
+        let v = ScriptedVerifier::owner().expiring_at(1_000);
+        assert!(admit(
+            &v,
+            &octets(),
+            StatementKind::RevocationStatement,
+            999,
+            SignerKey::OwnerAnchors
+        )
+        .is_ok());
+        let err = admit(
+            &v,
+            &octets(),
+            StatementKind::RevocationStatement,
+            1_001,
+            SignerKey::OwnerAnchors,
+        )
+        .expect_err("expired");
+        assert_eq!(err.code().as_str(), "AUTH.STATEMENT_EXPIRED");
+    }
+
+    #[test]
+    fn a_revocation_has_no_expiry_because_denials_are_permanent() {
+        // ADR-0009 §11.4: "denials are monotone accumulations, not leases." A
+        // revocation that expired would un-revoke a stolen device by doing
+        // nothing at all, so the CDDL declares no `not_after_ms` and this
+        // service reads none.
+        for kind in [
+            StatementKind::RevocationStatement,
+            StatementKind::PairingRevocation,
+        ] {
+            let v = ScriptedVerifier::owner();
+            assert!(
+                admit(&v, &octets(), kind, u64::MAX, SignerKey::OwnerAnchors).is_ok(),
+                "{} must not expire",
+                kind.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn every_statement_kind_maps_to_a_crypto_kind() {
+        // A total match, so a statement type added here without a crypto
+        // counterpart is a compile error rather than a verification that
+        // silently checks the wrong CDDL shape.
+        for kind in [
+            StatementKind::RevocationStatement,
+            StatementKind::PolicyBundle,
+            StatementKind::PairingAttestation,
+            StatementKind::IdentitySuccession,
+            StatementKind::TunnelKeyBinding,
+            StatementKind::RouteAdvertisement,
+            StatementKind::ExitNodeOffer,
+            StatementKind::RelayEpochFloor,
+            StatementKind::PairingRevocation,
+            StatementKind::OwnerDelegation,
+        ] {
+            let _ = kind.as_crypto_kind();
+        }
+        assert_eq!(
+            StatementKind::PolicyBundle.as_crypto_kind(),
+            twinvpn_crypto::StatementKind::PolicyBundle
+        );
+        assert_eq!(
+            StatementKind::RouteAdvertisement.as_crypto_kind(),
+            twinvpn_crypto::StatementKind::RouteAdvertisement
+        );
+    }
+
+    #[test]
+    fn the_signer_key_names_the_authority_it_establishes() {
+        assert_eq!(SignerKey::OwnerAnchors.authority(), SigningAuthority::Owner);
+        assert_eq!(
+            SignerKey::Device(b"k").authority(),
+            SigningAuthority::Device
+        );
+    }
+
+    #[test]
+    fn identity_succession_is_the_only_dual_signed_statement() {
+        let dual: Vec<&str> = [
+            StatementKind::RevocationStatement,
+            StatementKind::PolicyBundle,
+            StatementKind::PairingAttestation,
+            StatementKind::IdentitySuccession,
+            StatementKind::TunnelKeyBinding,
+            StatementKind::RouteAdvertisement,
+            StatementKind::ExitNodeOffer,
+            StatementKind::RelayEpochFloor,
+            StatementKind::PairingRevocation,
+            StatementKind::OwnerDelegation,
+        ]
+        .into_iter()
+        .filter(|k| k.is_dual_signed())
+        .map(StatementKind::as_str)
+        .collect();
+        assert_eq!(dual, vec!["identity_succession"]);
+    }
+}

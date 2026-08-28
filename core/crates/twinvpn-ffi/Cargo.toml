@@ -18,5 +18,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 twinvpn-core          = { workspace = true }
 twinvpn-types         = { workspace = true }
 twinvpn-env           = { workspace = true }
+twinvpn-platform      = { workspace = true }
+twinvpn-schema        = { workspace = true }
 twinvpn-diag          = { workspace = true }
-libc                  = { workspace = true }
+twinvpn-mgmt          = { workspace = true }
+futures-core          = { workspace = true }
+prost                 = { workspace = true }
+
+[dev-dependencies]
+twinvpn-core          = { workspace = true, features = ["test-support"] }

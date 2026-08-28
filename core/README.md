@@ -52,7 +52,7 @@ skeleton until its domain lands; see `ownership.md` §2 and §7.
 
 | Crate | What it is | Depends on |
 |---|---|---|
-| [`twinvpn-types`](crates/twinvpn-types) | the domain vocabulary: identifiers, addresses, `ConnectionState`, `reason_code`, evidence, `Diagnostic` | `thiserror` only |
+| [`twinvpn-types`](crates/twinvpn-types) | the domain vocabulary: identifiers, addresses, `ConnectionState`, `reason_code`, evidence, `Diagnostic` | no workspace crate; `thiserror`, `zeroize`, `subtle` |
 | [`twinvpn-env`](crates/twinvpn-env) | **the only source of time, timers, randomness and the runtime** | `twinvpn-types`, `futures-core`, `tokio` (optional) |
 | [`twinvpn-schema`](crates/twinvpn-schema) | the frozen contract bindings, and validation of untrusted input | `twinvpn-types`, `prost` |
 | [`twinvpn-platform`](crates/twinvpn-platform) | the platform adapter **trait** — the seam | `twinvpn-types`, `twinvpn-env` |
@@ -121,6 +121,15 @@ enforce it where they can — `DeviceId`, `ChannelBinding`, `SharedSecret`,
 enclosing struct. Where you genuinely need the bytes, `to_hex()` and
 `as_bytes()` are explicit and greppable.
 
+The secret-bearing types — `ChannelBinding`, `SharedSecret`, `SecureItem` —
+derive `ZeroizeOnDrop`, so the scrub is a volatile write with a compiler fence
+rather than an elidable `fill(0)`, and `SharedSecret::expose_for_kdf` /
+`SecureItem::into_bytes` hand back a `Zeroizing<Vec<u8>>` so the scrub follows
+the bytes rather than stopping at the type boundary. `ChannelBinding::verify_against`
+uses `subtle::ConstantTimeEq`. Neither `zeroize` nor `subtle` is a cryptographic
+implementation, so CD-I2 does not restrict them — see the exemption and its
+reasoning in `xtask/src/checks.rs`.
+
 ### Making time deterministic
 
 Anything that hangs, races, or "works on my machine" is usually a clock. Bind the
@@ -183,7 +192,7 @@ cargo run -q -p xtask -- lint
 | Rule | Fires when | The fix |
 |---|---|---|
 | **CD-3** | a deny-listed time or randomness API appears outside `crates/twinvpn-env/src/binding/` | take the capability from `Env`. `MonotonicClock` for a timer, `ElapsedClock` across a suspend, `WallClock` for evidence only |
-| **CD-I2** | a crate other than `twinvpn-crypto` declares a cryptographic dependency | ask `core-security` for the operation behind a trait; do not add the crate |
+| **CD-I2** | a crate other than `twinvpn-crypto` declares a cryptographic **implementation** | ask `core-security` for the operation behind a trait; do not add the crate. `zeroize` and `subtle` are exempt — they implement no cryptography; see `CD_I2_NOT_CRYPTO_IMPLEMENTATIONS` |
 | **CD-I5** | a data-plane crate reaches `twinvpn-cp-client`, directly or transitively, or the reverse | route it through `twinvpn-store`. Only `twinvpn-core` may name both planes |
 | **CD-CB3** | `#[cfg(target_os = …)]` outside a `twinvpn-platform-*` crate | branch on a **declared capability** instead: `Datapath`, `EnforcementCustody`, `RecordAeadCustody`, `SupportedFamilies`, `LinkClass` |
 

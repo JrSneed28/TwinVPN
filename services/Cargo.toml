@@ -42,10 +42,29 @@ repository   = "https://github.com/twinvpn/twinvpn"
 [workspace.dependencies]
 twinvpn-service-common = { path = "twinvpn-service-common" }
 
-# The one permitted edge into /core. ADR-0018 §11.2: the server side is a
-# different artifact that SHARES `twinvpn-schema`; it does not link the core.
+# The permitted edges into /core. ADR-0018 §11.2: the server side is a different
+# artifact that SHARES `twinvpn-schema` -- and, for the relay, the framing crate
+# (row 2.11). It does not link the core.
 twinvpn-schema = { path = "../core/crates/twinvpn-schema" }
 twinvpn-types  = { path = "../core/crates/twinvpn-types" }
+
+# Added by the integration lead, resolving relay-plane's finding F-1.
+#
+# The relay and the relay directory need signature verification, a frame MAC and
+# a digest: RelayCapabilityToken verification, RelayMap signing, pair_tag
+# derivation. `relay-plane` correctly refused to choose between violating CD-I2
+# and editing a manifest it does not own, and took all three as injected traits
+# with FAIL-CLOSED defaults instead.
+#
+# The resolution is this edge, NOT four primitive crates, and the reason is
+# DP-8: "at most two crypto providers fleet-wide ... they double the assurance
+# surface", and both must pass the identical golden-vector corpus. Adding
+# ed25519-dalek/blake2/coset/ciborium here would create a SECOND provider whose
+# agreement with the core's is untested -- the precise thing DP-8 bounds and
+# CD-I2 exists to keep auditable. Depending on `twinvpn-crypto` is not itself a
+# cryptographic dependency: it is the crate that encapsulates them, so the
+# server artifacts inherit the audited implementation rather than a parallel one.
+twinvpn-crypto = { path = "../core/crates/twinvpn-crypto" }
 
 thiserror   = "2.0"
 anyhow      = "1.0"
@@ -67,6 +86,30 @@ tower       = "0.5"
 tower-http  = { version = "0.6", features = ["trace", "timeout"] }
 quinn       = "0.11"
 rustls      = "0.23"
+
+# TLS termination for the server artifacts.
+#
+# Added by the integration lead after `rendezvous-connectivity` reported the
+# consequence of their absence plainly rather than as a footnote: with no
+# channel authentication, ATTACH/BIND are unauthenticated CLAIMS, so an attacker
+# could attach as another device's device_id and receive its CALLs, or publish
+# presence for it. `rustls` alone is not enough to terminate a connection -- the
+# tokio integration and a PEM reader are what actually close that hole.
+#
+# NOTE the difference from the core: ADR-0018 CD-I2 confines a cryptographic
+# dependency to `twinvpn-crypto`, and finding W-12 rules that `rustls` therefore
+# belongs there and `quinn` may sit in `twinvpn-cp-client`. CD-I2 is a rule over
+# the /core workspace crate set; these are SEPARATE SERVER ARTIFACTS that do not
+# link the core (ADR-0018 §11.2 rows 2.8 and 2.11), so they terminate their own
+# transport. `cargo run -p xtask -- lint` scopes CD-I2 to /core accordingly.
+tokio-rustls     = "0.26"
+rustls-pemfile   = "2.2"
+rustls-pki-types = "1.15"
+
+# Hoisted by the integration lead: three crates were naming this with a literal
+# version of their own, which is three chances to drift on the crate that
+# supplies the TLS CryptoProvider. It is already in the graph via `rustls`.
+aws-lc-rs        = "1.18"
 
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
