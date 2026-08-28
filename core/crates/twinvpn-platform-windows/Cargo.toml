@@ -1,0 +1,30 @@
+# twinvpn-platform-windows - the Windows implementation of the twinvpn-platform trait
+# (CB-3 permits `cfg` here; CD-3 permits the platform time/entropy primitives here).
+#
+# Owner: desktop-windows. This manifest is owned by that domain; the WORKSPACE
+# manifest at core/Cargo.toml is owned by the integration lead.
+[package]
+name    = "twinvpn-platform-windows"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the Windows implementation of the twinvpn-platform trait (CB-3 permits cfg here)"
+
+[dependencies]
+twinvpn-types    = { workspace = true }
+twinvpn-env      = { workspace = true }
+twinvpn-platform = { workspace = true }
+thiserror        = { workspace = true }
+tokio            = { workspace = true, features = ["net", "rt", "sync", "io-util"] }
+tracing          = { workspace = true }
+futures-core     = { workspace = true }
+serde_json       = { workspace = true }
+zeroize          = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "io-util", "macros"] }

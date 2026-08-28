@@ -35,6 +35,8 @@ members = [
   "crates/twinvpn-core",
   "crates/twinvpn-ffi",
   "crates/twinvpn-platform-linux",
+  "crates/twinvpn-platform-windows",
+  "crates/twinvpn-platform-macos",
   "xtask",
 ]
 
@@ -76,6 +78,8 @@ twinvpn-diag           = { path = "crates/twinvpn-diag" }
 twinvpn-mgmt           = { path = "crates/twinvpn-mgmt" }
 twinvpn-core           = { path = "crates/twinvpn-core" }
 twinvpn-platform-linux = { path = "crates/twinvpn-platform-linux" }
+twinvpn-platform-windows = { path = "crates/twinvpn-platform-windows" }
+twinvpn-platform-macos = { path = "crates/twinvpn-platform-macos" }
 
 # -- general ----------------------------------------------------------------
 thiserror       = "2.0"
@@ -90,6 +94,15 @@ arrayvec        = "0.7"
 hex             = "0.4"
 socket2         = "0.6"
 libc            = "0.2"
+
+# -- per-target platform FFI. Declared here so the two wave-2 adapter crates
+# name a pinned version like every other dependency; each is reachable ONLY
+# from a [target.'cfg(...)'] block in the adapter that needs it, so a Linux
+# build never resolves them. CB-3 keeps them out of every other crate.
+windows-sys              = "0.61"
+core-foundation-sys      = "0.8"
+security-framework-sys   = "2.14"
+system-configuration-sys = "0.6"
 
 # -- async ------------------------------------------------------------------
 # CD-1/CD-2: the runtime is a capability behind `twinvpn-env`. No crate outside

@@ -270,6 +270,56 @@ doc-check:
 fmt:
 	@for w in $(WORKSPACES); do ( cd $$w && $(CARGO) fmt --all ); done
 
+# ---------------------------------------------------------------------------
+# cross-check: the wave-2 desktop targets
+# ---------------------------------------------------------------------------
+# `ownership.md` §5 deferred the Windows and macOS shells because their platform
+# surfaces "cannot be compiled, let alone exercised, on the Linux host this wave
+# runs on". Half of that is now false and half is still true, and the split is
+# exactly where this target draws it.
+#
+# STILL TRUE: nothing here LINKS or RUNS. There is no MSVC linker, no Darwin
+# SDK, no WFP engine, no NetworkExtension host. A green `cross-check` is a
+# compile proof, NOT a behaviour proof, and it must never be reported as one.
+#
+# NOW FALSE: the rust-std for both targets installs on this host, and `cargo
+# check`/`clippy` need no linker. So every line of Rust in the two wave-2
+# adapters and the two wave-2 shells is type-checked against the REAL Win32 and
+# Darwin sys crates, with `-D warnings`, on this runner. That is the difference
+# between "shell code that has never been built" -- the failure mode wave 1
+# named -- and shell code whose behaviour has not yet been observed.
+#
+# The behaviour half is discharged by the adapters' own host-runnable tests:
+# both wave-2 adapters keep their translation layers (filter and anchor
+# construction, route and DNS programme rendering, error mapping) target-free,
+# so `make test` exercises them on Linux exactly as the nftables ruleset text
+# and the `nft --json` parser are exercised today.
+# The core workspace is checked BY PACKAGE, not `--workspace`: it holds all
+# three adapters, and `twinvpn-platform-linux` does not compile for Darwin (nor
+# should it). Each shell workspace holds only its own platform's crates, so
+# `--workspace` is right there.
+WIN_TARGET := x86_64-pc-windows-msvc
+MAC_TARGET := aarch64-apple-darwin
+
+cross-check:
+	@echo "==> cross-check twinvpn-platform-windows ($(WIN_TARGET))"
+	@cd core && $(CARGO) clippy -p twinvpn-platform-windows --all-targets \
+	    --target $(WIN_TARGET) -- -D warnings
+	@echo "==> cross-check twinvpn-platform-macos ($(MAC_TARGET))"
+	@cd core && $(CARGO) clippy -p twinvpn-platform-macos --all-targets \
+	    --target $(MAC_TARGET) -- -D warnings
+	@if [ -f shells/windows/Cargo.toml ]; then \
+	  echo "==> cross-check shells/windows ($(WIN_TARGET))"; \
+	  ( cd shells/windows && $(CARGO) clippy --workspace --all-targets \
+	      --target $(WIN_TARGET) -- -D warnings ) || exit 1; \
+	fi
+	@if [ -f shells/macos/Cargo.toml ]; then \
+	  echo "==> cross-check shells/macos ($(MAC_TARGET))"; \
+	  ( cd shells/macos && $(CARGO) clippy --workspace --all-targets \
+	      --target $(MAC_TARGET) -- -D warnings ) || exit 1; \
+	fi
+	@echo "==> cross-check OK (compile only -- nothing was linked or run)"
+
 # ADR-0018 CD-3 / CD-I2 / CD-I5 / CB-3. Owned by core-foundation.
 arch-lint:
 	@echo "==> ADR-0018 T1 architectural lints"
