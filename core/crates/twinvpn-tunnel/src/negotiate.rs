@@ -2,8 +2,8 @@
 //! two caps.
 //!
 //! **Authority:** ADR-0014 N-6, N-8, N-9, N-10, N-11, N-16, N-17, N-19; ADR-0001
-//! §7.3 D1–D6, §7.3.1; `docs/implementation/ownership.md` §4.3 (the open
-//! `limits.json` defect); `contracts/registry/capabilities.json`.
+//! §7.3 D1–D6, §7.3.1; `contracts/registry/limits.json` and
+//! `contracts/registry/capabilities.json` (frozen, `registry_version` 2).
 //!
 //! # Negotiation happens only inside the authenticated tunnel
 //!
@@ -16,14 +16,20 @@
 //! [`MonotonicFloor::record`] refuses to write anything until the caller says the
 //! selection was confirmed in-session (P-4).
 //!
-//! # The capability-name cap is 32, not `limits.json`'s 24
+//! # The capability-name cap is 32, and the registry now says so
 //!
-//! `ownership.md` §4.3 records the open defect: `limits.json` says 24,
-//! `capabilities.json` says 32, the CDDL says `[a-z][a-z0-9_]{0,31}`, and the
-//! registry itself contains `dns_config_dies_with_tunnel` — **27 bytes**. This
-//! crate validates against 32 through
-//! `twinvpn_schema::validate::is_capability_name`, which already carries the
-//! exception and the citation.
+//! N-11's cap is **32 bytes**, per CF-6, which amended ADR-0014 N-11 from 24 to
+//! 32 and deliberately did *not* rename `dns_config_dies_with_tunnel` — 27
+//! bytes, and `security_relevant`, so a rename would be an S-37 compatibility
+//! event. `registry_version` 2 carried that amendment into `limits.json`, so
+//! `limits.json`, `capabilities.json` and `capabilities.cddl`'s
+//! `[a-z][a-z0-9_]{0,31}` all agree.
+//!
+//! There is therefore **no exception left to carry here**. This crate validates
+//! through `twinvpn_schema::validate::is_capability_name`, whose bound is
+//! *derived* from the frozen registry rather than pinned against it — which is
+//! the property a hard-coded 32 could never have had, because a derived constant
+//! cannot drift from its source.
 
 use std::collections::BTreeSet;
 
@@ -37,7 +43,7 @@ impl Caps {
     pub const MAX_TOKENS: usize = limits::CAPABILITY_MAX_TOKENS;
     /// At most this many bytes in one advertisement.
     pub const MAX_ADVERTISEMENT_BYTES: usize = limits::CAPABILITY_MAX_ADVERTISEMENT_BYTES;
-    /// N-11's name cap: **32**, per `ownership.md` §4.3.
+    /// N-11's name cap: **32**, per CF-6, read from the frozen registry.
     pub const MAX_NAME_BYTES: usize = limits::CAPABILITY_MAX_NAME_BYTES;
     /// At most this many parameters per token.
     pub const MAX_PARAMETERS: usize = limits::CAPABILITY_MAX_PARAMETERS;

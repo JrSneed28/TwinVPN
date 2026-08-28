@@ -19,7 +19,7 @@ at construction:
 | Capability | Arrives as | Supplied by |
 |---|---|---|
 | clocks, timers, randomness, the runtime | [`twinvpn_env::Env`] | the composition root |
-| the QUIC/TLS binding | [`transport::ControlTransport`] | the composition root (**integration item**, §4) |
+| the QUIC/TLS binding | [`transport::ControlTransport`] | [`quic::QuicControlTransport`] for rung 1; the composition root supplies its identity, pin set and endpoints (§4) |
 | signature verification | [`ports::StatementVerifier`] | `twinvpn-trust` (**integration item**) |
 | durable cursor, high-water marks, cached peers | [`ports::ControlPlaneStore`] | `twinvpn-store` (**integration item**) |
 | identity signing | `twinvpn_platform::custody::IdentityCustody` | the platform adapter |
@@ -61,22 +61,39 @@ secrets, pairing secrets, private keys. The types help where they can —
 
 ## 4. What the composition root must bind, and what is still open
 
-**`ControlTransport` has no production implementation in this crate.** The
-`core/` workspace manifest declares no QUIC or TLS dependency, this crate may not
-add one (`ownership.md` §3, and `rustls` is on the CD-I2 deny-list), and CB-1 puts
-the socket at the platform seam. So the *policy* — which rung, in what order, with
-which budget, emitting which code — lives here and is fully tested, and the
-binding is supplied at construction.
+**Rung 1 is implemented.** [`quic::QuicControlTransport`] is QUIC + TLS 1.3 with
+mutual RFC 7250 raw-public-key authentication, server keys pinned, 0-RTT
+unreachable, one connection per `Device` carrying both C1 and C2, and Happy
+Eyeballs v2 across both address families. `ownership.md` §8 **W-12** is what
+makes it legal here: `quinn` is a transport-protocol implementation that takes
+its cryptography from rustls and implements none itself, so CD-I2 does not reach
+it. This crate declares `quinn` and **never** `rustls`, and every rustls type is
+spelled `quinn::rustls::…`.
 
-An implementation MUST be, per ADR-0001 §11 item 3:
+Four arguments come from the composition root:
 
-- QUIC + TLS 1.3 on rung 1, mutual RFC 7250 raw-public-key auth to
-  `DeviceIdentityKey`, server auth against a **pinned** key set;
-- **TLS 1.3 0-RTT disabled** — [`transport::TransportConfig`] cannot express
-  anything else, but a binding still has to honour it;
-- one connection per `Device` carrying both C1 and C2, with C2 on its own stream;
-- exposing the RFC 9266 `tls-exporter` value as
-  [`transport::ControlConnection::channel_binding`].
+| Argument | Source |
+|---|---|
+| `DeviceIdentity` | the enrolled `DeviceIdentityKey`: a signer the platform element backs (CB-5 / I4). `DeviceIdentity::software_key` exists for targets with no element and is named for what it costs |
+| `ServerPins` | the **enrolment record** (ADR-0001 §7.2). A non-empty set of exact SPKI octets; there is no learn-on-first-use and no variant for one |
+| `ControlEndpoint` | the bootstrap-scope resolution of each coordination name (ADR-0011 DN-0). Resolution is a platform call under CB-1, so this crate chooses among addresses rather than discovering them |
+| `Nat64Prefix` | PREF64 / RFC 7050 discovery, where the host has one. Only `/96` is accepted |
+
+**Still open, and the ladder says so rather than the type system implying
+otherwise:**
+
+- **Rungs 2, 3 and 4 have no implementation anywhere.** A device that cannot
+  reach UDP:443 still has no control channel.
+- **`quinn` is pinned in this crate's own manifest, not in
+  `core/Cargo.toml`.** The workspace manifest declares no `quinn` and is the
+  integration lead's; hoisting it there is an integration item.
+- **The TLS configuration is built here, not vended by `twinvpn-crypto`.** W-12
+  assigns the `CryptoProvider` and the cipher policy to that crate and it ships
+  no TLS module. The half that is genuinely cryptographic is a *seam* here — the
+  private key never appears, and pinning is byte equality — so the day
+  `twinvpn-crypto` vends a configured provider this module takes it instead of
+  building one.
+- **`StatementVerifier`** is still an integration item (`twinvpn-trust`).
 
 ## 5. Reading a rejection
 

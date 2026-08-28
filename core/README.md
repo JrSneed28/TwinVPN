@@ -247,9 +247,14 @@ Stated here rather than discovered later:
 - **`prost` 0.13 drops unknown protobuf fields.** A forwarding component must
   forward received octets verbatim rather than decode-then-re-encode. Measured by
   `unknown_fields_are_dropped_by_prost_0_13`.
-- **Capability names validate against 32, not `limits.json`'s 24.** An open
-  contract defect; see `ownership.md` §4.3 and
-  `crates/twinvpn-schema/src/limits.rs`.
+- **The capability-name cap is 32, and it is *derived* from the registry.**
+  This was an open contract defect: `limits.json` said 24 while
+  `capabilities.json`, the CDDL and a Phase-1-mandated 27-byte token all said
+  otherwise, so every validator carried a hand-written exception. Amendment 1
+  moved `capability.max_name_bytes` to 32 (CF-6 / ADR-0014 N-11), and
+  `crates/twinvpn-schema/src/limits.rs` now derives `CAPABILITY_MAX_NAME_BYTES`
+  from the registry rather than pinning a literal beside it. **Closed** —
+  `ownership.md` §4.3 records the close and the residue it left.
 - **A link-local `IpPrefix` has no faithful wire form.** `common.proto` says
   `IPv6Address.zone_index` is "REQUIRED and non-zero for link-local addresses
   (`fe80::/10`); MUST be zero otherwise", and `IPPrefix` contains an

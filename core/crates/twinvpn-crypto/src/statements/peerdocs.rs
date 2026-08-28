@@ -9,6 +9,7 @@ use crate::cose::VerifiedStatement;
 use crate::dcbor::Value;
 use crate::error::StatementKind;
 use crate::{CryptoError, Result};
+use twinvpn_schema::limits::CAPABILITY_MAX_NAME_BYTES;
 
 /// The cap on advertised prefixes per family, applied before any `Vec` grows.
 ///
@@ -96,9 +97,14 @@ pub fn decode_route_advertisement(s: &VerifiedStatement) -> Result<RouteAdvertis
     let mut requires_capability = Vec::with_capacity(caps_raw.len());
     for v in caps_raw {
         let t = v.as_text().ok_or_else(|| bad("capability is not text"))?;
-        // `ownership.md` §4.3: capability names validate against 32, not
-        // `limits.json`'s stale 24.
-        if t.is_empty() || t.len() > 32 {
+        // **Authority:** ADR-0014 N-11, amended from 24 to 32 by CF-6 and
+        // carried in `contracts/registry/limits.json` since `registry_version`
+        // 2. The bound is *derived* — `twinvpn-schema` compiles the registry
+        // and defines the constant as it, so this decoder moves with the
+        // registry. A literal here would be a second place the number lives,
+        // and the two would part company the next time the registry moves:
+        // exactly the divergence that made §4.3 a defect rather than a typo.
+        if t.is_empty() || t.len() > CAPABILITY_MAX_NAME_BYTES {
             return Err(bad("capability name outside its bound"));
         }
         requires_capability.push(t.to_owned());

@@ -81,6 +81,14 @@ pub mod session_table;
 
 #[cfg(feature = "full")]
 pub mod cp_binding;
+// The two halves of the packet path, each a self-contained unit the composition
+// root drives. They take their inputs as parameters rather than reaching into a
+// `SessionEntry`, so each is testable against `twinvpn-platform`'s mock adapter
+// without a live session — and so the wiring stays one integration-owned edit.
+#[cfg(feature = "full")]
+pub mod datapath;
+#[cfg(feature = "full")]
+pub mod relay;
 #[cfg(feature = "full")]
 pub mod journal;
 #[cfg(feature = "full")]

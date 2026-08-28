@@ -98,14 +98,15 @@ fn limits_match_twinvpn_types() {
 }
 
 // ---------------------------------------------------------------------------
-// ownership.md §4.3 — the open capability-name defect
+// ADR-0014 N-11 / CF-6 — the capability-name cap, derived from the registry
 // ---------------------------------------------------------------------------
 
 #[test]
-fn capability_name_cap_is_32_per_ownership_md_4_3() {
+fn capability_name_cap_is_derived_from_the_registry_and_both_say_32() {
     assert_eq!(limits::CAPABILITY_MAX_NAME_BYTES, 32);
-    // The exception exists precisely because a Phase-1-mandated token is 27
-    // bytes and the registry's stale cap is 24.
+    // 32 is ADR-0014 N-11 as amended by CF-6, and `limits.json` has carried it
+    // since `registry_version` 2 — so the Phase-1-mandated 27-byte token is
+    // admitted by the registry itself, not by an exception laid over it.
     let token = CapabilityToken {
         name: "dns_config_dies_with_tunnel",
         parameters: &[],
@@ -153,6 +154,61 @@ fn the_registry_agrees_with_itself() {
         .filter_map(|c| c["name"].as_str())
         .collect();
     assert!(names.contains(&"dns_config_dies_with_tunnel"));
+}
+
+/// The bound the validator actually *enforces* is the registry's number.
+///
+/// `the_registry_agrees_with_itself` compares constants; this compares
+/// **behaviour** against `limits.json` re-parsed at test time. If the registry
+/// moves `capability.max_name_bytes` again and any validator does not follow,
+/// this fails — which is the property a hand-written `32` could never have, and
+/// the one the closed §4.3 defect existed for want of.
+#[test]
+fn the_validated_capability_name_bound_tracks_the_registry() {
+    let doc: serde_json::Value =
+        serde_json::from_str(limits::LIMITS_JSON).expect("embedded limits.json parses");
+    let registry_cap = usize::try_from(
+        doc["capability"]["max_name_bytes"]
+            .as_u64()
+            .expect("limits.json has capability.max_name_bytes"),
+    )
+    .expect("the cap fits a usize");
+
+    assert_eq!(
+        limits::CAPABILITY_MAX_NAME_BYTES,
+        registry_cap,
+        "the enforced bound must BE the registry's, never a literal beside it"
+    );
+
+    let advertise = |name: &str| {
+        validate::capability_advertisement(
+            &[CapabilityToken {
+                name,
+                parameters: &[],
+            }],
+            128,
+        )
+    };
+
+    // A name of exactly the registry's length passes; one byte more does not.
+    assert!(advertise(&"a".repeat(registry_cap)).is_ok());
+    assert!(matches!(
+        advertise(&"a".repeat(registry_cap + 1)),
+        Err(Reject::CapViolated {
+            cap_violated: "capability.max_name_bytes",
+            ..
+        })
+    ));
+    // Stated concretely for the registry in force: 33 bytes is the first reject.
+    assert_eq!(registry_cap + 1, 33);
+
+    // And the token that made §4.3 a real defect is still accepted, because the
+    // registry admits it — not because anything here makes an exception for it.
+    let mandated = "dns_config_dies_with_tunnel";
+    assert_eq!(mandated.len(), 27);
+    assert!(mandated.len() <= registry_cap);
+    assert!(advertise(mandated).is_ok());
+    assert!(validate::is_capability_name(mandated));
 }
 
 #[test]

@@ -83,6 +83,11 @@ pub mod cose;
 pub mod dcbor;
 pub mod deviceid;
 pub mod emit;
+// Private: the erasing wrapper is reachable only by holding a
+// `noise::TransportSession`, which is the only thing that can own one. Making it
+// public would create a second way to hold `snow` transport state, and the whole
+// point of the type is that there is no such thing as an unerased one.
+mod erase;
 pub mod error;
 pub mod kdf;
 pub mod locked;

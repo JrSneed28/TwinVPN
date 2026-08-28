@@ -30,10 +30,44 @@ thiserror             = { workspace = true }
 bytes                 = { workspace = true }
 prost                 = { workspace = true }
 futures-core          = { workspace = true }
+futures-util          = { workspace = true }
 tracing               = { workspace = true }
+
+# ---------------------------------------------------------------------------
+# `rustls` IS DELIBERATELY NOT NAMED HERE. DO NOT "FIX" THE MISSING DEPENDENCY.
+#
+# `ownership.md` §8 W-12 splits the L-CONTROL stack by what is actually
+# cryptographic: `rustls` — the TLS implementation, the raw-public-key verifier,
+# the cipher-suite policy, the `CryptoProvider` — belongs to `twinvpn-crypto`
+# under CD-I2, and `quinn` is "a transport protocol implementation … that takes
+# its cryptography from rustls and implements none itself", so THIS crate may
+# declare it. `quinn` re-exports the `rustls` its own feature selection
+# compiled (`rustls-ring`), so `src/quic/` names `quinn::rustls::…` and never
+# introduces a second provider.
+#
+# Adding a `rustls` line here is actively harmful and not merely redundant:
+# `rustls`'s DEFAULT feature set enables `aws-lc-rs`, cargo unifies features
+# across the graph, and the result is `aws-lc-rs` compiled ALONGSIDE quinn's
+# `ring` — ADR-0018 DP-8's one-provider bound broken through a feature flag
+# rather than a dependency line, with no line for a reviewer to see.
+# `cargo run -p xtask -- lint` enforces it: `rustls` is in `CRYPTO_CRATES` and
+# `quinn` deliberately is not.
+#
+# Hoisted to `[workspace.dependencies]` by the integration lead, which is where
+# the version and the `rustls-ring` feature selection now live: ADR-0018 §11.11
+# wants the lockfile to be the only place a version can move, and this crate,
+# `lab/twinsim` and `services/` all speak to the same server. The workspace
+# manifest carries the W-12 reasoning in full.
+quinn = { workspace = true }
 
 [dev-dependencies]
 proptest              = { workspace = true }
+# Deterministic ES256 fixture key material — `FixtureIdentity::pkcs8_der()` and
+# `::spki_der()`, which that module's own docs describe as exactly what "a lab
+# client that wants to attach to a control plane needs". CD-I2 covers
+# dev-dependencies, so a P-256 keypair for a loopback handshake comes from the
+# one crate permitted to encode one rather than from a `p256` line here.
+twinvpn-crypto        = { workspace = true, features = ["test-support"] }
 # The virtual clock (ADR-0018 CD-1) — every test in this crate drives time
 # deterministically rather than sleeping. `test-support` is never shipped.
 twinvpn-env           = { workspace = true, features = ["test-support"] }

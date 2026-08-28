@@ -176,6 +176,49 @@ impl FixtureIssuer {
     }
 }
 
+/// The `device_id` every [`verified_tunnel_key`] binding names.
+pub const TK_BINDING_DEVICE_ID: [u8; 32] = [0x02; 32];
+/// The `identity_id` every [`verified_tunnel_key`] binding names.
+pub const TK_BINDING_IDENTITY_ID: [u8; 32] = [0x12; 32];
+
+/// Builds a [`crate::VerifiedTunnelKey`] the only way one can be built.
+///
+/// There is no constructor for that type, by design: ADR-0001 §11.4 K3 says
+/// "peers MUST verify the `TunnelKeyBinding` before trusting a static key", and
+/// [`crate::binding::VerifiedTunnelKey`] is that rule expressed as a type. So
+/// this fixture does the whole thing — signs a `TunnelKeyBinding`, verifies the
+/// COSE_Sign1 over its octets, then verifies the binding — rather than
+/// short-circuiting it. A shortcut here would make every test that depends on
+/// the gate test something weaker than production does.
+///
+/// The identity is derived from a fixed label, so two calls yield bindings under
+/// the same issuer and the `device_id` / `identity_id` a caller must pass to
+/// [`crate::verify_tunnel_key_binding`] are the two constants above.
+#[must_use]
+pub fn verified_tunnel_key(tk_pub: &[u8; 32]) -> crate::VerifiedTunnelKey {
+    let issuer = FixtureIdentity::from_seed(b"twinvpn/testkit/tunnel-key-binding");
+    let payload = Item::Map(vec![
+        (Item::Uint(1), Item::Bytes(TK_BINDING_DEVICE_ID.to_vec())),
+        (Item::Uint(2), Item::Bytes(TK_BINDING_IDENTITY_ID.to_vec())),
+        (Item::Uint(3), Item::Bytes(x25519_cose_key(tk_pub))),
+        (Item::Uint(4), Item::Uint(1)),
+        (Item::Uint(5), Item::Uint(2_000_000_000_000)),
+        (
+            Item::Uint(6),
+            Item::Array(vec![Item::Text("tk_generation".to_owned())]),
+        ),
+    ]);
+    let octets = issuer.sign(&payload);
+    let verified = crate::verify_cose_sign1(
+        &octets,
+        StatementKind::TunnelKeyBinding,
+        &issuer.verifying_key(),
+    )
+    .expect("fixture TunnelKeyBinding verifies");
+    crate::verify_tunnel_key_binding(&verified, &TK_BINDING_DEVICE_ID, &TK_BINDING_IDENTITY_ID)
+        .expect("fixture binding is well formed")
+}
+
 /// A COSE_Key for an X25519 public value, as `tk_pub` and a `cnf` claim are
 /// carried.
 ///

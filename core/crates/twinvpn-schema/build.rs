@@ -1,7 +1,8 @@
 //! Compiles `contracts/registry/limits.json` into `const` values.
 //!
-//! **Why not a runtime parse.** `limits.json` exists "to be *the* source for
-//! validators on untrusted input" (`ownership.md` §4.3). A validator that reads
+//! **Why not a runtime parse.** `limits.json` exists to be *the* source every
+//! validator of untrusted input consults — `ownership.md` §6 rule 9, and the
+//! registry's own header comment. A validator that reads
 //! it at runtime can be wrong in two ways this cannot: the file can be missing at
 //! run time, and a key that disappears from the registry becomes a runtime
 //! `None` instead of a compile error. Compiling it makes a limit that has moved
@@ -50,7 +51,7 @@ const LIMITS: &[(&str, &str, &str, &str)] = &[
     ("identifiers", "causality_token_max_bytes", "CAUSALITY_TOKEN_MAX_BYTES", "Cap on `causality_token`."),
     ("capability", "max_tokens_per_advertisement", "CAPABILITY_MAX_TOKENS", "Cap on tokens in one capability advertisement."),
     ("capability", "max_advertisement_bytes", "CAPABILITY_MAX_ADVERTISEMENT_BYTES", "Byte cap on one capability advertisement."),
-    ("capability", "max_name_bytes", "CAPABILITY_MAX_NAME_BYTES_REGISTRY", "The registry's capability-name cap. **Stale at 24** — see `ownership.md` §4.3 and use `CAPABILITY_MAX_NAME_BYTES` instead."),
+    ("capability", "max_name_bytes", "CAPABILITY_MAX_NAME_BYTES_REGISTRY", "The registry's capability-name cap. **Authority:** ADR-0014 N-11, amended 24 -> 32 by CF-6 and carried here since `registry_version` 2. [`CAPABILITY_MAX_NAME_BYTES`] is defined *as* this constant, so the enforced bound is derived from the registry and the two cannot disagree."),
     ("capability", "max_parameters_per_token", "CAPABILITY_MAX_PARAMETERS", "Cap on parameters per capability token."),
     ("capability", "max_parameter_bytes_total", "CAPABILITY_MAX_PARAMETER_BYTES", "Byte cap on one token's parameters."),
     ("capability", "max_epoch_above_current", "CAPABILITY_MAX_EPOCH_ABOVE_CURRENT", "How far above the current epoch an advertisement may reach."),

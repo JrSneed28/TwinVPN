@@ -21,8 +21,10 @@
 //!
 //! L-CONTROL is QUIC + TLS 1.3 with mutual raw-public-key authentication to
 //! `DeviceIdentityKey`, **0-RTT prohibited** ([`transport::EarlyData`] has one
-//! variant and no setter), plus end-to-end per-message signatures. None of that
-//! makes what the control plane *says* true. Anything Owner-signed is verified
+//! variant and no setter), plus end-to-end per-message signatures. [`quic`] is
+//! the production rung-1 binding — server keys pinned from the enrolment record,
+//! with no learn-on-first-use to select. None of that makes what the control
+//! plane *says* true. Anything Owner-signed is verified
 //! against the Owner chain ([`ports::StatementKind::required_authority`]); a
 //! `PolicyBundle` that verified against a device key is not a policy bundle.
 //!
@@ -109,6 +111,7 @@ pub mod idempotency;
 pub mod metadata;
 pub mod octets;
 pub mod ports;
+pub mod quic;
 pub mod retry;
 pub mod revocation;
 pub mod signing;
@@ -133,6 +136,10 @@ pub use octets::ReceivedOctets;
 pub use ports::{
     ControlPlaneStore, SigningAuthority, StatementKind, StatementVerifier, StoreFailure,
     VerifiedStatement, VerifyFailure,
+};
+pub use quic::{
+    ControlEndpoint, DeviceIdentity, Nat64Prefix, QuicConnection, QuicControlTransport,
+    QuicEventStream, ServerPins,
 };
 pub use retry::Retry;
 pub use revocation::{

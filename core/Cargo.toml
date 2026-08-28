@@ -122,6 +122,31 @@ tokio      = { version = "1.48", default-features = false }
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
+# -- L-CONTROL rung 1, for `twinvpn-cp-client` ONLY -------------------------
+#
+# Finding W-12 (`docs/implementation/ownership.md` §8) rules that `rustls` -- the
+# TLS implementation, the raw-public-key verifier, the cipher policy, the
+# `CryptoProvider` -- is cryptography and belongs to `twinvpn-crypto`, while
+# `quinn` "is a transport protocol implementation that takes its cryptography
+# from rustls and implements none itself" and may sit in `twinvpn-cp-client`.
+# `CRYPTO_CRATES` in `core/xtask/src/checks.rs` implements exactly that split:
+# `rustls` is on the list, `quinn` is not.
+#
+# `default-features = false` with `rustls-ring` is load-bearing and is the same
+# decision `services/Cargo.toml` and `lab/twinsim/Cargo.toml` already record: a
+# crate that named `rustls` directly would activate its default `aws-lc-rs`
+# alongside quinn's `ring` and put TWO `CryptoProvider`s in one artifact --
+# ADR-0018 DP-8's fleet bound violated through a feature flag rather than a
+# dependency line, with no line for a reviewer to catch. So the binding names
+# `quinn::rustls::...` and never `rustls::...`, and CD-I2 stays true as written.
+#
+# Added by the integration lead to close W-12. Before this line the composed
+# core had no L-CONTROL transport at all and `twinvpnd` refused every
+# C1-mapping operation for that reason.
+quinn = { version = "0.11", default-features = false, features = [
+  "rustls-ring", "runtime-tokio", "log",
+] }
+
 # -- cryptography: CD-I2 restricts these to `twinvpn-crypto` ----------------
 # `default-features = false` is load-bearing and NOT a size optimisation.
 #

@@ -42,6 +42,19 @@
 //! seeded per-consumer stream: forward secrecy is a claim about
 //! unpredictability, and a reproducible ephemeral is not forward-secret.
 //!
+//! # Session keys are erased, not merely dropped
+//!
+//! `snow` 0.10 implements no `Drop` and no zeroize on its cipher states, so
+//! dropping a [`TransportSession`] would hand the send and receive keys back to
+//! the allocator **intact**. ADR-0001 §7.2's `REJECT_AFTER_TIME` says keys "are
+//! unusable and are **zeroed**", and both halves are honoured here:
+//! [`TransportSession`] holds its `snow` state inside `crate::erase`'s
+//! wrapper, which overwrites both keys in place — on an explicit
+//! [`TransportSession::erase`] and again on drop, so an early return or an
+//! unwind cannot skip it — and refuses every keyed operation afterwards. Read
+//! `crate::erase`'s module documentation for what that achieves and, more
+//! importantly, what it does not.
+//!
 //! # What this module does not do
 //!
 //! It does not schedule. `REKEY_AFTER_TIME`, `REJECT_AFTER_TIME`,
@@ -61,6 +74,7 @@ use snow::types::Random;
 use twinvpn_env::{Entropy, Env};
 
 use crate::binding::VerifiedTunnelKey;
+use crate::erase::ErasingTransport;
 use crate::locked::LockedBytes;
 use crate::psk::{TwinNetPsk, PSK_LEN};
 use crate::replay::{ReplayWindow, SendCounter};
@@ -289,7 +303,7 @@ impl Handshake {
             }
         })?;
         Ok(TransportSession {
-            state,
+            transport: ErasingTransport::new(state),
             send: SendCounter::new(),
             recv: ReplayWindow::new(),
         })
@@ -311,8 +325,15 @@ impl core::fmt::Debug for Handshake {
 /// resets either**. A transport-mode change (`T-UDP` ↔ `T-RELAY` ↔ `T-QUIC`) or
 /// a path resumption keeps this object, which is ADR-0001 §11 item 2 and §7.3.2
 /// RS-3 expressed as ownership rather than as a rule.
+///
+/// # Its keys are erased before they are freed
+///
+/// The `snow` state lives inside `ErasingTransport`, so both cipher keys are
+/// overwritten in place on [`Self::erase`] **and** on drop, and every keyed
+/// operation is refused afterwards. `snow` 0.10 does none of that itself; see
+/// `crate::erase` for the mechanism and its honest limits.
 pub struct TransportSession {
-    state: snow::StatelessTransportState,
+    transport: ErasingTransport,
     send: SendCounter,
     recv: ReplayWindow,
 }
@@ -327,15 +348,16 @@ impl TransportSession {
     ///
     /// # Errors
     ///
-    /// [`CryptoError::RekeyFailed`] at `REJECT_AFTER_MESSAGES`;
-    /// [`CryptoError::HandshakeRejected`] if `out` is too small.
+    /// [`CryptoError::RekeyFailed`] at `REJECT_AFTER_MESSAGES`, and once the
+    /// session has been erased; [`CryptoError::HandshakeRejected`] if `out` is
+    /// too small.
     pub fn seal(&mut self, payload: &[u8], out: &mut [u8]) -> Result<(u64, usize)> {
+        // Before the counter moves, not after: an erased session must not spend
+        // a nonce it can never seal under, because `twinvpn-tunnel` runs its own
+        // counter in lockstep with this one.
+        self.transport.usable()?;
         let nonce = self.send.take()?;
-        let n = self.state.write_message(nonce, payload, out).map_err(|_| {
-            CryptoError::HandshakeRejected {
-                step: "transport seal",
-            }
-        })?;
+        let n = self.transport.write_message(nonce, payload, out)?;
         Ok((nonce, n))
     }
 
@@ -351,18 +373,19 @@ impl TransportSession {
     ///
     /// [`CryptoError::ReplayDetected`] before the AEAD if the counter is
     /// obviously stale, or after it if the frame is a replay;
-    /// [`CryptoError::HandshakeRejected`] if the AEAD fails.
+    /// [`CryptoError::HandshakeRejected`] if the AEAD fails;
+    /// [`CryptoError::RekeyFailed`] once the session has been erased.
     pub fn open(&mut self, nonce: u64, frame: &[u8], out: &mut [u8]) -> Result<usize> {
+        // An erased session is finished, and saying so is more useful to a
+        // diagnostic than reporting whatever the replay window happens to think
+        // of a counter no key can authenticate.
+        self.transport.usable()?;
         // Cheap shed first: a counter that cannot be accepted is dropped without
         // spending an AEAD on it. This does not mutate the window.
         if !self.recv.would_accept(nonce) {
             return Err(CryptoError::ReplayDetected { counter: nonce });
         }
-        let n = self.state.read_message(nonce, frame, out).map_err(|_| {
-            CryptoError::HandshakeRejected {
-                step: "transport open",
-            }
-        })?;
+        let n = self.transport.read_message(nonce, frame, out)?;
         // Only now, with the frame authenticated, does the window move.
         self.recv.accept(nonce)?;
         Ok(n)
@@ -381,17 +404,75 @@ impl TransportSession {
     }
 
     /// The peer's static, as established by the handshake.
+    ///
+    /// Still answers after [`Self::erase`]: `tk_pub` is a **public** key and it
+    /// is the identity this session was established against, so a teardown
+    /// diagnostic that could not name the peer would cost readability for no
+    /// confidentiality.
     #[must_use]
     pub fn remote_static(&self) -> Option<&[u8]> {
-        self.state.get_remote_static()
+        self.transport.remote_static()
+    }
+
+    /// Overwrites both session keys and makes the session permanently unusable.
+    ///
+    /// ADR-0001 §7.2's `REJECT_AFTER_TIME` outcome — "keys are unusable and are
+    /// **zeroed**" — reached explicitly rather than by waiting for a drop. It is
+    /// idempotent, and [`Drop`] calls it, so an early return, a `?`, or an
+    /// unwind through a scope holding this session reaches the same place. After
+    /// it, [`Self::seal`] and [`Self::open`] return
+    /// [`CryptoError::RekeyFailed`]; there is no method that makes the session
+    /// usable again, because a rekey is a **new** session (§7.3.2 RS-3).
+    ///
+    /// See `crate::erase` for what the overwrite does and does not achieve.
+    pub fn erase(&mut self) {
+        self.transport.erase();
+    }
+
+    /// Whether the session keys have been erased.
+    #[must_use]
+    pub const fn is_erased(&self) -> bool {
+        self.transport.is_erased()
+    }
+
+    /// The wrapper itself, for `crate::erase`'s own tests only.
+    ///
+    /// `cfg(test)` rather than `pub(crate)`: the erasure tests must be able to
+    /// look at the `snow` state *behind* the guard that refuses an erased
+    /// session, and nothing in a shipped build may.
+    #[cfg(test)]
+    pub(crate) const fn transport_for_test(&self) -> &ErasingTransport {
+        &self.transport
+    }
+
+    /// As [`Self::transport_for_test`], mutably.
+    #[cfg(test)]
+    pub(crate) const fn transport_for_test_mut(&mut self) -> &mut ErasingTransport {
+        &mut self.transport
     }
 }
+
+impl zeroize::Zeroize for TransportSession {
+    /// The ecosystem spelling of [`Self::erase`], so a caller holding this
+    /// behind a `Zeroize` bound gets the real erasure rather than a `Drop` that
+    /// used to be one. `twinvpn-tunnel` does not declare `zeroize` and calls
+    /// [`Self::erase`] instead; both reach the same code.
+    fn zeroize(&mut self) {
+        self.erase();
+    }
+}
+
+/// The erasure runs in `ErasingTransport`'s destructor, which is this type's
+/// field, so [`TransportSession`] needs no `Drop` of its own to honour the
+/// marker.
+impl zeroize::ZeroizeOnDrop for TransportSession {}
 
 impl core::fmt::Debug for TransportSession {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("TransportSession")
             .field("sent", &self.send.sent())
             .field("recv", &self.recv)
+            .field("erased", &self.is_erased())
             .finish_non_exhaustive()
     }
 }

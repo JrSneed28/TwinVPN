@@ -319,14 +319,19 @@ pub struct CapabilityToken<'a> {
 
 /// Validates a capability advertisement against ADR-0014 N-10's caps.
 ///
-/// # The capability-name cap is 32, not the registry's 24
+/// # The capability-name cap is derived from the registry, not restated here
 ///
-/// `docs/implementation/ownership.md` §4.3: `limits.json` says 24, but
-/// `capabilities.json` says 32, the CDDL says `[a-z][a-z0-9_]{0,31}`, and the
-/// capability registry itself contains `dns_config_dies_with_tunnel` — 27 bytes.
-/// Validating against 24 would reject a Phase-1-mandated token. `contracts/` is
-/// frozen, so this validates against [`limits::CAPABILITY_MAX_NAME_BYTES`] (32)
-/// and the exception is legible and removable at that one constant.
+/// **Authority:** ADR-0014 N-11, amended from 24 to 32 by CF-6, and carried in
+/// `contracts/registry/limits.json` as `capability.max_name_bytes` since
+/// `registry_version` 2. This checks [`limits::CAPABILITY_MAX_NAME_BYTES`],
+/// which is *defined as* the compiled registry constant — so the enforced bound
+/// moves when the registry moves, and no literal here can be left behind by it.
+///
+/// No exception is carried at this call any more. `limits.json`,
+/// `capabilities.json` and `capabilities.cddl`'s `[a-z][a-z0-9_]{0,31}` all say
+/// 32, so `dns_config_dies_with_tunnel` — 27 bytes, `security_relevant`, and
+/// deliberately not renamed under S-37 — is admitted by the registry itself
+/// rather than by something written on top of it.
 ///
 /// # Errors
 ///
@@ -346,7 +351,7 @@ pub fn capability_advertisement(
         limits::CAPABILITY_MAX_ADVERTISEMENT_BYTES,
     )?;
     for token in tokens {
-        // ownership.md §4.3: 32, not limits.json's stale 24.
+        // ADR-0014 N-11 via the compiled registry — never a literal; see above.
         Reject::check_max(
             "capability.max_name_bytes",
             token.name.len(),

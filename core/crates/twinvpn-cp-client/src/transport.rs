@@ -7,18 +7,25 @@
 //! §11.7 (reconnect discipline), §11.10 (the mobile rule), `docs/protocol.md`
 //! §4.1 (Happy Eyeballs v2 with a 250 ms IPv6 bias), ADR-0010 R1.
 //!
-//! # Why the binding is a trait and not an implementation here
+//! # Why this is still a trait now that rung 1 is implemented
 //!
-//! The `core/` workspace manifest — owned by the integration lead — declares no
-//! QUIC or TLS dependency, and `ownership.md` forbids this crate from adding one.
-//! More importantly, ADR-0018 CB-1 puts the socket at the platform seam and CB-3
-//! forbids an OS branch above the adapter. So the *policy* — which rung, in what
-//! order, with which budget, emitting which code — lives here and is fully
-//! testable, and the *binding* is supplied at construction, exactly as
-//! [`twinvpn_env::Env`] supplies the clock.
+//! [`crate::quic::QuicControlTransport`] is the production rung-1 binding, and it
+//! lives beside this module rather than in it. What stays here is the *policy* —
+//! which rung, in what order, with which budget, emitting which code — which is
+//! fully testable with no socket, and what stays a trait is the *binding*,
+//! supplied at construction exactly as [`twinvpn_env::Env`] supplies the clock.
 //!
-//! This is listed as an integration item: the composition root must bind a
-//! [`ControlTransport`] that is QUIC + HTTP/3 on rung 1.
+//! That split is not merely tidiness. Rungs 2, 3 and 4 are HTTP over TCP and are
+//! **not implemented anywhere yet**; a device that cannot reach UDP:443 still has
+//! no control channel, and the ladder above says so honestly instead of the type
+//! system implying otherwise. And the trait is what lets `src/testing.rs` drive
+//! an eight-hour outage on a virtual clock, which no real transport can do.
+//!
+//! `ownership.md` §8 **W-12** is what made the rung-1 implementation legal in
+//! this crate: `quinn` is a transport-protocol implementation that takes its
+//! cryptography from rustls and implements none itself, so CD-I2 does not reach
+//! it. See [`crate::quic`] for the full argument and for what a composition root
+//! must supply.
 //!
 //! # 0-RTT
 //!
@@ -36,6 +43,7 @@
 use core::time::Duration;
 
 use futures_core::future::BoxFuture;
+use twinvpn_schema::Reject;
 use twinvpn_types::{codes, ReasonCode};
 
 use crate::error::CpError;
@@ -297,6 +305,17 @@ pub enum TransportError {
         /// The drain deadline the server advertised. Default 120 s.
         drain_deadline_ms: u64,
     },
+    /// The peer declared a length or a shape the frozen registry forbids.
+    ///
+    /// A transport reads a `u32` length off the wire before it can size a
+    /// buffer, and that length is untrusted input like any other:
+    /// `ownership.md` §6 rules 9 and 10 require the cap to be applied **before**
+    /// the allocation, and rule 12 requires the refusal to name a registered
+    /// `PROTO.*` code rather than being flattened into "the connection closed".
+    /// Carrying the [`Reject`] verbatim is what keeps the violated registry key
+    /// nameable this far down the stack.
+    #[error(transparent)]
+    Rejected(Reject),
 }
 
 impl From<TransportError> for CpError {
@@ -315,6 +334,11 @@ impl From<TransportError> for CpError {
                 CpError::AdmissionDeferred { retry_after_ms }
             }
             TransportError::Superseded => CpError::SupersededByNewAttach,
+            // The registry key survives the conversion rather than being
+            // collapsed into `Unreachable`: a peer that declared 4 GiB and a
+            // peer that went away are different facts, and only one of them is
+            // a `PROTO.SIZE_EXCEEDED` worth alerting on.
+            TransportError::Rejected(reject) => CpError::Rejected(reject),
         }
     }
 }

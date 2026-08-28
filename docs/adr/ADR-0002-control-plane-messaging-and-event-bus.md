@@ -491,6 +491,55 @@ delivered by the first of these that applies:
 4. **Resume, do not reload.** A device whose cursor is still within the retention floor MUST resume
    from it. Re-snapshotting on every reconnect is prohibited — it converts a reconnect storm into a
    bandwidth storm.
+5. **A drain deadline that expires with work in flight is an operational fact, not a device-facing
+   error.** When rule 1's `drain_deadline_ms` elapses and requests are still outstanding, the
+   service MUST record the count and proceed with teardown. It MUST NOT invent a `reason_code` for
+   the condition, and it MUST NOT reuse `INTERNAL.INVARIANT_VIOLATED`.
+
+> **Amended 2026-08-28 — rule 5 added: what a service does when its own drain deadline expires.**
+>
+> Rule 1 fixed what a server *announces* at drain start and what clients do with it. It said nothing
+> about the server's state when that deadline actually arrives, and **no other ADR claimed the
+> question**: ADR-0015 C-5 points the opposite way (a service "MUST NOT rely on graceful shutdown to
+> flush"), ADR-0016 is client-side authority, ADR-0022 is mobile provider lifecycle, and ADR-0005 §8
+> with `docs/reliability.md` §8.3 govern the **relay's** drain, which is a different condition with a
+> different client obligation. This is finding **W-13** in
+> `docs/implementation/ownership.md` §8, raised there as "a request to whichever ADR owns shutdown".
+> This ADR owns the drain and the 120 s default, so it owns the deadline's expiry.
+>
+> **Why no `reason_code`.** A `reason_code` is a fact reported to a peer about that peer's request.
+> Grace expiry is neither: the affected requests are ones the service is about to abandon, on a
+> connection it is closing, and by then there is nobody left to tell. Registering a code for it would
+> put a value in the registry that no receiver can ever act on — which is the failure mode the closed
+> sixteen-domain taxonomy exists to prevent. The two codes that look close are both wrong:
+> `MGMT.SHUTTING_DOWN` is INFO and already means drain *start*, and
+> `RESOURCE.CAPACITY.RESTART_BREAKS_FLOWS` is a `user_actionable` POLICY warning in the future tense,
+> issued to an operator *before* a restart.
+>
+> **`INTERNAL.INVARIANT_VIOLATED` is explicitly refused**, and this is the substance of the rule
+> rather than a detail. That code is FATAL, CRITICAL, `terminal: true`, and its registry entry reads
+> "EVERY OCCURRENCE IS A DEFECT". A grace period that expires under genuine load is not a defect —
+> it is the bound doing its job — so reporting it that way would make a correct outcome page an
+> engineer, and would devalue the one code whose meaning depends on never being cried wolf.
+>
+> **What reporting is therefore required**, and what `services/twinvpn-service-common/src/shutdown.rs`
+> already does: increment the `twinvpn_shutdown_grace_expired_total` counter, set the
+> `twinvpn_shutdown_inflight_at_deadline` gauge to the outstanding count, and emit one WARN with
+> `twinvpn.outcome = "grace_expired"` and the count as an allowlisted attribute. That is a metric an
+> operator alerts on and a log line that names the number, which is what the condition actually needs.
+>
+> **A gap in rule 1 that this amendment does not close, and must not be read as closing.** Rule 1
+> names HTTP/3 `GOAWAY` as the carrier for `drain_deadline_ms`. **The shipped rung-1 server speaks
+> C1 directly over QUIC streams with no HTTP/3 layer** — `services/control-plane/src/quic.rs` and
+> `wire.rs` — so on the transport as built there is *no encoding in which a drain deadline is
+> announced*, and `twinvpn_cp_client::transport::TransportError::Draining` has no producer. Rule 5
+> therefore governs a deadline that, on rung 1 today, is never sent. It is still the right rule — the
+> service does time-bound its own shutdown and does reach expiry — but a client currently learns of a
+> planned restart only by the connection closing, which is rule 2's unplanned path with rule 2's
+> correlated backoff. **Closing this needs an application-close encoding the server actually writes**,
+> which is a protocol addition and not an editorial one. Recorded here rather than invented, because
+> fabricating a frame the server does not send would give the ladder a drain that silently never
+> fires.
 
 ### 11.8 Structural proof of I5 compliance
 

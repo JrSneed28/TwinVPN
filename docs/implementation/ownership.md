@@ -109,7 +109,8 @@ happens, in order:
 contract. If the contract genuinely cannot express what Phase 1 requires, that is
 a finding to report, not a patch to land.
 
-One defect is already open and is recorded in §4.
+One defect was raised under this procedure and is recorded in §4.3; Amendment 1
+closed it. No contract defect is open.
 
 ---
 
@@ -154,23 +155,73 @@ as the complete user-facing error* — is satisfied structurally and is still
 binding: map every internal error into a registered `reason_code`, carry the
 platform detail as typed `Evidence`, and never let an `errno` be the whole story.
 
-### 4.3 OPEN DEFECT — `limits.json` capability name bound is stale
+### 4.3 CLOSED — `limits.json` capability name bound was stale
 
-`contracts/registry/limits.json` has `capability.max_name_bytes = 24`.
-`contracts/registry/capabilities.json` has `capability_name_max_length = 32`,
-`contracts/cddl/twinvpn/v1/capabilities.cddl` has `[a-z][a-z0-9_]{0,31}`, and the
-registry itself contains `dns_config_dies_with_tunnel` — **27 bytes**. CF-6
+**The defect, as it stood.** `contracts/registry/limits.json` had
+`capability.max_name_bytes = 24`, while
+`contracts/registry/capabilities.json` had `capability_name_max_length = 32`,
+`contracts/cddl/twinvpn/v1/capabilities.cddl` had `[a-z][a-z0-9_]{0,31}`, and the
+registry itself contained `dns_config_dies_with_tunnel` — **27 bytes**. CF-6
 amended [ADR-0014](../adr/ADR-0014-protocol-versioning-and-capability-negotiation.md)
 N-11 from 24 to 32 and deliberately did **not** rename the token, because it is
 `security_relevant` and a rename is an S-37 compatibility event.
 
-`limits.json` exists to be *the* source for validators on untrusted input. An
-implementation that validates a capability advertisement against it would reject
-a Phase-1-mandated token. That is a genuine contract defect, not an
-inconvenience.
+`limits.json` exists to be *the* source for validators on untrusted input, so an
+implementation that validated a capability advertisement against it would have
+rejected a Phase-1-mandated token. That was a genuine contract defect, not an
+inconvenience, and it is why every validator in the tree carried a hand-written
+exception reading "32, not `limits.json`'s 24" with a pointer back to this
+section.
 
-**Until it is dispositioned:** validate capability names against **32** and cite
-this section. Do **not** edit `contracts/`. The integration lead has raised it.
+**The close.** Amendment 1 to the freeze moved `capability.max_name_bytes` to
+**32** under the §3 eight-step procedure — `contracts/FROZEN` lists it, and
+`limits.json` carries the reasoning at the field itself. The registry, the
+capability registry, the CDDL and ADR-0014 N-11 now all say 32.
+
+**The residue, which is the part worth recording.** Closing the registry did not
+close the workarounds: a defect that instructs every domain to hardcode a value
+leaves that value hardcoded after the defect is gone, and nothing fails when it
+does. Two kinds were found and both are fixed:
+
+- **Stale prose** in `twinvpn-schema`, `twinvpn-tunnel`, `core/README.md` and
+  `services/twinvpn-service-common/README.md`, still describing an open defect —
+  including a doc-comment string in `twinvpn-schema/build.rs` that was
+  *generated into* `limits_generated.rs`, so the wrong claim was reproduced into
+  every build output.
+- **One surviving code workaround**, a magic `32` in
+  `twinvpn-crypto/src/statements/peerdocs.rs`, which would not have moved if the
+  registry moved again.
+
+`CAPABILITY_MAX_NAME_BYTES` is now **derived** from the registry rather than
+pinned beside it, and `twinvpn-schema`'s `the_registry_agrees_with_itself`
+asserts the constant and `limits.json` are the same number — so the next registry
+change fails a test instead of silently disagreeing with a validator. That test
+was written during the defect to fail *the moment* `contracts/` was amended,
+which is what made this exception removable rather than permanent; it fired on
+`registry_version` 2, exactly as intended.
+
+**One clause in `contracts/` is now out of date, and stays that way.**
+`contracts/registry/limits.json`'s `_max_name_bytes_note` still reads "Recorded
+as an open contract defect in `ownership.md` §4.3 with a live workaround in
+production code". There is no live workaround any more — `peerdocs.rs` was the
+last one and it now derives the bound. The note is a frozen file and the clause
+is history rather than an instruction, so it is **not** worth an amendment on its
+own; fold the correction into the next one that opens `contracts/` for a real
+reason.
+
+**One asymmetry, ruled on rather than fixed.** `contracts/tests/` asserts
+`capabilities.json`'s 32 and the CDDL's pattern, but never compares
+`limits.json`'s `capability.max_name_bytes` to a literal — the bound is read
+dynamically there, so that suite would pass at any value. The line is therefore
+held Rust-side only. **It stays that way for now:** §3 names the contract tests
+as frozen, and adding an assertion to them mid-gate is a contract change for a
+property already asserted elsewhere. Recorded here so the asymmetry is a decision
+someone can revisit at the next amendment, not an oversight.
+
+**The rule this leaves.** Take the bound from
+`twinvpn_schema::limits::CAPABILITY_MAX_NAME_BYTES`, never from a literal, and
+cite ADR-0014 N-11 / CF-6 rather than this section. Nothing here is an open
+instruction any more.
 
 ---
 
@@ -317,7 +368,7 @@ something Phase 1 does not say and someone must decide.
 | **W-11** | **defect** | **Eight `CONTROL.*` reason codes that ADR-0009 §11 names are absent from the frozen registry.** Present: `CONTROL.CONSISTENCY.REPLICA_BEHIND_CURSOR`, `CONTROL.STALENESS.DOCUMENT_STALE`, `CONTROL.STALENESS.TRUST_LIST_EXPIRED`. **Missing:** `CONTROL.CONSISTENCY.{VERSION_ROLLBACK_REJECTED, FORKED_HISTORY_DETECTED, CURSOR_INVALIDATED, CLOCK_SKEW_EXCESSIVE, SIGNATURE_UNVERIFIABLE}` and `CONTROL.STALENESS.{POLICY_GRANT_SUSPENDED, RELAY_SET_EXPIRED, TRUST_EPOCH_BEHIND_PEER}` — 8 of the 11 names ADR-0009 uses. Verified directly against the registry rather than taken on report: `core-controlplane` reported five; `CLOCK_SKEW_EXCESSIVE` and `TRUST_EPOCH_BEHIND_PEER` were also missing and unreported. | Not patched. The interim mapping onto the nearest registered codes (`AUTH.TRUST_EPOCH_ROLLBACK`, `AUTH.TRUST_HISTORY_FORKED`, `POLICY.EXPIRY.BUNDLE_EXPIRED`) is **defensible and accepted for now**, but it has a real cost: it loses the `CONTROL.CONSISTENCY.*` namespace ADR-0009 asked for, and ADR-0015 §11.2's whole forward-compatibility story is **prefix degradation** — an older client meeting `AUTH.*` where a consistency failure occurred degrades to the wrong diagnosis, which is the failure mode the closed-domain rule exists to prevent. The registry is **append-only**, so adding these breaks nothing and is the sanctioned evolution path — but it is still a `contracts/` change. **Needs approval.** |
 | **W-12** | ruling | **Where does the L-CONTROL QUIC/TLS stack live?** ADR-0001 §11 item 3 requires QUIC + TLS 1.3 with mutual raw-public-key auth in the core, but CD-I2 permits a cryptographic dependency only in `twinvpn-crypto`, and `rustls` is one. `core-controlplane` was blocked on this and shipped the ladder policy without a production binding. | **Split by what is actually cryptographic.** `rustls` — the TLS implementation, the raw-public-key verifier, the cipher-suite policy, the `CryptoProvider` — belongs to **`twinvpn-crypto`**: those are exactly the decisions a reviewer auditing *what cryptography do we use* must read, which is CD-I2's stated purpose. `quinn` is a **transport protocol** implementation — framing, loss recovery, congestion control — that takes its cryptography from rustls and implements none itself, so **`twinvpn-cp-client` may declare it**, constructing its endpoint from configuration `twinvpn-crypto` vends. `twinvpn-core` wires the two. **Not the shell:** CB-1 puts code in a shell only when it must call a platform API with no stable C-callable form; QUIC is not one, and CB-1 says ambiguity resolves to the core. |
 
-| **W-13** | **defect** | **No registered reason code covers "shutdown grace period expired with work still in flight."** `INTERNAL.INVARIANT_VIOLATED` would overclaim — grace expiry under load is not necessarily a defect. | **PARTLY CLOSED.** `registry_version` 2 registered the ADR-named codes, but no ADR names this condition, so none was invented — correctly. The metric and the allowlisted attribute remain the handling. **Still open as a request to whichever ADR owns shutdown.** |
+| **W-13** | **defect** | **No registered reason code covers "shutdown grace period expired with work still in flight."** `INTERNAL.INVARIANT_VIOLATED` would overclaim — grace expiry under load is not necessarily a defect. | **CLOSED — and the answer is that the condition should not have a code.** The search for an owning ADR found there was none: ADR-0002 §11.7 rule 1 fixed what a server *announces* at drain start and said nothing about the deadline arriving; ADR-0015 C-5 points the other way, ADR-0016 is client-side, ADR-0022 is mobile lifecycle, and ADR-0005 §8 / `reliability.md` §8.3 govern the *relay's* drain, a different condition. **ADR-0002 §11.7 rule 5 (amended 2026-08-28) now owns it**, because that ADR already owns the drain and the 120 s default. The rule refuses a `reason_code` on the merits rather than for want of one: a `reason_code` is a fact reported to a peer about that peer's request, and by grace expiry the affected requests are being abandoned on a connection that is closing — there is nobody left to tell, so a registered code would be one no receiver could ever act on. It also **explicitly forbids `INTERNAL.INVARIANT_VIOLATED`**, whose registry entry reads "EVERY OCCURRENCE IS A DEFECT": expiry under genuine load is the bound working, and reporting it that way would page an engineer for a correct outcome and devalue the one code that depends on never being cried wolf. Required reporting is the metric pair `twinvpn_shutdown_grace_expired_total` / `twinvpn_shutdown_inflight_at_deadline` plus one WARN carrying `twinvpn.outcome = "grace_expired"` and the count — which is what `services/twinvpn-service-common/src/shutdown.rs` already emitted. **No contracts amendment was needed**; the registry is untouched. |
 | **W-14** | gap | **`/metrics` is scraped by Prometheus directly, so the collector's *positive* allowlist is not in that path** — only a `labeldrop` denylist is. | The positive control therefore had to move to **emit time**, which is where it belongs anyway. Consequence to be aware of: ADR-0015 §9's five labels are the *entire* metric-label vocabulary, so per-dependency readiness detail lives in the `/readyz` JSON body rather than as a metric label. Widening that is a §9 conversation, not a code change. |
 | **W-15** | gap | **`service.instance.id` is allowlisted by the collector but nothing in `docker-compose.yml` supplies it.** | `twinvpn-service-common` takes it as an explicit caller argument rather than silently reading a hostname or generating entropy — the right call, since an instance id invented per process makes fleet queries lie. **`infrastructure` to supply it in compose.** |
 | **W-16** | gap | **ADR-0015 §11.5 names a `CRITICAL` log level; `tracing` has none.** | `TWINVPN_LOG_LEVEL=critical` is accepted and mapped to `ERROR`, so a value copied verbatim from the ADR configures the service rather than failing it. Documented at the mapping. Flag if a genuinely distinct level is wanted. |

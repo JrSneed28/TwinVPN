@@ -175,6 +175,17 @@ impl ControlPlaneClient {
                     });
                 }
                 Err(TransportError::Superseded) => return Err(CpError::SupersededByNewAttach),
+                // A frame the frozen registry forbids. Terminal, and it does
+                // NOT fall through the ladder: the same malformed or oversized
+                // envelope would be refused identically on rungs 2, 3 and 4, so
+                // walking down would turn one legible `PROTO.*` into four
+                // transport failures — the same argument the arm above makes
+                // for a rejected identity. The violated registry key survives
+                // into `CpError::Rejected`.
+                Err(TransportError::Rejected(reject)) => {
+                    self.health = ChannelHealth::Unreachable;
+                    return Err(CpError::Rejected(reject));
+                }
                 Err(TransportError::RungFailed(_) | TransportError::Closed) => {
                     rung = current.next();
                 }

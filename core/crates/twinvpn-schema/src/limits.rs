@@ -25,7 +25,7 @@ pub const LIMITS_JSON: &str = include_str!("../../../../contracts/registry/limit
 pub const CAPABILITIES_JSON: &str =
     include_str!("../../../../contracts/registry/capabilities.json");
 
-/// The capability-name cap this build enforces: **32, not the registry's 24**.
+/// The capability-name cap this build enforces: **the registry's own 32**.
 ///
 /// # A closed contract defect — the constant is now the registry's
 ///

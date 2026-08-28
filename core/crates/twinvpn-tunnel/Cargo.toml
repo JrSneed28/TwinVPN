@@ -22,3 +22,14 @@ bytes                 = { workspace = true }
 
 [dev-dependencies]
 proptest              = { workspace = true }
+# CD-I2 covers dev-dependencies too — `cargo metadata` reports them alongside
+# normal ones, so a `p256` dev-dependency here would fail `xtask lint` exactly as
+# a real one would, and correctly. The fixtures a production-handshake test needs
+# (a signed `TunnelKeyBinding`, so a `VerifiedTunnelKey` can exist at all) come
+# from `twinvpn-crypto`'s own `test-support` module, where the dependency is
+# already permitted. Never enabled in a shipped build.
+twinvpn-crypto        = { workspace = true, features = ["test-support"] }
+# `test-support` is the virtual clock and the injectable entropy an `Env` needs
+# in a test. CD-3 bans reaching for the platform CSPRNG here, and a handshake
+# test must be reproducible in any case.
+twinvpn-env           = { workspace = true, features = ["test-support"] }

@@ -229,8 +229,23 @@ impl Tunnel {
     /// Opens one inbound payload, checking the replay window **after**
     /// authentication.
     ///
-    /// The order matters: checking the window first would let an attacker
-    /// advance it with forged counters. WireGuard opens first, then admits.
+    /// The order matters: **admitting** on the window first would let an
+    /// attacker advance it with forged counters. WireGuard opens first, then
+    /// admits, and so does this — [`ReplayWindow::accept`] runs only after the
+    /// AEAD has authenticated the frame.
+    ///
+    /// The non-mutating [`ReplayWindow::would_accept`] runs *before* the AEAD,
+    /// which is safe for the same reason WireGuard's own cheap shed is: it moves
+    /// nothing. It is here for a reason that only appears with a real crypto
+    /// binding. [`crate::bind::SessionKeys`] wraps a
+    /// `twinvpn_crypto::noise::TransportSession`, which carries a replay window
+    /// of its own and refuses a duplicate itself — so without this pre-check a
+    /// replayed counter would surface as [`TunnelError::Crypto`] (a drop) rather
+    /// than [`TunnelError::Replay`] (`CRYPTO.REPLAY_DETECTED`, `FATAL`), and the
+    /// engine's own classification would be unreachable in production while
+    /// staying reachable under a stub. A security event that downgrades to a
+    /// drop when you swap the stub for the real thing is exactly the divergence
+    /// worth spending three lines on.
     ///
     /// # Errors
     ///
@@ -244,6 +259,12 @@ impl Tunnel {
     ) -> Result<(), TunnelError> {
         if !self.state.carries_traffic() {
             return Err(TunnelError::NotEstablished);
+        }
+        // Non-mutating: a counter the window can never take is refused before an
+        // AEAD is spent on it, and before the keys' own window can classify the
+        // same fact more weakly.
+        if !self.replay.would_accept(counter) {
+            return Err(TunnelError::Replay);
         }
         let keys = self.keys.as_ref().ok_or(TunnelError::NotEstablished)?;
         keys.open(counter, ciphertext, out)?;

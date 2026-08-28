@@ -14,10 +14,13 @@
 //! engine here does scheduling, counters, replay windows and state — never
 //! arithmetic on a key.
 //!
-//! **Integration items.** `twinvpn-crypto` supplies implementations of
-//! [`NoiseHandshake`], [`TransportKeys`] and [`Transcript`]. The exact shapes are
-//! listed in this crate's report so the integration lead can reconcile them
-//! against what `core-security` built.
+//! **The implementations are [`crate::bind`]'s.** These three traits are the
+//! *shape* of the boundary; [`crate::bind::NoiseBinding`],
+//! [`crate::bind::SessionKeys`] and [`crate::bind::NoiseTranscript`] are the
+//! production bindings of that shape onto `twinvpn-crypto`. They live in a
+//! separate module rather than here so this file stays readable as the answer to
+//! "what does the engine ask cryptography for", with no implementation between
+//! the questions.
 
 use twinvpn_types::TypeError;
 

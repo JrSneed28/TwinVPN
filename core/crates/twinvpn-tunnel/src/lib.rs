@@ -18,6 +18,17 @@
 //! [`crypto::Transcript`], and this crate does scheduling, counters, windows and
 //! state.
 //!
+//! # Where the production implementations live
+//!
+//! [`bind`] supplies them. Declaring a trait and shipping no implementation of
+//! it is a gate that passes over a product with no tunnel, so [`bind`] closes
+//! that: [`bind::NoiseBinding`] is the real `Noise_IKpsk2` handshake,
+//! [`bind::SessionKeys`] the real transport keys, [`bind::NoiseTranscript`] the
+//! real §7.3 D2 hashes, and [`bind::establish_tunnel`] the path from a completed
+//! handshake to a live [`engine::Tunnel`]. All four are newtypes over
+//! `twinvpn-crypto`, which this crate already depends on — so CD-I2 is
+//! untouched and no cryptography moved.
+//!
 //! # The composition rule
 //!
 //! ADR-0001 §7.2 calls it "the single most important composition rule in this
@@ -56,6 +67,7 @@
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::missing_errors_doc)]
 
+pub mod bind;
 pub mod crypto;
 pub mod engine;
 pub mod negotiate;
@@ -63,6 +75,7 @@ pub mod rekey;
 pub mod replay;
 pub mod transport;
 
+pub use bind::{establish_tunnel, NoiseBinding, NoiseTranscript, SessionKeys};
 pub use crypto::{CryptoUnavailable, NoiseHandshake, Prologue, Transcript, TransportKeys};
 pub use engine::{Tunnel, TunnelError, TunnelState};
 pub use negotiate::{Advertisement, MonotonicFloor, Selection};

@@ -525,8 +525,13 @@ fn selection_takes_the_highest_mutually_supported_epoch_and_the_intersection() {
     assert!(negotiate::select(&ad(1, 2, &[]), &ad(5, 7, &[])).is_none());
 }
 
+/// CF-6 amended ADR-0014 N-11 from 24 to 32 and `registry_version` 2 carried
+/// that into `limits.json`, so the cap is now **derived** from the frozen
+/// registry rather than pinned against a disagreeing one. The 27-byte
+/// `security_relevant` token CF-6 declined to rename is what would fail if the
+/// two ever disagreed again.
 #[test]
-fn the_capability_name_cap_is_thirty_two_per_ownership_md_4_3() {
+fn the_capability_name_cap_is_thirty_two_and_comes_from_the_registry() {
     assert_eq!(negotiate::Caps::MAX_NAME_BYTES, 32);
     // The Phase-1-mandated 27-byte token validates.
     let a = ad(1, 1, &["dns_config_dies_with_tunnel"]);

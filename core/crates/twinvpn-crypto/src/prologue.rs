@@ -68,6 +68,7 @@
 //! salt's answer here would break the prologue's field alignment.
 
 use crate::kdf::{sha256, sha256_parts};
+use crate::{CryptoError, Result};
 
 /// `identity_binding_hash`'s domain label, verbatim from §7.3.1.
 pub const IDBIND_LABEL: &[u8] = b"TWINVPN-IDBIND-v1";
@@ -193,6 +194,59 @@ impl Prologue {
         out[19..51].copy_from_slice(&identity.hash());
         out[51..83].copy_from_slice(&negotiation.hash());
         Self(out)
+    }
+
+    /// Adopts 83 bytes that were assembled elsewhere as the **same** normative
+    /// field.
+    ///
+    /// # Why this exists
+    ///
+    /// P-1: "The `prologue` MUST be exactly the 83-byte concatenation above. **No
+    /// other document may define, extend, or reorder it.**" One normative field,
+    /// therefore one value — but until now there were two Rust *types* over it,
+    /// `twinvpn_crypto::prologue::Prologue` and `twinvpn_tunnel::crypto::Prologue`,
+    /// and **neither could be made from the other**: this one had no byte
+    /// constructor, that one has no binding constructor. `twinvpn_tunnel::bind`
+    /// bridged the gap by holding both and comparing them byte-for-byte on every
+    /// trait call.
+    ///
+    /// That cross-check is sound and should stay — two independent constructions
+    /// of the same 83 bytes agreeing is a real check, not a redundancy. What was
+    /// wrong is that the two constructions were *independent* at all: two
+    /// implementations of one normative field is the duplication P-1's last
+    /// sentence forbids, and it is only a matter of time before one of them
+    /// changes. With this constructor the tunnel-side value can be **derived**
+    /// from this one (or the reverse), and a future integration can collapse the
+    /// two types into one without touching a byte of the wire — because there is
+    /// no wire: P-3 says the prologue "is never transmitted".
+    ///
+    /// # What is checked, and why that is all
+    ///
+    /// The 19-byte label, and nothing else. The remaining 64 bytes are two
+    /// SHA-256 digests, and a digest is indistinguishable from any other 32
+    /// bytes — there is no check to perform that would not amount to recomputing
+    /// them, which is what [`Self::new`] is for. The label is the one part of the
+    /// field whose absence is *detectable*, so it is detected: it catches a
+    /// caller that swapped the two digest halves into the wrong offsets, or
+    /// handed over 83 bytes that were never a prologue at all.
+    ///
+    /// [`Self::new`] remains the way a prologue is **built**. This is the way one
+    /// already built is carried across a type boundary; it does not compute a
+    /// prologue and cannot be used to skip the two bindings.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::HandshakeRejected`] if the bytes do not begin with
+    /// [`PROLOGUE_LABEL`]. Handshake-shaped rather than a distinct code because
+    /// P-3 wants a prologue disagreement to be "observationally
+    /// indistinguishable from any other handshake failure".
+    pub fn from_bytes(bytes: [u8; PROLOGUE_LEN]) -> Result<Self> {
+        if &bytes[..PROLOGUE_LABEL.len()] != PROLOGUE_LABEL {
+            return Err(CryptoError::HandshakeRejected {
+                step: "prologue does not carry the §7.3.1 label",
+            });
+        }
+        Ok(Self(bytes))
     }
 
     /// The bytes, for `snow`'s `Builder::prologue`.
@@ -366,6 +420,65 @@ mod tests {
         // one where the other belongs would produce different key material
         // rather than accidentally agreeing.
         assert_ne!(&salt[..16], TwinnetTag::from_twinnet_id(id).as_bytes());
+    }
+
+    /// A prologue survives the round trip through its bytes unchanged, which is
+    /// what makes "derive one type from the other" possible at all.
+    #[test]
+    fn a_prologue_round_trips_through_its_own_bytes() {
+        let p = Prologue::new(&ident(), &nego());
+        let q = Prologue::from_bytes(*p.as_bytes()).expect("round trip");
+        assert_eq!(p, q);
+        assert_eq!(p.as_bytes(), q.as_bytes());
+    }
+
+    /// **The R-31 point.** `twinvpn_tunnel::crypto::Prologue::new` assembles the
+    /// same field from the two digests directly — `LABEL || h_id || h_neg` — and
+    /// that is reproduced here byte for byte. [`Prologue::from_bytes`] must
+    /// accept it and produce a value equal to the one this crate builds from the
+    /// bindings themselves, because P-1 says there is only one such field.
+    ///
+    /// If this ever fails, the two types have diverged over a field no document
+    /// is allowed to redefine — which is the whole reason the constructor
+    /// exists.
+    #[test]
+    fn the_tunnel_sides_assembly_of_the_same_field_is_the_same_field() {
+        let i = ident();
+        let n = nego();
+
+        // Exactly what `twinvpn_tunnel::crypto::Prologue::new` does, given the
+        // two digests this crate computes.
+        let mut assembled = [0u8; PROLOGUE_LEN];
+        assembled[..19].copy_from_slice(PROLOGUE_LABEL);
+        assembled[19..51].copy_from_slice(&i.hash());
+        assembled[51..83].copy_from_slice(&n.hash());
+
+        let derived = Prologue::from_bytes(assembled).expect("the tunnel side's bytes");
+        assert_eq!(derived, Prologue::new(&i, &n));
+    }
+
+    /// Eighty-three bytes that never were a prologue are refused, so the
+    /// constructor cannot become a way to bind nothing. The two digest halves
+    /// cannot be checked — they are digests — but a caller that swapped them
+    /// into the label's offsets is caught.
+    #[test]
+    fn eighty_three_bytes_without_the_label_are_not_a_prologue() {
+        let err = Prologue::from_bytes([0u8; PROLOGUE_LEN]).expect_err("no label");
+        assert!(matches!(err, CryptoError::HandshakeRejected { .. }));
+        assert_eq!(err.reason_code().as_str(), "CRYPTO.HANDSHAKE_REJECTED");
+
+        // One flipped bit in the label is still not the label.
+        let p = Prologue::new(&ident(), &nego());
+        let mut mangled = *p.as_bytes();
+        mangled[0] ^= 1;
+        assert!(Prologue::from_bytes(mangled).is_err());
+
+        // And the label is checked at its own offsets, not searched for: the
+        // digest halves rotated into the front are refused.
+        let mut rotated = [0u8; PROLOGUE_LEN];
+        rotated[..64].copy_from_slice(&p.as_bytes()[19..]);
+        rotated[64..].copy_from_slice(&p.as_bytes()[..19]);
+        assert!(Prologue::from_bytes(rotated).is_err());
     }
 
     #[test]

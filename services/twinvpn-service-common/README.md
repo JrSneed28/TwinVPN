@@ -826,9 +826,13 @@ Stated here rather than discovered later.
    opens a control-plane socket is not caught by anything here. The declaration
    makes the intent reviewable and machine-checkable at wiring time; it is not a
    sandbox.
-8. **Capability names, if a service validates one, must be checked against 32 and
-   not `limits.json`'s 24** — `ownership.md` §4.3's open contract defect.
-   `twinvpn_schema::limits::CAPABILITY_MAX_NAME_BYTES` is the value to use.
+8. **Capability names, if a service validates one, take their bound from
+   `twinvpn_schema::limits::CAPABILITY_MAX_NAME_BYTES`** — never from a literal.
+   This was `ownership.md` §4.3's open contract defect, where `limits.json` said
+   24 and everything else said 32; Amendment 1 closed it at 32 (CF-6 / ADR-0014
+   N-11) and the constant is now derived from the registry. Reading the constant
+   rather than restating its value is what keeps a future registry move from
+   silently disagreeing with a service.
 
 ### 12.1 A defect the port exposed — `release` dropped a live hold
 
