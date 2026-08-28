@@ -29,7 +29,13 @@ thiserror             = { workspace = true }
 futures-core          = { workspace = true }
 # CD-3 permits `tokio::time` only under src/binding/; `cargo run -p xtask -- lint`
 # enforces that path exclusion.
-tokio                 = { workspace = true, optional = true, features = ["rt", "rt-multi-thread", "time"] }
+#
+# `net` is what compiles tokio's I/O driver in, and `Builder::enable_io` is gated
+# on it. Without the driver no socket, netlink channel or tun device can be
+# registered on a production runtime, which is W-43 - see the comment in
+# src/binding/tokio_rt.rs. This crate opens no socket itself; it supplies the
+# driver the platform adapters register against.
+tokio                 = { workspace = true, optional = true, features = ["rt", "rt-multi-thread", "time", "net"] }
 
 [dev-dependencies]
 proptest              = { workspace = true }

@@ -191,7 +191,7 @@ cargo run -q -p xtask -- lint
 
 | Rule | Fires when | The fix |
 |---|---|---|
-| **CD-3** | a deny-listed time or randomness API appears outside `crates/twinvpn-env/src/binding/` | take the capability from `Env`. `MonotonicClock` for a timer, `ElapsedClock` across a suspend, `WallClock` for evidence only |
+| **CD-3** | a deny-listed time or randomness API appears outside `crates/twinvpn-env/src/binding/` — or a platform *syscall* appears outside a `twinvpn-platform-*` crate | take the capability from `Env`. `MonotonicClock` for a timer, `ElapsedClock` across a suspend, `WallClock` for evidence only. A platform adapter may name the syscalls in `CD3_PLATFORM_PRIMITIVES`; it may still not read an ambient Rust clock |
 | **CD-I2** | a crate other than `twinvpn-crypto` declares a cryptographic **implementation** | ask `core-security` for the operation behind a trait; do not add the crate. `zeroize` and `subtle` are exempt — they implement no cryptography; see `CD_I2_NOT_CRYPTO_IMPLEMENTATIONS` |
 | **CD-I5** | a data-plane crate reaches `twinvpn-cp-client`, directly or transitively, or the reverse | route it through `twinvpn-store`. Only `twinvpn-core` may name both planes |
 | **CD-CB3** | `#[cfg(target_os = …)]` outside a `twinvpn-platform-*` crate | branch on a **declared capability** instead: `Datapath`, `EnforcementCustody`, `RecordAeadCustody`, `SupportedFamilies`, `LinkClass` |
@@ -227,9 +227,20 @@ Stated here rather than discovered later:
 - **There is no production `ElapsedClock`.** `std` has no suspend-inclusive
   clock; the shell supplies one through
   `twinvpn_env::binding::system::ElapsedClockFn`. Substituting the monotonic
-  clock compiles and is invisible on Linux CI.
-- **There is no production `Entropy`.** CD-3 bans `getrandom`; the shell supplies
-  the platform CSPRNG.
+  clock compiles and is invisible on Linux CI. A `twinvpn-platform-*` crate may
+  reach the syscall directly — CD-3 exempts the platform primitives there (W-36).
+- **There is no production `Entropy`.** CD-3 bans `getrandom` outside a platform
+  crate; the shell supplies the platform CSPRNG. Note that CD-**I2** separately
+  restricts the `getrandom` *crate* to `twinvpn-crypto`, so a platform adapter
+  reaches the primitive through `libc` or a file read rather than that crate.
+- **`InterfaceFacts.addresses` cannot express an interface's own address.** It is
+  `Vec<IpPrefix>`, and `IpPrefix` requires every host bit to be zero, so
+  `192.0.2.10/24` has no representation and an adapter must mask it away. The
+  same conjunction drops link-local addresses. The replacement —
+  `twinvpn_types::InterfaceAddress`, plus `V6Addr::prefix_base` for the
+  link-local half — **is landed and additive**; flipping the field is a one-line
+  change at six call sites in `twinvpn-core` and `twinvpn-platform-linux`, so it
+  lands as a coordinated commit rather than as a red build.
 - **CD-4's HKDF is supplied by the binding**, not by `twinvpn-env`, because
   CD-I2 restricts cryptographic dependencies to `twinvpn-crypto`. See
   `crates/twinvpn-env/src/rng.rs`.
@@ -239,3 +250,9 @@ Stated here rather than discovered later:
 - **Capability names validate against 32, not `limits.json`'s 24.** An open
   contract defect; see `ownership.md` §4.3 and
   `crates/twinvpn-schema/src/limits.rs`.
+- **A link-local `IpPrefix` has no faithful wire form.** `common.proto` says
+  `IPv6Address.zone_index` is "REQUIRED and non-zero for link-local addresses
+  (`fe80::/10`); MUST be zero otherwise", and `IPPrefix` contains an
+  `IPAddress` — so `fe80::/10` encodes with `zone_index = 0`, which that comment
+  reads as forbidden. The domain types can now express it (`V6Addr::prefix_base`);
+  the wire cannot. Reported, not patched: `contracts/` is frozen.

@@ -3,8 +3,8 @@
 
 use proptest::prelude::*;
 use twinvpn_types::{
-    AddressFamily, Endpoint, IpAddr, IpPrefix, Nat64Prefix, PerFamily, Port, TypeError,
-    UnderlayFamilies, V4Addr, V6Addr, ZoneIndex,
+    AddressFamily, Endpoint, InterfaceAddress, IpAddr, IpPrefix, Nat64Prefix, PerFamily, Port,
+    TypeError, UnderlayFamilies, V4Addr, V6Addr, ZoneIndex,
 };
 
 fn v6(octets: [u8; 16]) -> V6Addr {
@@ -331,5 +331,137 @@ proptest! {
         let e6 = Endpoint::new(IpAddr::V6(V6Addr::UNSPECIFIED), p);
         prop_assert_eq!(e4.family(), AddressFamily::V4);
         prop_assert_eq!(e6.family(), AddressFamily::V6);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InterfaceAddress — an interface's OWN address (the IpPrefix conjunction)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_interface_address_keeps_its_host_bits() {
+    // 192.0.2.10/24. `IpPrefix` rejects this and must: it names a range.
+    let addr = IpAddr::V4(V4Addr::from_octets([192, 0, 2, 10]));
+    assert!(IpPrefix::new(addr, 24).is_err());
+
+    // `InterfaceAddress` keeps it, which is the whole point: the address to bind
+    // and to offer as a host candidate is 192.0.2.10, not 192.0.2.0.
+    let iface = InterfaceAddress::new(addr, 24).expect("an interface address");
+    assert_eq!(iface.address(), addr);
+    assert_eq!(iface.prefix_len(), 24);
+    assert!(!iface.is_host_route());
+}
+
+#[test]
+fn an_interface_address_derives_its_on_link_network() {
+    let iface =
+        InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets([192, 0, 2, 10])), 24).unwrap();
+    let net = iface.network();
+    assert_eq!(net.prefix_len(), 24);
+    assert_eq!(
+        net.address(),
+        IpAddr::V4(V4Addr::from_octets([192, 0, 2, 0]))
+    );
+    assert!(net.contains(iface.address()));
+}
+
+#[test]
+fn masking_is_exact_at_a_partial_octet_boundary() {
+    let iface =
+        InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets([100, 100, 5, 7])), 10).unwrap();
+    assert_eq!(
+        iface.network().address(),
+        IpAddr::V4(V4Addr::from_octets([100, 64, 0, 0]))
+    );
+}
+
+#[test]
+fn a_link_local_interface_address_keeps_its_zone_and_still_yields_a_prefix() {
+    // W-39's conjunction: V6Addr::new demands a zone on link-local and
+    // IpPrefix::new rejects any zone, so link-local prefixes were unrepresentable.
+    let mut ll = [0u8; 16];
+    ll[0] = 0xfe;
+    ll[1] = 0x80;
+    ll[15] = 1;
+    let scoped = V6Addr::from_slice(&ll, 3).expect("link-local with a zone");
+    let iface = InterfaceAddress::new(IpAddr::V6(scoped), 64).expect("interface address");
+
+    // The address keeps its zone — it is usable as an endpoint on this interface.
+    match iface.address() {
+        IpAddr::V6(a) => assert_eq!(a.zone_index_wire(), 3),
+        IpAddr::V4(_) => panic!("family flipped"),
+    }
+
+    // And the network derives, zoneless, which it could not before.
+    let net = iface.network();
+    assert_eq!(net.prefix_len(), 64);
+    match net.address() {
+        IpAddr::V6(a) => {
+            assert_eq!(a.zone(), None, "a prefix has no interface to be scoped to");
+            assert_eq!(a.octets()[..2], [0xfe, 0x80]);
+        }
+        IpAddr::V4(_) => panic!("family flipped"),
+    }
+}
+
+#[test]
+fn v6_prefix_base_accepts_a_zoneless_link_local_and_still_rejects_v4_mapped() {
+    let mut ll = [0u8; 16];
+    ll[0] = 0xfe;
+    ll[1] = 0x80;
+    // `new` refuses it — correct for an endpoint.
+    assert!(V6Addr::new(ll, None).is_err());
+    // `prefix_base` accepts it — correct for a range.
+    let base = V6Addr::prefix_base(ll).expect("fe80:: is a legal prefix base");
+    assert_eq!(base.zone(), None);
+    assert!(IpPrefix::new(IpAddr::V6(base), 10).is_ok());
+
+    // The v4-mapped rejection is unchanged: that rule is about canonical form,
+    // not about scope.
+    let mut mapped = [0u8; 16];
+    mapped[10] = 0xff;
+    mapped[11] = 0xff;
+    assert_eq!(
+        V6Addr::prefix_base(mapped).unwrap_err(),
+        TypeError::Ipv4MappedIpv6
+    );
+}
+
+#[test]
+fn the_overlays_own_addresses_are_host_routes() {
+    // ADR-0010 §11.1 allocates a /32 and a /128 per Device.
+    let v4 = InterfaceAddress::new(IpAddr::V4(V4Addr::from_octets([100, 64, 0, 7])), 32).unwrap();
+    let v6a = InterfaceAddress::new(
+        IpAddr::V6(v6([
+            0xfd, 0x7c, 0x9e, 0x5d, 0x2a, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ])),
+        128,
+    )
+    .unwrap();
+    assert!(v4.is_host_route());
+    assert!(v6a.is_host_route());
+    assert_eq!(v4.network().address(), v4.address());
+}
+
+#[test]
+fn an_interface_address_still_validates_its_prefix_length() {
+    assert!(InterfaceAddress::new(IpAddr::V4(V4Addr::UNSPECIFIED), 33).is_err());
+    assert!(InterfaceAddress::new(IpAddr::V6(V6Addr::UNSPECIFIED), 129).is_err());
+    assert!(InterfaceAddress::new(IpAddr::V4(V4Addr::UNSPECIFIED), 32).is_ok());
+}
+
+proptest! {
+    /// Every accepted interface address derives a canonical network that
+    /// contains it, for every octet pattern and every prefix length.
+    #[test]
+    fn an_interface_address_always_lies_inside_its_own_network(
+        octets in proptest::array::uniform4(any::<u8>()),
+        len in 0u32..=32,
+    ) {
+        let addr = IpAddr::V4(V4Addr::from_octets(octets));
+        let iface = InterfaceAddress::new(addr, len).expect("v4 length is in range");
+        let net = iface.network();
+        prop_assert!(net.contains(addr));
+        prop_assert_eq!(net.prefix_len(), len);
     }
 }

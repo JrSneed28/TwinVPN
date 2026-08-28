@@ -130,14 +130,80 @@ pub const CD3_DENIED: &[(&str, &str)] = &[
     ),
 ];
 
-/// Runs the CD-3 deny-list over one file.
+/// The needles that name a **platform primitive** rather than a Rust-level
+/// ambient clock or RNG.
+///
+/// # W-36: two of our own lints contradicted each other
+///
+/// CD-CB3 has [`cb3_crate_is_exempt`], which lets a `twinvpn-platform-*` crate
+/// name `target_os` — because CB-3 and DP-4 both put platform-specific code
+/// there. CD-3 had no equivalent, so **no location in the tree could legally
+/// read a platform clock**: the adapter crate that CB-3 designates for it was
+/// denied by CD-3, and `twinvpn-env`'s binding cannot branch on OS. That is not
+/// a rule with a hard case; it is two rules whose conjunction is unsatisfiable,
+/// and `desktop-linux` correctly routed around it through `/proc/uptime` and
+/// `/dev/urandom` — a 10 ms quantised clock where a syscall was meant.
+///
+/// This is the exemption CB-3 already implies, written down. It is scoped to the
+/// syscalls and entropy primitives themselves; see [`cd3_crate_may_read_platform_primitives`]
+/// for what stays denied even there, and why.
+pub const CD3_PLATFORM_PRIMITIVES: &[&str] = &[
+    // Suspend-inclusive and suspend-exclusive time, per ADR-0022 LC-8's table.
+    // This is how a platform adapter supplies `ElapsedClock`, which
+    // `twinvpn-env` deliberately ships no production implementation of.
+    "clock_gettime",
+    "mach_absolute_time",
+    "mach_continuous_time",
+    "QueryPerformanceCounter",
+    "QueryUnbiasedInterruptTime",
+    "QueryInterruptTime",
+    "GetTickCount64",
+    "GetSystemTimeAsFileTime",
+    "elapsedRealtime",
+    // Platform entropy, which is how a platform adapter supplies `Entropy`.
+    "getrandom",
+    "OsRng",
+];
+
+/// Whether `crate_name` may name a platform time or entropy primitive.
+///
+/// The same crate set as [`cb3_crate_is_exempt`], deliberately: CB-1 puts code
+/// that must call a platform API with no stable C-callable form in the adapter,
+/// and a clock syscall is exactly that. Keeping the two exemptions on one
+/// predicate is what stops them drifting apart again.
+///
+/// # What stays denied even in a platform crate
+///
+/// Everything in [`CD3_DENIED`] that is **not** in
+/// [`CD3_PLATFORM_PRIMITIVES`]: `SystemTime::now`, `Instant::now`,
+/// `std::time::Instant`, `tokio::time`, the `chrono` now-constructors, and the
+/// thread-local RNG constructors. Those are Rust-level ambient sources, not
+/// platform primitives, and an adapter has no more business reading them than
+/// anything else does — if it needs monotonic time it takes `Env` like every
+/// other component. The distinction matters concretely: `std::time::Instant` is
+/// suspend-*exclusive*, so an adapter reaching for it to implement `ElapsedClock`
+/// would produce exactly the defect LC-8 warns is invisible on Linux CI.
 #[must_use]
-pub fn cd3(file: &ScannedFile) -> Vec<Violation> {
+pub fn cd3_crate_may_read_platform_primitives(crate_name: &str) -> bool {
+    crate_name.starts_with("twinvpn-platform-")
+}
+
+/// Runs the CD-3 deny-list over one file.
+///
+/// Two exemptions, and only two: `twinvpn-env`'s binding directory
+/// ([`CD3_ALLOWED_PREFIX`]) may name anything, and a `twinvpn-platform-*` crate
+/// may name the platform primitives in [`CD3_PLATFORM_PRIMITIVES`].
+#[must_use]
+pub fn cd3(file: &ScannedFile, crate_name: &str) -> Vec<Violation> {
     if file.path.starts_with(CD3_ALLOWED_PREFIX) {
         return Vec::new();
     }
+    let platform_crate = cd3_crate_may_read_platform_primitives(crate_name);
     let mut out = Vec::new();
     for (needle, why) in CD3_DENIED {
+        if platform_crate && CD3_PLATFORM_PRIMITIVES.contains(needle) {
+            continue;
+        }
         let mut from = 0usize;
         while let Some(at) = file.blanked[from..].find(needle) {
             let at = from + at;

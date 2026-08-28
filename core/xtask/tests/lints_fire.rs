@@ -42,7 +42,7 @@ fn cd3_fires_on_a_planted_clock_read() {
         }
     ";
     let file = ScannedFile::new("crates/twinvpn-path/src/probe.rs", planted);
-    let found = checks::cd3(&file);
+    let found = checks::cd3(&file, "twinvpn-path");
     assert!(!found.is_empty(), "CD-3 did not fire on `Instant::now`");
     assert_eq!(rules(&found)[0], "CD-3");
     assert!(found[0].location.contains("probe.rs:3"), "{:?}", found[0]);
@@ -65,7 +65,7 @@ fn cd3_fires_on_every_class_in_the_deny_list() {
     ];
     for (line, expected) in cases {
         let file = ScannedFile::new("crates/twinvpn-session/src/lib.rs", line);
-        let found = checks::cd3(&file);
+        let found = checks::cd3(&file, "twinvpn-path");
         assert!(
             found.iter().any(|v| v.detail.contains(expected)),
             "CD-3 did not fire on {line:?}"
@@ -78,11 +78,11 @@ fn cd3_permits_the_binding_directory_and_nothing_else() {
     let code = "let now = Instant::now();";
     // The one exclusion ADR-0018 CD-3 states.
     let allowed = ScannedFile::new("crates/twinvpn-env/src/binding/system.rs", code);
-    assert!(checks::cd3(&allowed).is_empty());
+    assert!(checks::cd3(&allowed, "twinvpn-env").is_empty());
     // Elsewhere in the same crate, it still fires: the exclusion is
     // "twinvpn-env's implementations", not "twinvpn-env".
     let denied = ScannedFile::new("crates/twinvpn-env/src/clock.rs", code);
-    assert!(!checks::cd3(&denied).is_empty());
+    assert!(!checks::cd3(&denied, "twinvpn-env").is_empty());
 }
 
 #[test]
@@ -100,9 +100,9 @@ fn cd3_does_not_fire_on_its_own_documentation() {
     "#;
     let file = ScannedFile::new("crates/twinvpn-env/src/clock.rs", documented);
     assert!(
-        checks::cd3(&file).is_empty(),
+        checks::cd3(&file, "twinvpn-route").is_empty(),
         "CD-3 fired on documentation: {:?}",
-        checks::cd3(&file)
+        checks::cd3(&file, "twinvpn-route")
     );
 }
 
@@ -115,7 +115,106 @@ fn cd3_is_not_fooled_by_a_raw_string_or_a_lifetime() {
         pub fn g() -> u8 { b'x' }
     "####;
     let file = ScannedFile::new("crates/twinvpn-route/src/lib.rs", tricky);
-    assert!(checks::cd3(&file).is_empty(), "{:?}", checks::cd3(&file));
+    assert!(
+        checks::cd3(&file, "twinvpn-route").is_empty(),
+        "{:?}",
+        checks::cd3(&file, "twinvpn-route")
+    );
+}
+
+/// W-36: a `twinvpn-platform-*` crate may name a platform time or entropy
+/// primitive, exactly as `cb3_crate_is_exempt` lets it name `target_os`.
+///
+/// Before this exemption the two lints contradicted each other and **no
+/// location in the tree could legally read a platform clock**.
+#[test]
+fn cd3_permits_a_platform_crate_to_name_a_platform_primitive() {
+    for needle in checks::CD3_PLATFORM_PRIMITIVES {
+        let planted = format!("pub fn read() {{ let _ = {needle}; }}");
+        let file = ScannedFile::new("crates/twinvpn-platform-linux/src/clock.rs", &planted);
+        assert!(
+            checks::cd3(&file, "twinvpn-platform-linux").is_empty(),
+            "CD-3 denied `{needle}` inside the crate CB-3 designates for it"
+        );
+    }
+    assert!(checks::cd3_crate_may_read_platform_primitives(
+        "twinvpn-platform-windows"
+    ));
+}
+
+/// The exemption must not widen the hole: the same needle outside a platform
+/// crate still fires. Same discipline as the CD-I2 exemption.
+#[test]
+fn cd3_still_fires_on_a_platform_primitive_outside_a_platform_crate() {
+    for needle in checks::CD3_PLATFORM_PRIMITIVES {
+        let planted = format!("pub fn read() {{ let _ = {needle}; }}");
+        for crate_name in [
+            "twinvpn-session",
+            "twinvpn-path",
+            "twinvpn-store",
+            // The TRAIT crate is not a platform crate: it is the seam, and CB-3
+            // puts the OS below it.
+            "twinvpn-platform",
+            // Nor is `twinvpn-env` itself, outside its binding directory.
+            "twinvpn-env",
+        ] {
+            let file = ScannedFile::new(format!("crates/{crate_name}/src/lib.rs"), &planted);
+            assert!(
+                !checks::cd3(&file, crate_name).is_empty(),
+                "CD-3 no longer catches `{needle}` in `{crate_name}`"
+            );
+        }
+    }
+    assert!(!checks::cd3_crate_may_read_platform_primitives(
+        "twinvpn-platform"
+    ));
+    assert!(!checks::cd3_crate_may_read_platform_primitives(
+        "twinvpn-env"
+    ));
+}
+
+/// A platform crate is exempt from the platform primitives and **nothing else**.
+///
+/// `std::time::Instant` is the case that matters: it is suspend-*exclusive*, so
+/// an adapter reaching for it to implement `ElapsedClock` would produce exactly
+/// the defect ADR-0022 LC-8 warns is invisible on Linux CI.
+#[test]
+fn cd3_still_denies_ambient_rust_clocks_inside_a_platform_crate() {
+    for line in [
+        "let t = SystemTime::now();",
+        "let t = Instant::now();",
+        "let t: std::time::Instant = x;",
+        "tokio::time::sleep(d).await;",
+        "let now = chrono::Utc::now();",
+        "let mut r = rand::thread_rng();",
+    ] {
+        let file = ScannedFile::new("crates/twinvpn-platform-linux/src/lib.rs", line);
+        assert!(
+            !checks::cd3(&file, "twinvpn-platform-linux").is_empty(),
+            "a platform crate must not read an ambient Rust clock or RNG: {line:?}"
+        );
+    }
+}
+
+/// The two exemptions are the only two, and they do not overlap into each other.
+#[test]
+fn cd3_has_exactly_two_exemptions() {
+    // The binding directory may name anything, including an ambient clock.
+    let anywhere = ScannedFile::new(
+        "crates/twinvpn-env/src/binding/system.rs",
+        "let t = Instant::now(); let _ = clock_gettime;",
+    );
+    assert!(checks::cd3(&anywhere, "twinvpn-env").is_empty());
+
+    // A platform crate may name a primitive but not an ambient clock, so a file
+    // with both produces exactly the ambient-clock violation.
+    let mixed = ScannedFile::new(
+        "crates/twinvpn-platform-linux/src/clock.rs",
+        "let a = clock_gettime; let b = Instant::now();",
+    );
+    let found = checks::cd3(&mixed, "twinvpn-platform-linux");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].detail.contains("Instant::now"), "{:?}", found[0]);
 }
 
 // ---------------------------------------------------------------------------

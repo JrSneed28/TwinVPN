@@ -184,6 +184,34 @@ impl V6Addr {
         Ok(Self { octets, zone })
     }
 
+    /// Builds the **base of a prefix**, where the RFC 4007 zone rule does not
+    /// apply.
+    ///
+    /// # W-39: the zone rule is about host candidates, not ranges
+    ///
+    /// `docs/protocol.md` §10.4 says "IPv6 link-local **host candidates** MUST
+    /// carry `zone_index` or they are unusable on multi-interface hosts". A
+    /// prefix names a *range*; it has no interface to be scoped to, and
+    /// [`IpPrefix::new`] rejects a zone for exactly that reason. The two rules
+    /// are each right and their conjunction made `fe80::/10` — and every
+    /// link-local interface prefix — unrepresentable, so link-local prefixes
+    /// were silently dropped.
+    ///
+    /// This constructor is the narrow relaxation: it accepts a zoneless
+    /// link-local address, and nothing else changes. It still rejects an
+    /// IPv4-mapped address.
+    ///
+    /// **Never use the result as an endpoint or a candidate.** A link-local
+    /// address that reaches a socket without its zone is unusable on a
+    /// multi-homed host, which is the defect §10.4 exists to prevent;
+    /// [`V6Addr::new`] is the constructor for anything that will be connected to.
+    pub fn prefix_base(octets: [u8; 16]) -> Result<Self, TypeError> {
+        if is_v4_mapped(&octets) {
+            return Err(TypeError::Ipv4MappedIpv6);
+        }
+        Ok(Self { octets, zone: None })
+    }
+
     /// Builds from a wire slice and the proto's `uint32 zone_index`, where zero
     /// means "absent".
     pub fn from_slice(octets: &[u8], zone_index: u32) -> Result<Self, TypeError> {
@@ -443,6 +471,120 @@ impl IpPrefix {
         }
         let mask = 0xffu8 << (8 - rem);
         (net[full] & mask) == (test[full] & mask)
+    }
+}
+
+/// An interface's **own address**, with the prefix length of the network it is
+/// on.
+///
+/// # Why this is not an `IpPrefix`
+///
+/// The two look alike and are opposites. [`IpPrefix`] names a *range* and
+/// requires every host bit to be zero, because it is matched against attacker
+/// input in route and policy decisions and `common.proto` is explicit that
+/// normalizing there "is how a rule intended to match one network comes to match
+/// another". An interface address is the opposite kind of value: `192.0.2.10/24`
+/// is a *host* address whose host bits are the whole point.
+///
+/// Conflating them was a real defect. `InterfaceFacts.addresses` was
+/// `Vec<IpPrefix>`, so an adapter holding `192.0.2.10/24` had no representation
+/// for it: `desktop-linux` masked to `192.0.2.0/24` and lost the address, and
+/// `core-composition` could accept only `/32` and `/128`, reporting
+/// `AddressNotReportable` for everything else — because a network address
+/// offered as a candidate probes where nothing answers and reads as a NAT fault.
+///
+/// So this type keeps both facts: the address exactly as the OS reported it, and
+/// the prefix length beside it. [`InterfaceAddress::network`] derives the
+/// `IpPrefix` when a route is what is wanted — an explicit, named derivation of
+/// our *own* data, which is a different act from normalizing a peer's.
+///
+/// A scope zone **is** permitted here, because a link-local interface address
+/// genuinely has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InterfaceAddress {
+    address: IpAddr,
+    prefix_len: u32,
+}
+
+impl InterfaceAddress {
+    /// Builds an interface address.
+    ///
+    /// Validates the prefix length against the family and nothing else: host
+    /// bits are expected, and a zone is expected on a link-local address.
+    pub fn new(address: IpAddr, prefix_len: u32) -> Result<Self, TypeError> {
+        let family = address.family();
+        if prefix_len > family.max_prefix_len() {
+            return Err(TypeError::PrefixLength {
+                observed: prefix_len,
+                limit: family.max_prefix_len(),
+            });
+        }
+        Ok(Self {
+            address,
+            prefix_len,
+        })
+    }
+
+    /// The address itself — usable as an endpoint, zone and all.
+    #[must_use]
+    pub const fn address(self) -> IpAddr {
+        self.address
+    }
+
+    /// The prefix length of the network this address is on.
+    #[must_use]
+    pub const fn prefix_len(self) -> u32 {
+        self.prefix_len
+    }
+
+    /// The address family.
+    #[must_use]
+    pub const fn family(self) -> AddressFamily {
+        self.address.family()
+    }
+
+    /// Whether this is a host route — `/32` on v4, `/128` on v6.
+    ///
+    /// The overlay's own addresses are host routes (ADR-0010 §11.1 allocates a
+    /// `/32` and a `/128` per `Device`); an underlay address usually is not.
+    #[must_use]
+    pub const fn is_host_route(self) -> bool {
+        self.prefix_len == self.address.family().max_prefix_len()
+    }
+
+    /// The on-link network, as a canonical [`IpPrefix`].
+    ///
+    /// Masks the host bits and drops the scope zone, because a prefix has
+    /// neither. This is a **derivation of our own OS-supplied data**, performed
+    /// deliberately and named for what it does — not the normalization of
+    /// untrusted input before a policy check that `common.proto` forbids.
+    #[must_use]
+    pub fn network(self) -> IpPrefix {
+        let (mut octets, len) = self.address.octet_buffer();
+        mask_host_bits(&mut octets[..len], self.prefix_len);
+        let masked = match self.address.family() {
+            AddressFamily::V4 => IpAddr::V4(V4Addr([octets[0], octets[1], octets[2], octets[3]])),
+            // `prefix_base` rather than `new`: a masked link-local address is
+            // `fe80::`, which has no interface to be scoped to. See W-39.
+            AddressFamily::V6 => IpAddr::V6(V6Addr { octets, zone: None }),
+        };
+        IpPrefix {
+            address: masked,
+            prefix_len: self.prefix_len,
+        }
+    }
+}
+
+fn mask_host_bits(octets: &mut [u8], prefix_len: u32) {
+    let full = (prefix_len / 8) as usize;
+    let rem = prefix_len % 8;
+    if full < octets.len() {
+        if rem == 0 {
+            octets[full..].fill(0);
+        } else {
+            octets[full] &= 0xffu8 << (8 - rem);
+            octets[full + 1..].fill(0);
+        }
     }
 }
 
