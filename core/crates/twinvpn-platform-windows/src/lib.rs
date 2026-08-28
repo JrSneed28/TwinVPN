@@ -194,6 +194,12 @@ impl WindowsPlatformAdapter {
         Self::assemble_with(parts, system, ShutdownLatch::new())
     }
 
+    // Reachable from exactly two constructors: [`Self::new`] on Windows and
+    // [`Self::with_system`] under `test-support`. On a host that is neither —
+    // an ordinary `cargo build` of this crate on Linux — the adapter cannot be
+    // assembled at all, which is the honest shape: there is no Windows system
+    // here to bind, and a build that produced one would be producing a fiction.
+    #[cfg(any(windows, test, feature = "test-support"))]
     fn assemble_with(
         parts: WindowsAdapterParts,
         system: Arc<dyn sys::SystemOps>,
