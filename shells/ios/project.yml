@@ -1,0 +1,118 @@
+# XcodeGen spec for `shells/ios` — ADR-0018 §11.12's "Swift package + Xcode
+# project (app + NE extension)".
+#
+# ===========================================================================
+# WHY A SPEC AND NOT A COMMITTED .xcodeproj
+# ===========================================================================
+#
+# A `.xcodeproj` is a `project.pbxproj` full of generated 96-bit identifiers. On
+# a host with no Xcode it cannot be generated, cannot be opened, and cannot be
+# validated — so a hand-written one would be several hundred lines of unverifiable
+# identifiers presented as a build system. This file is the same information in a
+# form a reviewer can read and a machine can check, and `xcodegen generate`
+# produces the project from it on a Darwin builder.
+#
+# `shells/ios/README.md` documents the one command.
+#
+# STATUS: written, not compiled. No Xcode, no Darwin SDK, no XcodeGen on the
+# build host (ownership.md §10.3).
+
+name: TwinVPN
+options:
+  bundleIdPrefix: net.twinvpn
+  # ADR-0018 §11.9 row 1 and docs/networking.md §5.2's iOS row both fix the
+  # minimum at iOS 15. ADR-0019's iOS row says the same for the UI tier.
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    # ADR-0018 §11.3's release profile carries `panic = "unwind"` in EVERY
+    # shipped profile, because F-7's containment requires `catch_unwind` at the
+    # FFI boundary. Nothing in this project may build the staticlib with
+    # `panic = "abort"`.
+    OTHER_LDFLAGS: "-ObjC"
+
+targets:
+  # -------------------------------------------------------------------------
+  # The app. UI lives here and ONLY here (ADR-0019's iOS row, C-7).
+  # -------------------------------------------------------------------------
+  TwinVPN:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/TwinVPNApp
+      - path: Sources/TwinVPNBridge
+    dependencies:
+      - target: TwinVPNProvider
+        embed: true
+      # `core-lite` — ADR-0018 §11.12's feature profile: twinvpn-schema,
+      # twinvpn-crypto (VERIFICATION ONLY), twinvpn-store, twinvpn-trust and
+      # twinvpn-diag, and NO data-plane crate. Built by `Scripts/build-core.sh`.
+      - framework: Frameworks/libtwinvpn_core_lite.a
+        embed: false
+    settings:
+      base:
+        INFOPLIST_FILE: Resources/App-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Resources/TwinVPN.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: net.twinvpn.client
+        # ADR-0020 §11.9's iPadOS note: "The store MUST NOT be placed anywhere
+        # reachable by the Files app: `UIFileSharingEnabled` and
+        # `LSSupportsOpeningDocumentsInPlace` MUST be false, or the store MUST
+        # NOT be in `Documents/`." Both are set false AND the store lives in the
+        # App Group container, so the rule holds twice over.
+        INFOPLIST_KEY_UIFileSharingEnabled: NO
+        INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: NO
+        # iPadOS is "not iOS scaled up" (ADR-0019 §11.8) but it IS the same
+        # binary, with a distinct adaptive layout. Not a Catalyst app.
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+
+  # -------------------------------------------------------------------------
+  # The NetworkExtension. The OS starts it (CB-1 (b)); it holds NO UI (C-7).
+  # -------------------------------------------------------------------------
+  TwinVPNProvider:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Sources/TwinVPNProvider
+      - path: Sources/TwinVPNBridge
+    dependencies:
+      # The FULL core, as a staticlib. ADR-0018 §11.9 row 1: "<= 12 MB on disk;
+      # core RSS <= 9 MB inside ADR-0022's 12 MB provider budget (PB-6)".
+      # `Scripts/check-budget.sh` is what makes that a gate rather than a hope.
+      - framework: Frameworks/libtwinvpn_core.a
+        embed: false
+      - sdk: NetworkExtension.framework
+      - sdk: Security.framework
+      - sdk: Network.framework
+    settings:
+      base:
+        INFOPLIST_FILE: Resources/Provider-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Resources/TwinVPNProvider.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: net.twinvpn.client.provider
+
+  # -------------------------------------------------------------------------
+  # The device-bound suite. WRITTEN, NOT EXECUTED — see the headers in
+  # TwinVPNTests/. A green build of this target proves nothing about them.
+  # -------------------------------------------------------------------------
+  TwinVPNTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: TwinVPNTests
+    dependencies:
+      - target: TwinVPN
+
+schemes:
+  TwinVPN:
+    build:
+      targets:
+        TwinVPN: all
+        TwinVPNProvider: all
+    test:
+      targets:
+        - TwinVPNTests

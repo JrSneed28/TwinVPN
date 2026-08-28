@@ -1,0 +1,79 @@
+// swift-tools-version:5.9
+//
+//  Package.swift — SwiftPM, for editor tooling and for `swift build` of the
+//  parts that do not need an app bundle.
+//
+//  Authority: ADR-0018 §11.12 ("/shells/ios/  Swift package + Xcode project
+//  (app + NE extension)").
+//
+//  STATUS: written, not compiled. There is no Swift toolchain on the build host,
+//  Darwin or otherwise (ownership.md §10.3).
+//
+//  This package does NOT build the app or the extension: an `app-extension`
+//  target is an Xcode product type with entitlements and an Info.plist, and
+//  SwiftPM has no equivalent. `project.yml` is what builds those. What this gives
+//  is a module graph an editor can resolve and a place for logic that is worth
+//  unit-testing without a device — of which there is deliberately very little,
+//  because ownership.md §10.3's design rule pushes everything testable into
+//  `core/crates/twinvpn-platform-ios` where it runs on Linux.
+
+import PackageDescription
+
+let package = Package(
+    name: "TwinVPN",
+    platforms: [
+        // ADR-0018 §11.9 row 1, docs/networking.md §5.2's iOS row and ADR-0019's
+        // iOS row all fix the minimum at iOS 15.
+        .iOS(.v15)
+    ],
+    products: [
+        .library(name: "TwinVPNProviderCore", targets: ["TwinVPNProvider"]),
+        .library(name: "TwinVPNAppCore", targets: ["TwinVPNApp"]),
+    ],
+    targets: [
+        // The C bridge, as a system library target. TWO modules — the ABI of
+        // record and the internal bridge — because they have entirely different
+        // compatibility status; see `include/module.modulemap`.
+        .systemLibrary(name: "TwinVPNBridge", path: "Sources/TwinVPNBridge"),
+
+        .target(
+            name: "TwinVPNProvider",
+            dependencies: ["TwinVPNBridge"],
+            path: "Sources/TwinVPNProvider",
+            linkerSettings: [
+                // The FULL core, as a staticlib. ADR-0018 §11.9 row 1: <= 12 MB
+                // stripped, core RSS <= 9 MB inside ADR-0022's 12 MB provider
+                // budget. Built by `Scripts/build-core.sh`, which does not exist
+                // yet — see README §3.
+                .unsafeFlags(["-L", "Frameworks"]),
+                .linkedLibrary("twinvpn_core"),
+                .linkedFramework("NetworkExtension"),
+                .linkedFramework("Security"),
+                .linkedFramework("Network"),
+            ]),
+
+        .target(
+            name: "TwinVPNApp",
+            dependencies: ["TwinVPNBridge"],
+            path: "Sources/TwinVPNApp",
+            linkerSettings: [
+                // `core-lite`: ADR-0018 §11.12's feature profile of the SAME
+                // source — twinvpn-schema, twinvpn-crypto (verification only),
+                // twinvpn-store, twinvpn-trust, twinvpn-diag — and NO data-plane
+                // crate. "One source, two artifacts; the profile is recorded in
+                // S-46 so a support case is answerable."
+                .unsafeFlags(["-L", "Frameworks"]),
+                .linkedLibrary("twinvpn_core_lite"),
+                .linkedFramework("NetworkExtension"),
+                .linkedFramework("Security"),
+            ]),
+
+        // Device-bound. WRITTEN, NOT EXECUTED — see the headers in the suite. A
+        // green `swift build` of this target would prove nothing about them, and
+        // on this host there is no `swift` to run anyway.
+        .testTarget(
+            name: "TwinVPNTests",
+            dependencies: ["TwinVPNApp"],
+            path: "TwinVPNTests"),
+    ]
+)
