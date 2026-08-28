@@ -214,7 +214,10 @@ fn a_posture_swap_leaves_no_instant_with_no_rules() {
         return;
     }
     let blocked = wfp::boot::boot_set();
-    system().filters().commit(&blocked).expect("installs BLOCKED");
+    system()
+        .filters()
+        .commit(&blocked)
+        .expect("installs BLOCKED");
     assert!(system().filters().read().expect("reads").sublayer_present);
     // A real swap renders from a contract; the boot set stands in for one here
     // because this file has no core to ask for one.

@@ -67,7 +67,6 @@ use crate::sys::RouteTable;
 
 use super::addr;
 
-
 /// IP Helper. Stateless — every call is a query or a mutation, and nothing is
 /// remembered between them (R5's recovery entry point depends on that).
 pub struct IpHelper;

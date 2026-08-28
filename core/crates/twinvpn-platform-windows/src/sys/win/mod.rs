@@ -192,9 +192,7 @@ impl WindowsSystem {
     /// # Errors
     ///
     /// Whatever the enumeration refused.
-    pub fn net_events(
-        &self,
-    ) -> Result<(Vec<crate::wfp::canary::NetEvent>, bool), PlatformError> {
+    pub fn net_events(&self) -> Result<(Vec<crate::wfp::canary::NetEvent>, bool), PlatformError> {
         FilterEngine::net_events(&self.filters)
     }
 

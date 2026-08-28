@@ -67,7 +67,6 @@ use crate::sys::Resolver;
 
 use super::{wide, wide_from_utf16};
 
-
 /// The `DNS_INTERFACE_SETTINGS` version this build writes.
 ///
 /// Version 1 is the shape `windows-sys` binds here; a later version adds fields
