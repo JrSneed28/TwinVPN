@@ -1,0 +1,83 @@
+# twinvpnsvc — `TwinVPNService`, the privileged Windows authority: hosts the
+# core, owns the Wintun adapter, the IP Helper route table, the WFP sublayer and
+# the NRPT rules (ADR-0016 §11.2's Windows row).
+#
+# Owner: desktop-windows.
+[package]
+name    = "twinvpnsvc"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "TwinVPNService: the privileged Windows authority (ADR-0016)"
+publish = false
+
+# A library AND a binary, for one reason: ADR-0017 MI-20 and ADR-0018 §11.16 (b)
+# require "one contract, two carriages, NEVER two contracts". The MI envelope,
+# its framing and its client are therefore declared ONCE, here, and `twinvpnctl`
+# consumes them with `default-features = false` — which excludes every service
+# module, so the unprivileged CLI links no Wintun, no WFP, no IP Helper and no
+# core-hosting code.
+#
+# The alternative — a copy of the framing in each binary — is exactly the second
+# contract those rules forbid, and it would drift.
+[lib]
+name = "twinvpnsvc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "twinvpnsvc"
+path = "src/main.rs"
+required-features = ["service"]
+
+[features]
+default = ["service"]
+# The privileged half. Off for `twinvpnctl`, which needs only `mi`.
+service = [
+  "dep:twinvpn-core",
+  "dep:twinvpn-platform",
+  "dep:twinvpn-platform-windows",
+  "dep:twinvpn-env",
+  "dep:tracing-subscriber",
+  "dep:clap",
+]
+
+[dependencies]
+twinvpn-mgmt  = { workspace = true }
+twinvpn-types = { workspace = true }
+twinvpn-diag  = { workspace = true }
+thiserror     = { workspace = true }
+tokio         = { workspace = true }
+tracing       = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+
+twinvpn-core             = { workspace = true, optional = true }
+twinvpn-platform         = { workspace = true, optional = true }
+twinvpn-platform-windows = { workspace = true, optional = true }
+twinvpn-env              = { workspace = true, optional = true }
+tracing-subscriber       = { workspace = true, optional = true }
+clap                     = { workspace = true, optional = true }
+
+# The one place in this shell that names Windows. `shells/linux` carries
+# `#![forbid(unsafe_code)]` because `tokio` gives it `UnixListener` and
+# `peer_cred()`; there is no equivalent on this platform for SCM registration,
+# a pipe DACL or `SERVICE_CONTROL_POWEREVENT`, so `src/win32/` is a shim with
+# the same discipline the adapter uses — see this crate's `lib.rs`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_System_Services",          # the SCM: StartServiceCtrlDispatcherW, SERVICE_STATUS
+  "Win32_System_Threading",         # OpenProcessToken, the service's own token
+  "Win32_System_Power",             # PBT_APMSUSPEND / PBT_APMRESUMESUSPEND
+  "Win32_System_RemoteDesktop",     # WTS session type, for PS-14's console-seat rule
+  "Win32_System_Pipes",             # GetNamedPipeClientProcessId
+  "Win32_Security",                 # the DACL, the SIDs, token queries
+  "Win32_Security_Authorization",   # ConvertStringSecurityDescriptorToSecurityDescriptorW
+  "Win32_Storage_FileSystem",       # the pipe handle's flags
+  "Win32_System_Memory",            # LocalFree, for the converted descriptor
+] }
+
+[dev-dependencies]
+twinvpn-platform = { workspace = true, features = ["mock"] }
