@@ -339,7 +339,7 @@ where
         // §11.7: "The catalogue, not the version, is the capability contract."
         // Taken from the core's own catalogue so it cannot disagree with what
         // this agent would actually serve.
-        catalogue_digest: format!("{:016x}", twinvpn_mgmt::catalogue_digest()),
+        catalogue_digest: twinvpn_mgmt::catalogue_digest_text(),
         // The attach cursor: a client that reattaches offering this value has
         // missed nothing, and one offering less has (§11.10, MI-9a). Taken from
         // the fan-out rather than from the core, because the fan-out is what

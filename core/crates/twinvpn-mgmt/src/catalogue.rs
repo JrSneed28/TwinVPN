@@ -338,6 +338,37 @@ pub fn catalogue_digest() -> u64 {
     h
 }
 
+/// The **one** rendering of [`catalogue_digest`] that crosses a wire.
+///
+/// **Authority:** ADR-0017 §11.7 (*"The catalogue, not the version, is the
+/// capability contract"*), MI-21 (the digest is one of the four transport-layer
+/// facts), MI-5's reconnect rule.
+///
+/// # Why a `u64` needed a pinned spelling
+///
+/// [`catalogue_digest`] returns a `u64` and `HelloAck.catalogue_digest` is a
+/// **string**, so every carriage had to choose an encoding — and they did not
+/// all choose the same one. `shells/windows`' `twinvpnctl` rendered it with
+/// `to_string()` (decimal) while `shells/windows`' service rendered it as
+/// `{:016x}` (hex), so a client and an agent from one build compared two
+/// spellings of one number and could conclude the catalogue had changed.
+///
+/// §11.7 makes the digest *the capability contract*, and MI-5 requires a client
+/// to re-fetch the catalogue when it changes. An unpinned rendering is therefore
+/// how a client and an agent come to disagree about the contract **silently**,
+/// which is the failure MI-20 exists to prevent one level up.
+///
+/// The encoding is **lowercase hexadecimal, zero-padded to exactly 16 digits**.
+/// The fixed width matters on its own: a digest that happened to be small would
+/// otherwise render short, and a length-sensitive consumer would see the width
+/// move between builds.
+///
+/// This is the only function that renders it. There is no second one.
+#[must_use]
+pub fn catalogue_digest_text() -> String {
+    format!("{:016x}", catalogue_digest())
+}
+
 /// Looks up a row by wire name.
 ///
 /// `None` is the `MGMT.OP_UNKNOWN` case: a **typed** rejection naming the
@@ -444,6 +475,49 @@ mod tests {
         assert_ne!(d, 0);
         // Stability within one build: two calls agree.
         assert_eq!(d, catalogue_digest());
+    }
+
+    /// **The wire spelling is pinned, because an unpinned one is how two halves
+    /// of one build disagree about the capability contract.**
+    ///
+    /// `shells/windows` rendered it decimal in its CLI and hex in its service.
+    /// Both were "correct"; together they were a client that could never match
+    /// the digest it was sent.
+    #[test]
+    fn the_wire_rendering_is_sixteen_lowercase_hex_digits_and_nothing_else() {
+        let text = catalogue_digest_text();
+        assert_eq!(
+            text.len(),
+            16,
+            "fixed width, so a small digest does not render short"
+        );
+        assert!(
+            text.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "lowercase hex only, got {text}"
+        );
+        assert_eq!(text, format!("{:016x}", catalogue_digest()));
+        // And it is NOT the decimal rendering, which is the spelling that
+        // actually shipped in one place.
+        assert_ne!(text, catalogue_digest().to_string());
+    }
+
+    #[test]
+    fn the_rendering_round_trips_back_to_the_digest() {
+        // A client that parses it must recover the same number, so the encoding
+        // is a bijection and not merely a display form.
+        let text = catalogue_digest_text();
+        assert_eq!(
+            u64::from_str_radix(&text, 16).expect("parses"),
+            catalogue_digest()
+        );
+    }
+
+    #[test]
+    fn a_small_digest_still_renders_at_full_width() {
+        // A property of the FORMAT, not of today's table, asserted directly so
+        // it cannot regress when the table changes.
+        assert_eq!(format!("{:016x}", 1u64), "0000000000000001");
+        assert_eq!(format!("{:016x}", u64::MAX), "ffffffffffffffff");
     }
 
     #[test]

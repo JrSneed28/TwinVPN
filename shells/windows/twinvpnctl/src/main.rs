@@ -573,7 +573,7 @@ mod tests {
             build_profile: "test".to_owned(),
             granted_scopes: vec!["mgmt.status".to_owned()],
             withheld_scopes: Vec::new(),
-            catalogue_digest: twinvpn_mgmt::catalogue_digest().to_string(),
+            catalogue_digest: twinvpn_mgmt::catalogue_digest_text(),
             event_cursor: 0,
             protocol_epoch_range: [1, 1],
             platform_ctx: PlatformCtx {
@@ -678,7 +678,7 @@ mod tests {
             assert_eq!(client.platform_ctx().platform, "WINDOWS");
             assert_eq!(
                 client.catalogue_digest(),
-                twinvpn_mgmt::catalogue_digest().to_string()
+                twinvpn_mgmt::catalogue_digest_text()
             );
 
             let code = converse(

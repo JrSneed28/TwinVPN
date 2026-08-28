@@ -244,7 +244,7 @@ async fn a_client_attaches_and_the_agent_answers_from_the_one_vocabulary() {
     assert!(!client.catalogue_digest().is_empty());
     assert_eq!(
         client.catalogue_digest(),
-        format!("{:016x}", twinvpn_mgmt::catalogue_digest())
+        twinvpn_mgmt::catalogue_digest_text()
     );
     // MI-C3: the agent supplied `platform_ctx`, and the client uses it verbatim.
     assert_eq!(client.platform_ctx().platform, "linux");

@@ -110,7 +110,7 @@ fn a_resume_reports_the_gap_before_the_posture() {
     let correlation = CorrelationId::validated(b"wake-1").expect("bounded");
     ext.report_sleep(&correlation);
     ext.report_wake(&correlation);
-    let seen = drain(&mut stream, 3);
+    let seen = drain(&mut stream, 4);
     assert_eq!(
         seen[0],
         NetworkChange::LinkPostureChanged {
@@ -119,8 +119,21 @@ fn a_resume_reports_the_gap_before_the_posture() {
         }
     );
     assert_eq!(seen[1], NetworkChange::EventsLost { count: None });
+    // The seam gained `SystemResumed`, and the adapter emits it between the gap
+    // and the posture. This bridge supplies no `ElapsedClock` reading, so
+    // `suspended_for` is `None` — "we do not know how long", which the core
+    // treats as exceeding the rekey window. That is the safe direction and it is
+    // a REPORTED gap, not a design: measuring it needs `ContinuousElapsedClock`
+    // wired into `TvbExt`, which is a Darwin-only reading this host cannot take.
+    match seen[2] {
+        NetworkChange::SystemResumed(facts) => {
+            assert!(facts.announced_by_os, "IOKit told the provider");
+            assert_eq!(facts.suspended_for, None);
+        }
+        ref other => panic!("expected a resume, got {other:?}"),
+    }
     assert_eq!(
-        seen[2],
+        seen[3],
         NetworkChange::LinkPostureChanged {
             metered: false,
             low_power: false,

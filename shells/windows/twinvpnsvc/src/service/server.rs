@@ -269,7 +269,7 @@ where
         granted_scopes: granted.names(),
         withheld_scopes: withheld,
         // §11.7: "The catalogue, not the version, is the capability contract."
-        catalogue_digest: format!("{:016x}", twinvpn_mgmt::catalogue_digest()),
+        catalogue_digest: twinvpn_mgmt::catalogue_digest_text(),
         event_cursor: context.core.generation(),
         protocol_epoch_range: epoch_range(),
         platform_ctx: context.platform_ctx.clone(),

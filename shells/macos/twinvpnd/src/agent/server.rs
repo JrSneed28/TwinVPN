@@ -180,7 +180,7 @@ pub async fn serve(mut stream: tokio::net::UnixStream, context: &ServerContext) 
         // catalogue this agent would actually serve (§11.7). Rendered in hex
         // because the wire field is a string and JSON has no u64 that survives
         // every client's parser intact.
-        catalogue_digest: format!("{:016x}", twinvpn_mgmt::catalogue_digest()),
+        catalogue_digest: twinvpn_mgmt::catalogue_digest_text(),
         event_cursor: 0,
         protocol_epoch_range: [1, 1],
         platform_ctx: context.platform_ctx(),
@@ -233,7 +233,7 @@ pub fn handle(
     if request.operation == "mi.catalogue.get" {
         return Response {
             ok: true,
-            result: format!("{:016x}", twinvpn_mgmt::catalogue_digest()).into_bytes(),
+            result: twinvpn_mgmt::catalogue_digest_text().into_bytes(),
             diagnostic: None,
             committed_at_net_seq: None,
         };
@@ -546,7 +546,7 @@ mod tests {
         assert!(sink.submitted.lock().expect("lock").is_empty());
         assert_eq!(
             String::from_utf8(response.result).expect("utf8"),
-            format!("{:016x}", twinvpn_mgmt::catalogue_digest())
+            twinvpn_mgmt::catalogue_digest_text()
         );
     }
 
