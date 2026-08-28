@@ -37,13 +37,22 @@
 //! everything a reviewer would want to see exercised runs its tests on this Linux
 //! host." That rule is why this crate has the shape it does.
 //!
-//! | Module | `#[cfg(target_os)]` | `unsafe` blocks | Tests run on the build host |
+//! There are exactly **two** `#[cfg(target_os = "…")]` *attributes* in the whole
+//! crate — one pair in [`sys`] and one pair in [`sock`], each with a
+//! `#[cfg(not(…))]` counterpart that refuses rather than fakes. Every other
+//! appearance of `target_os` is a `cfg!(…)` *expression* inside a **posture**
+//! value: [`AdapterPosture`], [`ClockPosture`], [`sock::SocketPosture`]. Those
+//! are not OS branches on a domain fact; they are the adapter declaring what this
+//! build can do, which is ADR-0016 PS-17's principle — "silently running wider
+//! than declared is the defect this rule retires."
+//!
+//! | Module | `#[cfg(target_os)]` | non-test `unsafe` | Tests run on the build host |
 //! |---|---|---|---|
 //! | [`oserr`], [`settings`], [`enforce`], [`pathmon`], [`keychain`], [`lifecycle`], [`cmsg`], [`sockplan`], [`shutdown`] | none | none | **yes** |
 //! | [`netcfg`], [`tun`], [`custody`], [`iface`], [`host`] | none | none | **yes** |
-//! | [`sock`] | one, on the option apply | 1 (`setsockopt`) | yes, for everything but the apply |
-//! | [`bridge`] | none | 5 (pointer marshalling, each with a `// SAFETY:`) | yes |
-//! | [`sys`] | **all of them** | 4 (`mach_continuous_time`, `mach_timebase_info`, `getentropy`, `sysctlbyname`) | absence is asserted |
+//! | [`sock`] | one pair, on the option apply | 1 (`setsockopt`) | yes, for everything but the apply |
+//! | [`bridge`] | none | 7 (pointer marshalling and two `unsafe impl Send`/`Sync`) | yes |
+//! | [`sys`] | one pair, and **all of the crate's** | 4 (`mach_continuous_time`, `mach_timebase_info`, `getentropy`, `sysctlbyname`) | absence is asserted |
 //!
 //! Every `unsafe` block carries a `// SAFETY:` comment naming its invariant.
 //!
