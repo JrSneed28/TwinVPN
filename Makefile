@@ -250,11 +250,22 @@ DOCFLAGS := -D warnings -A rustdoc::invalid_html_tags
 # principle infrastructure applied to the arch-lint CI job while it was red: a
 # gate you intend to enforce should be visible and failing, not absent.
 # Wire it into `lint` once the six crates are clean.
+# --all-features, and the loop does not stop at the first failure. Both are
+# test-engineering's findings against the first version of this target:
+#
+#   1. Without --all-features, `cargo doc` runs the default feature set, so every
+#      link to a feature-gated module is unresolvable -- twinvpn-env's four links
+#      to `virtual_time` (behind test-support) and twinvpn-platform's to `mock`.
+#      Those links are CORRECT PROSE about modules that exist. Without this flag
+#      they would have been "fixed" by deleting accurate documentation, which is
+#      the opposite of what the target is for.
+#   2. Failing fast on `core` meant `lab` and `tests` were never reached, so
+#      their owners could not see their own state without running it by hand.
 doc-check:
-	@for w in $(WORKSPACES); do \
+	@rc=0; for w in $(WORKSPACES); do \
 	  echo "==> doc $$w"; \
-	  ( cd $$w && RUSTDOCFLAGS="$(DOCFLAGS)" $(CARGO) doc --workspace --no-deps -q ) || exit 1; \
-	done
+	  ( cd $$w && RUSTDOCFLAGS="$(DOCFLAGS)" $(CARGO) doc --workspace --no-deps --all-features -q ) || rc=1; \
+	done; exit $$rc
 
 fmt:
 	@for w in $(WORKSPACES); do ( cd $$w && $(CARGO) fmt --all ); done
