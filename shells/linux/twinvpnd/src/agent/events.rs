@@ -138,21 +138,20 @@ pub fn topic_of(kind: &CoreEventKind) -> &'static str {
 
 /// The payload bytes a client receives for an event.
 ///
-/// **Carried, never rendered** (MI-15). `CommandCompleted` is the interesting
-/// one: its `result` is the operation's body, prost-encoded by the core, and it
-/// is forwarded byte-for-byte.
+/// **Carried, never rendered** (MI-15), and **never encoded here**. Wave 2's
+/// §7 gap 2 was that four of the five topics carried an empty payload, because
+/// `Transition`, `SessionEvent` and `Diagnostic` are `twinvpn_schema::v1`
+/// messages and encoding one needs a `prost` dependency this shell has no other
+/// use for — which is exactly the "translate, don't model" line CB-2 draws.
+///
+/// The fix was the core's and the core made it:
+/// [`CoreEventKind::encoded_payload`] hands over the bytes and this function
+/// forwards them. There is no encoder in this shell and no branch on which
+/// variant carries a body, so a variant that gains one is carried the day it
+/// lands rather than the day someone remembers to add an arm here.
 #[must_use]
 pub fn payload_of(kind: &CoreEventKind) -> Vec<u8> {
-    match kind {
-        CoreEventKind::CommandCompleted { result, .. } => result.clone(),
-        // The remaining bodies are `twinvpn_schema::v1` messages the shell does
-        // not have an encoder for without taking a `prost` dependency it has no
-        // other use for. They travel as an empty payload with a real topic and a
-        // real `seq`, which is enough for a client to know what happened and to
-        // read the detail with a follow-up unary call. Stated in README §7
-        // rather than presented as complete.
-        _ => Vec::new(),
-    }
+    kind.encoded_payload()
 }
 
 /// One frame a subscriber will receive.
@@ -705,6 +704,47 @@ mod tests {
             result: vec![9, 8, 7],
         };
         assert_eq!(payload_of(&kind), vec![9, 8, 7]);
+    }
+
+    /// **The other half of §7's gap 2, closed: a body-bearing topic now carries
+    /// its body.**
+    ///
+    /// It used to be empty, because encoding a `twinvpn_schema::v1` message
+    /// needed a `prost` dependency in this shell. `twinvpn-core` encodes and
+    /// this shell forwards, so no contract type is modelled here.
+    /// **The other half of §7's gap 2, closed: this shell holds no encoder.**
+    ///
+    /// `Transition`, `SessionEvent` and `Diagnostic` used to arrive with an
+    /// empty payload, because encoding a `twinvpn_schema::v1` message needs a
+    /// `prost` dependency this shell has no other use for — the "translate,
+    /// don't model" line CB-2 draws. `twinvpn-core` encodes and this forwards.
+    ///
+    /// The assertion is *delegation*, not content, and deliberately so: a test
+    /// here that built a code-bearing `ErrorEnvelope` would need
+    /// `twinvpn-schema` in this manifest, which is the dependency the fix exists
+    /// to avoid. That the bytes are non-empty for a body-bearing event is
+    /// asserted where the encoder is, in `twinvpn-core`.
+    #[test]
+    fn every_body_bearing_event_is_forwarded_from_the_core_and_never_encoded_here() {
+        for kind in [
+            diagnostic(),
+            CoreEventKind::Transition(Box::default()),
+            CoreEventKind::SessionEvent(Box::default()),
+            CoreEventKind::CommandCompleted {
+                op: "status.get",
+                result: vec![4, 5, 6],
+            },
+            CoreEventKind::Compacted {
+                up_to_seq: 3,
+                dropped: 1,
+            },
+        ] {
+            assert_eq!(
+                payload_of(&kind),
+                kind.encoded_payload(),
+                "the shell must forward the core's bytes, never produce its own"
+            );
+        }
     }
 
     #[test]

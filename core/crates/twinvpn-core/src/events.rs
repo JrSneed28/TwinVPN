@@ -69,6 +69,58 @@ pub enum CoreEventKind {
     },
 }
 
+impl CoreEventKind {
+    /// The event's body, encoded from the frozen contract artifacts.
+    ///
+    /// **Authority:** ADR-0018 CB-2 and F-8 (*"structured data crosses as
+    /// encoded bytes"*); ADR-0017 §11.10 (the event topics), MI-15 (codes and
+    /// typed evidence, **never rendered text**).
+    ///
+    /// # Why this is the core's job and not a carriage's
+    ///
+    /// `desktop-linux` reported that four of the five MI topics carried an
+    /// **empty payload**: `CommandCompleted` had a real body because the core
+    /// encoded it, and `Transition`, `SessionEvent` and `Diagnostic` did not,
+    /// because encoding a `twinvpn_schema::v1` message needs a `prost`
+    /// dependency in a shell — *"exactly the 'translate, don't model' line CB-2
+    /// draws"*. A client learned **that** a transition happened and had to make
+    /// a second, unary call to learn **what**.
+    ///
+    /// So the core hands over bytes. Every carriage — `tw_core_submit`'s event
+    /// pump, the Unix socket, the named pipe, XPC — forwards the same bytes
+    /// byte-for-byte, which is F-5's *one vocabulary, two carriages* at the
+    /// event port as well as at the command port. A shell that encoded a
+    /// contract type would be the second modeller MI-20 forbids.
+    ///
+    /// # `Compacted` is empty, and that is not the same defect
+    ///
+    /// MI-19's marker announces a **gap**; it has no contract body, and its two
+    /// numbers travel in the frame that carries it rather than in a payload. An
+    /// empty payload here is the whole truth, not a missing encoder.
+    #[must_use]
+    pub fn encoded_payload(&self) -> Vec<u8> {
+        fn encode<M: prost::Message>(m: &M) -> Vec<u8> {
+            let mut buf = Vec::with_capacity(m.encoded_len());
+            // `Vec` grows; the only documented failure is an insufficient
+            // buffer, which cannot happen here.
+            m.encode(&mut buf).expect("a Vec never fails to grow");
+            buf
+        }
+        match self {
+            CoreEventKind::Transition(e) => encode(e.as_ref()),
+            CoreEventKind::SessionEvent(e) => encode(e.as_ref()),
+            CoreEventKind::Diagnostic(e) => encode(e.as_ref()),
+            CoreEventKind::CommandRejected { diagnostic, .. } => encode(diagnostic.as_ref()),
+            // Already encoded by whoever produced the result; forwarded rather
+            // than re-encoded, because re-encoding would make this function the
+            // second place a result's shape is decided.
+            CoreEventKind::CommandCompleted { result, .. } => result.clone(),
+            // See the note above: a gap marker has no contract body.
+            CoreEventKind::Compacted { .. } => Vec::new(),
+        }
+    }
+}
+
 /// One event on the stream.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoreEvent {
@@ -230,6 +282,75 @@ impl EventStream {
 
 #[cfg(test)]
 mod tests {
+    use prost::Message as _;
+
+    /// **Four of the five topics carried an empty payload; now none does.**
+    ///
+    /// `desktop-linux` §7 gap 2. A client learned *that* a transition happened
+    /// and had to make a second unary call to learn *what*. Encoding it in the
+    /// shell would need a `prost` dependency there, which is the "translate,
+    /// don't model" line CB-2 draws — so the core encodes and the carriage
+    /// forwards.
+    #[test]
+    fn every_body_bearing_event_carries_its_encoded_body() {
+        let transition = CoreEventKind::Transition(Box::new(v1::TransitionEvent::default()));
+        let session = CoreEventKind::SessionEvent(Box::new(v1::SessionEvent::default()));
+        let diagnostic = CoreEventKind::Diagnostic(Box::new(v1::ErrorEnvelope {
+            reason_code: "PLATFORM.ADAPTER_UNAVAILABLE".to_owned(),
+            ..v1::ErrorEnvelope::default()
+        }));
+        let rejected = CoreEventKind::CommandRejected {
+            op: "status.get",
+            diagnostic: Box::new(v1::ErrorEnvelope {
+                reason_code: "MGMT.OP_UNKNOWN".to_owned(),
+                ..v1::ErrorEnvelope::default()
+            }),
+        };
+
+        // A default message encodes to zero bytes in protobuf, which is correct
+        // and is not "empty payload" in the sense the finding meant. What the
+        // finding meant is that the shell had no encoder at all, so a body with
+        // CONTENT still arrived empty. These two carry content.
+        assert!(!diagnostic.encoded_payload().is_empty());
+        assert!(!rejected.encoded_payload().is_empty());
+
+        // And every body-bearing variant round-trips through the frozen type.
+        assert_eq!(
+            v1::ErrorEnvelope::decode(diagnostic.encoded_payload().as_slice())
+                .expect("decodes")
+                .reason_code,
+            "PLATFORM.ADAPTER_UNAVAILABLE"
+        );
+        assert_eq!(
+            v1::TransitionEvent::decode(transition.encoded_payload().as_slice()),
+            Ok(v1::TransitionEvent::default())
+        );
+        assert_eq!(
+            v1::SessionEvent::decode(session.encoded_payload().as_slice()),
+            Ok(v1::SessionEvent::default())
+        );
+    }
+
+    #[test]
+    fn a_command_result_is_forwarded_byte_for_byte_and_never_re_encoded() {
+        let kind = CoreEventKind::CommandCompleted {
+            op: "session.connect",
+            result: vec![9, 8, 7],
+        };
+        assert_eq!(kind.encoded_payload(), vec![9, 8, 7]);
+    }
+
+    #[test]
+    fn a_gap_marker_has_no_body_and_that_is_the_whole_truth() {
+        // MI-19's marker announces a gap. Its two numbers travel in the frame
+        // that carries it, not in a payload, so an empty payload here is not the
+        // missing encoder the finding was about.
+        let kind = CoreEventKind::Compacted {
+            up_to_seq: 12,
+            dropped: 3,
+        };
+        assert!(kind.encoded_payload().is_empty());
+    }
     use super::*;
 
     fn diag() -> CoreEventKind {
