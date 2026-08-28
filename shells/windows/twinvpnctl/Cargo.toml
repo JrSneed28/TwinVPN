@@ -1,0 +1,41 @@
+# twinvpnctl — the unprivileged Windows CLI over the local management interface
+# (ADR-0017, ADR-0023).
+#
+# Owner: desktop-windows.
+#
+# NAMING DEVIATION, reported rather than papered over, and it is the same one
+# `shells/linux/twinvpnctl` raised as W-41. ADR-0016 §11.2's Windows process
+# table names this binary `twinvpn.exe`, ADR-0017 §11.12's command shape is
+# `twinvpn <noun> <verb>`, and ADR-0023 EM-42's rendered `next_action` strings
+# say "run 'twinvpn peer disconnect nas-attic'". This domain has named it
+# `twinvpnctl` to match the Linux shell that shipped in wave 1 rather than
+# shipping two different names for one CLI across two platforms — which would
+# make the rendered next actions wrong on exactly one of them.
+#
+# Neither name is this domain's to settle. Raised for the integration lead:
+# either both binaries are renamed to `twinvpn`, or a `twinvpn` alias ships
+# beside each, or ADR-0016 §11.2 and ADR-0023 EM-42 are amended. Until then the
+# rendered next actions name a command that is not installed under that name, on
+# both platforms, identically.
+[package]
+name    = "twinvpnctl"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the unprivileged Windows CLI over the local management interface (ADR-0017, ADR-0023)"
+publish = false
+
+[dependencies]
+# The MI contract, from the ONE place it is declared (MI-20). `default-features
+# = false` excludes the whole `service` feature, so this unprivileged binary
+# links no Wintun, no WFP, no IP Helper and no core-hosting code.
+twinvpnsvc    = { path = "../twinvpnsvc", default-features = false }
+twinvpn-mgmt  = { workspace = true }
+twinvpn-types = { workspace = true }
+twinvpn-diag  = { workspace = true }
+thiserror     = { workspace = true }
+tokio         = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }

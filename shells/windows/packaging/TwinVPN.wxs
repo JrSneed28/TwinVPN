@@ -1,0 +1,539 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The TwinVPN per-machine MSI.
+
+  ADR-0021 §11's Windows row: "Authenticode-signed per-machine MSI (WiX)",
+  `.msi` (x64, arm64) plus an `.intunewin` wrapper, driven by Windows Installer,
+  self-updating through `msiexec`. MSIX and the Microsoft Store are refused
+  there, for a reason that decides this file's shape: an MSIX app container
+  cannot install a kernel-mode driver, and WinTun is one.
+
+  Every element below carries the rule it discharges, in the register of
+  `shells/linux/packaging/twinvpnd.service`. Nothing here is a local preference.
+
+  ══════════════════════════════════════════════════════════════════════════
+  THIS FILE HAS NEVER BEEN BUILT.
+
+  No WiX toolset was run against it, no `.msi` has ever existed, and nothing
+  described below has been installed on any machine. It was written on a Linux
+  host, where `candle.exe` and `light.exe` do not run. The only property that
+  has been checked is that the document is well-formed XML — not that it
+  compiles, not that its custom actions link, not that its sequencing is
+  accepted by Windows Installer.
+
+  Treat every claim below as a specification of what the installer must do, not
+  as a record of what one did. `shells/windows/README.md` §7 carries the same
+  statement with its consequences.
+  ══════════════════════════════════════════════════════════════════════════
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <!--
+    ADR-0021 §11's version mapping, verbatim: an MSI `ProductVersion` is
+    `a.b.c` with `a <= 255`, `b <= 255`, `c <= 65535`, and "naive SemVer does
+    not fit". So `a = major`, `b = minor`, `c = patch*100 + build mod 100`, and
+    the full `AppVersion` rides in `ARPCOMMENTS` and in the manifest.
+
+    UpgradeCode is FIXED FOR THE LIFE OF THE PRODUCT. Changing it makes every
+    future upgrade a side-by-side install, which on a product that owns a WFP
+    provider and a network adapter means two authorities — ADR-0016 PS-1's
+    `INTERNAL.INVARIANT_VIOLATED`, arrived at through packaging.
+  -->
+  <Product Id="*"
+           Name="TwinVPN"
+           Language="1033"
+           Version="0.1.0"
+           Manufacturer="TwinVPN"
+           UpgradeCode="7477696E-7670-6E00-5477-696E56504E00">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="TwinVPN"
+             Comments="0.1.0" />
+
+    <!--
+      ADR-0021 §11.12 and ADR-0012 KS-23: an update replaces the rule set by an
+      atomic swap and MUST NOT clear the latch. Scheduling the removal of the
+      old product AFTER the new files are in place keeps the persistent WFP
+      filters resident throughout: `RemoveExistingProducts` before
+      `InstallFiles` would uninstall the old service — and PS-21 step 5's
+      disarm with it — leaving a window in which the host has no rules.
+    -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  Schedule="afterInstallExecute"
+                  DowngradeErrorMessage="A newer version of TwinVPN is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!--
+      ADR-0021 §11.14: the below-MSPV gate lives "in the installer package
+      itself, not only in our updater — an MSI `LaunchCondition` custom action
+      — because a user can run an old installer directly". It refuses with
+      `PROTO.VERSION_UNSUPPORTED` (ADR-0014 N-30).
+    -->
+    <Condition Message="PROTO.VERSION_UNSUPPORTED: this build is below the minimum supported protocol version for the state already on this machine.">
+      <![CDATA[Installed OR NOT TWINVPN_BELOW_MSPV]]>
+    </Condition>
+
+    <!--
+      ADR-0021 §11: "Windows 10 21H2 / Server 2019+". Below that the WFP
+      surface and `SetInterfaceDnsSettings` differ, and ADR-0022 LC-12's
+      `SERVICE_AUTO_START` reasoning assumes the modern BFE start ordering.
+    -->
+    <Condition Message="TwinVPN requires Windows 10 21H2 or Windows Server 2019 or later.">
+      <![CDATA[Installed OR (VersionNT >= 603)]]>
+    </Condition>
+
+    <!--
+      Layout.
+
+      ADR-0016 §10: "WinTun's DLL and driver ship in the application directory,
+      versioned with the app; the service compares versions at startup and
+      emits NET.DRIVER_REPLACED; the uninstaller removes the adapter."
+      App-local, not System32 — the version the service checks must be the one
+      beside it, not whatever a later product dropped in a shared directory.
+    -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="TwinVPN" />
+      </Directory>
+      <Directory Id="CommonAppDataFolder">
+        <!--
+          ADR-0020 §11.9's Windows row: the store root is
+          `%ProgramData%\TwinVPN\store\`, and §11.8 requires the installer to
+          place it there and MUST NOT place it in a user profile —
+          `%ProgramData%` is outside File History and Known Folder Move scope.
+          (Volume Shadow Copy and full-image backups DO capture it; §11.7's
+          honesty table records that, and no packaging choice changes it.)
+        -->
+        <Directory Id="TWINVPNDATA" Name="TwinVPN">
+          <Directory Id="TWINVPNSTORE" Name="store" />
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <!--
+      PS-12a's principals — created by the PACKAGE, never by the service.
+
+      ADR-0016 PS-12a: "the package owns creating them at install and removing
+      them at uninstall (PS-21 step 7)". Both are created EMPTY (ADR-0021 §11:
+      "the local group `TwinVPN Users`, created empty by the MSI"), because
+      "'every local account can enumerate this device's peers and endpoints'
+      should be an install-time decision (TB-13), not a platform default".
+
+      A NOTE ON THE MECHANISM, stated because it is easy to get wrong: WiX v3's
+      `util:Group` element REFERENCES a group, it does not create one — only
+      `util:User` creates a principal. Creating a local group therefore needs a
+      custom action, which is what `CreateGroups` below is. Declaring
+      `util:Group` here and believing it created the group is a mistake this
+      comment exists to prevent; the group's absence would not fail the install,
+      it would silently leave the pipe DACL naming a SID that does not resolve.
+    -->
+    <Component Id="PrincipalGroups" Directory="INSTALLFOLDER" Guid="7477696E-7670-6E00-5052-494E43000001">
+      <CreateFolder />
+    </Component>
+
+    <!--
+      The store directory and its ACL.
+
+      ADR-0020 §11.9's Windows row, verbatim: `SYSTEM:F`, `Administrators:F`,
+      `Users` denied; inheritance disabled; opened by the LocalSystem service
+      only. ST-30's single-opener rule is enforced at runtime by an advisory
+      `LockFileEx`; this ACL is what stops a second opener existing at all.
+
+      `Inheritable="no"` on every ACE, and `util:PermissionEx` replaces rather
+      than merges the inherited set. A store that inherited `Users: read` from
+      `%ProgramData%` would make the vault world-readable, which is ST-3's
+      "Tier 2 is not non-secret" failing at the filesystem.
+    -->
+    <Component Id="StoreDirectory" Directory="TWINVPNSTORE" Guid="7477696E-7670-6E00-5354-4F5245000001">
+      <CreateFolder>
+        <util:PermissionEx User="SYSTEM" GenericAll="yes" Inheritable="no" />
+        <util:PermissionEx User="Administrators" GenericAll="yes" Inheritable="no" />
+        <util:PermissionEx User="Users" GenericAll="yes" Denied="yes" Inheritable="no" />
+      </CreateFolder>
+    </Component>
+
+    <!--
+      The service.
+
+      Start type: ADR-0022 LC-12, verbatim — "The choice is Automatic versus
+      Automatic (Delayed Start), and Automatic wins: delayed start defers the
+      service by ~2 minutes after boot, which lengthens exactly the window in
+      which the host is fail-closed-and-offline, and buys only a boot-time
+      perception improvement the product does not need. `SERVICE_BOOT_START` is
+      not available to a user-mode service."
+
+      REPORTED CONTRADICTION, not reconciled locally: ADR-0016 §11.6's
+      supervision table says "The service is `SERVICE_AUTO_START` with delayed
+      start", which contradicts LC-12. LC-12 is the later statement, it names
+      the cost of the other choice, and it is the one this file follows. Raised
+      for the integration lead; see README §7.
+
+      `ErrorControl="normal"`: a failure to start is logged and the boot
+      continues. `critical` would turn a service problem into an unbootable
+      machine — the same reasoning `twinvpn-killswitch.service`'s
+      `FailureAction=none` records on Linux, and it matters more here because
+      the BOOTTIME filters already hold the host closed without us.
+
+      `Account="LocalSystem"`: ADR-0016 §11.2 rejects `LocalService` and
+      `NetworkService` because "neither can open the WFP engine for write,
+      install a device driver, or program the IP Helper interface stack".
+    -->
+    <Component Id="ServiceBinary" Directory="INSTALLFOLDER" Guid="7477696E-7670-6E00-5356-430000000001">
+      <File Id="twinvpnsvc.exe" Name="twinvpnsvc.exe" Source="$(var.BinDir)\twinvpnsvc.exe" KeyPath="yes" />
+
+      <ServiceInstall Id="TwinVPNService"
+                      Name="TwinVPNService"
+                      DisplayName="TwinVPN"
+                      Description="TwinVPN network authority."
+                      Type="ownProcess"
+                      Start="auto"
+                      ErrorControl="normal"
+                      Account="LocalSystem"
+                      Vital="yes">
+        <!--
+          ADR-0022 LC-12: "dependencies on BFE and Tcpip". Without BFE the WFP
+          engine cannot be opened, and ADR-0016 PS-18 makes that a startup
+          refusal rather than a service that runs and cannot arm.
+        -->
+        <ServiceDependency Id="BFE" />
+        <ServiceDependency Id="Tcpip" />
+      </ServiceInstall>
+
+      <!--
+        ADR-0016 §11.6's Windows supervision row, verbatim: "SCM recovery:
+        restart at 1 s, restart at 5 s, then run a command (the quarantine
+        action); `ResetPeriod=86400`. Third failure inside the reset period
+        enters quarantine."
+
+        PS-9: quarantine keeps protection and keeps a way out. The command
+        below MUST NOT disarm, MUST NOT clear the latch, and MUST NOT swap the
+        ruleset; it records the quarantine and stops the restart ladder, and
+        `twinvpn-unblock.exe` remains the operator's exit.
+
+        `ResetPeriodInDays="1"` is `ResetPeriod=86400` in the units WiX takes.
+
+        NOTE: WiX v3's `util:ServiceConfig` carries ONE
+        `RestartServiceDelayInSeconds` for every restart action, so the "1 s
+        then 5 s" ladder cannot be expressed here. The value below is the
+        first delay; the second requires `sc failure` or a custom action. A
+        gap, named — see README §7.
+      -->
+      <util:ServiceConfig FirstFailureActionType="restart"
+                          SecondFailureActionType="restart"
+                          ThirdFailureActionType="runCommand"
+                          ProgramCommandLine="[INSTALLFOLDER]twinvpnsvc.exe --quarantine"
+                          RestartServiceDelayInSeconds="1"
+                          ResetPeriodInDays="1" />
+
+      <!--
+        ADR-0016 §11.9's Windows row: service SID `NT SERVICE\TwinVPNService`,
+        `SERVICE_SID_TYPE_UNRESTRICTED`, and `RequiredPrivileges` limited to
+        exactly three.
+
+        `SERVICE_SID_TYPE_RESTRICTED` is rejected by §11.2 because "the WFP
+        engine handle and `SwDevice`-based driver installation require access
+        outside a restricted token's reach".
+
+        The service SID is not cosmetic: it is the `ALE_USER_ID` half of
+        ADR-0012 KS-9(1)'s bootstrap predicate, and it is the principal named in
+        the pipe DACL and the store ACL.
+      -->
+      <ServiceConfig ServiceName="TwinVPNService" ServiceSidType="unrestricted" />
+
+      <!--
+        §11.9 names three privileges as required, one as not required
+        (`SeAssignPrimaryTokenPrivilege`) and two as FORBIDDEN
+        (`SeDebugPrivilege`, `SeTcbPrivilege`). `RequiredPrivileges` is an
+        allow-list, so their absence here IS the prohibition; they are named in
+        this comment so a reviewer can check the list against the ADR without
+        holding both open.
+
+        The service verifies its own posture at startup and refuses to run
+        wider than this declares — the Windows counterpart of
+        `shells/linux/twinvpnd/src/agent/privilege.rs`, and PS-17's rule that a
+        hardening directive which cannot be applied is reported rather than
+        skipped.
+      -->
+      <ServiceConfig ServiceName="TwinVPNService"
+                     RequiredPrivileges="SeChangeNotifyPrivilege,SeImpersonatePrivilege,SeLoadDriverPrivilege" />
+
+      <ServiceControl Id="StartTwinVPNService"
+                      Name="TwinVPNService"
+                      Start="install"
+                      Stop="both"
+                      Remove="uninstall"
+                      Wait="yes" />
+    </Component>
+
+    <!--
+      The unprivileged CLI.
+
+      NAMING DEVIATION: ADR-0016 §11.2's process table names this
+      `twinvpn.exe`, and ADR-0023 EM-42's rendered next actions say
+      `run 'twinvpn peer disconnect nas-attic'`. It is installed as
+      `twinvpnctl.exe` to match the Linux shell that shipped in wave 1. Raised
+      for the integration lead; see the CLI's own Cargo.toml and README §7.
+
+      The CLI is on the machine PATH for every user. It holds no privilege of
+      its own, and every request it makes is authorized by the service
+      impersonating the caller's token (ADR-0016 §11.9).
+    -->
+    <Component Id="Cli" Directory="INSTALLFOLDER" Guid="7477696E-7670-6E00-434C-490000000001">
+      <File Id="twinvpnctl.exe" Name="twinvpnctl.exe" Source="$(var.BinDir)\twinvpnctl.exe" KeyPath="yes" />
+      <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="yes" />
+    </Component>
+
+    <!--
+      twinvpn-unblock.exe — ADR-0016 O13, ADR-0012 KS-20a.
+
+      "A privileged local unblock command MUST exist so that 'blocked' is not
+      'bricked'", and KS-20a records Windows as one of the four platforms where
+      it is satisfiable. PS-9 requires it to remain installed and functional
+      while the service is quarantined, which is why it is a separate binary and
+      not a subcommand of a service that may not be running.
+
+      NOT BUILT. `shells/windows/Cargo.toml`'s member list does not contain it,
+      and that manifest is the integration lead's. The component is declared so
+      the layout and the uninstall order are reviewable against PS-21 now rather
+      than later; a build that has no `twinvpn-unblock.exe` to stage fails at
+      `light.exe` — loudly, which is the correct direction. See README §7.
+    -->
+    <Component Id="Unblock" Directory="INSTALLFOLDER" Guid="7477696E-7670-6E00-554E-424C4F430001">
+      <File Id="twinvpn_unblock.exe" Name="twinvpn-unblock.exe" Source="$(var.BinDir)\twinvpn-unblock.exe" KeyPath="yes" />
+    </Component>
+
+    <!--
+      WinTun.
+
+      ADR-0021 §11: "WinTun is a kernel-mode driver: since Windows 10 1607
+      kernel-mode drivers must be Microsoft-signed, so we ship the UPSTREAM
+      Microsoft-signed WinTun binaries app-locally and re-verify their signature
+      at load; we do not re-sign them and we do not submit them."
+
+      App-local, beside the service, so ADR-0016 §10's version check at startup
+      compares against the file this package staged.
+    -->
+    <Component Id="WinTun" Directory="INSTALLFOLDER" Guid="7477696E-7670-6E00-5754-554E00000001">
+      <File Id="wintun.dll" Name="wintun.dll" Source="$(var.WinTunDir)\wintun.dll" KeyPath="yes" />
+    </Component>
+
+    <!--
+      The DN-20 restore service.
+
+      ADR-0011 DN-20: "restoration MUST NOT require the agent to be healthy. The
+      restore entry point is part of the same OS-applied artifact family as
+      ADR-0012 KS-19's boot ruleset (a Windows service) and runs AFTER
+      enforcement is live, so the host never regains an upstream resolver in an
+      unarmed window."
+
+      ADR-0011 §11.7 names Windows "the highest-risk platform for D7" because
+      NRPT configuration is registry-persistent and does not die with the tunnel
+      object. This service is what stops a crashed agent leaving the host
+      pointed at a stub that is not answering. It reads the restore point
+      `twinvpn_platform_windows::restore` writes, whose format is a documented
+      line-oriented one precisely so a separate binary can parse it without
+      linking the core.
+
+      NOT BUILT. There is no `twinvpn-restore.exe` in this workspace. See
+      README §7.
+    -->
+    <Component Id="RestoreService" Directory="INSTALLFOLDER" Guid="7477696E-7670-6E00-5253-540000000001">
+      <File Id="twinvpn_restore.exe" Name="twinvpn-restore.exe" Source="$(var.BinDir)\twinvpn-restore.exe" KeyPath="yes" />
+      <ServiceInstall Id="TwinVPNRestore"
+                      Name="TwinVPNRestore"
+                      DisplayName="TwinVPN resolver restore"
+                      Description="Restores the host resolver configuration if TwinVPN did not shut down cleanly."
+                      Type="ownProcess"
+                      Start="auto"
+                      ErrorControl="normal"
+                      Account="LocalSystem"
+                      Vital="no">
+        <!--
+          After BFE, so DN-20's "runs AFTER enforcement is live" holds: the
+          persistent filters are in force before the host can regain an upstream
+          resolver.
+        -->
+        <ServiceDependency Id="BFE" />
+      </ServiceInstall>
+      <ServiceControl Id="ControlTwinVPNRestore"
+                      Name="TwinVPNRestore"
+                      Start="install"
+                      Stop="both"
+                      Remove="uninstall"
+                      Wait="no" />
+    </Component>
+
+    <Feature Id="Complete" Title="TwinVPN" Level="1" Absent="disallow">
+      <ComponentRef Id="PrincipalGroups" />
+      <ComponentRef Id="StoreDirectory" />
+      <ComponentRef Id="ServiceBinary" />
+      <ComponentRef Id="Cli" />
+      <ComponentRef Id="Unblock" />
+      <ComponentRef Id="WinTun" />
+      <ComponentRef Id="RestoreService" />
+    </Feature>
+
+    <!--
+      The KS-19 boot artifact — the package-owned WFP filter set.
+      This is the Windows equivalent of `twinvpn-killswitch.service`.
+
+      ADR-0012 KS-19: "The rule set that covers the interval between the network
+      stack coming up and the agent starting MUST be installed by an artifact
+      the OS ITSELF applies, never by the agent. This is where real products
+      leak."
+
+      ADR-0012 §11.6's Windows row: `FWPM_FILTER_FLAG_BOOTTIME` coarse deny plus
+      `FWPM_FILTER_FLAG_PERSISTENT` full policy, both reinstated by the Base
+      Filtering Engine with no process of ours running.
+
+      ADR-0016 PS-7: package-owned, modified only by an atomic replace under
+      ADMINISTER authority. The service MUST NOT rewrite it as an ordinary
+      runtime action and MUST NOT be a prerequisite for it to apply — which is
+      why this action has no dependency on the service component in either
+      direction, exactly as the Linux unit has none.
+
+      WHAT is installed is not decided here. It is
+      `twinvpn_platform_windows::wfp::boot::boot_set()`, and the custom action's
+      only job is to apply that set to the engine. Two definitions of a boot
+      ruleset — one in Rust, one in XML — is the second contract MI-20 forbids
+      in its own domain, and it would drift.
+
+      See `boot-filters.md` for the mechanism and its one Windows caveat.
+    -->
+    <Binary Id="TwinVPNBootFilters" SourceFile="$(var.BinDir)\twinvpn-bootfilters.dll" />
+
+    <CustomAction Id="InstallBootFilters"
+                  BinaryKey="TwinVPNBootFilters"
+                  DllEntry="InstallBootFilters"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <!--
+      `Return="ignore"`: an artifact that is already gone must not fail the
+      uninstall. ADR-0008 requires re-running the uninstaller after an
+      interruption to converge on the same end state.
+    -->
+    <CustomAction Id="RemoveBootFilters"
+                  BinaryKey="TwinVPNBootFilters"
+                  DllEntry="RemoveBootFilters"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!--
+      PS-12a's groups, created empty. See the `PrincipalGroups` comment above
+      for why this is a custom action and not `util:Group`.
+    -->
+    <CustomAction Id="CreateGroups"
+                  BinaryKey="TwinVPNBootFilters"
+                  DllEntry="CreatePrincipalGroups"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <!--
+      PS-21 step 7 removes the groups with everything else. Ignored on failure
+      for the same convergence reason as the boot filters.
+    -->
+    <CustomAction Id="RemoveGroups"
+                  BinaryKey="TwinVPNBootFilters"
+                  DllEntry="RemovePrincipalGroups"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!--
+      Sequencing — PS-21's uninstall order, which is NORMATIVE.
+
+      ADR-0016 PS-21, verbatim:
+
+        1. authenticate ADMINISTER (PS-20)          - refuse and stop if this fails
+        2. stop admissions; tear down Sessions      - peers see a normal peer-gone condition
+        3. restore the resolver from S-34           - BEFORE the interface goes, so name
+                                                      resolution is never left pointing at a dead stub
+        4. restore every other host mutation from S-41
+        5. atomic-swap the enforcement rule set to "no TwinVPN rules"   - the disarm proper
+        6. destroy the interface; remove the adapter/driver (Windows)
+        7. deregister the boot artifact, the service, and the supervisor entry
+        8. purge durable local state (S-38..S-41)
+        9. DeviceKey: retained by default
+
+      "Steps 3 and 4 precede 5 and 6 deliberately: the only ordering that can
+      leave a host PERMANENTLY broken is one that removes the interface or the
+      rules while the host's resolver or forwarding configuration still points
+      at TwinVPN state. An abort anywhere leaves the host either still protected
+      (before step 5) or cleanly restored (after step 6); the window between them
+      is a single atomic swap."
+
+      Windows Installer cannot express that order by itself: `StopServices` and
+      `DeleteServices` are standard actions with fixed positions. So steps 1-6
+      are performed BY THE SERVICE, in-process, before it stops —
+      `TwinVPNUninstall` below signals it and waits — and the installer performs
+      only steps 7-8 afterwards. Running 3-6 from a custom action after
+      `StopServices` would run them with no authority holding the WFP session,
+      which is the ordering PS-21 forbids.
+
+      Every step is idempotent (ADR-0008). A failure emits
+      `PLATFORM.SERVICE.UNINSTALL_INCOMPLETE` at ERROR naming the step, and
+      `twinvpn-unblock.exe` remains the recovery path.
+    -->
+    <CustomAction Id="TwinVPNUninstall"
+                  FileKey="twinvpnsvc.exe"
+                  ExeCommand="--uninstall-prepare"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <InstallExecuteSequence>
+      <!--
+        PS-21 steps 1-6, performed by the running authority before it is
+        stopped. `REMOVE="ALL"` only: an upgrade must NOT run it, because KS-23
+        forbids an update from clearing the latch.
+      -->
+      <Custom Action="TwinVPNUninstall" Before="StopServices">
+        <![CDATA[REMOVE="ALL"]]>
+      </Custom>
+
+      <!-- PS-21 step 7's boot artifact and principals, on the way out. -->
+      <Custom Action="RemoveBootFilters" After="TwinVPNUninstall">
+        <![CDATA[REMOVE="ALL"]]>
+      </Custom>
+      <Custom Action="RemoveGroups" After="RemoveBootFilters">
+        <![CDATA[REMOVE="ALL"]]>
+      </Custom>
+
+      <!--
+        On the way in, the groups exist before the service starts (the pipe DACL
+        it writes at every start names their SIDs, MI-A3), and the boot artifact
+        is applied before the service starts, so the host is never running the
+        authority without the boot ruleset it verifies at step (1) of ADR-0016
+        §11.6.
+      -->
+      <Custom Action="CreateGroups" Before="InstallBootFilters">
+        <![CDATA[NOT REMOVE]]>
+      </Custom>
+      <Custom Action="InstallBootFilters" Before="StartServices">
+        <![CDATA[NOT REMOVE]]>
+      </Custom>
+    </InstallExecuteSequence>
+
+    <!--
+      PS-21 step 8 purges durable local state; step 9 retains the `DeviceKey`.
+      ADR-0016 §11.6's step-9 table, Windows row: "Retained (CNG/TPM key
+      container) unless explicitly removed. Reinstall rejoins the TwinNet with
+      the same DeviceIdentity and the same overlay addresses."
+
+      So the store directory is removed and the CNG key container is NOT. There
+      is deliberately no removal of a key-container path here: deleting the
+      identity on uninstall would make every reinstall a re-enrolment, which is a
+      user-visible difference the ADR chose against.
+    -->
+    <util:RemoveFolderEx Id="PurgeStore" On="uninstall" Property="TWINVPNSTORE" />
+
+  </Product>
+</Wix>

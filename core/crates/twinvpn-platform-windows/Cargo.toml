@@ -12,6 +12,13 @@ license.workspace      = true
 repository.workspace   = true
 description = "the Windows implementation of the twinvpn-platform trait (CB-3 permits cfg here)"
 
+[features]
+# The in-memory `sys::fake`, which is what lets the transactional layers above
+# the syscall shim run their tests on a host that is not Windows. Off by
+# default and unreachable from `WindowsPlatformAdapter::new`, so no production
+# build can bind an enforcement engine that lives in a HashMap.
+test-support = []
+
 [dependencies]
 twinvpn-types    = { workspace = true }
 twinvpn-env      = { workspace = true }
@@ -23,8 +30,28 @@ futures-core     = { workspace = true }
 serde_json       = { workspace = true }
 zeroize          = { workspace = true }
 
+# The version is pinned in the WORKSPACE manifest, which is the integration
+# lead's; the feature list is this crate's, because a feature is what decides
+# which syscalls exist and that is a property of this adapter and not of the
+# workspace. Each is named for the surface it opens.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true }
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",                     # HANDLE, WIN32_ERROR, BOOL
+  "Win32_NetworkManagement_IpHelper",     # MIB_IPFORWARD_ROW2, the notify APIs
+  "Win32_NetworkManagement_Ndis",         # NET_LUID_LH
+  "Win32_Networking_WinSock",             # sockets, SOCKADDR_INET, setsockopt
+  "Win32_NetworkManagement_WindowsFilteringPlatform", # WFP: the whole Fwpm* surface
+  "Win32_System_Rpc",                     # RPC_C_AUTHN_*, which FwpmEngineOpen0 takes
+  "Win32_System_SystemInformation",       # GetSystemTimeAsFileTime, the wall clock
+  "Win32_System_WindowsProgramming",      # QueryInterruptTimePrecise and its unbiased twin
+  "Win32_System_Registry",                # the NRPT rules live in the registry
+  "Win32_System_LibraryLoader",           # Wintun is loaded dynamically
+  "Win32_System_Threading",               # the Wintun session's wait event
+  "Win32_System_IO",                      # OVERLAPPED, for the notify callbacks
+  "Win32_Security",                       # SECURITY_ATTRIBUTES, the SID types
+  "Win32_Security_Cryptography",          # BCryptGenRandom, NCrypt*, DPAPI-NG
+  "Win32_System_Memory",                  # VirtualLock, for CB-5's locked pages
+] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "io-util", "macros"] }
