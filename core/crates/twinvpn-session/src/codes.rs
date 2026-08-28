@@ -48,43 +48,7 @@ pub struct Substitution {
 /// A test asserts each `specified` spelling is genuinely **absent** from the
 /// frozen registry, so registering one turns this list into a build failure that
 /// points at the line to delete.
-pub const SUBSTITUTIONS: &[Substitution] = &[
-    Substitution {
-        specified: "NET.PATH.DEAD_NO_ALTERNATE",
-        emitted: codes::NET_NO_ROUTE,
-        cited_by: "reliability.md §3.5, §4.5 T20, §8.1",
-    },
-    Substitution {
-        specified: "RELAY.FLEET.UNREACHABLE",
-        emitted: codes::RELAY_FAILOVER_EXHAUSTED,
-        cited_by: "reliability.md §3.4, §4.5 T27, §6.3, §8.2, §8.4",
-    },
-    Substitution {
-        specified: "POLICY.KILLSWITCH.TRAFFIC_RESTORED",
-        emitted: codes::NET_SESSION_RECOVERED,
-        cited_by: "reliability.md §4.5 T30",
-    },
-    Substitution {
-        specified: "PLATFORM.BACKGROUND_SUSPENDED",
-        emitted: codes::PLATFORM_SUSPENDED,
-        cited_by: "reliability.md §3.5, §4.5 T34, §11.1, §11.2",
-    },
-    Substitution {
-        specified: "DNS.LEAK.QUERY_OBSERVED_OFF_TUNNEL",
-        emitted: codes::POLICY_LEAK_DETECTED,
-        cited_by: "reliability.md §3.2, §3.4, §4.5 T29",
-    },
-    Substitution {
-        specified: "NET.QOS.THROUGHPUT_LOW",
-        emitted: codes::NET_QOS_DEGRADED_TIMEOUT,
-        cited_by: "reliability.md §3.5, §5.4",
-    },
-    Substitution {
-        specified: "RELAY.REGION.DOWN",
-        emitted: codes::RELAY_REGION_UNAVAILABLE,
-        cited_by: "reliability.md §3.2, §3.4, §8.2",
-    },
-];
+pub const SUBSTITUTIONS: &[Substitution] = &[];
 
 /// The registered code for a substituted spelling.
 ///
@@ -104,7 +68,7 @@ pub fn substituted(specified: &str) -> Option<ReasonCode> {
 /// cause available as `caused_by` evidence.
 #[must_use]
 pub const fn path_dead_no_alternate() -> ReasonCode {
-    codes::NET_NO_ROUTE
+    codes::NET_PATH_DEAD_NO_ALTERNATE
 }
 
 /// The specific cause T20 carries in `caused_by`.

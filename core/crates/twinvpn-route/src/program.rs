@@ -147,7 +147,7 @@ impl RoutePlan {
     #[must_use]
     pub fn single_family_diagnostic(&self) -> Option<Diagnostic> {
         self.single_family_grant.map(|uncovered| {
-            Diagnostic::builder(codes::ROUTE_DEFAULT_SINGLE_FAMILY, Component::RoutingEngine)
+            Diagnostic::builder(codes::ROUTE_FAMILY_ASYMMETRY, Component::RoutingEngine)
                 .evidence("family", EvidenceValue::Family(uncovered))
                 .build()
         })

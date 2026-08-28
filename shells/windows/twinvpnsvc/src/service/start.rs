@@ -159,9 +159,22 @@ pub struct StartupRefusal {
 impl StartupRefusal {
     /// A platform refusal.
     #[must_use]
+    /// `code` is ignored and `specified` is emitted, as of `registry_version` 2.
+    ///
+    /// Every spelling ADR-0016 §11.12 uses is registered now, so the caller's
+    /// "nearest registered code" argument is dead — five distinct start-sequence
+    /// refusals used to arrive as `PLATFORM.ADAPTER_UNAVAILABLE`, which made a
+    /// fleet query unable to count the hosts whose boot window is unprotected.
+    /// The parameter is retained so the ~40 call sites need no edit and so a
+    /// build that reintroduces a divergence has somewhere to put it.
     pub fn platform(code: &'static str, specified: &'static str, detail: String) -> Self {
+        debug_assert!(
+            !specified.is_empty(),
+            "a refusal must name the code the ADR uses"
+        );
+        let _ = code;
         Self {
-            code,
+            code: specified,
             specified,
             detail,
             exit: 71,
@@ -205,58 +218,12 @@ pub struct Substitution {
 /// contribution to the registry and almost none of it landed. The two rows that
 /// are new here are Windows-shaped — a service has a single-instance lock and a
 /// remote-session rule that a `systemd` unit does not.
-pub const SUBSTITUTIONS: &[Substitution] = &[
-    Substitution {
-        specified: "PLATFORM.SERVICE.BOOT_ARTIFACT_UNREGISTERED",
-        emitted: "PLATFORM.ADAPTER_UNAVAILABLE",
-        cost: "PS-7's CRITICAL becomes indistinguishable from any other adapter problem, so a \
-               fleet query cannot count hosts whose boot window is unprotected — which is the \
-               one number KS-19 exists to make countable",
-    },
-    Substitution {
-        specified: "PLATFORM.LIFECYCLE.SINGLE_INSTANCE_CONFLICT",
-        emitted: "INTERNAL.INVARIANT_VIOLATED",
-        cost: "PS-1 names a second authority as INTERNAL.INVARIANT_VIOLATED anyway, so the \
-               class and severity are right; what is lost is that the second process cannot \
-               be distinguished from a genuine internal defect in the first",
-    },
-    Substitution {
-        specified: "PLATFORM.PRIV.DROP_FAILED",
-        emitted: "PLATFORM.ADAPTER_UNAVAILABLE",
-        cost: "a fatal privilege-separation failure reads as a generic adapter problem. The \
-               remediation differs completely: one is 'the service is installed with the \
-               wrong RequiredPrivileges', the other is 'the platform is unavailable'",
-    },
-    Substitution {
-        specified: "PLATFORM.PRIV.CAPABILITY_MISSING",
-        emitted: "PLATFORM.ADAPTER_UNAVAILABLE",
-        cost: "loses the named privilege, which PS-18 requires the code to carry so an \
-               operator knows WHICH one to grant — SeLoadDriverPrivilege and \
-               SeImpersonatePrivilege have different consequences and different fixes",
-    },
-    Substitution {
-        specified: "PLATFORM.SERVICE.SUPERVISOR_ABSENT",
-        emitted: "PLATFORM.ADAPTER_UNAVAILABLE",
-        cost: "PS-11's WARN is emitted as a log line with the fact in it rather than as a \
-               distinguishable code, so a fleet query cannot count services running outside \
-               the SCM",
-    },
-    Substitution {
-        specified: "PLATFORM.PRIV.CLIENT_UNAUTHORIZED",
-        emitted: "POLICY.POLICY_DENIED",
-        cost: "ADR-0017 §11.12 gives this its OWN exit code (4), 'distinct so a script can \
-               tell re-run with privilege from this will never work'. Degrading onto POLICY \
-               tells a correct script to give up",
-    },
-    Substitution {
-        specified: "PLATFORM.PRIV.REMOTE_ADMIN_REFUSED",
-        emitted: "POLICY.POLICY_DENIED",
-        cost: "PS-14's console-seat rule becomes indistinguishable from an ordinary \
-               authorization failure, so an administrator on RDP is told 'denied' rather \
-               than 'denied BECAUSE this is a remote session' — which is the one sentence \
-               that would send them to the console",
-    },
-];
+pub const SUBSTITUTIONS: &[Substitution] = &[];
+
+// EMPTY as of `registry_version` 2 (the first amendment under ownership.md §3).
+// All seven spellings are registered and are emitted directly. The type and its
+// tripwire are kept so a future ADR code that outruns the registry lands here
+// visibly rather than becoming a silent substitution.
 
 /// The registered code emitted for a specified spelling.
 ///
@@ -375,13 +342,18 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_carries_a_registered_code_and_a_separate_specified_spelling() {
+    fn a_refusal_carries_the_code_the_adr_names_and_it_is_registered() {
+        // Was `..._and_a_separate_specified_spelling`, asserting
+        // code == PLATFORM.ADAPTER_UNAVAILABLE while specified ==
+        // PLATFORM.PRIV.DROP_FAILED. registry_version 2 registered the latter,
+        // so the two no longer diverge and the separation is what is asserted
+        // gone.
         let refusal = StartupRefusal::platform(
             emitted_for("PLATFORM.PRIV.DROP_FAILED"),
             "PLATFORM.PRIV.DROP_FAILED",
             "the token holds SeDebugPrivilege".to_owned(),
         );
-        assert_eq!(refusal.code, "PLATFORM.ADAPTER_UNAVAILABLE");
+        assert_eq!(refusal.code, "PLATFORM.PRIV.DROP_FAILED");
         assert_eq!(refusal.specified, "PLATFORM.PRIV.DROP_FAILED");
         assert_eq!(refusal.exit, 71);
         assert!(ReasonCode::lookup(refusal.code).is_some());
@@ -407,21 +379,50 @@ mod tests {
 
     /// **The W-18 tripwire.** Deleting a row is what a registry addition looks
     /// like, and this fails the build until the row is deleted.
+    // `const_is_empty` fires because the table IS a const empty slice today. That
+    // is exactly what this asserts and exactly what must not change silently:
+    // the point is to fail when a row comes back, not to observe that none is
+    // there now. Suppressed at the assertion rather than rewritten as a length
+    // comparison, which `len_zero` then objects to.
+    #[allow(clippy::const_is_empty)]
     #[test]
-    fn every_substituted_spelling_is_still_absent_from_the_frozen_registry() {
+    fn no_start_sequence_refusal_is_substituted_any_more() {
+        // Inverted, not deleted. This asserted each substituted spelling was
+        // STILL absent and told the reader to delete the row when it landed.
+        // registry_version 2 registered all seven; it failed as designed.
+        assert!(
+            SUBSTITUTIONS.is_empty(),
+            "a start-sequence refusal is being substituted again: {:?}",
+            SUBSTITUTIONS
+                .iter()
+                .map(|s| s.specified)
+                .collect::<Vec<_>>()
+        );
         for substitution in SUBSTITUTIONS {
-            assert!(
-                ReasonCode::lookup(substitution.specified).is_none(),
-                "{} is now REGISTERED. Delete its row from SUBSTITUTIONS and emit it \
-                 directly — the substitution's cost is recorded there.",
-                substitution.specified
-            );
             assert!(
                 ReasonCode::lookup(substitution.emitted).is_some(),
                 "{} must be a registered code",
                 substitution.emitted
             );
         }
+    }
+
+    #[test]
+    fn a_refusal_emits_the_code_the_adr_names() {
+        // Five distinct refusals used to arrive as PLATFORM.ADAPTER_UNAVAILABLE,
+        // so a fleet query could not count the hosts whose boot window is
+        // unprotected -- the one number KS-19 exists to make countable.
+        let r = StartupRefusal::platform(
+            "PLATFORM.ADAPTER_UNAVAILABLE",
+            "PLATFORM.SERVICE.BOOT_ARTIFACT_UNREGISTERED",
+            "the boot artifact is not registered".to_owned(),
+        );
+        assert_eq!(r.code, "PLATFORM.SERVICE.BOOT_ARTIFACT_UNREGISTERED");
+        assert_eq!(r.code, r.specified);
+        assert!(
+            ReasonCode::lookup(r.code).is_some(),
+            "the emitted code must be registered"
+        );
     }
 
     #[test]

@@ -292,6 +292,12 @@ fn section_4_5_has_thirty_eight_rows_and_the_code_agrees() {
     }
 }
 
+// `const_is_empty` fires because the table IS a const empty slice today. That
+// is exactly what this asserts and exactly what must not change silently:
+// the point is to fail when a row comes back, not to observe that none is
+// there now. Suppressed at the assertion rather than rewritten as a length
+// comparison, which `len_zero` then objects to.
+#[allow(clippy::const_is_empty)]
 #[test]
 fn every_reason_bearing_row_names_an_emit_action() {
     let mut offenders = Vec::new();
@@ -319,20 +325,42 @@ fn every_reason_bearing_row_names_an_emit_action() {
     );
 }
 
+// `const_is_empty` fires because the table IS a const empty slice today. That
+// is exactly what this asserts and exactly what must not change silently:
+// the point is to fail when a row comes back, not to observe that none is
+// there now. Suppressed at the assertion rather than rewritten as a length
+// comparison, which `len_zero` then objects to.
+#[allow(clippy::const_is_empty)]
 #[test]
-fn every_substituted_spelling_is_genuinely_absent_from_the_frozen_registry() {
-    // A tripwire, not a workaround: the day one of these is registered, this
-    // assertion fails and points at the SUBSTITUTIONS entry to delete.
-    for s in SUBSTITUTIONS {
+fn no_session_spelling_is_substituted_any_more() {
+    // Inverted. The tripwire said "the day one of these is registered, this
+    // assertion fails and points at the SUBSTITUTIONS entry to delete".
+    // registry_version 2 registered all seven — including
+    // NET.PATH.DEAD_NO_ALTERNATE, which reliability.md §4.5 T20 makes the
+    // primary oracle for testing-strategy.md P04 and which was being emitted as
+    // NET.NO_ROUTE.
+    assert!(
+        SUBSTITUTIONS.is_empty(),
+        "a session spelling is being substituted again: {:?}",
+        SUBSTITUTIONS
+            .iter()
+            .map(|s| s.specified)
+            .collect::<Vec<_>>()
+    );
+    for spelling in [
+        "NET.PATH.DEAD_NO_ALTERNATE",
+        "RELAY.FLEET.UNREACHABLE",
+        "POLICY.KILLSWITCH.TRAFFIC_RESTORED",
+        "PLATFORM.BACKGROUND_SUSPENDED",
+        "DNS.LEAK.QUERY_OBSERVED_OFF_TUNNEL",
+        "NET.QOS.THROUGHPUT_LOW",
+        "RELAY.REGION.DOWN",
+    ] {
         assert!(
-            twinvpn_types::ReasonCode::lookup(s.specified).is_none(),
-            "{} is now in the frozen registry — remove its substitution \
-             in twinvpn-session::codes (cited by {})",
-            s.specified,
-            s.cited_by
+            twinvpn_types::ReasonCode::lookup(spelling).is_some(),
+            "{spelling} is cited by reliability.md and must be registered"
         );
     }
-    assert_eq!(SUBSTITUTIONS.len(), 7);
 }
 
 // ---------------------------------------------------------------------------

@@ -35,76 +35,14 @@ pub struct Substitution {
 
 /// The seventeen. A test asserts each `specified` spelling is genuinely absent,
 /// so registering one fails the build and points at the line to delete.
-pub const UNREGISTERED: &[Substitution] = &[
-    Substitution {
-        specified: "POLICY.KILLSWITCH.TRAFFIC_RESTORED",
-        emitted: reg::NET_SESSION_RECOVERED,
-    },
-    Substitution {
-        specified: "POLICY.KILLSWITCH.ASSERTION_MISMATCH",
-        emitted: reg::ROUTE_DRIFT_DETECTED,
-    },
-    Substitution {
-        specified: "POLICY.KILLSWITCH.RULESET_TAMPERED",
-        emitted: reg::POLICY_KILLSWITCH_ARM_FAILED,
-    },
-    Substitution {
-        specified: "POLICY.KILLSWITCH.BOOT_ENFORCEMENT_UNAVAILABLE",
-        emitted: reg::PLATFORM_ADAPTER_UNAVAILABLE,
-    },
-    Substitution {
-        specified: "POLICY.KILLSWITCH.DISARMED_BY_OWNER",
-        emitted: reg::POLICY_KILLSWITCH_UNPROTECTED_FALLBACK,
-    },
-    Substitution {
-        specified: "POLICY.KILLSWITCH.DISARM_REFUSED_REMOTE",
-        emitted: reg::MGMT_DISARM_REQUIRES_LOCAL_AUTH,
-    },
-    Substitution {
-        specified: "POLICY.LEAK.FAMILY_GRANT_MISSING",
-        emitted: reg::POLICY_LEAK_IPV6_UNPROTECTED,
-    },
-    Substitution {
-        specified: "POLICY.LEAK.EGRESS_OBSERVED",
-        emitted: reg::POLICY_LEAK_DETECTED,
-    },
-    Substitution {
-        specified: "POLICY.LEAK.DNS_UNPROTECTED",
-        emitted: reg::DNS_RESOLUTION_BLOCKED_FAIL_CLOSED,
-    },
-    Substitution {
-        specified: "POLICY.SCOPE.ROUTE_UNGRANTED",
-        emitted: reg::POLICY_NOT_ADVERTISED,
-    },
-    Substitution {
-        specified: "POLICY.EXEMPT.LOCAL_NETWORK_ALLOWED",
-        emitted: reg::POLICY_KILLSWITCH_UNPROTECTED_FALLBACK,
-    },
-    Substitution {
-        specified: "POLICY.EXEMPT.PLATFORM_MANDATED",
-        emitted: reg::PLATFORM_THIRD_PARTY_FILTER_SUSPECTED,
-    },
-    Substitution {
-        specified: "POLICY.EXEMPT.EGRESS_ANOMALY",
-        emitted: reg::POLICY_LEAK_DETECTED,
-    },
-    Substitution {
-        specified: "POLICY.PORTAL.EXEMPTION_ACTIVE",
-        emitted: reg::NET_CAPTIVE_PORTAL,
-    },
-    Substitution {
-        specified: "POLICY.PORTAL.EXEMPTION_EXPIRED",
-        emitted: reg::NET_CAPTIVE_PORTAL,
-    },
-    Substitution {
-        specified: "POLICY.COEXIST.SECOND_VPN_DEFAULT_ROUTE",
-        emitted: reg::ROUTE_IFACE_CONFLICT,
-    },
-    Substitution {
-        specified: "POLICY.COEXIST.FILTER_CONFLICT",
-        emitted: reg::PLATFORM_THIRD_PARTY_FILTER_SUSPECTED,
-    },
-];
+pub const UNREGISTERED: &[Substitution] = &[];
+
+// EMPTY as of `registry_version` 2. Every spelling ADR-0012 §11.9 uses is now
+// carried by the frozen registry, so this build emits each code by its own name
+// and no longer reports one condition under another's identifier. The table and
+// its test are kept rather than deleted: the test asserts the table is empty,
+// so a future ADR code that outruns the registry again lands here visibly
+// instead of becoming a silent substitution.
 
 /// `POLICY.KILLSWITCH.ENGAGED` — protected traffic is blocked because no
 /// authorized secure path exists. Registered.
@@ -121,17 +59,17 @@ pub const fn ruleset_absent() -> ReasonCode {
 }
 
 /// `POLICY.KILLSWITCH.ASSERTION_MISMATCH` — installed rules differ from intended
-/// policy (O-17). **Substituted**; see [`UNREGISTERED`].
+/// policy (O-17). Registered in `registry_version` 2.
 #[must_use]
 pub const fn assertion_mismatch() -> ReasonCode {
-    reg::ROUTE_DRIFT_DETECTED
+    reg::POLICY_KILLSWITCH_ASSERTION_MISMATCH
 }
 
 /// `POLICY.LEAK.EGRESS_OBSERVED` — the canary observed protected traffic on a
-/// non-overlay interface. **Substituted**; see [`UNREGISTERED`].
+/// non-overlay interface. Registered in `registry_version` 2.
 #[must_use]
 pub const fn egress_observed() -> ReasonCode {
-    reg::POLICY_LEAK_DETECTED
+    reg::POLICY_LEAK_EGRESS_OBSERVED
 }
 
 /// `POLICY.LEAK.IPV6_UNPROTECTED` — the tunnel or exit grant is v4-only.

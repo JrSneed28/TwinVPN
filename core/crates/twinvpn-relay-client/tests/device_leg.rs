@@ -836,5 +836,14 @@ fn every_unregistered_relay_code_is_still_absent_from_the_frozen_registry() {
             s.cited_by
         );
     }
-    assert_eq!(UNREGISTERED.len(), 18);
+    // 18 -> 1 in registry_version 2. The survivor is RELAY.FRAME_WRONG_DIRECTION,
+    // and it survives for a different reason than the other seventeen: those
+    // were named by ADR-0005/ADR-0006 and simply had not been transcribed,
+    // whereas this spelling appears in NO document at all. It was minted here.
+    // Registering it would put a code in the contract that no ADR defines,
+    // which is a worse defect than the substitution — so it stays recorded, and
+    // the right fix is for ADR-0005 to name the condition or for this crate to
+    // stop needing it.
+    assert_eq!(UNREGISTERED.len(), 1);
+    assert_eq!(UNREGISTERED[0].specified, "RELAY.FRAME_WRONG_DIRECTION");
 }

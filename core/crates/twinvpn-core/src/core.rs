@@ -982,7 +982,13 @@ mod tests {
         let err = core
             .submit(&Submission::bare(CoreCommand::DiagBundleCreate))
             .expect_err("ADR-0008 requires a CEREMONY key");
-        assert!(err.code().as_str().starts_with("POLICY."));
+        // Was `starts_with("POLICY.")`, which is what the substitution cost:
+        // MGMT.PRECONDITION_FAILED was unregistered, so a MANAGEMENT
+        // precondition failure arrived in the POLICY domain and degraded, on an
+        // older client, to "a protection rule stopped this" rather than "this
+        // request was missing its idempotency key". registry_version 2
+        // registered it.
+        assert_eq!(err.code().as_str(), "MGMT.PRECONDITION_FAILED");
     }
 
     #[test]

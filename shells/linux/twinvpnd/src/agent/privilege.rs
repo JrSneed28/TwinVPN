@@ -100,27 +100,21 @@ pub enum PrivilegeError {
 impl PrivilegeError {
     /// The `reason_code` this condition would carry.
     ///
-    /// **Every one is a substitution.** ADR-0016 §11.12 contributes
-    /// `PLATFORM.PRIV.DROP_FAILED` and `PLATFORM.PRIV.CAPABILITY_MISSING`, and
-    /// `contracts/registry/reason_codes.json` registers **neither** — it carries
-    /// two of the nineteen `PLATFORM.PRIV.*`/`PLATFORM.SERVICE.*` codes that ADR
-    /// names (`ownership.md` §8 W-18). The nearest registered code is emitted
-    /// and the specified spelling is recorded in [`SUBSTITUTIONS`].
+    /// **No longer a substitution.** ADR-0016 §11.12's
+    /// `PLATFORM.PRIV.DROP_FAILED` and `PLATFORM.PRIV.CAPABILITY_MISSING` were
+    /// both unregistered — the registry carried two of the nineteen
+    /// `PLATFORM.PRIV.*`/`PLATFORM.SERVICE.*` codes the ADR names
+    /// (`ownership.md` §8 W-18) — so this emitted `PLATFORM.ADAPTER_UNAVAILABLE`
+    /// for three distinct privilege failures. `registry_version` 2 registered
+    /// them, so each condition now carries its own identifier and
+    /// [`SUBSTITUTIONS`] is empty.
     #[must_use]
     pub const fn reason_code(&self) -> &'static str {
-        match self {
-            // `PLATFORM.PRIV.DROP_FAILED` and `PLATFORM.PRIV.CAPABILITY_MISSING`
-            // are both unregistered. `PLATFORM.ADAPTER_UNAVAILABLE` is the
-            // nearest registered `PLATFORM.*` code and keeps the domain, which
-            // is what ADR-0015 §11.2's prefix degradation actually needs.
-            PrivilegeError::StillRoot
-            | PrivilegeError::ForbiddenCapability { .. }
-            | PrivilegeError::CapabilityMissing => "PLATFORM.ADAPTER_UNAVAILABLE",
-            // Registered, so it is emitted DIRECTLY rather than substituted —
-            // and the tripwire below is what caught that: the row this used to
-            // have in `SUBSTITUTIONS` failed the build until it was deleted.
-            PrivilegeError::Unverifiable => "PLATFORM.PRIV.SANDBOX_DEGRADED",
-        }
+        // Every arm is registered as of `registry_version` 2, so this is now
+        // exactly `specified_code`. The two are kept separate because they
+        // answer different questions — "what did we emit" and "what does the ADR
+        // call it" — and a build where they diverge again must be able to say so.
+        self.specified_code()
     }
 
     /// The spelling ADR-0016 §11.12 uses, for the log line and the report.
@@ -154,41 +148,12 @@ pub struct Substitution {
 /// `ownership.md` §8 W-18: record the pair, state the cost, and assert with a
 /// tripwire that the specified spelling is **still absent** — so registering one
 /// fails the build and points at the line to delete.
-pub const SUBSTITUTIONS: &[Substitution] = &[
-    Substitution {
-        specified: "PLATFORM.PRIV.DROP_FAILED",
-        emitted: "PLATFORM.ADAPTER_UNAVAILABLE",
-        cost: "a fatal privilege-separation failure reads as a generic adapter problem. The \
-               remediation differs completely: one is 'fix the unit file', the other is \
-               'the platform is unavailable'",
-    },
-    Substitution {
-        specified: "PLATFORM.PRIV.CAPABILITY_MISSING",
-        emitted: "PLATFORM.ADAPTER_UNAVAILABLE",
-        cost: "loses the named entitlement, which PS-18 requires the code to carry so the \
-               operator knows WHICH capability to grant",
-    },
-    Substitution {
-        specified: "PLATFORM.SERVICE.SUPERVISOR_ABSENT",
-        emitted: "PLATFORM.ADAPTER_UNAVAILABLE",
-        cost: "PS-11's WARN is emitted as a log line with the fact in it rather than as a \
-               distinguishable code, so a fleet query cannot count unsupervised agents",
-    },
-    Substitution {
-        specified: "PLATFORM.PRIV.CLIENT_UNAUTHORIZED",
-        emitted: "POLICY.POLICY_DENIED",
-        cost: "ADR-0017 §11.12 gives this its OWN exit code (4), 'distinct so a script can \
-               tell re-run with privilege from this will never work'. Degrading on POLICY \
-               tells a correct script to give up",
-    },
-    Substitution {
-        specified: "PLATFORM.SERVICE.QUARANTINED",
-        emitted: "MGMT.UNAVAILABLE",
-        cost: "PS-9's quarantine stub must answer management with a code that says 'the rules \
-               are still installed and this is contained'. MGMT.UNAVAILABLE says only 'not \
-               now', which is the fact a UI most needs to distinguish",
-    },
-];
+pub const SUBSTITUTIONS: &[Substitution] = &[];
+
+// EMPTY as of `registry_version` 2 (the first amendment under ownership.md §3).
+// W-18 is closed for this file: ADR-0016 §11.12's spellings are registered and
+// are emitted directly. The type and its tripwire are kept, not deleted, so a
+// future ADR code that outruns the registry lands here visibly.
 
 impl Posture {
     /// Reads this process's actual posture.
@@ -414,19 +379,62 @@ mod tests {
 
     /// **The W-18 tripwire.** Deleting a row is what a registry addition looks
     /// like, and this fails the build until the row is deleted.
+    // `const_is_empty` fires because the table IS a const empty slice today. That
+    // is exactly what this asserts and exactly what must not change silently:
+    // the point is to fail when a row comes back, not to observe that none is
+    // there now. Suppressed at the assertion rather than rewritten as a length
+    // comparison, which `len_zero` then objects to.
+    #[allow(clippy::const_is_empty)]
     #[test]
-    fn every_substituted_spelling_is_still_absent_from_the_frozen_registry() {
+    fn no_privilege_condition_is_substituted_any_more() {
+        // Inverted, not deleted. This test used to assert each substituted
+        // spelling was STILL absent, and its message said "Delete its row from
+        // SUBSTITUTIONS and emit it directly". registry_version 2 registered
+        // them, it failed exactly as designed, and the rows were deleted.
+        assert!(
+            SUBSTITUTIONS.is_empty(),
+            "a privilege condition is being substituted again: {:?}",
+            SUBSTITUTIONS
+                .iter()
+                .map(|s| s.specified)
+                .collect::<Vec<_>>()
+        );
         for substitution in SUBSTITUTIONS {
-            assert!(
-                twinvpn_types::ReasonCode::lookup(substitution.specified).is_none(),
-                "{} is now REGISTERED. Delete its row from SUBSTITUTIONS and emit it \
-                 directly — the substitution's cost is recorded there.",
-                substitution.specified
-            );
             assert!(
                 twinvpn_types::ReasonCode::lookup(substitution.emitted).is_some(),
                 "{} must be a registered code",
                 substitution.emitted
+            );
+        }
+    }
+
+    #[test]
+    fn each_privilege_failure_carries_its_own_identifier() {
+        // Before registry_version 2 these three shared
+        // PLATFORM.ADAPTER_UNAVAILABLE, so an operator could not tell a refused
+        // privilege drop from a missing capability from an adapter that was not
+        // there — and ADR-0017 §11.12 gives the first its own exit code.
+        assert_eq!(
+            PrivilegeError::StillRoot.reason_code(),
+            "PLATFORM.PRIV.DROP_FAILED"
+        );
+        assert_eq!(
+            PrivilegeError::CapabilityMissing.reason_code(),
+            "PLATFORM.PRIV.CAPABILITY_MISSING"
+        );
+        assert_eq!(
+            PrivilegeError::Unverifiable.reason_code(),
+            "PLATFORM.PRIV.SANDBOX_DEGRADED"
+        );
+        for e in [
+            PrivilegeError::StillRoot,
+            PrivilegeError::CapabilityMissing,
+            PrivilegeError::Unverifiable,
+        ] {
+            assert!(
+                twinvpn_types::ReasonCode::lookup(e.reason_code()).is_some(),
+                "{} must be registered",
+                e.reason_code()
             );
         }
     }

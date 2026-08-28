@@ -27,23 +27,23 @@ pub const CAPABILITIES_JSON: &str =
 
 /// The capability-name cap this build enforces: **32, not the registry's 24**.
 ///
-/// # An open contract defect, worked around rather than patched
+/// # A closed contract defect — the constant is now the registry's
 ///
-/// `docs/implementation/ownership.md` §4.3 records it in full. In short:
-/// `limits.json` says `capability.max_name_bytes = 24`, while
-/// `capabilities.json` says `capability_name_max_length = 32`,
-/// `capabilities.cddl` says `[a-z][a-z0-9_]{0,31}`, and the capability registry
-/// itself contains `dns_config_dies_with_tunnel` — **27 bytes**. CF-6 amended
-/// ADR-0014 N-11 from 24 to 32 and deliberately did *not* rename the token,
-/// because it is `security_relevant` and a rename is an S-37 compatibility event.
+/// This used to be a **pinned exception**. `limits.json` said
+/// `capability.max_name_bytes = 24`, while `capabilities.json` said
+/// `capability_name_max_length = 32`, `capabilities.cddl` said
+/// `[a-z][a-z0-9_]{0,31}`, and the capability registry itself contained
+/// `dns_config_dies_with_tunnel` — **27 bytes**. CF-6 amended ADR-0014 N-11
+/// from 24 to 32 and deliberately did *not* rename the token, because it is
+/// `security_relevant` and a rename is an S-37 compatibility event. So a
+/// validator built on `limits.json` alone **rejected a Phase-1-mandated
+/// token**, and this constant was hard-coded to 32 with a comment.
 ///
-/// A validator built on `limits.json` alone would therefore **reject a
-/// Phase-1-mandated token**. `contracts/` is frozen (`ownership.md` §3), so this
-/// build validates against 32 and cites the section. `capability_name_cap_is_32_per_ownership_md_4_3`
-/// pins the exception, and
-/// `the_registry_still_disagrees_with_itself` fails the moment the defect is
-/// dispositioned — which is what makes this removable rather than permanent.
-pub const CAPABILITY_MAX_NAME_BYTES: usize = 32;
+/// `registry_version` 2 set `limits.json` to 32 under the `ownership.md` §3
+/// amendment procedure, closing `ownership.md` §4.3. The workaround is gone:
+/// this is now **derived**, so the constant cannot drift from the registry
+/// again — which is the property the workaround could not have.
+pub const CAPABILITY_MAX_NAME_BYTES: usize = CAPABILITY_MAX_NAME_BYTES_REGISTRY;
 
 /// Which channel's envelope caps apply.
 ///

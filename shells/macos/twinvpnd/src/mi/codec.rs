@@ -194,16 +194,17 @@ mod tests {
             frame_length(u32::MAX.to_be_bytes()),
             Err(FrameError::TooLarge)
         );
-        // And it names the code W-18 forces in place of ADR-0017 §11.3's
-        // `MGMT.PAYLOAD_TOO_LARGE`, from the one place that substitution is
-        // recorded.
+        // And it names ADR-0017 §11.3's own code. Before `registry_version` 2
+        // this was PROTO.SIZE_EXCEEDED, forced by W-18: a MANAGEMENT framing
+        // refusal degraded on an older client to "the peer protocol is wrong",
+        // which is a different diagnosis with a different next action.
         assert_eq!(
             FrameError::TooLarge.reason_code(),
-            twinvpn_mgmt::codes::substituted("MGMT.PAYLOAD_TOO_LARGE").expect("recorded")
+            twinvpn_mgmt::codes::substituted("MGMT.PAYLOAD_TOO_LARGE").expect("registered")
         );
         assert_eq!(
             FrameError::TooLarge.reason_code().as_str(),
-            "PROTO.SIZE_EXCEEDED"
+            "MGMT.PAYLOAD_TOO_LARGE"
         );
     }
 

@@ -165,7 +165,11 @@ fn a_one_family_exit_grant_blocks_the_other_family_rather_than_leaking_it() {
     let d = plan
         .single_family_diagnostic()
         .expect("an asymmetric grant carries a diagnostic");
-    assert_eq!(d.code().as_str(), "ROUTE.DEFAULT_SINGLE_FAMILY");
+    // Was ROUTE.DEFAULT_SINGLE_FAMILY, which is what the substitution cost: the
+    // asymmetry ADR-0010 R1 exists to forbid was reported under the code for a
+    // narrower condition. registry_version 2 registered ROUTE.FAMILY_ASYMMETRY
+    // (PERSISTENT/WARN, exactly as ADR-0010 §11.8 declares it).
+    assert_eq!(d.code().as_str(), "ROUTE.FAMILY_ASYMMETRY");
     assert!(
         d.code().declares_evidence("family"),
         "the family is declared evidence, not prose"
@@ -228,6 +232,12 @@ fn per_app_routing_is_a_named_refusal_and_never_a_silent_downgrade() {
     assert!(matches!(err, RouteError::PerAppUnsupported));
 }
 
+// `const_is_empty` fires because the table IS a const empty slice today. That
+// is exactly what this asserts and exactly what must not change silently:
+// the point is to fail when a row comes back, not to observe that none is
+// there now. Suppressed at the assertion rather than rewritten as a length
+// comparison, which `len_zero` then objects to.
+#[allow(clippy::const_is_empty)]
 #[test]
 fn p2_lets_the_local_lan_win_and_p5_still_reports_the_conflict() {
     // networking.md §7.4's normal case: the client is on 192.168.1.0/24 and a
@@ -388,12 +398,25 @@ fn mss_is_clamped_per_family_and_fragmentation_is_never_permitted() {
     }
 }
 
+// `const_is_empty` fires because the table IS a const empty slice today. That
+// is exactly what this asserts and exactly what must not change silently:
+// the point is to fail when a row comes back, not to observe that none is
+// there now. Suppressed at the assertion rather than rewritten as a length
+// comparison, which `len_zero` then objects to.
+#[allow(clippy::const_is_empty)]
 #[test]
-fn the_unregistered_route_spelling_is_still_absent_from_the_frozen_registry() {
-    for (spelling, note) in twinvpn_route::error::UNREGISTERED_SPELLINGS {
-        assert!(
-            twinvpn_types::ReasonCode::lookup(spelling).is_none(),
-            "{spelling} is now registered — remove the substitution ({note})"
-        );
-    }
+fn the_route_spelling_is_no_longer_substituted() {
+    // Inverted. ROUTE.FAMILY_ASYMMETRY was substituted with
+    // ROUTE.DEFAULT_SINGLE_FAMILY, which reported the asymmetry ADR-0010 R1
+    // forbids under the code for a narrower condition. registry_version 2
+    // registered it.
+    assert!(
+        twinvpn_route::error::UNREGISTERED_SPELLINGS.is_empty(),
+        "a route spelling is being substituted again: {:?}",
+        twinvpn_route::error::UNREGISTERED_SPELLINGS
+    );
+    assert!(
+        twinvpn_types::ReasonCode::lookup("ROUTE.FAMILY_ASYMMETRY").is_some(),
+        "ADR-0010 §11.8 names ROUTE.FAMILY_ASYMMETRY and it must be registered"
+    );
 }

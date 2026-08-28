@@ -350,6 +350,80 @@ def run():
         check(True, f"NOTE: B2 inventory at {n}/20 - approaching the trigger")
 
     case("registry versions agree")
-    check_eq(reasons["registry_version"], 1, "reason registry version")
-    check_eq(caps["registry_version"], 1, "capability registry version")
-    check_eq(lim["registry_version"], 1, "limits registry version")
+    # Bumped 1 -> 2 by the first amendment under ownership.md §3 (2026-08-28).
+    # The three registries ship as ONE versioned set, which is what this case
+    # asserts; reason_codes and limits both changed, so all three move together.
+    check_eq(reasons["registry_version"], 2, "reason registry version")
+    check_eq(caps["registry_version"], 2, "capability registry version")
+    check_eq(lim["registry_version"], 2, "limits registry version")
+
+    # ---- Known-encrypted-resolver endpoints (ADR-0011 §11.9) ---------------
+    # This artifact exists because §11.9 requires all three desktop enforcement
+    # layers to deny "known-DoH endpoints" off-overlay and says the list "ships
+    # with the reason-code registry, is versioned, and is explicitly incomplete
+    # - a detection aid, never a guarantee". It did not exist, so that half of
+    # the containment could not be installed anywhere.
+    enc = registry("encrypted_resolvers")
+
+    case("the encrypted-resolver list carries its own incompleteness as data")
+    # The most important assertion in this block. A consumer must be unable to
+    # mistake a detection aid for a guarantee, and prose in a comment is not
+    # something a consumer can read.
+    check_eq(enc["status"], "EXPLICITLY_INCOMPLETE", "encrypted-resolver status")
+    check_eq(enc["guarantee"], "NONE", "encrypted-resolver guarantee")
+    for k in ("what_this_is_not", "consumer_rule"):
+        check(enc.get(k), f"encrypted_resolvers.{k} must be present and non-empty")
+    check_eq(enc["registry_version"], 2, "encrypted-resolver registry version")
+
+    case("the encrypted-resolver list is well-formed and family-symmetric")
+    import ipaddress
+    check(len(enc["endpoints"]) > 0, "the endpoint list must not be empty")
+    n4 = n6 = 0
+    for e in enc["endpoints"]:
+        check(e.get("provider"), "every endpoint entry names a provider")
+        check(e.get("transports"), f"{e.get('provider')} declares no transports")
+        for a in e.get("v4", []):
+            ipaddress.IPv4Address(a)
+            n4 += 1
+        for a in e.get("v6", []):
+            ipaddress.IPv6Address(a)
+            n6 += 1
+        # ADR-0010 R1: "a v4 story and a v6 story" is the defect. A provider
+        # listed for one family only would be denied on one family only.
+        check(
+            bool(e.get("v4")) == bool(e.get("v6")),
+            f"{e.get('provider')} is listed for one address family only - "
+            f"ADR-0010 R1 makes a per-family asymmetry the defect, and here it "
+            f"would mean the resolver is contained on one family and reachable "
+            f"on the other",
+        )
+    check(n4 > 0 and n6 > 0, "both families must be represented")
+
+    case("the encrypted-resolver ports cover what ADR-0011 §11.9 names")
+    ports = enc["ports"]
+    for k, v in (("do53_udp", 53), ("do53_tcp", 53), ("dot_tcp", 853), ("doh_tcp", 443)):
+        check_eq(ports.get(k), v, f"encrypted_resolvers.ports.{k}")
+    check_eq(
+        enc["canary"]["name"], "use-application-dns.net", "the DoH canary name"
+    )
+    check_eq(enc["canary"]["answer"], "NXDOMAIN", "the DoH canary answer")
+
+    case("universal evidence keys are declared (W-5)")
+    # errors.proto REQUIRES a truncating emitter to append {key:
+    # "evidence_truncated"}, and no reason code declared it - so a validator
+    # checking a message's keys against its code's declared evidence_fields
+    # rejected a message the schema mandates.
+    uni = reasons.get("universal_evidence_fields")
+    check(uni is not None, "reason_codes.universal_evidence_fields must exist (W-5)")
+    check(
+        "evidence_truncated" in uni["fields"],
+        "evidence_truncated must be declared as a universal evidence key - "
+        "errors.proto requires a truncating emitter to append it to ANY code",
+    )
+    for f in uni["fields"]:
+        check(
+            re.match(r"^[a-z][a-z0-9_]*$", f) is not None,
+            f"universal evidence field {f!r} must be lower_snake_case",
+        )
+        check(len(f) <= lim["diagnostics"]["max_evidence_key_bytes"],
+              f"universal evidence field {f!r} too long")

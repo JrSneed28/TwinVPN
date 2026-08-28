@@ -764,17 +764,35 @@ fn hairpin_failure_goes_to_the_relay_rather_than_spinning() {
 // The contract defect
 // ---------------------------------------------------------------------------
 
+// `const_is_empty` fires because the table IS a const empty slice today. That
+// is exactly what this asserts and exactly what must not change silently:
+// the point is to fail when a row comes back, not to observe that none is
+// there now. Suppressed at the assertion rather than rewritten as a length
+// comparison, which `len_zero` then objects to.
+#[allow(clippy::const_is_empty)]
 #[test]
-fn every_unregistered_traversal_code_is_still_absent_from_the_frozen_registry() {
-    for s in UNREGISTERED {
+fn no_traversal_code_is_substituted_any_more() {
+    // Inverted, not deleted. This asserted the six ADR-0004 spellings were
+    // STILL absent and named the substitution to remove when one landed.
+    // registry_version 2 registered all six and it fired exactly as designed.
+    assert!(
+        UNREGISTERED.is_empty(),
+        "a traversal code is being substituted again: {:?}",
+        UNREGISTERED.iter().map(|s| s.specified).collect::<Vec<_>>()
+    );
+    for spelling in [
+        "NAT.PORTMAP_FAILED",
+        "NAT.HAIRPIN_UNSUPPORTED",
+        "NAT.CLASS_OBSERVED",
+        "NET.EGRESS_RESTRICTED",
+        "NET.PROXY_REQUIRED",
+        "NET.HAIRPIN_UNSUPPORTED",
+    ] {
         assert!(
-            twinvpn_types::ReasonCode::lookup(s.specified).is_none(),
-            "{} is now registered — remove its substitution ({})",
-            s.specified,
-            s.cited_by
+            twinvpn_types::ReasonCode::lookup(spelling).is_some(),
+            "{spelling} is named by ADR-0004 and is not registered"
         );
     }
-    assert_eq!(UNREGISTERED.len(), 6);
 }
 
 #[test]

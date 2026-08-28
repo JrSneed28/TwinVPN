@@ -7,9 +7,19 @@
 use twinvpn_types::reason::validate_syntax;
 use twinvpn_types::{codes, CodeStatus, Domain, ObservedReasonCode, ReasonCode};
 
+/// The count is pinned so a registry that silently loses codes fails here
+/// rather than at a peer.
+///
+/// 201 -> 454 in `registry_version` 2, the first amendment under
+/// `ownership.md` §3. The ADRs normatively named roughly 490 codes and the
+/// frozen registry carried 201, so every implementation domain was forced to
+/// substitute -- and the substitutions changed meaning, which is what made it a
+/// defect rather than an inconvenience. The addition is append-only and
+/// wire-compatible: codes travel as strings, no `.proto` moved, and the closed
+/// domain set is unchanged.
 #[test]
-fn registry_has_the_201_frozen_codes() {
-    assert_eq!(ReasonCode::all().count(), 201);
+fn registry_has_the_454_frozen_codes() {
+    assert_eq!(ReasonCode::all().count(), 454);
 }
 
 #[test]
@@ -137,5 +147,5 @@ fn observed_code_accepts_a_code_at_exactly_the_64_byte_cap() {
 /// case nobody can answer.
 #[test]
 fn registry_version_is_embedded() {
-    assert_eq!(twinvpn_types::REASON_REGISTRY_VERSION, 1);
+    assert_eq!(twinvpn_types::REASON_REGISTRY_VERSION, 2);
 }

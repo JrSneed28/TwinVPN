@@ -83,11 +83,11 @@ impl RouteError {
             RouteError::AddressCollision { .. } => codes::ROUTE_ADDRESS_COLLISION,
             RouteError::ProgrammingDenied => codes::ROUTE_PROGRAMMING_DENIED,
             RouteError::InterfaceMissing => codes::ROUTE_IFACE_MISSING,
-            // `ROUTE.FAMILY_ASYMMETRY` is named by ADR-0010 §11.8 and is absent
+            // `ROUTE.FAMILY_ASYMMETRY`, registered in `registry_version` 2
             // from the frozen registry. `ROUTE.DEFAULT_SINGLE_FAMILY` is the
             // nearest registered condition and is what this build emits.
             RouteError::DefaultSingleFamily { .. } | RouteError::FamilyAsymmetry => {
-                codes::ROUTE_DEFAULT_SINGLE_FAMILY
+                codes::ROUTE_FAMILY_ASYMMETRY
             }
             RouteError::DriftDetected => codes::ROUTE_DRIFT_DETECTED,
             RouteError::PerAppUnsupported | RouteError::Address(_) => codes::ROUTE_IFACE_CONFLICT,
@@ -125,7 +125,9 @@ impl RouteError {
 ///
 /// Asserted absent by a test, so registering one turns into a build failure that
 /// points at the line to delete.
-pub const UNREGISTERED_SPELLINGS: &[(&str, &str)] = &[(
-    "ROUTE.FAMILY_ASYMMETRY",
-    "ADR-0010 §11.8; substituted with ROUTE.DEFAULT_SINGLE_FAMILY",
-)];
+pub const UNREGISTERED_SPELLINGS: &[(&str, &str)] = &[];
+// EMPTY as of `registry_version` 2. ROUTE.FAMILY_ASYMMETRY is registered and is
+// emitted directly. It mattered more than most: it was substituted with
+// ROUTE.DEFAULT_SINGLE_FAMILY, so "one family got routes and the other did not"
+// -- the exact asymmetry ADR-0010 R1 exists to forbid -- was reported under the
+// code for a narrower condition.

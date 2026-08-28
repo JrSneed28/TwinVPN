@@ -1,6 +1,6 @@
 {
   "$schema": "twinvpn/v1/capabilities.cddl",
-  "registry_version": 1,
+  "registry_version": 2,
   "advertisement_byte_budget": 512,
   "max_tokens_per_advertisement": 32,
   "capabilities": [
@@ -411,5 +411,5 @@
     }
   ],
   "capability_name_max_length": 32,
-  "_capability_name_note": "ADR-0014 N-11, as amended 2026-08-27: [a-z][a-z0-9_]{0,31}. The bound was 24 and contradicted ADR-0014 \u00a711.11's own registry table. Resolved by amendment (CF-6), not by renaming a security_relevant token."
+  "_capability_name_note": "ADR-0014 N-11, as amended 2026-08-27: [a-z][a-z0-9_]{0,31}. The bound was 24 and contradicted ADR-0014 §11.11's own registry table. Resolved by amendment (CF-6), not by renaming a security_relevant token."
 }

@@ -1,27 +1,75 @@
-2f5323cf3351a757b5ca31585b46ffebc7bad22d4b75cbc1e89e3ff5f5b344a3
+b2b24ca39ba5befe0ad2362437a6bcea0457300c3b2c70dcf60614856191d24a
 
-TwinVPN Phase 2 contract freeze — declared 2026-08-27.
+TwinVPN Phase 2 contract freeze — re-declared 2026-08-28.
+AMENDMENT 1 to the freeze of 2026-08-27 (digest 2f5323cf3351a757...).
 
-Declared by the Phase 3 integration lead after `make gate` reported 31/31
-conditions satisfied against this exact schema digest, and after every conflict
-in docs/phase1-conflicts.md was confirmed dispositioned (CF-1 … CF-10 resolved
-or closed; OQ-1 and OQ-2 open questions that Phase 1 states do not block).
+Re-declared by the wave-2 integration lead under the eight-step procedure in
+docs/implementation/ownership.md §3, after `make gate` and the full Rust gate
+were green against this exact schema digest.
 
-Evidence at declaration:
-  20 .proto files compile and lint clean
-  649 generated files across rust, swift, kotlin, csharp
-  all four bindings COMPILE against their pinned runtimes
-  35801 contract checks, 0 failures
-  201 reason codes across 16 domains; 28 capabilities; 12 canonical states
+WHAT CHANGED, and nothing else changed:
+  registry/reason_codes.json      201 -> 450 codes; registry_version 1 -> 2
+                                  + universal_evidence_fields (W-5)
+                                  + OS-error evidence on two PLATFORM codes (W-6)
+  registry/limits.json            capability.max_name_bytes 24 -> 32 (CF-6 / §4.3)
+  registry/capabilities.json      registry_version 1 -> 2 (version parity only)
+  registry/encrypted_resolvers.json   NEW — ADR-0011 §11.9's known-encrypted-
+                                  resolver endpoint list, which that section
+                                  says ships with the reason-code registry and
+                                  which did not exist
+  tests/                          updated to assert the above
 
-What this file authorizes: production implementation under ADR-0018 §11.12's
-repository layout may begin.
+  NO .proto changed. NO .cddl changed. contracts/gen/** is byte-identical.
 
-What it does NOT authorize: any change to contracts/. The freeze procedure in
-the Phase 3 objective still applies — a contract may change only on a
-demonstrated defect, documented, reviewed by the integration lead, checked for
-Phase 1 and compatibility implications, explicitly approved, with contract tests
-updated and this decision amended. Implementation inconvenience is not a reason.
+WHY IT IS A DEFECT AND NOT AN INCONVENIENCE (§3 step 1):
+  The ADRs normatively name roughly 490 reason codes. The registry carried 201.
+  Every implementation domain was therefore forced to substitute, and the
+  substitutions changed meaning rather than merely losing detail:
+    - PLATFORM.PRIV.CLIENT_UNAUTHORIZED -> POLICY.POLICY_DENIED discards
+      ADR-0017 §11.12's dedicated exit code and tells a correct script to stop
+      retrying something a group-membership change would fix.
+    - MGMT.RESYNC_REQUIRED -> MGMT.STREAM_COMPACTED makes MI-9a's two distinct
+      conditions indistinguishable at the exact point a client must tell them
+      apart.
+    - Five distinct Windows start-sequence refusals arrived as
+      PLATFORM.ADAPTER_UNAVAILABLE, so a fleet query could not count the hosts
+      whose boot window is unprotected — the one number KS-19 exists to make
+      countable.
+  ADR-0011 §11.9's endpoint list is the second half: without it no platform
+  could install the DoH containment that section requires of WFP, pf AND
+  nftables, so a browser with a pinned DoH endpoint resolved off-tunnel on
+  every desktop.
+
+WHY IT IS COMPATIBLE (§3 step 5):
+  Reason codes travel the wire as STRINGS. Adding entries is a pure superset: a
+  reader that meets a new code handles it exactly as it already handles an
+  unknown one, using the carried attributes per ADR-0015 rule 5. No field
+  number, no enum value, no wire format, and no generated binding moved. The
+  closed set of sixteen domains is unchanged. The one non-additive edit —
+  max_name_bytes 24 -> 32 — RELAXES a validator bound that was rejecting a
+  Phase-1-mandated 27-byte token, and was already required by CF-6's amendment
+  to ADR-0014 N-11.
+
+WHAT IT COST, RECORDED:
+  Raising max_name_bytes exposed that the per-field capability bounds are not
+  mutually consistent with max_advertisement_bytes: 32 tokens at the name cap
+  is ~1216 B against a declared 512 B advertisement cap. That was ALREADY true
+  at 24 bytes (~960 B); the old wire test compared the unreachable product
+  against the 1200 B C4 datagram instead and passed by coincidence. The test is
+  rewritten to assert what a receiver actually enforces, and to assert that the
+  byte cap is load-bearing.
+
+Evidence at re-declaration:
+  20 .proto files compile and lint clean, unchanged
+  649 generated files across rust, swift, kotlin, csharp — BYTE-IDENTICAL
+  43979 contract checks, 0 failures
+  450 reason codes across 16 domains; 28 capabilities; 12 canonical states
+  8 known-encrypted-resolver providers, both families, EXPLICITLY_INCOMPLETE
+
+What this file authorizes: unchanged from the 2026-08-27 declaration.
+What it does NOT authorize: any further change to contracts/. The §3 procedure
+still applies in full, and this amendment is the precedent for how it is done,
+not a precedent for doing it casually.
 
 If the schema changes, scripts/check_freeze_scope.py fails until this file is
 re-declared deliberately.

@@ -652,19 +652,78 @@ fn ks_16_keeps_portal_answers_out_of_the_protected_cache_at_both_ends() {
 // The contract defect
 // ---------------------------------------------------------------------------
 
+/// The canary that closed the defect it was watching for.
+///
+/// This test used to assert that each of ADR-0012 §11.9's seventeen
+/// unregistered spellings was *still absent* from the frozen registry, and its
+/// failure message said "remove its substitution in twinvpn-enforce::codes".
+/// `registry_version` 2 registered all seventeen, the test failed exactly as
+/// designed, and the substitutions were removed.
+///
+/// It is inverted rather than deleted. An empty table is the invariant now, so
+/// a future ADR code that outruns the registry again shows up here as a
+/// non-empty table instead of becoming a silent substitution — which is the
+/// failure mode the original test existed to prevent, and it prevents it in
+/// both directions.
+// `const_is_empty` fires because the table IS a const empty slice today. That
+// is exactly what this asserts and exactly what must not change silently:
+// the point is to fail when a row comes back, not to observe that none is
+// there now. Suppressed at the assertion rather than rewritten as a length
+// comparison, which `len_zero` then objects to.
+#[allow(clippy::const_is_empty)]
 #[test]
-fn every_unregistered_adr_0012_code_is_still_absent_from_the_frozen_registry() {
-    for s in UNREGISTERED {
+fn no_adr_0012_code_is_substituted_any_more() {
+    assert!(
+        UNREGISTERED.is_empty(),
+        "twinvpn-enforce is substituting {} code(s) again: {:?}. Either register \
+         the spelling under the ownership.md §3 amendment procedure, or record \
+         here why it cannot be.",
+        UNREGISTERED.len(),
+        UNREGISTERED.iter().map(|s| s.specified).collect::<Vec<_>>()
+    );
+
+    // And the seventeen really are reachable by their own names now.
+    for spelling in [
+        "POLICY.KILLSWITCH.TRAFFIC_RESTORED",
+        "POLICY.KILLSWITCH.ASSERTION_MISMATCH",
+        "POLICY.KILLSWITCH.RULESET_TAMPERED",
+        "POLICY.KILLSWITCH.BOOT_ENFORCEMENT_UNAVAILABLE",
+        "POLICY.KILLSWITCH.DISARMED_BY_OWNER",
+        "POLICY.KILLSWITCH.DISARM_REFUSED_REMOTE",
+        "POLICY.LEAK.FAMILY_GRANT_MISSING",
+        "POLICY.LEAK.EGRESS_OBSERVED",
+        "POLICY.LEAK.DNS_UNPROTECTED",
+        "POLICY.SCOPE.ROUTE_UNGRANTED",
+        "POLICY.EXEMPT.LOCAL_NETWORK_ALLOWED",
+        "POLICY.EXEMPT.PLATFORM_MANDATED",
+        "POLICY.EXEMPT.EGRESS_ANOMALY",
+        "POLICY.PORTAL.EXEMPTION_ACTIVE",
+        "POLICY.PORTAL.EXEMPTION_EXPIRED",
+        "POLICY.COEXIST.SECOND_VPN_DEFAULT_ROUTE",
+        "POLICY.COEXIST.FILTER_CONFLICT",
+    ] {
         assert!(
-            twinvpn_types::ReasonCode::lookup(s.specified).is_none(),
-            "{} is now registered — remove its substitution in twinvpn-enforce::codes",
-            s.specified
+            twinvpn_types::ReasonCode::lookup(spelling).is_some(),
+            "{spelling} is named by ADR-0012 §11.9 and is not in the registry"
         );
     }
+}
+
+/// The two codes this crate actually emits are emitted under their OWN names.
+///
+/// Before `registry_version` 2, `assertion_mismatch()` returned
+/// `ROUTE.DRIFT_DETECTED` and `egress_observed()` returned
+/// `POLICY.LEAK.DETECTED` — so the kill switch's own verdict and the leak
+/// canary's own verdict each arrived wearing another condition's identifier.
+#[test]
+fn the_emitted_policy_codes_are_no_longer_wearing_another_codes_name() {
     assert_eq!(
-        UNREGISTERED.len(),
-        17,
-        "ADR-0012 §11.9 contributes 21 POLICY codes; the registry carries 4"
+        twinvpn_enforce::codes::assertion_mismatch().as_str(),
+        "POLICY.KILLSWITCH.ASSERTION_MISMATCH"
+    );
+    assert_eq!(
+        twinvpn_enforce::codes::egress_observed().as_str(),
+        "POLICY.LEAK.EGRESS_OBSERVED"
     );
 }
 

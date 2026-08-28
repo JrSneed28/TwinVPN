@@ -686,10 +686,16 @@ fn every_unregistered_spelling_in_the_core_is_still_absent_from_the_frozen_regis
         );
         still_absent += 1;
     }
-    assert!(
-        still_absent >= 24,
-        "the combined substitution set shrank to {still_absent}; if codes were \
-         registered this test should have named them"
+    // 24+ -> 1 in `registry_version` 2. Every spelling the core substituted is
+    // registered now except RELAY.FRAME_WRONG_DIRECTION, which survives for a
+    // different reason than the rest: it appears in NO document at all -- it was
+    // minted by twinvpn-relay-client. Registering it would put a code in the
+    // contract that no ADR defines, which is a worse defect than a substitution.
+    assert_eq!(
+        still_absent, 1,
+        "the combined substitution set is {still_absent}; only \
+         RELAY.FRAME_WRONG_DIRECTION should remain, and only because no \
+         document names it"
     );
 }
 
@@ -763,27 +769,18 @@ fn no_substitution_crosses_a_reason_code_domain_without_saying_so() {
         }
     }
     crossings.sort();
-    // The set as it stands. A new crossing changes this list and fails here,
-    // which is the point: a domain crossing is a decision, never an accident.
-    assert_eq!(
-        crossings,
-        [
-            "twinvpn-enforce POLICY.COEXIST.FILTER_CONFLICT -> PLATFORM.THIRD_PARTY_FILTER_SUSPECTED",
-            "twinvpn-enforce POLICY.COEXIST.SECOND_VPN_DEFAULT_ROUTE -> ROUTE.IFACE_CONFLICT",
-            "twinvpn-enforce POLICY.EXEMPT.PLATFORM_MANDATED -> PLATFORM.THIRD_PARTY_FILTER_SUSPECTED",
-            "twinvpn-enforce POLICY.KILLSWITCH.ASSERTION_MISMATCH -> ROUTE.DRIFT_DETECTED",
-            "twinvpn-enforce POLICY.KILLSWITCH.BOOT_ENFORCEMENT_UNAVAILABLE -> PLATFORM.ADAPTER_UNAVAILABLE",
-            "twinvpn-enforce POLICY.KILLSWITCH.DISARM_REFUSED_REMOTE -> MGMT.DISARM_REQUIRES_LOCAL_AUTH",
-            "twinvpn-enforce POLICY.KILLSWITCH.TRAFFIC_RESTORED -> NET.SESSION.RECOVERED",
-            "twinvpn-enforce POLICY.LEAK.DNS_UNPROTECTED -> DNS.RESOLUTION.BLOCKED_FAIL_CLOSED",
-            "twinvpn-enforce POLICY.PORTAL.EXEMPTION_ACTIVE -> NET.CAPTIVE_PORTAL",
-            "twinvpn-enforce POLICY.PORTAL.EXEMPTION_EXPIRED -> NET.CAPTIVE_PORTAL",
-            "twinvpn-path NET.EGRESS_RESTRICTED -> NAT.UDP_BLOCKED",
-            "twinvpn-path NET.HAIRPIN_UNSUPPORTED -> NAT.PUNCH_TIMEOUT",
-            "twinvpn-path NET.PROXY_REQUIRED -> NAT.UDP_BLOCKED",
-            "twinvpn-relay-client RELAY.UPGRADE.FLAPPING_SUPPRESSED -> NAT.DIRECT_UPGRADED",
-        ],
-        "the set of substitutions that cross a reason-code domain changed"
+    // EMPTY as of `registry_version` 2, and that is the strongest form this
+    // test can take. FOURTEEN substitutions used to cross a reason-code domain
+    // -- POLICY.LEAK.DNS_UNPROTECTED emitted as
+    // DNS.RESOLUTION.BLOCKED_FAIL_CLOSED, POLICY.KILLSWITCH.TRAFFIC_RESTORED as
+    // NET.SESSION.RECOVERED, and twelve more -- so ADR-0015 §11.2's prefix
+    // degradation handed an older client an ACTIVELY WRONG diagnosis rather
+    // than a merely vague one, which is the failure the closed-domain admission
+    // rule exists to prevent. Nothing is substituted now, so nothing can cross.
+    assert!(
+        crossings.is_empty(),
+        "a substitution has reappeared and it crosses a reason-code domain; a \
+         crossing is a decision, never an accident: {crossings:?}"
     );
 }
 
@@ -816,8 +813,9 @@ fn the_compiled_in_reason_registry_agrees_with_the_frozen_file() {
         checked += 1;
     }
     assert_eq!(
-        checked, 201,
-        "contracts/FROZEN records 201 reason codes; the file now has {checked}"
+        checked, 454,
+        "contracts/FROZEN records 454 reason codes as of registry_version 2; \
+         the file now has {checked}"
     );
 }
 

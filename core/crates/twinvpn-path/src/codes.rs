@@ -35,38 +35,7 @@ pub struct Substitution {
 }
 
 /// The six. A test asserts each is genuinely absent.
-pub const UNREGISTERED: &[Substitution] = &[
-    Substitution {
-        specified: "NAT.PORTMAP_FAILED",
-        cited_by: "ADR-0004 §11.5",
-        emitted: reg::NAT_PUNCH_TIMEOUT,
-    },
-    Substitution {
-        specified: "NAT.HAIRPIN_UNSUPPORTED",
-        cited_by: "ADR-0004 §11.5",
-        emitted: reg::NAT_PUNCH_TIMEOUT,
-    },
-    Substitution {
-        specified: "NAT.CLASS_OBSERVED",
-        cited_by: "ADR-0004 §11.5, §11.6(a) — a GUARANTEED OBSERVABLE for P01",
-        emitted: reg::NAT_CGNAT_DETECTED,
-    },
-    Substitution {
-        specified: "NET.EGRESS_RESTRICTED",
-        cited_by: "networking.md §3.7",
-        emitted: reg::NAT_UDP_BLOCKED,
-    },
-    Substitution {
-        specified: "NET.PROXY_REQUIRED",
-        cited_by: "networking.md §3.7",
-        emitted: reg::NAT_UDP_BLOCKED,
-    },
-    Substitution {
-        specified: "NET.HAIRPIN_UNSUPPORTED",
-        cited_by: "networking.md §3.7",
-        emitted: reg::NAT_PUNCH_TIMEOUT,
-    },
-];
+pub const UNREGISTERED: &[Substitution] = &[];
 
 /// `NAT.DIRECT_ESTABLISHED` — the direct-path **success** outcome.
 ///

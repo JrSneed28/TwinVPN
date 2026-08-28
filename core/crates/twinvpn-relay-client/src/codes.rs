@@ -26,98 +26,11 @@ pub struct Substitution {
 }
 
 /// The eighteen. A test asserts each is genuinely absent.
-pub const UNREGISTERED: &[Substitution] = &[
-    Substitution {
-        specified: "RELAY.FRAME_WRONG_DIRECTION",
-        cited_by: "W-32; ADR-0005 §9.1 frame roles, §11's originated-frame rule",
-        emitted: reg::RELAY_MAP_UNVERIFIED,
-    },
-    Substitution {
-        specified: "RELAY.FLEET.UNREACHABLE",
-        cited_by: "ADR-0006 §11.13; reliability §3.4, §4.5 T27, §6.3, §8.2, §8.4",
-        emitted: reg::RELAY_FAILOVER_EXHAUSTED,
-    },
-    Substitution {
-        specified: "RELAY.REGION.DOWN",
-        cited_by: "ADR-0006 §11.13; reliability §3.2, §3.4",
-        emitted: reg::RELAY_REGION_UNAVAILABLE,
-    },
-    Substitution {
-        specified: "RELAY.REGION.SHED_DEFERRED",
-        cited_by: "ADR-0006 §11.7; reliability §8.2",
-        emitted: reg::RELAY_REGION_UNAVAILABLE,
-    },
-    Substitution {
-        specified: "RELAY.FAILOVER.CROSS_REGION",
-        cited_by: "ADR-0006 §11.13; reliability §3.4, §8.2",
-        emitted: reg::RELAY_FAILOVER_VALIDATED,
-    },
-    Substitution {
-        specified: "RELAY.FAILOVER.COMPLETED",
-        cited_by: "ADR-0006 §11.5",
-        emitted: reg::RELAY_FAILOVER_VALIDATED,
-    },
-    Substitution {
-        specified: "RELAY.FAILOVER.NO_STANDBY",
-        cited_by: "reliability §8.1",
-        emitted: reg::RELAY_FAILOVER_EXHAUSTED,
-    },
-    Substitution {
-        specified: "RELAY.FAILOVER.EPOCH_CONFLICT",
-        cited_by: "ADR-0006 §11.5 rule 4",
-        emitted: reg::RELAY_FAILOVER_EXHAUSTED,
-    },
-    Substitution {
-        specified: "RELAY.FAILOVER.OFFER_UNACKED",
-        cited_by: "ADR-0006 §11.5 rule 5",
-        emitted: reg::RELAY_FAILOVER_EXHAUSTED,
-    },
-    Substitution {
-        specified: "RELAY.SELECT.ALL_BREAKERS_OPEN",
-        cited_by: "ADR-0006 §11.3 rule 3; reliability §6.3",
-        emitted: reg::RELAY_NONE_REACHABLE,
-    },
-    Substitution {
-        specified: "RELAY.SELECT.NO_CANDIDATE_FOR_FAMILY",
-        cited_by: "ADR-0006 §11.3 rule 2",
-        emitted: reg::RELAY_NONE_REACHABLE,
-    },
-    Substitution {
-        specified: "RELAY.SELECT.NO_CARRIAGE_SUPPORTED",
-        cited_by: "ADR-0006 §11.3 rule 2",
-        emitted: reg::RELAY_NONE_REACHABLE,
-    },
-    Substitution {
-        specified: "RELAY.STANDBY_UNAVAILABLE",
-        cited_by: "ADR-0005; ADR-0006 §11.6; reliability §8.4",
-        emitted: reg::RELAY_REGION_UNAVAILABLE,
-    },
-    Substitution {
-        specified: "RELAY.STANDBY.SUPPRESSED_METERED",
-        cited_by: "ADR-0006 §11.6; reliability §11.4",
-        emitted: reg::RELAY_REGION_UNAVAILABLE,
-    },
-    Substitution {
-        specified: "RELAY.STANDBY.SUPPRESSED_POWER",
-        cited_by: "ADR-0006 §11.6; reliability §11.4",
-        emitted: reg::RELAY_REGION_UNAVAILABLE,
-    },
-    Substitution {
-        specified: "RELAY.PAIR_UNMATCHED",
-        cited_by: "ADR-0005; ADR-0006 §11.5",
-        emitted: reg::RELAY_NONE_REACHABLE,
-    },
-    Substitution {
-        specified: "RELAY.MAP.VERSION_ROLLBACK_REFUSED",
-        cited_by: "ADR-0006 §11.9",
-        emitted: reg::RELAY_MAP_UNVERIFIED,
-    },
-    Substitution {
-        specified: "RELAY.UPGRADE.FLAPPING_SUPPRESSED",
-        cited_by: "reliability §7.4",
-        emitted: reg::NAT_DIRECT_UPGRADED,
-    },
-];
+pub const UNREGISTERED: &[Substitution] = &[Substitution {
+    specified: "RELAY.FRAME_WRONG_DIRECTION",
+    cited_by: "W-32; ADR-0005 §9.1 frame roles, §11's originated-frame rule",
+    emitted: reg::RELAY_MAP_UNVERIFIED,
+}];
 
 /// `RELAY.NONE_REACHABLE` — registered.
 #[must_use]

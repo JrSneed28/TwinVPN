@@ -117,20 +117,33 @@ fn capability_name_cap_is_32_per_ownership_md_4_3() {
     );
 }
 
-/// Fails the moment `contracts/` is amended, which is what makes the §4.3
-/// exception removable rather than permanent.
+/// The §4.3 defect is CLOSED, and this asserts the registry now agrees with
+/// itself rather than that it still disagrees.
+///
+/// This test was written to fail "the moment `contracts/` is amended, which is
+/// what makes the §4.3 exception removable rather than permanent". It fired on
+/// `registry_version` 2, which set `limits.json`'s
+/// `capability.max_name_bytes` to 32 under the `ownership.md` §3 procedure —
+/// so `CAPABILITY_MAX_NAME_BYTES` is no longer a pinned exception, it is what
+/// the registry says.
 #[test]
-fn the_registry_still_disagrees_with_itself() {
+fn the_registry_agrees_with_itself() {
     let caps: serde_json::Value =
         serde_json::from_str(limits::CAPABILITIES_JSON).expect("capabilities.json parses");
     let cap_registry_len = caps["capability_name_max_length"].as_u64().expect("length");
     assert_eq!(cap_registry_len, 32);
     assert_eq!(
         limits::CAPABILITY_MAX_NAME_BYTES_REGISTRY,
-        24,
-        "limits.json's capability.max_name_bytes is no longer 24 — the ownership.md §4.3 \
-         workaround has been dispositioned and CAPABILITY_MAX_NAME_BYTES should now be \
-         derived from the registry rather than pinned"
+        32,
+        "limits.json's capability.max_name_bytes must be 32 — CF-6 amended \
+         ADR-0014 N-11, capabilities.json and the CDDL both say 32, and the \
+         registry carries a 27-byte token"
+    );
+    assert_eq!(
+        limits::CAPABILITY_MAX_NAME_BYTES,
+        limits::CAPABILITY_MAX_NAME_BYTES_REGISTRY,
+        "the pinned constant and the registry must now be the same number; the \
+         §4.3 workaround is dispositioned"
     );
     // And the token that proves the defect is real is still in the registry.
     let names: Vec<&str> = caps["capabilities"]

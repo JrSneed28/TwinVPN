@@ -452,18 +452,68 @@ def run():
         "candidates",
     )
 
-    case("a capability advertisement at the cap fits its byte budget")
-    over = {"capabilities": [
-        {"name": "x" * lim["capability"]["max_name_bytes"], "major": 1}
-        for _ in range(lim["capability"]["max_tokens_per_advertisement"])
+    case("max_advertisement_bytes is load-bearing, not decorative")
+    # The per-field bounds are NOT mutually sufficient, and this case exists to
+    # keep that fact checked rather than accidental.
+    #
+    # max_tokens_per_advertisement (32) x max_name_bytes produces an object far
+    # larger than max_advertisement_bytes (512) permits: ~960 B at the old
+    # 24-byte name cap and ~1216 B at the 32-byte cap CF-6 set. So the byte cap
+    # is the constraint a receiver actually enforces, and the per-field caps
+    # bound individual fields only.
+    #
+    # This case previously constructed that unreachable worst case and checked it
+    # against c4_max_bytes (1200). It passed at 960 B by COINCIDENCE -- the
+    # product happened to sit between the cap it violated (512) and the cap it
+    # was compared against (1200) -- so it never tested the property it named,
+    # and it began failing the moment CF-6's amendment was applied to
+    # limits.json. Rewritten during the registry_version 2 amendment.
+    cap = lim["capability"]
+    unreachable = {"capabilities": [
+        {"name": "x" * cap["max_name_bytes"], "major": 1}
+        for _ in range(cap["max_tokens_per_advertisement"])
     ]}
-    blob = to_binary("twinvpn.v1.CapabilitySet", over)
-    # Worst case: 32 tokens each at the 24-byte name cap. This is the absolute
+    unreachable_blob = to_binary("twinvpn.v1.CapabilitySet", unreachable)
+    check(
+        len(unreachable_blob) > cap["max_advertisement_bytes"],
+        f"the per-field caps now fit inside max_advertisement_bytes "
+        f"({len(unreachable_blob)} B <= {cap['max_advertisement_bytes']} B). That "
+        f"is not a failure, but it means this case no longer proves the byte cap "
+        f"is load-bearing -- re-derive it rather than deleting it",
+    )
 
+    case("an advertisement at the ENFORCED cap fits a C4 datagram")
+    # What a receiver accepts is bounded by max_advertisement_bytes, so that is
+    # the number that must fit the worst-case IPv6 path MTU alongside candidates.
+    check(
+        cap["max_advertisement_bytes"] <= lim["envelope"]["c4_max_bytes"],
+        f"the enforced advertisement cap ({cap['max_advertisement_bytes']} B) "
+        f"does not fit the {lim['envelope']['c4_max_bytes']} B C4 datagram",
+    )
+    # And an advertisement built up to that enforced cap must really fit.
+    n = 0
+    fitted = {"capabilities": []}
+    while True:
+        trial = {"capabilities": fitted["capabilities"] + [
+            {"name": "x" * cap["max_name_bytes"], "major": 1}]}
+        if len(to_binary("twinvpn.v1.CapabilitySet", trial)) > cap["max_advertisement_bytes"]:
+            break
+        fitted = trial
+        n += 1
+        if n >= cap["max_tokens_per_advertisement"]:
+            break
+    blob = to_binary("twinvpn.v1.CapabilitySet", fitted)
     check(
         len(blob) <= lim["envelope"]["c4_max_bytes"],
-        f"a worst-case advertisement is {len(blob)} B, which does not fit the "
-        f"{lim['envelope']['c4_max_bytes']} B C4 datagram at all",
+        f"an advertisement at the enforced {cap['max_advertisement_bytes']} B cap "
+        f"is {len(blob)} B and does not fit the "
+        f"{lim['envelope']['c4_max_bytes']} B C4 datagram",
+    )
+    check(
+        n < cap["max_tokens_per_advertisement"],
+        f"the byte cap admitted all {cap['max_tokens_per_advertisement']} tokens "
+        f"at the {cap['max_name_bytes']}-byte name cap, so the two bounds are "
+        f"consistent and the note above is stale",
     )
 
     case("an oversized C4 body is detectable before parse")
