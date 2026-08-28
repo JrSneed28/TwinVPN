@@ -165,11 +165,24 @@ impl WindowsPlatformAdapter {
     /// host would be a way to install a ruleset that lives in a `HashMap`, which
     /// is exactly the belief ADR-0012 K12 forbids. The test double is reached
     /// through [`Self::with_system`], which is feature-gated.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `FwpmEngineOpen0` refused with. **Fallible on purpose**:
+    /// ADR-0016 PS-18 makes an absent capability a *startup* failure rather than
+    /// a degradation, and ADR-0012 §8 says arming must never fail open. An
+    /// infallible constructor would defer the refusal to the first call and let
+    /// the service report itself running in a mode that cannot arm enforcement,
+    /// which is the state PS-18 exists to forbid.
     #[cfg(windows)]
-    #[must_use]
-    pub fn new(parts: WindowsAdapterParts) -> Self {
-        let system: Arc<dyn sys::SystemOps> = Arc::new(sys::win::WindowsSystem::new());
-        Self::assemble(parts, system)
+    pub fn new(parts: WindowsAdapterParts) -> Result<Self, PlatformError> {
+        // The latch is built first so the system and every capability share
+        // one: a shutdown that did not reach the interface provider would leave
+        // an in-flight enumeration running past `begin_shutdown`.
+        let shutdown = ShutdownLatch::new();
+        let system: Arc<dyn sys::SystemOps> =
+            Arc::new(sys::win::WindowsSystem::open(shutdown.clone())?);
+        Ok(Self::assemble_with(parts, system, shutdown))
     }
 
     /// Builds the adapter over a supplied system.
@@ -178,11 +191,14 @@ impl WindowsPlatformAdapter {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_system(parts: WindowsAdapterParts, system: Arc<dyn sys::SystemOps>) -> Self {
-        Self::assemble(parts, system)
+        Self::assemble_with(parts, system, ShutdownLatch::new())
     }
 
-    fn assemble(parts: WindowsAdapterParts, system: Arc<dyn sys::SystemOps>) -> Self {
-        let shutdown = ShutdownLatch::new();
+    fn assemble_with(
+        parts: WindowsAdapterParts,
+        system: Arc<dyn sys::SystemOps>,
+        shutdown: ShutdownLatch,
+    ) -> Self {
         let element_name = parts.identity_element.name();
         let tier1_backend = parts.tier1_backend;
         let store_root = parts.store_root.clone();

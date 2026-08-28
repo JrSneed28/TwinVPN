@@ -32,6 +32,7 @@
 pub mod logging;
 pub mod peer;
 pub mod power;
+pub mod privilege;
 pub mod runtime;
 pub mod scm;
 pub mod server;
