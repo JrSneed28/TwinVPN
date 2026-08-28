@@ -18,5 +18,15 @@ twinvpn-platform      = { workspace = true }
 thiserror             = { workspace = true }
 libc                  = { workspace = true }
 socket2               = { workspace = true }
-tokio                 = { workspace = true }
+# `net` for the AsyncFd readiness driver the UDP and netlink sockets run on;
+# `rt`/`sync` for the shutdown latch. NOT `time`: CD-3 bans the runtime's own
+# time module outside `twinvpn-env`'s binding, and every deadline in this crate
+# is the core's, composed from `twinvpn_env::Timer`.
+tokio                 = { workspace = true, features = ["net", "rt", "sync", "io-util"] }
 tracing               = { workspace = true }
+futures-core          = { workspace = true }
+serde_json            = { workspace = true }
+zeroize               = { workspace = true }
+
+[dev-dependencies]
+tokio                 = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "io-util", "macros"] }
