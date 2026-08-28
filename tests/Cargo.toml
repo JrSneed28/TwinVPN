@@ -38,6 +38,39 @@ twinvpn-platform     = { path = "../core/crates/twinvpn-platform", features = ["
 twinvpn-store        = { path = "../core/crates/twinvpn-store" }
 twinvpn-trust        = { path = "../core/crates/twinvpn-trust" }
 twinvpn-session      = { path = "../core/crates/twinvpn-session" }
+
+# ---------------------------------------------------------------------------
+# THE SERVER AND SHELL ARTIFACTS.
+# ---------------------------------------------------------------------------
+# Added by the integration lead on final-review's recommendation, and it is the
+# single highest-leverage change available at the end of this wave.
+#
+# `ownership.md` §1 chose four separate cargo workspaces deliberately and stated
+# the benefit: no domain silently acquires another's dependency graph. The COST
+# was never stated, and final-review named it: **no test in this repository could
+# link a client crate and a server crate at the same time.**
+#
+# That is not a hypothetical. It is the shared cause of every cross-artifact
+# defect this wave paid for -- the control plane deriving a v6 address one way
+# and twinvpn-route another; the relay MACing the egress frame over the ingress
+# flow_id; two independently-written channel bindings both passing their own
+# tests over the same release() bug; three hand-written HealthState models in two
+# workspaces. Each side was correct in its own tests. Nothing could compare them,
+# so the rig fell back on `include_str!`-ing the other crate's SOURCE and
+# grepping it -- which proves a crate agrees with its own README and cannot
+# decode a frame.
+#
+# The property that actually matters is untouched: no PRODUCTION crate gains
+# another domain's graph. Only the test crate -- test-engineering's own -- gains
+# the ability to see both sides of a wire it is supposed to be verifying.
+twinvpn-service-common = { path = "../services/twinvpn-service-common" }
+twinvpn-relay          = { path = "../services/relay" }
+twinvpn-relay-directory = { path = "../services/relay-directory" }
+twinvpn-relay-health   = { path = "../services/relay-health" }
+twinvpn-rendezvous     = { path = "../services/rendezvous" }
+twinvpn-presence       = { path = "../services/presence" }
+twinvpn-control-plane  = { path = "../services/control-plane" }
+twinvpn-platform-linux = { path = "../core/crates/twinvpn-platform-linux" }
 twinvpn-path         = { path = "../core/crates/twinvpn-path" }
 twinvpn-relay-client = { path = "../core/crates/twinvpn-relay-client" }
 twinvpn-tunnel       = { path = "../core/crates/twinvpn-tunnel" }
