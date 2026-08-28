@@ -8,9 +8,17 @@ docs/implementation/ownership.md §3, after `make gate` and the full Rust gate
 were green against this exact schema digest.
 
 WHAT CHANGED, and nothing else changed:
-  registry/reason_codes.json      201 -> 450 codes; registry_version 1 -> 2
+  registry/reason_codes.json      201 -> 454 codes; registry_version 1 -> 2
                                   + universal_evidence_fields (W-5)
                                   + OS-error evidence on two PLATFORM codes (W-6)
+                                  + a 'family' evidence key on
+                                    ROUTE.FAMILY_ASYMMETRY. This landed in
+                                    a9f07c1, AFTER the paragraph below was
+                                    first written, which is why the digest on
+                                    line 1 is that commit's and not amendment
+                                    1's. It was omitted from this list until
+                                    the wave-3 integration read the two
+                                    against each other.
   registry/limits.json            capability.max_name_bytes 24 -> 32 (CF-6 / §4.3)
   registry/capabilities.json      registry_version 1 -> 2 (version parity only)
   registry/encrypted_resolvers.json   NEW — ADR-0011 §11.9's known-encrypted-
@@ -59,11 +67,18 @@ WHAT IT COST, RECORDED:
   rewritten to assert what a receiver actually enforces, and to assert that the
   byte cap is load-bearing.
 
-Evidence at re-declaration:
+Evidence at re-declaration, against the digest on line 1.
+  Corrected 2026-08-28 by the wave-3 integration lead. The four numbers first
+  written here were from the run BEFORE ROUTE.FAMILY_ASYMMETRY gained its
+  'family' key, so they described a schema this file does not declare. Nothing
+  was wrong with the freeze — the digest bound then and binds now, and the gate
+  passes on it — but a declaration whose own "WHAT CHANGED, and nothing else
+  changed" list omits the last change made is not the record §3 intends, and
+  the first clause of the acceptance gate turns on this file being that record.
   20 .proto files compile and lint clean, unchanged
   649 generated files across rust, swift, kotlin, csharp — BYTE-IDENTICAL
-  43979 contract checks, 0 failures
-  450 reason codes across 16 domains; 28 capabilities; 12 canonical states
+  44105 contract checks, 0 failures
+  454 reason codes across 16 domains; 28 capabilities; 12 canonical states
   8 known-encrypted-resolver providers, both families, EXPLICITLY_INCOMPLETE
 
 What this file authorizes: unchanged from the 2026-08-27 declaration.
