@@ -20,21 +20,27 @@
 //!
 //! # What the rig does not do
 //!
-//! It does not drive `twinvpn-core`. At the time this was written
-//! `core/crates/twinvpn-core/src/lib.rs` contains no items at all — the
-//! composition root is being built by `core-composition` in parallel. The rig
-//! therefore composes the leaf crates directly and
-//! [`composition_root_is_populated`] records that fact as an executable
-//! observation, so the day the composition root lands, this crate is told.
+//! [`ComposedRig`] is the same idea one level up: the real
+//! [`twinvpn_core::Core`], built from **this** crate's `CoreParts` rather than
+//! `twinvpn_core::testing`'s, so the composed core runs on TwinLab's seeded
+//! CD-4 streams and TwinLab's virtual clock instead of a counting entropy
+//! source behind a `SystemRngSource`. That difference is the point:
+//! `core-composition`'s `tests/falsification.rs` proves the core never *needs* a
+//! shell; these prove what it does under a scenario whose recorded seed can
+//! reproduce it a year later.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
+use futures_core::future::BoxFuture;
 use twinlab::{LabEnv, ScenarioSeed};
+use twinvpn_core::session_loop::SessionRuntime;
+use twinvpn_core::{Core, CoreEvent, CoreParts};
 use twinvpn_enforce::contract::ContractInputs;
 use twinvpn_enforce::{ArmingPolicy, Latch, ProtectedPreconditions};
 use twinvpn_platform::mock::{MockAdapter, MockOptions};
@@ -322,19 +328,200 @@ impl Rig {
     }
 }
 
-/// Whether `twinvpn-core`'s composition root has any items yet.
+/// The environment every rig runs on.
 ///
-/// An executable observation rather than a comment: this domain programmed
-/// against the leaf crates because the composition root was empty while
-/// `core-composition` built it, and this is how that assumption announces that
-/// it has expired.
-#[must_use]
-pub fn composition_root_is_populated() -> bool {
-    const CORE_LIB: &str = include_str!("../../../core/crates/twinvpn-core/src/lib.rs");
-    CORE_LIB.lines().any(|l| {
-        let t = l.trim_start();
-        t.starts_with("pub mod ") || t.starts_with("pub struct ") || t.starts_with("pub fn ")
-    })
+/// `entropy_produces_bytes` is `false` by default and should stay that way: a
+/// deterministic scenario that can reach a working CSPRNG is not reproducible
+/// and nothing would say so. It is `true` only for the tests that open a real
+/// vault, which needs a store key it cannot derive from a refusal.
+fn rig_env(seed: u8, entropy_produces_bytes: bool) -> LabEnv {
+    let s = ScenarioSeed::from_bytes([seed; 16]);
+    if entropy_produces_bytes {
+        LabEnv::with_entropy(
+            s,
+            twinvpn_env::WallClockReading::Unset,
+            Arc::new(twinlab::CountingEntropy::default()),
+        )
+    } else {
+        LabEnv::new(s)
+    }
+}
+
+/// The composed core, on TwinLab's seeded environment.
+///
+/// `twinvpn_core::testing::parts()` exists and is deliberately **not** used
+/// here: it binds a `CountingEntropy` behind a `SystemRngSource`, which answers
+/// `is_deterministic() == false`. A scenario that cannot say it is deterministic
+/// may not declare `BIT` (§3.5), so this rig builds its own `CoreParts` over
+/// [`twinlab::LabEnv`] and asserts that property at construction.
+pub struct ComposedRig {
+    /// The real composition root.
+    pub core: Core,
+    /// The mock platform it is bound to — for asserting what the core did, and
+    /// in the cases where doing nothing is the requirement, that it did nothing.
+    pub adapter: Arc<MockAdapter>,
+    /// The deterministic environment, for advancing time and drawing streams.
+    pub env: LabEnv,
+    /// Which families the underlay offers.
+    pub host_family: HostFamily,
+}
+
+impl ComposedRig {
+    /// Builds a composed core for `host_family` at `seed`.
+    ///
+    /// # Panics
+    ///
+    /// If `Core::create` refuses, or if the environment is not deterministic.
+    /// Both are defects in this rig rather than conditions a test should handle.
+    #[must_use]
+    pub fn new(host_family: HostFamily, seed: u8) -> Self {
+        Self::with_parts(host_family, seed, |_| {})
+    }
+
+    /// As [`ComposedRig::new`], with the parts adjusted before construction.
+    ///
+    /// # Panics
+    ///
+    /// As [`ComposedRig::new`].
+    #[must_use]
+    pub fn with_parts(
+        host_family: HostFamily,
+        seed: u8,
+        adjust: impl FnOnce(&mut CoreParts),
+    ) -> Self {
+        let env = rig_env(seed, false);
+        assert!(
+            env.is_deterministic(),
+            "the composed rig must run on a seeded source, or no scenario over it \
+             may declare BIT"
+        );
+        let adapter = Arc::new(MockAdapter::new(&MockOptions {
+            supported_families: host_family.supported(),
+            ..MockOptions::default()
+        }));
+        let mut parts = CoreParts {
+            env: env.env_owned(),
+            adapter: Arc::clone(&adapter) as Arc<dyn PlatformAdapter>,
+            abi_major_expected: twinvpn_core::ABI_MAJOR,
+            abi_major: twinvpn_core::ABI_MAJOR,
+            abi_minor: twinvpn_core::ABI_MINOR,
+            schema_digest: vec![0xcd; 32],
+            crypto_provider: "twinvpn-crypto/system-tests".to_owned(),
+            sek_custody: "core-held:system-tests".to_owned(),
+            // The mock reports no secure element and the core records that
+            // rather than assuming otherwise (ADR-0018 §11.16 (l)).
+            hardware_backed: false,
+            ledger_capacity: twinvpn_diag::ring::DEFAULT_CAPACITY,
+            event_capacity: twinvpn_core::events::DEFAULT_CAPACITY,
+        };
+        adjust(&mut parts);
+        let core = Core::create(parts).expect("the composed core must construct");
+        Self {
+            core,
+            adapter,
+            env,
+            host_family,
+        }
+    }
+
+    /// As [`ComposedRig::with_parts`], returning the refusal instead of
+    /// panicking on it.
+    ///
+    /// Present so a test can assert **why** construction was refused — VR-4's
+    /// `INTERNAL.ABI_VERSION_MISMATCH` is a named condition, and a
+    /// `#[should_panic]` would only prove that something went wrong.
+    ///
+    /// # Errors
+    ///
+    /// The [`twinvpn_types::Diagnostic`] `Core::create` returns.
+    pub fn try_with_parts(
+        host_family: HostFamily,
+        seed: u8,
+        adjust: impl FnOnce(&mut CoreParts),
+    ) -> Result<Self, Box<twinvpn_types::Diagnostic>> {
+        let env = rig_env(seed, false);
+        let adapter = Arc::new(MockAdapter::new(&MockOptions {
+            supported_families: host_family.supported(),
+            ..MockOptions::default()
+        }));
+        let mut parts = CoreParts {
+            env: env.env_owned(),
+            adapter: Arc::clone(&adapter) as Arc<dyn PlatformAdapter>,
+            abi_major_expected: twinvpn_core::ABI_MAJOR,
+            abi_major: twinvpn_core::ABI_MAJOR,
+            abi_minor: twinvpn_core::ABI_MINOR,
+            schema_digest: vec![0xcd; 32],
+            crypto_provider: "twinvpn-crypto/system-tests".to_owned(),
+            sek_custody: "core-held:system-tests".to_owned(),
+            hardware_backed: false,
+            ledger_capacity: twinvpn_diag::ring::DEFAULT_CAPACITY,
+            event_capacity: twinvpn_core::events::DEFAULT_CAPACITY,
+        };
+        adjust(&mut parts);
+        Ok(Self {
+            core: Core::create(parts)?,
+            adapter,
+            env,
+            host_family,
+        })
+    }
+
+    /// A composed rig whose entropy **produces bytes**.
+    ///
+    /// `twinvpn_store::Store::open` derives a store key and refuses to start
+    /// without entropy, so a test that opens a real vault cannot use the default
+    /// [`twinlab::seed::RefusingEntropy`]. The source bound here counts, and
+    /// `twinlab` names it so no reader mistakes it for a CSPRNG.
+    ///
+    /// The scenario is still `BIT`: a counter is as reproducible as a seeded
+    /// stream, and `is_deterministic()` — which answers about the `RngSource` —
+    /// is unchanged. **Never use this rig to assert unpredictability.**
+    #[must_use]
+    pub fn with_store_entropy(host_family: HostFamily, seed: u8) -> Self {
+        let env = rig_env(seed, true);
+        let adapter = Arc::new(MockAdapter::new(&MockOptions {
+            supported_families: host_family.supported(),
+            ..MockOptions::default()
+        }));
+        let parts = CoreParts {
+            env: env.env_owned(),
+            adapter: Arc::clone(&adapter) as Arc<dyn PlatformAdapter>,
+            abi_major_expected: twinvpn_core::ABI_MAJOR,
+            abi_major: twinvpn_core::ABI_MAJOR,
+            abi_minor: twinvpn_core::ABI_MINOR,
+            schema_digest: vec![0xcd; 32],
+            crypto_provider: "twinvpn-crypto/system-tests".to_owned(),
+            sek_custody: "core-held:system-tests".to_owned(),
+            hardware_backed: false,
+            ledger_capacity: twinvpn_diag::ring::DEFAULT_CAPACITY,
+            event_capacity: twinvpn_core::events::DEFAULT_CAPACITY,
+        };
+        Self {
+            core: Core::create(parts).expect("the composed core must construct"),
+            adapter,
+            env,
+            host_family,
+        }
+    }
+
+    /// A `SessionRuntime` over this rig's environment.
+    #[must_use]
+    pub fn session_runtime(&self, seed: u8) -> SessionRuntime {
+        SessionRuntime::new(
+            self.env.env_owned(),
+            SessionMachine::new(self.env.env_owned(), SessionId::from_array([seed; 16])),
+        )
+    }
+
+    /// Drains every event currently queued, without blocking.
+    #[must_use]
+    pub fn drain_events(&self) -> Vec<CoreEvent> {
+        let mut out = Vec::new();
+        while let Some(e) = self.core.next_event(core::time::Duration::ZERO) {
+            out.push(e);
+        }
+        out
+    }
 }
 
 /// A minimal, valid `DnsPolicy` for a rig.
@@ -396,4 +583,92 @@ pub fn preconditions(plan: &RoutePlan, path_validated: bool) -> ProtectedPrecond
             plan.carries(AddressFamily::V6),
         ),
     }
+}
+
+/// A `SecureStore` that forwards to a `MockAdapter`'s own.
+///
+/// `twinvpn_store::Store::open` takes an `Arc<dyn SecureStore>`, and
+/// `MockStore`'s constructor is `pub(super)` — the adapter owns the only
+/// instance. Rather than build a second, weaker double, this forwards every
+/// call to the adapter's, so the store under test is bound to exactly the
+/// custody surface the rest of the rig is using.
+///
+/// It adds no behaviour of its own. That matters: a forwarder that quietly
+/// answered `Ok(None)` for a missing item would make the recovery ladder look
+/// like a first run, which is ADR-0020 ST-24 row 7's benign path and the wrong
+/// classification for a torn vault.
+pub struct AdapterStore(Arc<MockAdapter>);
+
+impl AdapterStore {
+    /// Wraps an adapter's secure store.
+    #[must_use]
+    pub fn new(adapter: Arc<MockAdapter>) -> Self {
+        Self(adapter)
+    }
+}
+
+impl core::fmt::Debug for AdapterStore {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AdapterStore").finish_non_exhaustive()
+    }
+}
+
+impl twinvpn_platform::custody::SecureStore for AdapterStore {
+    fn secure_item_read<'a>(
+        &'a self,
+        key: &'a twinvpn_platform::custody::SecureItemKey,
+    ) -> BoxFuture<
+        'a,
+        Result<Option<twinvpn_platform::custody::SecureItem>, twinvpn_platform::PlatformError>,
+    > {
+        self.0.store().secure_item_read(key)
+    }
+
+    fn secure_item_write_atomic<'a>(
+        &'a self,
+        key: &'a twinvpn_platform::custody::SecureItemKey,
+        value: &'a twinvpn_platform::custody::SecureItem,
+    ) -> BoxFuture<'a, Result<(), twinvpn_platform::PlatformError>> {
+        self.0.store().secure_item_write_atomic(key, value)
+    }
+
+    fn secure_item_delete<'a>(
+        &'a self,
+        key: &'a twinvpn_platform::custody::SecureItemKey,
+    ) -> BoxFuture<'a, Result<(), twinvpn_platform::PlatformError>> {
+        self.0.store().secure_item_delete(key)
+    }
+
+    fn store_root(
+        &self,
+    ) -> BoxFuture<'_, Result<twinvpn_platform::custody::StoreRoot, twinvpn_platform::PlatformError>>
+    {
+        self.0.store().store_root()
+    }
+
+    fn record_aead_custody(&self) -> twinvpn_platform::custody::RecordAeadCustody {
+        self.0.store().record_aead_custody()
+    }
+}
+
+/// A private vault directory under `target/`, removed and recreated per call.
+///
+/// Under `target/` because `ownership.md` forbids writing test material anywhere
+/// else, and because no key material may be committed: everything the store
+/// creates here is generated at run time and thrown away.
+///
+/// # Panics
+///
+/// If the directory cannot be prepared, which is a broken runner rather than a
+/// condition a test should absorb.
+#[must_use]
+pub fn scratch_vault(name: &str) -> std::path::PathBuf {
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.push("../target/system-test-vaults");
+    dir.push(name);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).expect("clearing a scratch vault");
+    }
+    std::fs::create_dir_all(&dir).expect("creating a scratch vault");
+    dir
 }

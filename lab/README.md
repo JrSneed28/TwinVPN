@@ -98,7 +98,7 @@ that is the honest state.
 source build/toolchain/env.sh
 cd lab
 
-cargo test --workspace                      # 106 tests, ~4 s
+cargo test --workspace                      # 107 tests, ~4 s
 
 cargo run -q -p twinlab-scenarios -- capabilities   # probe this host
 cargo run -q -p twinlab-scenarios -- matrix         # the class-pair matrix

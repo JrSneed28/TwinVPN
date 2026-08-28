@@ -1241,6 +1241,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "twinvpn-ffi"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "prost",
+ "twinvpn-core",
+ "twinvpn-diag",
+ "twinvpn-env",
+ "twinvpn-mgmt",
+ "twinvpn-platform",
+ "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
 name = "twinvpn-gateway"
 version = "0.1.0"
 dependencies = [
@@ -1362,20 +1377,26 @@ dependencies = [
 name = "twinvpn-system-tests"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "futures-core",
  "prost",
  "serde_json",
  "twinlab",
  "twinvpn-core",
  "twinvpn-crypto",
+ "twinvpn-diag",
  "twinvpn-dns",
  "twinvpn-enforce",
  "twinvpn-env",
+ "twinvpn-ffi",
+ "twinvpn-mgmt",
  "twinvpn-path",
  "twinvpn-platform",
  "twinvpn-relay-client",
  "twinvpn-route",
  "twinvpn-schema",
  "twinvpn-session",
+ "twinvpn-store",
  "twinvpn-tunnel",
  "twinvpn-types",
 ]

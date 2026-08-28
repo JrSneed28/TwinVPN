@@ -32,11 +32,17 @@ twinvpn-route        = { workspace = true }
 twinvpn-dns          = { workspace = true }
 twinvpn-enforce      = { workspace = true }
 twinvpn-core         = { workspace = true }
+twinvpn-mgmt         = { workspace = true }
+twinvpn-diag         = { workspace = true }
+twinvpn-ffi          = { workspace = true }
+twinvpn-store        = { workspace = true }
+futures-core         = "0.3"
 twinlab              = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
 prost      = { workspace = true }
+bytes      = "1"
 
 # ---------------------------------------------------------------------------
 # The four test levels ownership.md §1 assigns to `tests/`, kept as four
@@ -68,3 +74,15 @@ path = "../chaos/outage_and_failover.rs"
 name = "compatibility_golden_vectors"
 path = "../compatibility/golden_vectors.rs"
 
+
+[[test]]
+name = "e2e_composed_core"
+path = "../e2e/composed_core.rs"
+
+[[test]]
+name = "chaos_journal_write_behind"
+path = "../chaos/journal_write_behind.rs"
+
+[[test]]
+name = "integration_tunnel_wire_agreement"
+path = "../integration/tunnel_wire_agreement.rs"

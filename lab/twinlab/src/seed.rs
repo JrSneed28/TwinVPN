@@ -116,6 +116,38 @@ impl Entropy for RefusingEntropy {
     }
 }
 
+/// Entropy that counts, for the components that must actually receive bytes.
+///
+/// [`RefusingEntropy`] is the right default and stays the default. But some
+/// components genuinely need entropy to produce output rather than to be
+/// unpredictable — `twinvpn_store::Store::open` derives a store key and refuses
+/// to start without one — and a scenario that drives such a component cannot use
+/// a source that always fails.
+///
+/// This is **not** a weak CSPRNG standing in for a strong one, and it is named so
+/// that no reader could mistake it for one: it counts. A scenario binding it is
+/// declaring that unpredictability is not the property under test. The scenario
+/// remains `BIT`, because a counter is as reproducible as a seeded stream —
+/// [`LabEnv::is_deterministic`] still answers `true`, and it answers about the
+/// [`RngSource`], which is unchanged.
+///
+/// **Never bind this where unpredictability is the property under test.** A
+/// nonce, a session key or a pairing secret drawn from here is predictable, and
+/// a test that asserted secrecy over it would assert nothing.
+#[derive(Debug, Default)]
+pub struct CountingEntropy(std::sync::Mutex<u64>);
+
+impl Entropy for CountingEntropy {
+    fn fill(&self, dst: &mut [u8]) -> Result<(), EnvError> {
+        let mut n = self.0.lock().map_err(|_| EnvError::EntropyUnavailable)?;
+        for b in dst.iter_mut() {
+            *n = n.wrapping_add(1);
+            *b = u8::try_from(*n & 0xff).unwrap_or(0);
+        }
+        Ok(())
+    }
+}
+
 /// A complete deterministic [`Env`]: virtual clocks plus CD-4 seeded streams.
 ///
 /// This is the `Env` every TwinLab scenario and every system test constructs.
@@ -143,6 +175,23 @@ impl LabEnv {
     /// As [`LabEnv::new`], with an explicit initial wall reading.
     #[must_use]
     pub fn with_wall(seed: ScenarioSeed, wall: WallClockReading) -> Self {
+        Self::with_entropy(seed, wall, Arc::new(RefusingEntropy))
+    }
+
+    /// As [`LabEnv::with_wall`], with an explicit entropy binding.
+    ///
+    /// The default is [`RefusingEntropy`], and it should stay the default: a
+    /// deterministic scenario that reaches the platform CSPRNG is not
+    /// reproducible and nothing would say so. Bind [`CountingEntropy`] only for
+    /// a component that must *receive bytes* to work at all — the vault's store
+    /// key is the case this exists for — and never where unpredictability is the
+    /// property under test.
+    #[must_use]
+    pub fn with_entropy(
+        seed: ScenarioSeed,
+        wall: WallClockReading,
+        entropy: Arc<dyn Entropy>,
+    ) -> Self {
         let time = Arc::new(VirtualTime::new(wall));
         let env = Env::new(EnvParts {
             monotonic: time.monotonic(),
@@ -150,7 +199,7 @@ impl LabEnv {
             wall: time.wall(),
             timer: time.timer(),
             runtime: time.runtime(),
-            entropy: Arc::new(RefusingEntropy),
+            entropy,
             rng: seeded_rng_source(seed),
         });
         Self { env, time, seed }
@@ -250,6 +299,27 @@ mod tests {
         a.fill_bytes(&mut x);
         b.fill_bytes(&mut y);
         assert_ne!(x, y);
+    }
+
+    #[test]
+    fn counting_entropy_produces_bytes_and_stays_reproducible() {
+        // The property that makes it safe to bind for the vault: it is as
+        // reproducible as the seeded stream, so a scenario over it is still BIT.
+        let build = || {
+            let e = LabEnv::with_entropy(
+                ScenarioSeed::from_bytes([11; 16]),
+                twinvpn_env::WallClockReading::Unset,
+                Arc::new(CountingEntropy::default()),
+            );
+            let mut buf = [0u8; 16];
+            e.env().entropy().fill(&mut buf).expect("bytes");
+            (e.is_deterministic(), buf)
+        };
+        let (deterministic, a) = build();
+        let (_, b) = build();
+        assert!(deterministic, "the RngSource is still the seeded one");
+        assert_eq!(a, b, "two runs produced different entropy");
+        assert_ne!(a, [0u8; 16], "it must actually produce bytes");
     }
 
     #[test]

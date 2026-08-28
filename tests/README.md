@@ -15,20 +15,16 @@ cross-domain defects turned out to be.
 ```bash
 source build/toolchain/env.sh
 cd tests
-cargo test --workspace          # 80 tests, ~1 s after the first build
+cargo test --workspace          # 122 tests, ~1 s after the first build
 ```
 
-> **INTEGRATION-LEAD ACTION REQUESTED.** `tests/` is a fifth cargo workspace and
-> the `Makefile`'s `WORKSPACES := core services shells/linux lab` does not
-> include it, so **`make lint` and `make test` do not run anything here today**.
-> One line closes that:
->
-> ```make
-> WORKSPACES := core services shells/linux lab tests
-> ```
->
-> A test suite outside the gate is a suite that will rot. This is the single most
-> important integration action this domain asks for.
+`tests/` is a fifth cargo workspace and is in the `Makefile`'s `WORKSPACES`, so
+`make lint` and `make test` run everything here.
+
+It is deliberately **not** a member of the core workspace: a test workspace that
+shared the product's manifest could silently add a dependency to a shipped
+crate. `services/` is deliberately absent from its dependency list for the same
+kind of reason — see §7.
 
 ---
 
@@ -36,14 +32,16 @@ cargo test --workspace          # 80 tests, ~1 s after the first build
 
 | Path | Level (§2 of `docs/testing-strategy.md`) | Tests |
 |---|---|---|
-| `e2e/session_lifecycle.rs` | 7 — end-to-end | 13 |
+| `e2e/composed_core.rs` | 7 — end-to-end, the real `twinvpn_core::Core` | 28 |
+| `e2e/session_lifecycle.rs` | 7 — end-to-end, the leaf-crate pipeline | 12 |
 | `e2e/fail_closed_leak.rs` | 7 + 12 — end-to-end, security | 15 |
 | `integration/dual_stack_parity.rs` | 6 + 9 — integration, networking | 12 |
-| `integration/cross_component_agreement.rs` | 4 — contract | 13 |
+| `integration/cross_component_agreement.rs` | 4 — contract | 21 |
+| `integration/tunnel_wire_agreement.rs` | 6 — sender against receiver | 8 |
 | `chaos/outage_and_failover.rs` | 15 — chaos | 11 |
+| `chaos/journal_write_behind.rs` | 15 — chaos, **W-28** measured | 7 |
 | `compatibility/golden_vectors.rs` | 3 + 19 — protocol, compatibility | 8 |
-| `defects/tripwires.rs` | — | 8 |
-| `system/` | the shared rig (`Rig`, `HostFamily`, `block_on`, the DNS-policy builder) | — |
+| `system/` | the shared rigs (`Rig`, `ComposedRig`, `AdapterStore`, `block_on`) | — |
 | `vectors/crypto-kat/` | §2.3's `crypto-kat/` corpus | 7 vectors |
 
 `system/Cargo.toml` declares each file as a `[[test]]` target with an explicit
@@ -59,10 +57,25 @@ pipeline. It is parameterised by **underlay** address family — `V4Only`,
 `V6Only`, `Dual` — because ADR-0010 **R1** is one story covering both and a rig
 that could only be built for IPv4 would quietly make that untestable.
 
-It does **not** drive `twinvpn-core`. That crate contained no items while this
-was written; `composition_root_is_populated()` is an executable observation of
-that, and `the_composition_root_is_still_empty` fails the day the composition
-root lands — which is when these tests should be re-pointed at it.
+`ComposedRig` is the same idea one level up: the real `twinvpn_core::Core`,
+built from **this crate's** `CoreParts` rather than `twinvpn_core::testing`'s.
+That difference is the whole point. `twinvpn_core::testing` binds a
+`CountingEntropy` behind a `SystemRngSource`, which answers
+`is_deterministic() == false`; a scenario that cannot say it is deterministic
+may not declare `BIT` (§3.5). `ComposedRig` asserts determinism at
+construction, so every assertion in `e2e/composed_core.rs` is over a run a
+recorded `scenario_seed` reproduces.
+
+`ComposedRig::with_store_entropy` is the one exception, and it says so: opening
+a real `twinvpn_store::Store` needs entropy that produces bytes, so those rigs
+bind `twinlab::CountingEntropy` — deterministic, obviously so, and never to be
+used where unpredictability is the property under test.
+
+`AdapterStore` forwards `SecureStore` to a `MockAdapter`'s own, because
+`MockStore`'s constructor is `pub(super)` and `Store::open` wants an `Arc`.
+It adds no behaviour: a forwarder that quietly answered `Ok(None)` for a
+missing item would make the ADR-0020 recovery ladder read a torn vault as a
+first run.
 
 ---
 
@@ -84,45 +97,56 @@ paired with something that breaks it:
 
 ---
 
-## 4. `defects/tripwires.rs` — read this before trusting the suite
+## 4. The defect tripwires are gone, and what replaced them
 
-Five defects in **other domains'** components are recorded here as executable
-evidence. Each test asserts the **defective behaviour that exists today**, names
-the correct behaviour in its comment, and **fails the moment the defect is
-fixed** — at which point the test is deleted.
+`tests/defects/tripwires.rs` recorded five defects in other domains' components
+as executable evidence — each asserting the defective behaviour, naming the
+correct one in its comment, and designed to fail the day it was fixed.
+`core-dataplane` fixed all five, so the file was deleted with them.
 
-That is deliberate, and it is the only honest option this domain has:
+Two things survive it, and they are the parts worth keeping.
 
-- asserting the *correct* behaviour would leave a red suite, which under §6.3
-  **F-3** is a quarantine, and a quarantine hides the finding;
-- fixing the component would breach ownership — `ownership.md` §2 says a domain
-  "files findings, does not silently rewrite".
+**The shape that found the worst one.** `integration/tunnel_wire_agreement.rs`
+runs a sender against a receiver. That composition is what surfaced **W-31** —
+the first data packet of every tunnel rejected as a replay — and neither owning
+crate's suite could see it, because *every existing test started at counter 1*.
+The replay window was thoroughly tested for the attack it defends against and
+untested at its own origin. Those tests are now permanent regressions in their
+positive form.
 
-The pattern is the wave's own (finding **W-18**: "a tripwire test asserting the
-spelling is still absent, so registering a code fails the build and points at
-the line to delete").
+**The reasoning behind the fix.** `core-dataplane` moved the *receiver's*
+origin, not the sender's: a conforming peer sends counter 0 first, so a receiver
+refusing it is broken against every correct implementation regardless of its own
+sender. Moving `SendCounter` to 1 would have made two TwinVPN devices agree with
+each other and left both wrong against WireGuard.
+`interoperability_is_what_fixing_the_receiver_bought` asserts that rather than
+remembering it. Fixing W-31 also surfaced a second defect nobody had flagged —
+the replay window was **2048** counters where ADR-0001 §7.1 specifies **8192** —
+and `the_replay_window_is_the_width_adr_0001_specifies` now anchors the constant
+to the ADR's own text.
 
-**Every test in that file is a bug report with a `cargo test` attached. None of
-them is an endorsement.**
+Two of this domain's original filings were corrected on the way, and both
+corrections are preserved as pins rather than quietly dropped:
 
-| # | Defect | Severity | Owner |
-|---|---|---|---|
-| **D-1** | The **first data packet of every tunnel is rejected as a replay.** `SendCounter` issues counter 0 first; `ReplayWindow::would_accept(0)` is `false` on a fresh window. | **P1** | `core-dataplane` (`twinvpn-tunnel`) |
-| **D-2** | The relay score's measurement floors never apply — `-x.max(-250)` parses as `-(x.max(-250))`, so `MAX_MEASUREMENT_PENALTY = -410` is not enforced and one bad RTT sample can rank a healthy relay below an `UNHEALTHY` one. | **P2** | `core-dataplane` (`twinvpn-relay-client`) |
-| **D-3** | `RouteError::DefaultSingleFamily` is unreachable: the family is blocked before the guard tests whether it was blocked, so the diagnostic is never emitted. | P3 | `core-dataplane` (`twinvpn-route`) |
-| **D-4** | `RestorePoint` derives `Debug` over the host's verbatim prior resolver configuration; the `RestorePointRedactionMarker` in the same file is attached to nothing. | P3 | `core-dataplane` (`twinvpn-dns`) |
-| **D-5** | A `RESOLVER`-class exempt socket is port-permitted to **443**, wider than the function's own documentation. | P3 | `core-dataplane` (`twinvpn-dns`) |
+- **D-2's crossover is the ADR's own weighting, not a defect.** §11.2 floors RTT
+  at −250 and gives `UNHEALTHY` −150, so the 150 ms crossover is intended. The
+  real defect was **unboundedness** — a 5 s RTT cost −5000 against a declared
+  floor of −410 — and
+  `d2_no_measurement_can_drive_the_score_past_the_declared_floor` asserts the
+  bound over an extreme sweep, because the defect was invisible at realistic
+  magnitudes where an inert floor and a working one agree.
+- **D-5 had no correct option on offer.** DN-23 makes DoH a selectable upstream,
+  so deleting 443 was wrong; KS-10 bounds it to the known-DoH endpoint *list*,
+  which a port-only predicate cannot express. The predicate was replaced — a
+  genuine tightening, since any 443 destination was previously permitted.
 
-Two more findings live in `integration/cross_component_agreement.rs` as
-tripwires rather than in the table above, because they are *absences*:
-
-- **the relay data frame has no device-side implementation.** `services/relay`
-  implements ADR-0005 §9.1's 16-byte header; nothing in
-  `core/crates/twinvpn-relay-client` does. The device can select, bind and fail
-  over between relays and cannot put a byte on the wire to one.
-- **`services/relay/src/lib.rs` says the forwarding payload is
-  `twinvpn_service_common::Verbatim`; `src/forward.rs` uses
-  `crate::frame::Opaque`.** One of the two is stale.
+**One tripwire of this domain's had gone blind, and that is recorded too.**
+`the_relay_data_frame_still_has_no_device_side_implementation` scanned `map.rs`
+and `bind.rs` for `HEADER_LEN`. The device frame landed in a *new* file,
+`frame.rs`, which the scan never looked at — so it stayed green through exactly
+the change it was built to catch. A tripwire that enumerates the files it
+watches goes stale the moment a file is added. The agreement test it existed to
+demand is now written, and the lesson is noted at it.
 
 ---
 
@@ -156,15 +180,17 @@ is finding **W-4**, and the test says so in its assertion message.
 
 | Tier | What of `tests/` belongs there | Measured cost |
 |---|---|---|
-| **T1** | `integration/cross_component_agreement.rs`, `compatibility/golden_vectors.rs`, `defects/tripwires.rs` — all pure, no I/O, no privilege | **< 0.2 s** |
-| **T2** | `e2e/*`, `integration/dual_stack_parity.rs`, `chaos/outage_and_failover.rs` — real components against `MockAdapter` | **< 0.1 s** |
-| **T3** | nothing yet — the levels that need TwinLab's namespace rig live in `lab/`, and nothing in this directory needs a network | — |
+| **T1** | `integration/*`, `compatibility/golden_vectors.rs` — pure, no I/O, no privilege | **< 0.1 s** |
+| **T2** | `e2e/*`, `chaos/outage_and_failover.rs` — real components against `MockAdapter` | **< 0.1 s** |
+| **T2** | `chaos/journal_write_behind.rs` — a real vault under `target/`, so it touches the filesystem | **≈ 0.05 s** |
+| **T3** | nothing yet — the levels that need TwinLab's namespace rig live in `lab/`, and nothing here needs a network | — |
 | **T4** | nothing yet | — |
 
-The whole suite is **≈ 1 s**, which is deliberate: everything here is a decision
-the core makes, and CD-5's mock is what keeps that affordable. Nothing in this
-directory opens a socket, touches the filesystem outside `target/`, or needs a
-privilege.
+The whole suite is **≈ 1 s** including compilation of the composed core, which
+is deliberate: everything here is a decision the core makes, and CD-5's mock is
+what keeps that affordable. Nothing in this directory opens a socket or needs a
+privilege, and the only filesystem it touches is
+`target/system-test-vaults/`, cleared per test.
 
 ---
 
@@ -182,6 +208,15 @@ privilege.
 - **No network namespace is created.** Everything here is in-process against
   `MockAdapter`. The namespace-backed half is `lab/`'s, and `lab/README.md` §2
   says exactly what that could and could not produce.
-- **No key material is generated or stored.** The `ReversibleKeys` stand-in in
-  `defects/tripwires.rs` is explicitly not cryptography and says so; the crypto
-  corpus is published test vectors.
+- **No key material is committed.** The `ReversibleKeys` stand-in in
+  `integration/tunnel_wire_agreement.rs` is explicitly not cryptography and says
+  so; the crypto corpus is published test vectors. `chaos/journal_write_behind.rs`
+  opens a real vault, which derives a store key at run time into
+  `target/system-test-vaults/` — generated per run, never reused, never
+  committed.
+- **W-24 and W-25 are asserted, not re-discovered.** The F-9 vtable has no
+  `installed_ruleset` read-back and no socket provider, so a `ProtectionAssertion`
+  cannot be produced across the ABI and a vtable-only shell cannot do NAT
+  traversal. `integration/cross_component_agreement.rs` §6 asserts both absences
+  against `twinvpn.h`, so the day the vtable gains either, the test says which
+  refusal to delete.

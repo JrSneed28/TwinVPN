@@ -2,24 +2,19 @@
 #
 # Owner: test-engineering (docs/implementation/ownership.md §1).
 #
-# INTEGRATION-LEAD ACTION REQUESTED. This is a fifth cargo workspace. The
-# Makefile's `WORKSPACES := core services shells/linux lab` does not include it,
-# so `make lint` and `make test` do NOT run anything here today. One line closes
-# that:
+# This is the fifth cargo workspace. The integration lead added it to the
+# Makefile's `WORKSPACES`, so `make lint` and `make test` run everything here.
 #
-#     WORKSPACES := core services shells/linux lab tests
+# It is deliberately NOT a member of the core workspace: a test workspace that
+# shared the product's manifest could silently add a dependency to a shipped
+# crate. The cost is that every dependency below is named by path; the benefit
+# is that nothing in `tests/` can reach a shipped artifact's dependency graph.
 #
-# Until then these tests run only as `cd tests && cargo test --workspace`, which
-# is how the results in this domain's completion report were produced. A test
-# suite outside the gate is a suite that will rot, so this is the single most
-# important integration action this domain asks for.
-#
-# The alternative considered and rejected: declaring these files as `[[test]]`
-# targets of `lab/twinlab-scenarios` with `path = "../../tests/..."`. That would
-# put them inside the existing gate immediately, but it makes `tests/` a
-# directory of orphan files owned by a crate in another tree, and it gives the
-# system tests the lab's dependency graph rather than the product's. A fifth
-# workspace is the honest shape; it just needs one line of Makefile.
+# `services/` is deliberately absent. Pulling in axum, tokio and a Postgres
+# client would give the system tests the services' dependency graph rather than
+# the product's, so cross-service agreement is checked the way
+# `services/control-plane/tests/client_agreement.rs` checks it: by reading the
+# other side as text at compile time.
 [workspace]
 resolver = "2"
 members = ["system"]
@@ -51,7 +46,15 @@ twinvpn-dns          = { path = "../core/crates/twinvpn-dns" }
 twinvpn-enforce      = { path = "../core/crates/twinvpn-enforce" }
 twinvpn-gateway      = { path = "../core/crates/twinvpn-gateway" }
 twinvpn-cp-client    = { path = "../core/crates/twinvpn-cp-client" }
-twinvpn-core         = { path = "../core/crates/twinvpn-core" }
+# `test-support` is what makes `twinvpn_core::testing` exist and binds the mock
+# platform (CD-5). Never shipped; `lab/` and `tests/` are the never-shipped paths.
+twinvpn-core         = { path = "../core/crates/twinvpn-core", features = ["test-support"] }
+twinvpn-mgmt         = { path = "../core/crates/twinvpn-mgmt" }
+twinvpn-diag         = { path = "../core/crates/twinvpn-diag" }
+# The C ABI, so W-24 and W-25 can be asserted against the shipped vtable rather
+# than against the header text alone. `twinvpn-ffi` declares an `rlib` target
+# beside its `cdylib`/`staticlib`, so this links like any other crate.
+twinvpn-ffi          = { path = "../core/crates/twinvpn-ffi" }
 
 # TwinLab, for the deterministic Env and the scenario catalogue.
 twinlab              = { path = "../lab/twinlab" }
@@ -60,3 +63,5 @@ serde_json = "1.0"
 # The wire runtime the shipped Rust bindings use. Pinned to the same major the
 # core workspace pins, so a fixture that round-trips here round-trips there.
 prost = "0.13"
+# The device relay frame's payload type, for the byte-layout agreement test.
+bytes = "1"

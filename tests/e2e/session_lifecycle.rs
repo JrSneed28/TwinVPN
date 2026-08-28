@@ -12,10 +12,10 @@
 //! Every test in this file spans at least two domains, so a defect that lives in
 //! the space between two correct components is visible for the first time.
 //!
-//! The composition root is not used: `twinvpn-core` was empty while this was
-//! written (see [`twinvpn_system_tests::composition_root_is_populated`]), so the
-//! leaf crates are wired directly. `the_composition_root_is_still_empty` records
-//! that as an executable observation rather than a stale comment.
+//! This file drives the **leaf crates** directly, which is still the right
+//! level for it: the route planner meeting the enforcement assembler meeting the
+//! adapter is a composition the composition root does not add anything to.
+//! `e2e/composed_core.rs` is the file that drives `twinvpn_core::Core` itself.
 
 use twinvpn_platform::mock::MockAdapter;
 use twinvpn_platform::mock::MockOptions;
@@ -26,10 +26,7 @@ use twinvpn_session::{
 };
 use twinvpn_types::{AddressFamily, PathClass, PerFamily};
 
-use twinvpn_system_tests::{
-    block_on, composition_root_is_populated, dns_policy, preconditions, stub_addresses, HostFamily,
-    Rig,
-};
+use twinvpn_system_tests::{block_on, dns_policy, preconditions, stub_addresses, HostFamily, Rig};
 
 // ---------------------------------------------------------------------------
 // The happy path, on every underlay family.
@@ -378,25 +375,5 @@ fn fail_closed_is_the_disposition_whenever_the_enforcement_mode_is_unset() {
     assert!(
         !permissive.fail_closed(),
         "the negative control: an explicitly permissive mode is not fail-closed"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// The observation this file's own design rests on.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn the_composition_root_is_still_empty() {
-    // `twinvpn-core` is the ONLY crate that may name both planes (CD-I5), so an
-    // end-to-end test should drive it. It contained no items when this suite was
-    // written, and the tests therefore compose the leaf crates directly.
-    //
-    // This assertion fails the day `core-composition` lands, which is the point:
-    // it is a message to whoever runs the suite next, not a permanent claim.
-    assert!(
-        !composition_root_is_populated(),
-        "twinvpn-core now has a public surface. These end-to-end tests were \
-         written against the leaf crates because it was empty; re-point them at \
-         the composition root and delete this test."
     );
 }
