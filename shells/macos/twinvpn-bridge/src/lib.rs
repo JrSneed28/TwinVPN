@@ -54,13 +54,20 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod abi;
+pub mod config;
 pub mod correlation;
 pub mod envelope;
 pub mod ext;
+pub mod host;
 pub mod log;
+pub mod logging;
+pub mod mgmt;
 pub mod port;
+pub mod probes;
 pub mod report;
+pub mod start;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use twinvpn_types::codes;
@@ -68,6 +75,8 @@ use twinvpn_types::codes;
 use abi::{contained, ext_of, slice_of, slice_of_raw, write_out, TvbBuf, TvbSlice};
 use correlation::CorrelationId;
 use ext::{CoreHandle, TvbExt};
+use mgmt::audit::AuditToken;
+use mgmt::session::SessionHandle;
 use report::{fail, fail_code, fail_panic, resolve};
 
 /// `TVB_ABI_MAJOR`.
@@ -159,7 +168,38 @@ pub unsafe extern "C" fn tvb_ext_start(
         // against `limits.json`, which is where those limits live. Its LENGTH is
         // logged; its bytes are not.
         log::counted(CALL, "config_bytes", config.len() as u64, &correlation);
-        let instance = Box::into_raw(Box::new(TvbExt::new(CoreHandle::Unwired)));
+        // The subscriber is installed here because THIS is the authority's
+        // process entry point now: there is no `main` to do it in. Idempotent,
+        // so a second `startTunnel` after a stop does not fight the first.
+        logging::install_once();
+        // **PS-22: the authority starts here.** `Host::start` runs §11.6's
+        // sequence — boot artifact, privilege posture, clocks, the runtime's
+        // I/O driver, the capability probe, the enforcement READ-BACK, the
+        // vault, the core, the MI endpoint — and refuses by naming the step
+        // that failed. PS-18: an extension that started without arming
+        // enforcement would report itself as running while protecting nothing.
+        let host = match host::Host::start(&config::ExtensionConfig::from_env()) {
+            Ok(host) => Arc::new(host),
+            Err(sequence) => {
+                let code = sequence
+                    .refusal()
+                    .map_or(codes::INTERNAL_UNEXPECTED_STATE, |(_, code)| code);
+                // SAFETY: `err`'s contract is unchanged.
+                return unsafe { fail_code(CALL, code, &correlation, err) };
+            }
+        };
+        for (step, code) in host.sequence().degradations() {
+            // PS-17: a directive that cannot be applied is REPORTED, never
+            // skipped. Silently running wider than declared is the defect that
+            // rule retires.
+            tracing::warn!(
+                target: "twinvpn.agent",
+                step = step.tag(),
+                reason_code = code.as_str(),
+                "a start-sequence step reported a degradation"
+            );
+        }
+        let instance = Box::into_raw(Box::new(TvbExt::new(CoreHandle::Hosted(host))));
         // SAFETY: `out` is non-null by the branch above and writable by this
         // function's contract. Ownership of the instance passes to the caller,
         // who releases it with `tvb_ext_free`.
@@ -460,10 +500,20 @@ unsafe fn report(
 
 /// `int32_t tvb_ext_app_message(tvb_ext *, tvb_slice, tvb_buf **, tvb_buf **);`
 ///
-/// **Refuses by name in this wave.** The MI server lives in `twinvpnd` and no
-/// in-process MI is wired into the extension, so `MGMT.UNAVAILABLE` — whose
-/// registered condition is "the local management interface is not reachable" —
-/// is the truthful answer rather than an empty success.
+/// **Refuses, and the reason changed with X-7.** The MI now lives in this
+/// process — served on the XPC Mach service by `tvb_mgmt_*` below and on the
+/// `AF_UNIX` socket by the accept loop in [`host`]. What
+/// `NETunnelProviderSession.sendProviderMessage` cannot supply is a **peer
+/// credential**: there is no `audit_token_t` on this hop and no `xucred`, and
+/// MI-A1 requires the calling principal to be obtained from the kernel on the
+/// connected channel. MI-A5 makes an unverifiable identity a refusal rather than
+/// a default principal, so the honest code is now
+/// `MGMT.PRINCIPAL_UNVERIFIABLE` and not `MGMT.UNAVAILABLE` — the channel is
+/// there; the caller cannot be named on it.
+///
+/// ADR-0017 §11.2 agrees by omission: the provider-message row is the *future-
+/// compatible* App Store variant (C-13), not a Phase 1 macOS channel. The two
+/// Phase 1 channels are the ones this file serves.
 ///
 /// # Safety
 ///
@@ -511,10 +561,234 @@ pub unsafe extern "C" fn tvb_ext_app_message(
             &CorrelationId::absent(),
         );
         // SAFETY: `err`'s contract is unchanged.
-        unsafe { fail_code(CALL, codes::MGMT_UNAVAILABLE, &CorrelationId::absent(), err) }
+        unsafe {
+            fail_code(
+                CALL,
+                codes::MGMT_PRINCIPAL_UNVERIFIABLE,
+                &CorrelationId::absent(),
+                err,
+            )
+        }
     });
     // SAFETY: `err`'s contract is unchanged.
     result.unwrap_or_else(|| unsafe { fail_panic(CALL, err) })
+}
+
+// ---------------------------------------------------------------------------
+// The management interface - the XPC carriage (11.14 (a), PS-22)
+// ---------------------------------------------------------------------------
+
+/// `int32_t tvb_mgmt_open(tvb_ext *, tvb_slice, tvb_session **, tvb_buf **);`
+///
+/// Opens one management session for the process an `audit_token_t` names.
+///
+/// **Swift marshals; it decides nothing.** It accepts the `xpc_connection_t`,
+/// copies the 32-byte token out of it with `xpc_connection_get_audit_token`, and
+/// hands the bytes here. Everything that follows — decoding the token, deriving
+/// the principal, deriving the scope set, checking the catalogue, reaching the
+/// core — is Rust, and is tested on the Linux host.
+///
+/// **MI-A5**: a token that does not decode is a refusal, and there is no
+/// constructor anywhere below that produces an anonymous principal.
+///
+/// # Safety
+///
+/// `audit_token` is valid for the duration of the call; `out` and `err` are null
+/// or writable.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_mgmt_open(
+    ext: *mut TvbExt,
+    audit_token: TvbSlice,
+    out: *mut *mut SessionHandle,
+    err: *mut *mut TvbBuf,
+) -> i32 {
+    const CALL: &str = "tvb_mgmt_open";
+    let result = contained(|| {
+        // SAFETY: null is checked rather than dereferenced.
+        let Some(instance) = (unsafe { ext_of(ext.cast_const()) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::INTERNAL_UNEXPECTED_STATE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        // The MI exists only while the authority does. An extension whose start
+        // refused has no context, and `MGMT.UNAVAILABLE` is exactly the code
+        // ADR-0017 11.12 has a client mint for "the channel is not there".
+        if instance.mgmt_context().is_none() {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(CALL, codes::MGMT_UNAVAILABLE, &CorrelationId::absent(), err)
+            };
+        }
+        // SAFETY: the slice obeys the ABI contract by this function's own.
+        let Some(bytes) = (unsafe { slice_of(audit_token) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::MGMT_PRINCIPAL_UNVERIFIABLE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        // Bounds before anything proportional to a declared length: the token is
+        // a fixed 32 bytes and a buffer of any other size is refused rather than
+        // read short.
+        let Some(token) = AuditToken::from_bytes(bytes) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::MGMT_PRINCIPAL_UNVERIFIABLE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        if out.is_null() {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::INTERNAL_UNEXPECTED_STATE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        }
+        let session = Box::into_raw(Box::new(SessionHandle::new(token.principal())));
+        // SAFETY: `out` is non-null by the branch above and writable by this
+        // function's contract. Ownership passes to the caller, who releases it
+        // with `tvb_mgmt_close`.
+        unsafe { write_out(out, session) };
+        log::counted(
+            CALL,
+            "peer_pid",
+            u64::from(token.pid()),
+            &CorrelationId::absent(),
+        );
+        TVB_OK
+    });
+    // SAFETY: `err`'s contract is unchanged.
+    result.unwrap_or_else(|| unsafe { fail_panic(CALL, err) })
+}
+
+/// `int32_t tvb_mgmt_exchange(tvb_ext *, tvb_session *, tvb_slice, tvb_buf **, tvb_buf **);`
+///
+/// One framed `MgmtEnvelope` in, one framed `MgmtEnvelope` out.
+///
+/// **Always writes a response on `TVB_OK`**, including for a refusal: ADR-0017
+/// 11.7 forbids a silent close, "because a silent close is indistinguishable
+/// from the agent not running and sends the user to reinstall rather than to
+/// update". `TVB_ERR` is reserved for the cases where there is no session and
+/// therefore nothing that could have produced an envelope.
+///
+/// The bytes are **opaque to Swift** (MI-20): their schema lives in
+/// `twinvpn-mgmt`, and a Swift copy of it would be the second contract.
+///
+/// # Safety
+///
+/// `session` came from `tvb_mgmt_open` and has not been closed; `req` is valid
+/// for the duration of the call; `resp` and `err` are null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_mgmt_exchange(
+    ext: *mut TvbExt,
+    session: *mut SessionHandle,
+    req: TvbSlice,
+    resp: *mut *mut TvbBuf,
+    err: *mut *mut TvbBuf,
+) -> i32 {
+    const CALL: &str = "tvb_mgmt_exchange";
+    let result = contained(|| {
+        // SAFETY: null is checked rather than dereferenced.
+        let Some(instance) = (unsafe { ext_of(ext.cast_const()) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::INTERNAL_UNEXPECTED_STATE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        // SAFETY: as above.
+        let Some(session) = (unsafe { ext_of(session.cast_const()) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::INTERNAL_UNEXPECTED_STATE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        let Some(context) = instance.mgmt_context() else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(CALL, codes::MGMT_UNAVAILABLE, &CorrelationId::absent(), err)
+            };
+        };
+        // SAFETY: the slice obeys the ABI contract by this function's own.
+        let Some(request) = (unsafe { slice_of(req) }) else {
+            // SAFETY: `err`'s contract is unchanged.
+            return unsafe {
+                fail_code(
+                    CALL,
+                    codes::PROTO_MALFORMED_MESSAGE,
+                    &CorrelationId::absent(),
+                    err,
+                )
+            };
+        };
+        // The request's LENGTH, never its bytes: an MI envelope can carry a
+        // `pairing_secret` (MI-P1), and 6 rule 11 forbids logging one.
+        log::counted(
+            CALL,
+            "request_bytes",
+            request.len() as u64,
+            &CorrelationId::absent(),
+        );
+        let exchange = session.exchange(request, context);
+        // SAFETY: `resp` is null or writable by the ABI contract, and ownership
+        // of the buffer passes to the caller.
+        unsafe { write_out(resp, TvbBuf::into_raw(exchange.reply)) };
+        TVB_OK
+    });
+    // SAFETY: `err`'s contract is unchanged.
+    result.unwrap_or_else(|| unsafe { fail_panic(CALL, err) })
+}
+
+/// `void tvb_mgmt_close(tvb_session *);`
+///
+/// Releases a session. Tolerates NULL.
+///
+/// **PS-3**: a client going away changes nothing. Closing a session drops a
+/// scope set and a lock and touches no product state — not `session_intent`, not
+/// the enforcement mode, not the installed rule set, not the `ConnectionState`.
+///
+/// # Safety
+///
+/// `session` is null, or a pointer from `tvb_mgmt_open` that has **not** been
+/// closed. Closing twice is undefined behaviour.
+#[no_mangle]
+pub unsafe extern "C" fn tvb_mgmt_close(session: *mut SessionHandle) {
+    let _ = contained(|| {
+        if session.is_null() {
+            return;
+        }
+        // SAFETY: non-null by the branch above, and by this function's contract
+        // it came from `Box::into_raw` in `tvb_mgmt_open` and has not been
+        // released. Reboxing reclaims exactly that allocation.
+        drop(unsafe { Box::from_raw(session) });
+    });
 }
 
 // ---------------------------------------------------------------------------

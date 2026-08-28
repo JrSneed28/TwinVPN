@@ -412,3 +412,108 @@ async fn the_leak_canary_reads_the_counter_out_of_pfs_own_answer() {
          canary exists to observe"
     );
 }
+
+// ---------------------------------------------------------------------------
+// KS-20a — the offline recovery path `twinvpn-unblock` links
+//
+// ADR-0012 §10: "a crash between 'rules installed' and 'agent running' leaves a
+// host blocked with no UI … without it, a bug in this ADR bricks connectivity."
+// ADR-0017 MI-12 makes the command agent-independent, which is why these two
+// functions take an ENGINE rather than a `MacosNetworkConfig`: the recovery path
+// must not need the transaction object the authority owns.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_unblock_removes_only_the_owner_tagged_anchor_and_never_flushes_pf() {
+    use twinvpn_platform_macos::netcfg::PfEngine as _;
+
+    // KS-20's reclamation is scoped to what we tagged. An empty load into our
+    // own anchor is one transaction that touches no rule outside it; a flush
+    // would take the host's own firewall with it, which is a worse outage than
+    // the one being fixed.
+    let pf = testkit::RecordingPf::default();
+    pf.load_anchor(
+        twinvpn_platform_macos::pf::ANCHOR,
+        &twinvpn_platform_macos::pf::render(
+            &testkit::contract_with(7, Ruleset::Blocked),
+            Ruleset::Blocked,
+            &testkit::enforcement(),
+        ),
+    )
+    .expect("armed");
+    assert!(
+        twinvpn_platform_macos::netcfg::read_owner_tagged_anchor(&pf)
+            .expect("readable")
+            .is_some(),
+        "the fixture must start blocked or the test proves nothing"
+    );
+
+    twinvpn_platform_macos::netcfg::remove_owner_tagged_anchor(&pf).expect("removed");
+    assert_eq!(
+        pf.last_load().as_deref(),
+        Some(""),
+        "the removal is an empty load into our anchor, not a flush"
+    );
+    assert!(
+        twinvpn_platform_macos::netcfg::read_owner_tagged_anchor(&pf)
+            .expect("readable")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_removal_that_the_kernel_does_not_confirm_is_reported_as_a_failure() {
+    use twinvpn_platform::PlatformError;
+    use twinvpn_platform_macos::netcfg::PfEngine;
+
+    // **W-24 in the other direction.** The dangerous failure here is telling an
+    // operator the host is unblocked when it is not, so the read-back is part of
+    // the operation rather than a courtesy afterwards.
+    #[derive(Debug, Default)]
+    struct StubbornPf(testkit::RecordingPf);
+
+    impl PfEngine for StubbornPf {
+        fn load_anchor(&self, anchor: &str, body: &str) -> Result<(), PlatformError> {
+            self.0.load_anchor(anchor, body)
+        }
+        fn status(&self) -> Result<PfStatus, PlatformError> {
+            self.0.status()
+        }
+        fn tables(
+            &self,
+            _anchor: &str,
+        ) -> Result<Option<twinvpn_platform_macos::pfread::Installed>, PlatformError> {
+            // The kernel still holds it, whatever the load said.
+            Ok(Some(twinvpn_platform_macos::pfread::Installed {
+                ruleset: Ruleset::Blocked,
+                generation: Some(ContractGeneration(7)),
+                scope: twinvpn_types::PerFamily { v4: 1, v6: 1 },
+            }))
+        }
+        fn labels(
+            &self,
+            anchor: &str,
+        ) -> Result<
+            std::collections::BTreeMap<String, twinvpn_platform_macos::pfread::LabelCounters>,
+            PlatformError,
+        > {
+            self.0.labels(anchor)
+        }
+    }
+
+    let pf = StubbornPf::default();
+    assert!(
+        twinvpn_platform_macos::netcfg::remove_owner_tagged_anchor(&pf).is_err(),
+        "a load that returned Ok is not a removal"
+    );
+}
+
+#[test]
+fn the_unblock_status_read_changes_nothing() {
+    // An operator asking "is TwinVPN what is blocking me" must not have to run
+    // the destructive command to find out.
+    let pf = testkit::RecordingPf::default();
+    let before = pf.load_count();
+    let _ = twinvpn_platform_macos::netcfg::read_owner_tagged_anchor(&pf).expect("readable");
+    assert_eq!(pf.load_count(), before);
+}

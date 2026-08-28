@@ -1,0 +1,38 @@
+# twinvpn-unblock — ADR-0012 KS-20a's offline recovery path on macOS.
+#
+# Owner: desktop-macos.
+#
+# ADR-0016 §11.2's macOS component row lists it beside the app, the CLI, the
+# sysext and `ksd`; `shells/macos/README.md` §7 gap 19 recorded it as missing.
+# It is what keeps KS-20's "blocked must not mean bricked" true on this
+# platform.
+#
+# ============================================== WHAT IT MUST NOT DEPEND ON
+#
+# ADR-0017 MI-12: "the unblock command MUST NOT depend on the management
+# interface, on the agent process, or on any MI channel, and MUST NOT be
+# invocable *by* any MI operation."
+#
+# So the dependency list is the rule, exactly as it is for `shells/linux`'s copy:
+# `twinvpn-platform-macos` for `pf`, and nothing else. No `twinvpn-core` (it
+# cannot be blocked by an `abi_major` mismatch or a poisoned store — two of the
+# ways the authority fails to start), no `twinvpn-mi`, no `twinvpn-bridge`, no
+# `ksd`, no `tokio`.
+[package]
+name    = "twinvpn-unblock"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the privileged, local, network-independent macOS unblock command (ADR-0012 §10, KS-20a)"
+publish = false
+
+[[bin]]
+name = "twinvpn-unblock"
+path = "src/main.rs"
+
+[dependencies]
+twinvpn-platform-macos = { workspace = true }
+twinvpn-platform       = { workspace = true }
+twinvpn-types          = { workspace = true }

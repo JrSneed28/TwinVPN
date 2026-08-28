@@ -95,10 +95,41 @@ pub fn under_launchd() -> bool {
     std::env::var_os("XPC_SERVICE_NAME").is_some()
 }
 
+/// Installs the subscriber **at most once per process**, and logs what it
+/// decided.
+///
+/// The authority has no `main` any more: it is a static library inside a Swift
+/// system extension, and `tvb_ext_start` is the only entry point that runs
+/// before anything else wants to log. A second `startTunnel` after a
+/// `stopTunnel` reaches it again, and `tracing`'s global subscriber may be set
+/// only once — so the second call must be a no-op rather than a panic or a
+/// silently-lost log.
+///
+/// Returns `Some` on the call that installed, `None` on every later one.
+pub fn install_once() -> Option<LoggingPosture> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if INSTALLED.swap(true, Ordering::AcqRel) {
+        return None;
+    }
+    let posture = install();
+    if !posture.level_recognised {
+        tracing::warn!(
+            target: "twinvpn.agent",
+            variable = LOG_LEVEL_ENV,
+            fell_back_to = posture.level,
+            "the configured log level was not recognised; a logging \
+             misconfiguration must not be why a VPN authority will not run"
+        );
+    }
+    Some(posture)
+}
+
 /// Installs the subscriber.
 ///
-/// Returns what it decided, so the agent can log its own logging configuration —
-/// which is the only way an operator finds out that a level was not understood.
+/// Returns what it decided, so the authority can log its own logging
+/// configuration — which is the only way an operator finds out that a level was
+/// not understood.
 pub fn install() -> LoggingPosture {
     use tracing_subscriber::EnvFilter;
 

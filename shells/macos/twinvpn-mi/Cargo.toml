@@ -1,0 +1,39 @@
+# twinvpn-mi — the local management interface as this shell carries it.
+#
+# Owner: desktop-macos.
+#
+# ADR-0017 MI-20 and ADR-0018 §11.16 (b): "one contract, two carriages, NEVER
+# two contracts". The two carriages on macOS are the AUTHORITY (the NE system
+# extension, through `twinvpn-bridge`) and the CLI (`twinvpnctl`). Before X-7
+# they were two halves of one `twinvpnd` crate behind a feature gate; the
+# authority has moved into the system extension and the CLI has not, so the
+# shared half is a crate of its own rather than a feature of a binary neither
+# of them is any more.
+#
+# **This crate links no core, no platform adapter and no `pf`.** That is what
+# makes `twinvpnctl` an unprivileged binary rather than one that merely runs
+# unprivileged: there is nothing privileged in its dependency graph to reach.
+# The MI *server*, the peer credential and the endpoint live in
+# `twinvpn-bridge`, on the authority's side of the boundary.
+#
+# The envelope itself is `twinvpn_mgmt::envelope`'s (X-4). What is here is the
+# TRANSPORT: the endpoint's location, the length-prefixed reader, the scope set
+# and the client.
+[package]
+name    = "twinvpn-mi"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the macOS local management interface: endpoint, framing, scopes and client (ADR-0017)"
+publish = false
+
+[dependencies]
+twinvpn-mgmt  = { workspace = true }
+twinvpn-types = { workspace = true }
+thiserror     = { workspace = true }
+tokio         = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

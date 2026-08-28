@@ -147,13 +147,29 @@ fi
 # ---------------------------------------------------------------------------
 # 3. Binaries.
 # ---------------------------------------------------------------------------
+#    X-7 / PS-22: there is NO `twinvpnd`. The authority is the NE system
+#    extension, which is installed by the app through
+#    `OSSystemExtensionRequest` and is not a file this script copies. What is
+#    left for the installer is the boot daemon and the two unprivileged /
+#    package-owned commands.
 say "binaries"
-for bin in twinvpnd twinvpn-ksd; do
-    [[ -f "${SRC}/../target/release/${bin}" ]] \
-        || die "missing ${bin}; build it first (cd shells/macos && cargo build --release)"
-    install -o root -g wheel -m 0755 \
-        "${SRC}/../target/release/${bin}" "${PREFIX}/${bin}"
-done
+[[ -f "${SRC}/../target/release/twinvpn-ksd" ]] \
+    || die "missing twinvpn-ksd; build it first (cd shells/macos && cargo build --release)"
+install -o root -g wheel -m 0755 \
+    "${SRC}/../target/release/twinvpn-ksd" "${PREFIX}/twinvpn-ksd"
+
+# ADR-0012 KS-20a / ADR-0017 MI-12: the unblock command is a PACKAGE-OWNED
+# artifact, of the same class as the boot anchor beside it, and it must work
+# when the authority will not start. It goes in /usr/local/sbin rather than
+# beside the CLI because it is privileged: `sbin` is where a reader expects a
+# command they must be root to run, and the split is the only signal a PATH
+# gives.
+[[ -f "${SRC}/../target/release/twinvpn-unblock" ]] \
+    || die "missing twinvpn-unblock; build it first"
+install -d -o root -g wheel -m 0755 /usr/local/sbin
+install -o root -g wheel -m 0755 \
+    "${SRC}/../target/release/twinvpn-unblock" "/usr/local/sbin/twinvpn-unblock"
+
 install -o root -g wheel -m 0755 \
     "${SRC}/../target/release/twinvpnctl" "/usr/local/bin/twinvpnctl"
 
@@ -231,9 +247,13 @@ fi
 # ---------------------------------------------------------------------------
 # 6. launchd jobs.
 #
-#    Two jobs, and they are different things (see each plist's header):
+#    ONE job, and X-7 is why. ADR-0016 §11.2's macOS row lists exactly one
+#    LaunchDaemon — `com.twinvpn.ksd`, "root, minimal" — and amendment PS-22
+#    puts the core, the keys and the management interface inside the NE system
+#    extension. `com.twinvpn.twinvpnd` was a second root component §11.2 never
+#    had, and it is gone along with its plist.
+#
 #      com.twinvpn.ksd       the KS-19 boot artifact, package-owned (PS-7)
-#      com.twinvpn.twinvpnd  the authority
 #
 #    `bootout` before `bootstrap` is NOT the unlink-then-bind pattern MI-A3
 #    prohibits — that rule is about the MI SOCKET, where a window with no
@@ -242,12 +262,23 @@ fi
 #    is the only way to make launchd re-read a changed plist.
 # ---------------------------------------------------------------------------
 say "launchd"
-for label in com.twinvpn.ksd com.twinvpn.twinvpnd; do
-    plist="${LAUNCH_DAEMONS}/${label}.plist"
-    install -o root -g wheel -m 0644 "${SRC}/${label}.plist" "${plist}"
-    launchctl bootout "system/${label}" 2>/dev/null || true
-    launchctl bootstrap system "${plist}"
-done
+label=com.twinvpn.ksd
+plist="${LAUNCH_DAEMONS}/${label}.plist"
+install -o root -g wheel -m 0644 "${SRC}/${label}.plist" "${plist}"
+launchctl bootout "system/${label}" 2>/dev/null || true
+launchctl bootstrap system "${plist}"
+
+# The authority's plist is NOT installed, and its absence is the point: a
+# LaunchDaemon that hosted the core would be the second privileged surface
+# §11.2 forbids. If a `com.twinvpn.twinvpnd.plist` is found on a host, it is a
+# leftover from a pre-X-7 install and this script removes it — leaving it would
+# leave a root job trying to bind the MI socket the extension now owns.
+if [[ -f "${LAUNCH_DAEMONS}/com.twinvpn.twinvpnd.plist" ]]; then
+    say "removing the pre-X-7 authority daemon"
+    launchctl bootout system/com.twinvpn.twinvpnd 2>/dev/null || true
+    rm -f "${LAUNCH_DAEMONS}/com.twinvpn.twinvpnd.plist"
+    rm -f "${PREFIX}/twinvpnd"
+fi
 
 # ---------------------------------------------------------------------------
 # 7. Arm pf now, so the first boot after install is not the first time the

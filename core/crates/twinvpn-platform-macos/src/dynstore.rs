@@ -282,7 +282,13 @@ impl DynamicStoreEngine {
     /// once per contract generation.
     #[allow(clippy::unused_self)]
     fn session(&self) -> Result<(CfOwned, SCDynamicStoreRef), PlatformError> {
-        let name = cf_string("net.twinvpn.twinvpnd")?;
+        // The session name `configd` shows in `scutil`. Deliberately the
+        // PRODUCT's and not a component's: `ownership.md` §9.6 X-7 moved the
+        // authority out of the `twinvpnd` daemon and into the NE system
+        // extension, and a name that tracked whichever component happened to
+        // hold the store would make an operator's `scutil` output disagree with
+        // the process list after a topology change.
+        let name = cf_string("net.twinvpn.agent")?;
         // SAFETY: `name` is a live `CFString`; the two null pointers are the
         // documented "no callback, no context" form, which is correct for a
         // session used only for get/set/remove.

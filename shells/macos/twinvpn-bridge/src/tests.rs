@@ -71,7 +71,19 @@ fn the_abi_version_is_what_the_header_declares() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_start_yields_a_handle_the_caller_frees() {
+fn a_start_that_cannot_host_the_authority_refuses_and_writes_no_handle() {
+    // **X-7 changed what this entry point does, and this test is where it
+    // shows.** `tvb_ext_start` used to build an empty `TvbExt` and always
+    // succeed; PS-22 makes it run ADR-0016 §11.6's whole start sequence and
+    // PS-18 makes a failed sequence a refusal — "MUST NOT start in a mode that
+    // cannot arm enforcement while reporting itself as running."
+    //
+    // On this Linux host the sequence cannot get past the privilege posture and
+    // the clocks, so the refusal is the CORRECT outcome and the test asserts the
+    // *shape* of it: a registered code, no handle, and an envelope Swift can
+    // log. What it deliberately does NOT assert is which step refused — that is
+    // a property of the runner, not of the code, and pinning it would make this
+    // test fail the day CI runs as root.
     let config = br#"{"twinvpn":"config"}"#;
     let cid = b"A1B2C3D4-0000-0000-0000-0000000000FF";
     let mut handle: *mut TvbExt = core::ptr::null_mut();
@@ -85,16 +97,27 @@ fn a_start_yields_a_handle_the_caller_frees() {
             &raw mut err,
         )
     };
-    assert_eq!(rc, TVB_OK);
-    assert!(!handle.is_null());
-    assert!(err.is_null(), "TVB_OK leaves *err untouched");
-    release(handle);
+    assert_eq!(
+        rc, TVB_ERR,
+        "no Darwin kernel here, and no pretending there is"
+    );
+    assert!(handle.is_null(), "no handle is written on failure");
+    let envelope = take_envelope(err);
+    let code = envelope["reason_code"].as_str().expect("a code");
+    assert!(code.contains('.'), "a registered code, not a bare string");
+    // And it is NOT a marshalling error: the slices were well-formed, so the
+    // refusal came from the start sequence rather than from the ABI.
+    assert_ne!(code, "PROTO.MALFORMED_MESSAGE");
 }
 
 #[test]
-fn an_empty_config_is_accepted_because_swift_sends_a_null_base_for_one() {
+fn an_empty_config_reaches_the_start_sequence_because_swift_sends_a_null_base_for_one() {
     // `withUnsafeBufferPointer` on `[]` yields `(nil, 0)`. Dereferencing it is
     // UB, and refusing it would refuse a legitimate empty document.
+    //
+    // The assertion is about the MARSHALLING and not about the start: an empty
+    // slice must get **past** the slice check. What the sequence then decides is
+    // the test above's subject.
     let mut handle: *mut TvbExt = core::ptr::null_mut();
     let mut err: *mut TvbBuf = core::ptr::null_mut();
     // SAFETY: both slices are the well-formed empty shape.
@@ -106,8 +129,15 @@ fn an_empty_config_is_accepted_because_swift_sends_a_null_base_for_one() {
             &raw mut err,
         )
     };
-    assert_eq!(rc, TVB_OK);
-    release(handle);
+    if rc == TVB_OK {
+        release(handle);
+        return;
+    }
+    assert_ne!(
+        take_envelope(err)["reason_code"],
+        "PROTO.MALFORMED_MESSAGE",
+        "the (NULL, 0) shape is a well-formed empty slice, not a malformed one"
+    );
 }
 
 #[test]
@@ -432,10 +462,14 @@ fn the_three_lifecycle_facts_report_and_return_ok() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn an_app_message_refuses_by_name_while_no_mi_is_wired() {
-    // `MGMT.UNAVAILABLE`, whose registered condition is "the local management
-    // interface is not reachable" — the truthful answer rather than an empty
-    // success a client would read as a working but silent agent.
+fn an_app_message_refuses_because_that_hop_carries_no_peer_credential() {
+    // **The reason changed with X-7, and the code changed with it.** The MI is
+    // wired now — `tvb_mgmt_*` serves it — so `MGMT.UNAVAILABLE` would be false.
+    // What `NETunnelProviderSession.sendProviderMessage` cannot supply is a peer
+    // credential: no `audit_token_t`, no `xucred`. MI-A1 requires the principal
+    // to come from the kernel on the connected channel and MI-A5 makes an
+    // unverifiable one a refusal, so the truthful code is
+    // `MGMT.PRINCIPAL_UNVERIFIABLE`.
     let (ext, _port) = instance();
     let request = br#"{"kind":"hello"}"#;
     let mut resp: *mut TvbBuf = core::ptr::null_mut();
@@ -451,7 +485,10 @@ fn an_app_message_refuses_by_name_while_no_mi_is_wired() {
     };
     assert_eq!(rc, TVB_ERR);
     assert!(resp.is_null());
-    assert_eq!(take_envelope(err)["reason_code"], "MGMT.UNAVAILABLE");
+    assert_eq!(
+        take_envelope(err)["reason_code"],
+        "MGMT.PRINCIPAL_UNVERIFIABLE"
+    );
     release(ext);
 }
 

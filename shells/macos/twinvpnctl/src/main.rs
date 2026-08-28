@@ -27,7 +27,7 @@ mod render;
 mod verbs;
 
 use render::{Exit, Output};
-use twinvpnd::mi::{Client, ClientError, CLI_REQUESTED_SCOPES};
+use twinvpn_mi::{Client, ClientError, CLI_REQUESTED_SCOPES};
 
 fn main() {
     let exit = tokio::runtime::Builder::new_current_thread()
@@ -79,7 +79,7 @@ async fn run() -> Exit {
         return Exit::Usage;
     }
 
-    let path = twinvpnd::mi::socket_path();
+    let path = twinvpn_mi::socket_path();
     let mut client = match Client::attach(
         &path,
         "cli",
@@ -106,7 +106,7 @@ async fn run() -> Exit {
     // A refusal the agent named. **EM-37**: the code and its class reach stderr
     // in every output mode, and automation switches on the class.
     let diagnostic = response.diagnostic.unwrap_or_else(|| {
-        twinvpnd::mi::Diagnostic::of(twinvpn_types::codes::INTERNAL_UNEXPECTED_STATE)
+        twinvpn_mi::Diagnostic::of(twinvpn_types::codes::INTERNAL_UNEXPECTED_STATE)
     });
     eprintln!(
         "{}",

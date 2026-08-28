@@ -30,7 +30,7 @@
 //! produces an anonymous or default principal, so "fall back to a default
 //! principal" is not something a caller can do by forgetting a branch.
 
-use crate::mi::Scopes;
+use twinvpn_mi::Scopes;
 
 /// `<sys/ucred.h>`: `XUCRED_VERSION`.
 pub const XUCRED_VERSION: u32 = 0;
@@ -47,7 +47,7 @@ pub const SOL_LOCAL: libc::c_int = 0;
 /// `<sys/ucred.h>`: `struct xucred`.
 ///
 /// Declared here with its header definition rather than taken from `libc`, for
-/// the same reason [`crate::agent`]'s other C layouts are: the size is asserted
+/// the same reason this crate's other C layouts are: the size is asserted
 /// below, so a drifting layout fails the build instead of producing a plausible
 /// uid.
 #[repr(C)]
@@ -308,7 +308,7 @@ mod tests {
         let stranger = PeerCredentials::from_xucred(&xucred(504, &[20, 12, 61])).expect("valid");
         let scopes = scopes_for(&stranger, POLICY);
         assert!(scopes.names().is_empty());
-        for scope in crate::mi::scope::GRANTABLE {
+        for scope in twinvpn_mi::scope::GRANTABLE {
             assert!(!scopes.holds(scope));
         }
     }

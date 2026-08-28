@@ -1,0 +1,51 @@
+# ksd — the macOS `LaunchDaemon`, narrowed to what ADR-0016 §11.2 actually
+# gives it.
+#
+# Owner: desktop-macos.
+#
+# ===================================================== WHAT THIS CRATE IS NOT
+#
+# It was `twinvpnd`: a full authority that built the platform adapter, hosted
+# `twinvpn-core`, owned the `pf` anchor, the route programme and the resolver,
+# and served the management interface. ADR-0016 §11.2 never gave it any of that
+# — "the system extension is the authority; the `LaunchDaemon` `ksd` is *not* a
+# general-purpose privileged helper and MUST NOT accept any request other than
+# (a) apply the boot anchor and (b) the unblock command's local,
+# admin-authenticated invocation" — and amendment **PS-22** restates it as a
+# table:
+#
+#   | `ksd`, the `LaunchDaemon` | the KS-19 boot anchor, and the unblock
+#   | command's local admin-authenticated invocation | **no core, no keys, no
+#   | network sockets, no management interface** |
+#
+# So the dependency list below IS the rule. There is no `twinvpn-core`, no
+# `twinvpn-mgmt`, no `twinvpn-mi`, no `twinvpn-env` and no `tokio`: not because
+# they are unused, but because §11.2's stated reason for `ksd` existing at all
+# is that the second privileged surface must be "close to nil", and a
+# dependency you cannot reach is the only kind that stays unreachable.
+#
+# `twinvpn-platform-macos` is here for exactly two things: `pf`'s anchor name
+# and `pfread`'s read-back parser. Both are pure translation and both are
+# executed by `cargo test` on the Linux host.
+[package]
+name    = "ksd"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the macOS LaunchDaemon: the KS-19 boot anchor, and nothing else (ADR-0016 §11.2, PS-22)"
+publish = false
+
+# The binary's name is not the crate's. ADR-0016 §11.2 names the COMPONENT
+# `com.twinvpn.ksd`, which is the launchd label; the executable the plist points
+# at is `twinvpn-ksd`, prefixed like every other binary this product installs so
+# that a bare `ksd` on a PATH is never ours.
+[[bin]]
+name = "twinvpn-ksd"
+path = "src/main.rs"
+
+[dependencies]
+twinvpn-platform-macos = { workspace = true }
+twinvpn-platform       = { workspace = true }
+twinvpn-types          = { workspace = true }
