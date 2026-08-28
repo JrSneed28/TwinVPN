@@ -11,15 +11,17 @@
 //!
 //! Four properties, each checkable rather than argued:
 //!
-//! 1. **The payload's type has no reader.** A payload travels as
-//!    [`crate::frame::Opaque`]. Its whole surface is `as_bytes`, `to_bytes`,
-//!    `len`, `is_empty` — no decode, no parse, no `Display`, and a `Debug` that
-//!    prints a length. There is no method to call that yields a decoded value.
-//!    (`crate::frame`'s docs record why `twinvpn_service_common::Verbatim`
-//!    cannot be the carrier for a ciphertext leg; the *rule* it encodes is
-//!    honoured here in its strongest form — nothing is ever decoded.)
+//! 1. **The payload's type has no reader.** A payload travels as a
+//!    [`twinvpn_service_common::Verbatim`] built through `Verbatim::from_opaque`
+//!    — `Framing::Opaque`, size cap only. Its whole surface is `as_bytes`,
+//!    `to_bytes`, `into_bytes`, `len`, `is_empty` — no decode, no parse, no
+//!    `Display`, and a `Debug` that prints a length, a channel and the framing
+//!    token. There is no method to call that yields a decoded value.
+//!    ([`crate::frame`]'s docs record why the *protobuf* framing cannot carry a
+//!    ciphertext leg: ADR-0003 R7 puts zero serialization framework on the B4
+//!    packet path.)
 //! 2. **The key inventory has no decrypt operation.**
-//!    [`crate::crypto::RelayCrypto`] exposes `verify_signature`,
+//!    [`crate::crypto::RelayCrypto`] exposes `verify_statement`,
 //!    `verify_frame_mac`, `frame_mac` and `digest16`. There is no `decrypt`, no
 //!    `open`, no `unseal`. A relay built against this trait has nothing to call.
 //! 3. **The only key that touches a frame is `K_leg`, and it only MACs.** ADR-0005

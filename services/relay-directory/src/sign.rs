@@ -21,7 +21,7 @@
 //! one anyway would burn a `map_version` for a document nobody can apply and, on
 //! a device with no prior map, would leave it with an empty candidate set.
 //!
-//! So [`sign`] returns an error rather than an unsigned document, and the service
+//! So [`MapBuilder::publish`](crate::map::MapBuilder::publish) returns an error rather than an unsigned document, and the service
 //! reports **not ready** while no signer is installed — `infra/README.md` §5's
 //! relay-directory readiness set names "signing key loaded" for exactly this.
 

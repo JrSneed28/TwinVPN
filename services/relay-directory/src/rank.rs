@@ -320,6 +320,10 @@ mod tests {
     use super::*;
     use crate::fleet::sample;
 
+    /// The published §11.7 HRW vector (W-33). One copy, so this service and
+    /// `twinvpn-relay-client` fail together rather than separately.
+    use twinvpn_crypto::blake2s::vectors;
+
     /// A deterministic, seedable stand-in with a real avalanche.
     ///
     /// **Not a substitute for BLAKE2s in production** — it exists so the spread
@@ -661,25 +665,34 @@ mod tests {
     }
 
     #[test]
-    fn the_production_hash_is_the_one_the_client_calls() {
+    fn the_production_hash_matches_the_shared_golden_vector() {
         // ADR-0006 §11.5's convergence is coordination-free, so it holds only if
-        // both sides compute the identical function. Asserted against
-        // `twinvpn-crypto` directly rather than against a copy of the algorithm.
-        let relay_id = [0x0a; 8];
-        let pair_id = [0x5c; 16];
+        // a device and this service compute the identical function. Pinned to the
+        // published §11.7 vector (W-33) rather than to a locally chosen input, so
+        // this service and `twinvpn-relay-client` are asserted against one value
+        // and fail together rather than separately.
         assert_eq!(
-            Blake2sHrw.weight_digest(&relay_id, &pair_id),
-            twinvpn_crypto::hrw_weight_digest(&relay_id, &pair_id)
+            Blake2sHrw.weight_digest(&vectors::HRW_RELAY_ID, &vectors::HRW_PAIR_ID),
+            vectors::HRW_DIGEST,
+            "this service's HRW digest disagrees with the published vector"
         );
+
         // And it is not a constant: different inputs give different digests.
         assert_ne!(
-            Blake2sHrw.weight_digest(&relay_id, &pair_id),
-            Blake2sHrw.weight_digest(&[0x0b; 8], &pair_id)
+            Blake2sHrw.weight_digest(&vectors::HRW_RELAY_ID, &vectors::HRW_PAIR_ID),
+            Blake2sHrw.weight_digest(&[0x0b; 8], &vectors::HRW_PAIR_ID)
         );
         assert_ne!(
-            Blake2sHrw.weight_digest(&relay_id, &pair_id),
-            Blake2sHrw.weight_digest(&relay_id, &[0x5d; 16])
+            Blake2sHrw.weight_digest(&vectors::HRW_RELAY_ID, &vectors::HRW_PAIR_ID),
+            Blake2sHrw.weight_digest(&vectors::HRW_RELAY_ID, &[0x5d; 16])
         );
+    }
+
+    #[test]
+    fn the_shared_vectors_are_self_consistent() {
+        // The published constants agree with the implementation they describe, so
+        // importing them cannot silently drift from `hrw_weight_digest`.
+        vectors::self_consistency();
     }
 
     #[test]

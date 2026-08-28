@@ -9,7 +9,7 @@
 //! payload length; it never fans out, retransmits, or pads; and it emits **zero
 //! bytes** in response to any unauthenticated or unbound frame."
 //!
-//! [`step`] returns an [`Action`], and `Action` has exactly three shapes: send
+//! [`Pump::step`] returns an [`Action`], and `Action` has exactly three shapes: send
 //! nothing, send one datagram to one peer, or send one datagram to the *other*
 //! half-flow's peer. There is no variant that sends two, and none that sends to a
 //! peer the frame did not name — so the amplification factor is a property of the
@@ -19,7 +19,7 @@
 //! # It is synchronous, and that is I5 again
 //!
 //! `step` is `fn`, takes `&mut RelayEngine` and returns an `Action`. It performs
-//! no I/O: [`crate::net::serve_udp`] awaits the socket and calls this. A pure
+//! no I/O: [`crate::loop_udp::serve_udp`] awaits the socket and calls this. A pure
 //! step is what makes "a frame from an unbound source produces zero bytes"
 //! testable without a network, and what stops a future maintainer adding a lookup
 //! on the packet path.
