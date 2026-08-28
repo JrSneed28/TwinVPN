@@ -89,6 +89,17 @@ pub struct Installed {
     /// not be counted against the runtime set's size — a comparison that counted
     /// them would report `FiltersMissing` on every healthy host that had booted.
     pub owned_filters: usize,
+    /// How many KS-9 bootstrap-exemption filters the engine holds.
+    ///
+    /// The fact a start sequence actually needs, and it is **not** implied by
+    /// the posture. A host that has just booted holds the KS-19 artifact and
+    /// nothing else: fail-closed, `Blocked`, and unable to run, because the
+    /// bootstrap exemption is a *runtime* filter and the boot set cannot carry
+    /// one — ADR-0012 §11.6's Windows row says why (a BOOTTIME filter cannot
+    /// name an ALE principal). Counting it separately is what lets
+    /// `WindowsNetworkConfig::reclaim` tell "already running" from "fail-closed
+    /// and stuck".
+    pub bootstrap_exemptions: usize,
     /// How many of the engine's owned filters are the boot artifact's.
     ///
     /// Reported separately rather than folded away, because "the boot artifact
@@ -163,6 +174,9 @@ pub fn parse_installed(state: &EngineState) -> Option<Installed> {
             count(TrafficClass::ProtectedScopeDeny, AddressFamily::V4),
             count(TrafficClass::ProtectedScopeDeny, AddressFamily::V6),
         ),
+        bootstrap_exemptions: owned()
+            .filter(|f| class_of(f.key) == Some(TrafficClass::BootstrapExemption))
+            .count(),
         overlay_permits: PerFamily::new(
             count(TrafficClass::OverlayEgress, AddressFamily::V4) > 0,
             count(TrafficClass::OverlayEgress, AddressFamily::V6) > 0,

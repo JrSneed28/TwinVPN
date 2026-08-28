@@ -38,6 +38,13 @@
 //! detour: the LUID is what WFP and IP Helper key on, and converting at the one
 //! call site that needs a GUID keeps a second identifier out of the crate.
 
+// Every method below is a method of the shim rather than a free function: they
+// are the shim's operations, and reading them as one impl is what makes the API
+// surface reviewable against the trait. Several do not touch `self`, because the
+// type is stateless by design — R5's recovery entry point depends on this module
+// holding nothing between calls — and that is the shape the lint objects to.
+#![allow(clippy::unused_self)]
+
 use twinvpn_platform::PlatformError;
 use twinvpn_types::{AddressFamily, IpAddr, PerFamily};
 use windows_sys::core::GUID;
@@ -59,6 +66,7 @@ use crate::route::InterfaceLuid;
 use crate::sys::Resolver;
 
 use super::{wide, wide_from_utf16};
+
 
 /// The `DNS_INTERFACE_SETTINGS` version this build writes.
 ///
@@ -257,6 +265,7 @@ impl NrptResolver {
         loop {
             // A registry subkey name is at most 255 characters.
             let mut name = [0u16; 256];
+            #[allow(clippy::cast_possible_truncation)]
             let mut len = name.len() as u32;
             // SAFETY: `name` and `len` are live; every other parameter is
             // optional and passed null.
@@ -391,7 +400,7 @@ impl NrptResolver {
         let mut servers = wide(&servers);
         let mut search = wide(&settings.search_list.join(","));
 
-        let mut record = DNS_INTERFACE_SETTINGS {
+        let record = DNS_INTERFACE_SETTINGS {
             Version: DNS_SETTINGS_VERSION,
             Flags: u64::from(DNS_SETTING_NAMESERVER | DNS_SETTING_REGISTER_ADAPTER_NAME)
                 | if family == AddressFamily::V6 {
@@ -410,8 +419,8 @@ impl NrptResolver {
         };
         // SAFETY: every pointer in `record` points at storage live for the call.
         let status = unsafe { SetInterfaceDnsSettings(guid, &raw const record) };
-        // Touch `record` after the call so the buffers provably outlive it.
-        let _ = record.Version;
+        // Touch the buffers after the call so they provably outlive it.
+        let _ = (servers.len(), search.len());
         if status == 0 {
             Ok(())
         } else {

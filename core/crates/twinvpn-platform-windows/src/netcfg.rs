@@ -123,6 +123,22 @@ pub struct ProtectionAssertion {
     pub generation: Option<ContractGeneration>,
     /// Whether each family has a Tier-1 deny installed.
     pub families_covered: PerFamily<bool>,
+    /// How many KS-9 bootstrap-exemption filters the engine holds.
+    ///
+    /// Zero on a host that has booted and not yet started the service: the
+    /// exemption is a runtime filter and the KS-19 boot set cannot carry one.
+    pub bootstrap_exemptions: usize,
+    /// How many owned filters belong to the **runtime** set.
+    ///
+    /// Separate from the boot artifact's, because a host holding only the KS-19
+    /// filters is fail-closed and **not yet running**: the bootstrap exemption
+    /// is a runtime filter, so until the runtime set is installed the agent
+    /// itself cannot reach the control plane. That is the availability gap
+    /// ADR-0012 §11.6's Windows row names, and it is a state
+    /// [`WindowsNetworkConfig::reclaim`] has to be able to see in order to leave.
+    pub runtime_filters: usize,
+    /// How many belong to the KS-19 boot artifact.
+    pub boot_filters: usize,
     /// How the engine's contents compare with what was asked for.
     pub verdict: Verdict,
 }
@@ -252,6 +268,9 @@ impl WindowsNetworkConfig {
                     )
                 },
             ),
+            bootstrap_exemptions: installed.as_ref().map_or(0, |i| i.bootstrap_exemptions),
+            runtime_filters: installed.as_ref().map_or(0, |i| i.owned_filters),
+            boot_filters: installed.as_ref().map_or(0, |i| i.boot_filters),
             verdict,
         })
     }
@@ -279,7 +298,22 @@ impl WindowsNetworkConfig {
         self.shutdown.check()?;
         let blocked = self.render(contract.unwrap_or(&blank_contract()), Ruleset::Blocked);
         let observed = self.assert_protection(Some(&blocked))?;
-        if observed.is_fail_closed() && observed.posture == Some(Ruleset::Blocked) {
+        // Reclaimed, not recreated (KS-20, PS-8): if the engine already holds a
+        // fail-closed **runtime** set, leave it exactly where it is. KS-23
+        // forbids remove-then-add, and re-committing on every start would be
+        // that, at the moment the host is least defended.
+        //
+        // `bootstrap_exemptions > 0` is the load-bearing half of the condition. A
+        // host that has just booted holds the KS-19 artifact and nothing else —
+        // fail-closed, `Blocked`, and **unable to run**, because the bootstrap
+        // exemption is a runtime filter. Returning early there would leave the
+        // service permanently unable to reach the control plane and reporting
+        // itself healthy, which is the availability half of the same defect
+        // PS-18 names on the enforcement side.
+        if observed.is_fail_closed()
+            && observed.posture == Some(Ruleset::Blocked)
+            && observed.bootstrap_exemptions > 0
+        {
             return Ok(observed);
         }
         self.commit(&blocked)?;

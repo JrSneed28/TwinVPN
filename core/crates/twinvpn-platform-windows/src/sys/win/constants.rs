@@ -53,7 +53,19 @@ use windows_sys::Win32::Networking::WinSock::{
 /// The plain `WIN32_ERROR` half. `windows-sys` types these `u32`, which is the
 /// same type `oserr` declares, so the comparison is direct.
 mod win32 {
-    use super::{oserr, *};
+    use super::oserr;
+    use super::{
+        ERROR_ACCESS_DENIED, ERROR_ADAP_HDW_ERR, ERROR_ALREADY_EXISTS, ERROR_BAD_EXE_FORMAT,
+        ERROR_BUSY, ERROR_CANCELLED, ERROR_DEV_NOT_EXIST, ERROR_ELEVATION_REQUIRED,
+        ERROR_FILE_NOT_FOUND, ERROR_HOST_UNREACHABLE, ERROR_INSUFFICIENT_BUFFER,
+        ERROR_INVALID_FUNCTION, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_IO_PENDING,
+        ERROR_MOD_NOT_FOUND, ERROR_NETWORK_ACCESS_DENIED, ERROR_NETWORK_UNREACHABLE,
+        ERROR_NOT_ALL_ASSIGNED, ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_FOUND, ERROR_NOT_READY,
+        ERROR_NOT_SUPPORTED, ERROR_NO_NETWORK, ERROR_NO_SYSTEM_RESOURCES,
+        ERROR_OBJECT_ALREADY_EXISTS, ERROR_OPERATION_ABORTED, ERROR_OUTOFMEMORY,
+        ERROR_PATH_NOT_FOUND, ERROR_PRIVILEGE_NOT_HELD, ERROR_PROC_NOT_FOUND, ERROR_SEM_TIMEOUT,
+        ERROR_SHARING_VIOLATION, ERROR_TIMEOUT,
+    };
 
     const _: () = assert!(oserr::ERROR_INVALID_FUNCTION == ERROR_INVALID_FUNCTION);
     const _: () = assert!(oserr::ERROR_FILE_NOT_FOUND == ERROR_FILE_NOT_FOUND);
@@ -98,7 +110,13 @@ mod win32 {
 /// rather than assumed, because "these happen to be positive" is the kind of
 /// fact that stops being true when somebody adds a constant.
 mod winsock {
-    use super::{oserr, *};
+    use super::oserr;
+    use super::{
+        WSAEACCES, WSAEADDRINUSE, WSAEADDRNOTAVAIL, WSAEAFNOSUPPORT, WSAECONNRESET,
+        WSAEHOSTUNREACH, WSAEINTR, WSAEINVAL, WSAEMFILE, WSAEMSGSIZE, WSAENETDOWN,
+        WSAENETUNREACH, WSAENOBUFS, WSAENOPROTOOPT, WSAEOPNOTSUPP, WSAEPROTONOSUPPORT,
+        WSAEWOULDBLOCK, WSASYSNOTREADY,
+    };
 
     /// `WSA_ERROR` as `oserr` holds it. `as u32` on a value asserted positive.
     const fn as_u32(value: i32) -> u32 {

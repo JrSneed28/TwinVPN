@@ -239,6 +239,43 @@ fn startup_reports_the_boot_artifact_as_absent_when_the_installer_never_wrote_it
 }
 
 #[test]
+fn a_host_holding_only_the_boot_artifact_still_installs_the_runtime_set() {
+    // The KS-19 filters are fail-closed and `Blocked`, so a reclaim that asked
+    // only "is the host fail-closed?" would return early and never install the
+    // runtime set — and the bootstrap exemption is a **runtime** filter, so the
+    // service would sit there permanently unable to reach the control plane
+    // while reporting itself healthy. That is the availability half of the
+    // defect PS-18 names on the enforcement side.
+    let h = harness("reclaim-after-boot");
+    twinvpn_platform_windows::sys::FilterEngine::commit(&*h.system, &wfp::boot::boot_set())
+        .expect("BFE applied the artifact");
+    let before = h.config.assert_protection(None).expect("asserts");
+    assert!(before.is_fail_closed(), "the boot artifact is fail-closed");
+    assert_eq!(
+        before.bootstrap_exemptions, 0,
+        "and no KS-9 exemption, so the agent itself cannot reach anything"
+    );
+    assert!(before.boot_filters > 0);
+
+    let after = h.config.reclaim(None).expect("reclaims");
+    assert_eq!(after.posture, Some(Ruleset::Blocked));
+    assert!(after.is_fail_closed());
+    assert!(
+        after.bootstrap_exemptions > 0,
+        "the runtime set, and with it the KS-9 bootstrap exemption, must be installed"
+    );
+    assert!(
+        after.boot_filters > 0,
+        "and the boot artifact is still there"
+    );
+
+    // A second reclaim now finds a runtime set and leaves it alone (KS-23).
+    let commits = h.system.commit_count();
+    h.config.reclaim(None).expect("reclaims again");
+    assert_eq!(h.system.commit_count(), commits, "reclaimed, not recreated");
+}
+
+#[test]
 fn the_boot_artifact_survives_every_runtime_commit() {
     // The leak KS-19 exists to close, arrived at from inside our own
     // transaction. A commit replaces every owner-tagged object; the boot filters

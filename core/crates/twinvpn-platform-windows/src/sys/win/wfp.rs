@@ -185,6 +185,84 @@ impl WfpEngine {
     }
 }
 
+/// The engine, opened on first use.
+///
+/// # Why this exists, stated once
+///
+/// [`WfpEngine::open`] can fail, and ADR-0016 PS-18 wants that failure at
+/// startup. But [`crate::WindowsPlatformAdapter::new`] is infallible and is not
+/// this domain's file, so the shim needs a constructor that cannot fail.
+///
+/// The refusal is not lost, only deferred by one call: every method here opens
+/// the engine if it is not open and returns the **open error** if it cannot, and
+/// the first call the service makes is the start sequence's read-back. So a host
+/// where `FwpmEngineOpen0` is refused still fails to start, with the same
+/// `reason_code`.
+///
+/// A failed open is **retried** on the next call rather than remembered. That is
+/// deliberate: the Base Filtering Engine is a service, and "BFE was not up yet"
+/// is a condition that resolves, whereas a cached failure would make it
+/// permanent for the life of the process.
+pub struct LazyEngine {
+    inner: Mutex<Option<std::sync::Arc<WfpEngine>>>,
+}
+
+impl LazyEngine {
+    /// An engine that will open on first use.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
+    }
+
+    /// An engine that is already open.
+    #[must_use]
+    pub fn opened(engine: WfpEngine) -> Self {
+        Self {
+            inner: Mutex::new(Some(std::sync::Arc::new(engine))),
+        }
+    }
+
+    /// The engine, opening it if this is the first call.
+    fn get(&self) -> Result<std::sync::Arc<WfpEngine>, PlatformError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(engine) = guard.as_ref() {
+            return Ok(engine.clone());
+        }
+        let engine = std::sync::Arc::new(WfpEngine::open()?);
+        *guard = Some(engine.clone());
+        Ok(engine)
+    }
+}
+
+impl Default for LazyEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FilterEngine for LazyEngine {
+    fn commit(&self, set: &FilterSet) -> Result<(), PlatformError> {
+        self.get()?.commit(set)
+    }
+
+    fn read(&self) -> Result<EngineState, PlatformError> {
+        self.get()?.read()
+    }
+
+    fn net_events(&self) -> Result<(Vec<NetEvent>, bool), PlatformError> {
+        self.get()?.net_events()
+    }
+
+    fn purge(&self) -> Result<(), PlatformError> {
+        self.get()?.purge()
+    }
+}
+
 /// A write transaction that cannot be left open.
 struct Transaction<'a> {
     engine: HANDLE,
@@ -254,13 +332,13 @@ const fn guid(g: Guid) -> GUID {
 
 /// Our GUID form of one of Windows'.
 const fn ours(g: GUID) -> Guid {
-    let a = g.data1.to_be_bytes();
-    let b = g.data2.to_be_bytes();
-    let c = g.data3.to_be_bytes();
-    let d = g.data4;
+    let one = g.data1.to_be_bytes();
+    let two = g.data2.to_be_bytes();
+    let three = g.data3.to_be_bytes();
+    let rest = g.data4;
     Guid([
-        a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d[0], d[1], d[2], d[3], d[4], d[5], d[6],
-        d[7],
+        one[0], one[1], one[2], one[3], two[0], two[1], three[0], three[1], rest[0], rest[1],
+        rest[2], rest[3], rest[4], rest[5], rest[6], rest[7],
     ])
 }
 
@@ -422,8 +500,10 @@ fn build_conditions(spec: &FilterSpec, arena: &mut FilterArena) {
                 // The pointer is filled in by `link_blobs`, once the blob
                 // arena exists: a `FWP_BYTE_BLOB` is itself a struct the engine
                 // dereferences, so it needs storage the condition can point at
-                // and that storage cannot exist until both arenas do.
+                // and that storage cannot exist until both arenas do. The
+                // counter advances so the two passes stay in step.
                 app += 1;
+                let _ = app;
                 value
             }
             Condition::UserSid(_) => {

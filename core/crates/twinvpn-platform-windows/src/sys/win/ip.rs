@@ -40,6 +40,13 @@
 //! arrives, every row in it carries the overlay LUID and every delete carries
 //! `MIB_IPPROTO_NETMGMT`.
 
+// Every method below is a method of the shim rather than a free function: they
+// are the shim's operations, and reading them as one impl is what makes the API
+// surface reviewable against the trait. Several do not touch `self`, because the
+// type is stateless by design — R5's recovery entry point depends on this module
+// holding nothing between calls — and that is the shape the lint objects to.
+#![allow(clippy::unused_self)]
+
 use twinvpn_platform::{LinkFacts, PlatformError};
 use twinvpn_types::{AddressFamily, PerFamily, UnderlayFamilies};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -59,6 +66,7 @@ use crate::route::{
 use crate::sys::RouteTable;
 
 use super::addr;
+
 
 /// IP Helper. Stateless — every call is a query or a mutation, and nothing is
 /// remembered between them (R5's recovery entry point depends on that).
@@ -162,7 +170,7 @@ impl IpHelper {
         let mut table: *mut MIB_IPFORWARD_TABLE2 = core::ptr::null_mut();
         // SAFETY: `table` is a live out-parameter the API fills with memory it
         // owns and `FreeMibTable` releases.
-        let status = unsafe { GetIpForwardTable2(AF_UNSPEC as u16, &raw mut table) };
+        let status = unsafe { GetIpForwardTable2(AF_UNSPEC, &raw mut table) };
         if status != 0 {
             return Err(oserr::from_status(
                 Win32Error(status),
@@ -222,7 +230,7 @@ impl IpHelper {
     fn read_addresses(&self, overlay: InterfaceLuid) -> Result<Vec<AddressRow>, PlatformError> {
         let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = core::ptr::null_mut();
         // SAFETY: live out-parameter; the API owns the memory until `FreeMibTable`.
-        let status = unsafe { GetUnicastIpAddressTable(AF_UNSPEC as u16, &raw mut table) };
+        let status = unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &raw mut table) };
         if status != 0 {
             return Err(oserr::from_status(
                 Win32Error(status),
@@ -534,7 +542,7 @@ impl RouteTable for IpHelper {
         // facts are about the host, not about the overlay.
         let mut table: *mut MIB_IPFORWARD_TABLE2 = core::ptr::null_mut();
         // SAFETY: live out-parameter.
-        let status = unsafe { GetIpForwardTable2(AF_UNSPEC as u16, &raw mut table) };
+        let status = unsafe { GetIpForwardTable2(AF_UNSPEC, &raw mut table) };
         if status != 0 {
             return Err(oserr::from_status(
                 Win32Error(status),
@@ -564,14 +572,17 @@ impl RouteTable for IpHelper {
 
         Ok(LinkFacts {
             mtu,
+            // `(true, false)` and `(false, false)` share a body and are written
+            // out separately on purpose: the first is a real v4-only host, and
+            // the second is a host with no default route at all, which
+            // `UnderlayFamilies` has no value for. Merging them would hide that
+            // the second is an approximation — the `default_routes` pair below
+            // carries the honest answer and the core reads that.
+            #[allow(clippy::match_same_arms)]
             families: match (v4, v6) {
                 (true, true) => UnderlayFamilies::DualStack,
                 (true, false) => UnderlayFamilies::V4Only,
                 (false, true) => UnderlayFamilies::V6Only { nat64: None },
-                // No default route in either family. Reported as v4-only rather
-                // than as a fourth value the type does not have; the
-                // `default_routes` pair below carries the real answer, and the
-                // core reads that.
                 (false, false) => UnderlayFamilies::V4Only,
             },
             default_routes: PerFamily::new(v4, v6),
