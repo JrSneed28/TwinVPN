@@ -57,7 +57,7 @@
 
 use twinvpn_platform_windows::oserr::{self, Win32Error};
 use twinvpn_platform_windows::route::InterfaceLuid;
-use twinvpn_platform_windows::sys::{FilterEngine as _, RouteTable as _};
+use twinvpn_platform_windows::sys::SystemOps as _;
 use twinvpn_platform_windows::wfp;
 
 /// The opt-in every mutating test requires.
@@ -97,7 +97,7 @@ fn the_engine_can_be_queried_or_the_refusal_is_named() {
     // need Administrator; opening it for write does. Either outcome is
     // acceptable here — what is not acceptable is a panic, or an `Ok` carrying a
     // state nobody asked the engine for.
-    match system().read() {
+    match system().filters().read() {
         Ok(state) => {
             // A host with no TwinVPN install holds no ruleset of ours, and
             // `parse_installed` must say so rather than inventing a posture.
@@ -125,7 +125,7 @@ fn the_boot_artifact_check_answers_from_the_engine_and_never_from_a_file() {
     // host where the MSI has not run this must report absent; on one where it
     // has, present. Both are correct answers and neither is a failure of this
     // test — what it checks is that the question reaches the engine at all.
-    if let Ok(state) = system().read() {
+    if let Ok(state) = system().filters().read() {
         let artifact = wfp::boot::verify(&state);
         // Both families or neither: KS-5 at the moment the host is least
         // defended, and a one-family boot set must not read as registered.
@@ -140,7 +140,7 @@ fn the_boot_artifact_check_answers_from_the_engine_and_never_from_a_file() {
 fn the_routing_table_can_be_read_and_reports_only_our_interface() {
     // `RouteTable::read` narrows to one LUID. On a host with no overlay adapter
     // the answer is empty, which is the honest one.
-    if let Ok(routes) = system().read(PLACEHOLDER_LUID) {
+    if let Ok(routes) = system().routes().read(PLACEHOLDER_LUID) {
         for row in &routes.rows {
             assert_eq!(row.luid, PLACEHOLDER_LUID);
         }
@@ -180,12 +180,12 @@ fn installing_the_blocked_ruleset_either_works_or_names_the_refusal() {
     // assertion `twinvpn-platform-linux`'s `tests/netns.rs` makes about an
     // unprivileged `nft`.
     let set = wfp::boot::boot_set();
-    let result = system().commit(&set);
+    let result = system().filters().commit(&set);
     if mutating_enabled() {
         result.expect("an Administrator shell can install the boot set");
         // KS-17: the read-back must show exactly what was committed, and it must
         // show it as a query rather than as a remembered value.
-        let state = system().read().expect("reads back");
+        let state = system().filters().read().expect("reads back");
         let installed = wfp::readback::parse_installed(&state).expect("a ruleset is installed");
         assert_eq!(installed.posture, wfp::Ruleset::Blocked);
         assert!(
@@ -193,7 +193,7 @@ fn installing_the_blocked_ruleset_either_works_or_names_the_refusal() {
             "KS-5: one family without the other is non-conforming"
         );
         // And the cleanup, because this test just made a real host fail-closed.
-        system().purge().expect("purges");
+        system().filters().purge().expect("purges");
     } else {
         let err = result.expect_err(
             "an unprivileged process must be refused, not silently succeed; \
@@ -214,16 +214,16 @@ fn a_posture_swap_leaves_no_instant_with_no_rules() {
         return;
     }
     let blocked = wfp::boot::boot_set();
-    system().commit(&blocked).expect("installs BLOCKED");
-    assert!(system().read().expect("reads").sublayer_present);
+    system().filters().commit(&blocked).expect("installs BLOCKED");
+    assert!(system().filters().read().expect("reads").sublayer_present);
     // A real swap renders from a contract; the boot set stands in for one here
     // because this file has no core to ask for one.
-    system().commit(&blocked).expect("re-installs");
+    system().filters().commit(&blocked).expect("re-installs");
     assert!(
-        system().read().expect("reads").sublayer_present,
+        system().filters().read().expect("reads").sublayer_present,
         "the sublayer must never be absent between two commits"
     );
-    system().purge().expect("purges");
+    system().filters().purge().expect("purges");
 }
 
 #[test]
@@ -236,7 +236,7 @@ fn the_net_event_stream_reports_its_own_losses() {
     if !mutating_enabled() {
         return;
     }
-    let (events, lost) = system().net_events().expect("enumerates");
+    let (events, lost) = system().filters().net_events().expect("enumerates");
     // No assertion on the counts: a quiet host produces none. What is asserted
     // is that the call answers at all and that the loss flag is a fact the
     // engine supplied rather than one inferred from an empty slice.

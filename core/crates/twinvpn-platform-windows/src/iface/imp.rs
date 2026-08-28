@@ -316,12 +316,14 @@ impl Sink {
                 ledger.clear();
             }
         }
-        match self.tx.try_send(change) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => ledger.record(),
-            // The core dropped the stream. Nothing to record and nowhere to
-            // record it; the subscription is cancelled when `Subscription` drops.
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+        // Only a FULL channel is a dropped event the core needs to hear about.
+        // A CLOSED one means the core dropped the stream, so there is nothing to
+        // record and nowhere to record it; the subscription is cancelled when
+        // `Subscription` drops. The two are written as one arm because the
+        // *action* is the same — do nothing — and the distinction that matters
+        // is the one the `if let` makes.
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = self.tx.try_send(change) {
+            ledger.record();
         }
     }
 }

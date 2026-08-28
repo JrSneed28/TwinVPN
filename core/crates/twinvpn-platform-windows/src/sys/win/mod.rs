@@ -143,6 +143,73 @@ impl WindowsSystem {
     pub const fn overlay_from(luid: u64) -> InterfaceLuid {
         InterfaceLuid(luid)
     }
+
+    // ---- the engine operations, forwarded -------------------------------
+    //
+    // `SystemOps::filters()` is the seam's way in and is what `netcfg` uses.
+    // These four exist beside it for the two callers that hold the concrete
+    // type and have no reason to import a trait to reach it: the on-Windows
+    // integration tests, and `twinvpn-unblock` — whose whole job is
+    // `purge`, and which ADR-0012 KS-20a requires to work when the service
+    // will not start, i.e. with none of the seam assembled.
+
+    /// Installs a whole filter set in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the engine refused, as a registered `reason_code`.
+    pub fn commit(&self, set: &crate::wfp::FilterSet) -> Result<(), PlatformError> {
+        FilterEngine::commit(&self.filters, set)
+    }
+
+    /// Enumerates what the engine holds — the W-24 read-back.
+    ///
+    /// # There is deliberately no inherent `read`
+    ///
+    /// `FilterEngine::read` takes no argument and `RouteTable::read` takes an
+    /// interface, and `WindowsSystem` answers for both. An inherent `read` would
+    /// shadow one of them, and implementing both traits on this type would make
+    /// `system.read(..)` ambiguous rather than resolving by arity — Rust picks
+    /// candidates by name, not by how many arguments follow.
+    ///
+    /// So the read-backs are reached the way the seam intends and the way
+    /// `netcfg` reaches them:
+    ///
+    /// ```ignore
+    /// let engine = system.filters().read()?;          // the WFP read-back
+    /// let routes = system.routes().read(overlay)?;    // the IP Helper one
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A failed query is an error, never a remembered value.
+    pub fn engine_state(&self) -> Result<crate::wfp::readback::EngineState, PlatformError> {
+        FilterEngine::read(&self.filters)
+    }
+
+    /// Drains the net-event window, and says whether the engine dropped any.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the enumeration refused.
+    pub fn net_events(
+        &self,
+    ) -> Result<(Vec<crate::wfp::canary::NetEvent>, bool), PlatformError> {
+        FilterEngine::net_events(&self.filters)
+    }
+
+    /// Removes every owner-tagged object.
+    ///
+    /// KS-20a's offline unblock, and PS-21 step 5. **Never** part of ordinary
+    /// shutdown: CB-6 puts the ruleset in the OS's custody precisely so the core
+    /// going away does not drop protection.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the engine refused.
+    pub fn purge(&self) -> Result<(), PlatformError> {
+        FilterEngine::purge(&self.filters)
+    }
 }
 
 impl Default for WindowsSystem {
