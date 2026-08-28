@@ -498,16 +498,25 @@ Each of these is a gap this wave did not close, with the reason.
     |---|---|
     | `cargo clippy -p twinvpn-platform-windows --all-targets --target x86_64-pc-windows-msvc -- -D warnings` | **clean** — the whole adapter, including every `unsafe` block |
     | `cargo clippy -p twinvpnctl --all-targets --target …` | **clean** |
-    | `cargo clippy -p twinvpnsvc --no-default-features --all-targets --target …` | **clean** — the `mi` module |
-    | `cargo clippy -p twinvpnsvc --all-targets --target …` | **fails in `ring`'s build script**, before reaching any of our code |
+    | `cargo clippy -p twinvpnsvc --no-default-features --features service --all-targets --target …` | **clean** — the whole Win32 surface: `scm`, `power`, `privilege`, `peer`, `start`, `mi`, `win32` |
+    | `cargo clippy -p twinvpnsvc --all-targets --target …` (i.e. with `core-host`) | **fails in `ring`'s build script**, before reaching any of our code |
+
+    The third line exists because this domain split `twinvpnsvc`'s `service`
+    feature from `core-host` (see the manifest's own note). Before the split the
+    Windows half of the service was **not type-checked at all** — and the first
+    run after it found two type errors and eight lints in code nothing had ever
+    compiled. Default features are unchanged, so a real build is unaffected.
+
+    What is still unchecked for Windows is `service::runtime`, `service::server`
+    and `main.rs` — the three files that host the core. They are the least
+    platform-specific of the set, and it is not nothing.
 
     `shells/linux` has the identical dependency shape and is unaffected only
-    because it builds natively. Two fixes, both outside this domain: put an
+    because it builds natively. The remaining fix is outside this domain: put an
     MSVC-targeting C toolchain in the build image (`cargo-xwin` is the usual
-    answer), or split `twinvpnsvc`'s `service` feature so the Win32 half —
-    `scm`, `power`, `privilege`, `peer`, `start`, `win32` — type-checks without
-    the core. **Reported, not worked around**: making the gate pass by not
-    compiling the thing that matters would be worse than a red gate.
+    answer), or teach `make cross-check` the three commands above. **Reported,
+    not worked around**: making the gate pass by not compiling the thing that
+    matters would be worse than a red gate.
 
 20. **Files exceed the 500-line guidance in several places.** The adapter's
     `sock.rs` (1561), `custody.rs` (1398), `wintun.rs` (1020) and `iface.rs`
