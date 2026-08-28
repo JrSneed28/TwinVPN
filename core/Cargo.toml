@@ -123,7 +123,26 @@ futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
 # -- cryptography: CD-I2 restricts these to `twinvpn-crypto` ----------------
-snow               = "0.10"
+# `default-features = false` is load-bearing and NOT a size optimisation.
+#
+# snow 0.10's `std` feature list contains `ring/std`, written without the `?`,
+# so enabling `std` force-enables the optional `ring` dependency -- and `ring`
+# builds C. That single edge is why `twinvpn-core` could not be cross-compiled
+# for x86_64-pc-windows-msvc or aarch64-apple-darwin on a Linux host: `ring`'s
+# build script refuses a GNU compiler for an MSVC target and needs `lib.exe`,
+# and it fails before reaching a line of our code. Both wave-2 shells hit it
+# independently and each had to push its core-hosting code outside
+# `make cross-check`.
+#
+# The primitives are unchanged. ADR-0001 §11 fixes X25519, ChaCha20-Poly1305 and
+# BLAKE2s, and the default resolver supplies exactly those through
+# curve25519-dalek, chacha20poly1305 and blake2 -- the same crates
+# `core/Cargo.toml` already pins for `twinvpn-crypto` under CD-I2. What changes
+# is which implementation computes them, not which ones they are.
+snow               = { version = "0.10", default-features = false, features = [
+  "default-resolver", "use-curve25519", "use-chacha20poly1305", "use-blake2",
+  "use-sha2", "use-getrandom",
+] }
 x25519-dalek       = "3.0"
 ed25519-dalek      = "3.0"
 p256               = "0.14"

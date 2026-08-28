@@ -361,7 +361,11 @@ fn acquire_instance_lock() -> Result<InstanceLock, StartupRefusal> {
 /// documented default, and none is probed.
 #[cfg(windows)]
 fn build_adapter() -> Result<twinvpn_platform_windows::WindowsPlatformAdapter, StartupRefusal> {
-    use twinvpn_platform_windows::{custody, dns, wfp, wintun, WindowsAdapterParts};
+    // `dns` and `wfp` are NOT imported here: `stub_addresses` and
+    // `enforcement_config` name those modules by full path. Until the `ring`
+    // edge was removed from `snow` this function could not be compiled for
+    // x86_64-pc-windows-msvc at all, and the two dead imports sat here unseen.
+    use twinvpn_platform_windows::{custody, wintun, WindowsAdapterParts};
 
     // ADR-0016 §10 puts the driver's lifecycle with the installer: the DLL ships
     // in the application directory, versioned with the app. A missing one is a
