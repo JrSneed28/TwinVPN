@@ -37,7 +37,7 @@ const REDACTED_ARG_NAMES: &[&str] = &["--key", "--psk", "--secret", "--token"];
 pub struct Invocation {
     /// The program.
     pub program: String,
-    /// The arguments, with any value following a [`REDACTED_ARG_NAMES`] name
+    /// The arguments, with any value following a redacted argument name
     /// replaced.
     pub argv: Vec<String>,
     /// The namespace the command ran in, if any.

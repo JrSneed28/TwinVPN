@@ -15,7 +15,7 @@ cross-domain defects turned out to be.
 ```bash
 source build/toolchain/env.sh
 cd tests
-cargo test --workspace          # 122 tests, ~1 s after the first build
+cargo test --workspace          # 121 tests, ~1 s after the first build
 ```
 
 `tests/` is a fifth cargo workspace and is in the `Makefile`'s `WORKSPACES`, so
@@ -36,7 +36,7 @@ kind of reason — see §7.
 | `e2e/session_lifecycle.rs` | 7 — end-to-end, the leaf-crate pipeline | 12 |
 | `e2e/fail_closed_leak.rs` | 7 + 12 — end-to-end, security | 15 |
 | `integration/dual_stack_parity.rs` | 6 + 9 — integration, networking | 12 |
-| `integration/cross_component_agreement.rs` | 4 — contract | 21 |
+| `integration/cross_component_agreement.rs` | 4 — contract | 20 |
 | `integration/tunnel_wire_agreement.rs` | 6 — sender against receiver | 8 |
 | `chaos/outage_and_failover.rs` | 15 — chaos | 11 |
 | `chaos/journal_write_behind.rs` | 15 — chaos, **W-28** measured | 7 |
@@ -95,6 +95,45 @@ paired with something that breaks it:
 - every family-shaped assertion is a loop over `[V4, V6]` that fails if either
   arm is missing.
 
+### Enumerate the property, not the files or the literals
+
+The cross-workspace agreement tests were first written as `include_str!` of the
+other side's source. That reasoning was sound — separate cargo workspaces cannot
+link each other — and the conclusion was wrong. It broke four times in one wave,
+twice in this domain's own tests:
+
+- a `HEADER_LEN` tripwire scanned `map.rs` and `bind.rs`; the device relay frame
+  landed in a *new* `frame.rs` and it stayed green through exactly the change it
+  was built to catch;
+- a MAC-vector check scraped `services/relay/src/provider.rs` for four literal
+  declarations, and failed with *"the two golden vectors have drifted"* on the
+  day `relay-plane` **deleted** those literals in favour of one shared artifact.
+  The opposite of drift, reported as drift.
+
+**A check that enumerates its subject's source form fails loudest exactly when
+the subject improves.** The rule that replaced it:
+
+| Read | Do not read |
+|---|---|
+| a **frozen contract** — `relay.proto`, `limits.json`, `reason_codes.json`, the generated bindings | another crate's **source** |
+| a **specification** — an ADR's normative sentence, the ABI header | another crate's **literals** |
+| a **shared artifact** by value — `twinvpn_crypto::blake2s::vectors` | a file list, or a variant list, restated here |
+
+Two consequences worth naming. Where the two sides share one artifact, agreement
+becomes a value comparison and this suite stops being where it is checked — the
+relay frame's MAC vector now lives in `twinvpn_crypto::blake2s::vectors`, all
+three sides import it, and each compares its own assembler's output against it.
+Where they cannot share, an **exhaustive match** against the generated bindings
+moves the check to the compiler: adding a `Carriage` or `AdminState` variant on
+either side now fails to build rather than failing a string search.
+
+One residual is named rather than hidden. `services/rendezvous`'s framing is
+finding **RZ-1** — `contracts/` declares no message for it — so its README §5
+table is the specification of record and `src/frame.rs` is the only
+implementation. There is nothing to compare by value and nothing frozen to
+compare against, so that one check is still a source read. It is the residual of
+a missing contract, and it goes away the day RZ-1 does.
+
 ---
 
 ## 4. The defect tripwires are gone, and what replaced them
@@ -140,13 +179,13 @@ corrections are preserved as pins rather than quietly dropped:
   which a port-only predicate cannot express. The predicate was replaced — a
   genuine tightening, since any 443 destination was previously permitted.
 
-**One tripwire of this domain's had gone blind, and that is recorded too.**
-`the_relay_data_frame_still_has_no_device_side_implementation` scanned `map.rs`
-and `bind.rs` for `HEADER_LEN`. The device frame landed in a *new* file,
-`frame.rs`, which the scan never looked at — so it stayed green through exactly
-the change it was built to catch. A tripwire that enumerates the files it
-watches goes stale the moment a file is added. The agreement test it existed to
-demand is now written, and the lesson is noted at it.
+**Two of this domain's own checks went blind, and the lesson is now §3's
+rule.** `the_relay_data_frame_still_has_no_device_side_implementation` scanned
+`map.rs` and `bind.rs`; the device frame landed in a new `frame.rs`. And the
+MAC-vector check scraped `provider.rs` for literals that were then deleted in
+favour of a shared artifact — reporting drift on the day drift became
+impossible. Both are replaced by value comparisons; neither reads anyone's
+source.
 
 ---
 
