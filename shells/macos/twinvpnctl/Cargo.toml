@@ -1,0 +1,32 @@
+# twinvpnctl — the unprivileged macOS CLI over the local management interface
+# (ADR-0017, ADR-0023).
+#
+# Owner: desktop-macos.
+#
+# NAMING DEVIATION, reported rather than papered over: ADR-0016 §11.2's process
+# table and ADR-0017 §11.12's command shape both name this binary `twinvpn`, not
+# `twinvpnctl` — and ADR-0023 EM-42's rendered `next_action` strings say
+# "run 'twinvpn peer disconnect nas-attic'". `shells/linux` raised the same
+# deviation and kept `twinvpnctl`; this shell matches it, because a CLI called
+# one thing on Linux and another on macOS would be worse than either. Raised for
+# the integration lead: either both are renamed to `twinvpn`, or a `twinvpn`
+# symlink ships beside each, or ADR-0016 §11.2 is amended.
+[package]
+name    = "twinvpnctl"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the unprivileged macOS CLI over the local management interface (ADR-0017, ADR-0023)"
+publish = false
+
+[dependencies]
+# The MI contract, from the ONE place it is declared (MI-20). `default-features
+# = false` excludes the whole `agent` feature, so this unprivileged binary links
+# no pf, no route programme, no `SCDynamicStore` and no core-hosting code.
+twinvpnd      = { path = "../twinvpnd", default-features = false }
+twinvpn-mgmt  = { workspace = true }
+twinvpn-types = { workspace = true }
+tokio         = { workspace = true }
+serde_json    = { workspace = true }

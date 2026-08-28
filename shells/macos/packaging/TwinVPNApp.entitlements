@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Entitlements for TwinVPN.app — the containing app.
+
+  Authority: ADR-0016 §11.9's macOS row, verbatim, for this component:
+
+    "App: App Sandbox on, `com.apple.security.network.client`,
+     `com.apple.developer.system-extension.install`."
+
+  and §11.2's macOS component row: "TwinVPN.app (per-user, sandboxed)".
+
+  ============================================= WHAT THE APP IS NOT ALLOWED TO BE
+
+  ADR-0016 §11.2's "macOS, normatively" makes the system extension the
+  authority. The app is a client: it presents UI, it installs the VPN profile,
+  and it activates the extension. It holds NO enforcement authority, NO key, and
+  NO recovery path.
+
+  That last one is a rule, not a description. FC-1 §6 instance 5 puts the
+  SIGNED-CONTRACT FETCH in the EXTENSION and core-lite's parse and verification
+  behind it, precisely so that a device whose app is not running — or is
+  uninstalled — can still recover. An app that could fetch the contract would
+  become a dependency of recovery, and the fail-closed ladder would then have a
+  rung that requires a GUI.
+
+  `com.apple.security.network.client` below therefore exists for the app's own
+  update check and telemetry submission, NOT for the contract. Nothing in the
+  app's code path fetches a contract, and if that ever changes, FC-1 is what it
+  breaks.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- §11.9: "App Sandbox on". The app parses untrusted presentation data and
+         renders it; §6's option-A analysis is explicit that font, image, markup
+         and URL parsing must not run with privilege. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!--
+      §11.9: `com.apple.developer.system-extension.install`.
+
+      Without it, OSSystemExtensionRequest.activationRequest fails and the
+      extension can never be installed. It is what makes
+      SystemExtensionInstaller.swift work at all.
+
+      This entitlement is granted by Apple as part of the same application as
+      the NetworkExtension one (ADR-0016 P-06); it is not separately obtainable.
+    -->
+    <key>com.apple.developer.system-extension.install</key>
+    <true/>
+
+    <!--
+      §11.9: `com.apple.security.network.client`.
+
+      For the app's OWN outbound requests only — see the header. A sandboxed app
+      has no outbound network at all without it, so its absence would break the
+      update check silently rather than loudly.
+
+      `com.apple.security.network.server` is deliberately ABSENT: the app listens
+      for nothing. An app that could listen would be a second local management
+      surface, and ADR-0017 MI-20 allows one contract with two carriages, never
+      two contracts.
+    -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!--
+      Installing and managing the VPN profile. ADR-0016 §11.2's iOS capability
+      table assigns "NETunnelProviderManager configuration and VPN-profile
+      installation" to the APP, because "only the app can present the consent
+      flow", and macOS is the same in this respect.
+
+      UNVERIFIED whether the macOS system-extension shape needs
+      `com.apple.developer.networking.vpn.api` on the app as well as (or instead
+      of) on the extension. Both bundles carry it here; see the note in
+      TwinVPNTunnel.entitlements. One of the two is probably unnecessary and an
+      unnecessary entitlement is still surface, so this is a thing to delete
+      once a Mac build says which.
+    -->
+    <key>com.apple.developer.networking.vpn.api</key>
+    <array>
+        <string>allow-vpn</string>
+    </array>
+
+    <!-- Paired with the extension's. See the long note in
+         TwinVPNTunnel.entitlements: this group deliberately does NOT hold the
+         identity key, which lives in the System keychain with an ACL bound to
+         the Team-signed binary (ADR-0020's macOS Developer-ID row), because a
+         shared access group cannot be scoped below app identity (ADR-0016
+         §11.4's residual). -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.twinvpn.shared</string>
+    </array>
+
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>$(TeamIdentifierPrefix)com.twinvpn.shared</string>
+    </array>
+
+    <!--
+      Sandbox file access. The app reads the diagnostic ring buffer out of the
+      app-group container and writes a bundle where the user chooses, which is
+      what `files.user-selected.read-write` is for: ADR-0015 requires local user
+      authorization for a diagnostic bundle anyway, and a save panel IS that
+      authorization rather than a step in front of it.
+
+      There is NO `files.all` and no temporary-exception entitlement. The app has
+      no business reading /Library/Application Support/TwinVPN/ — that is the
+      authority's store root at 0700 root:wheel, and the app being able to read
+      it would defeat ADR-0016 §11.5's "unopenable by the unprivileged client".
+    -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!--
+      DELIBERATELY ABSENT:
+        com.apple.security.cs.disable-library-validation
+        com.apple.security.cs.allow-dyld-environment-variables
+        com.apple.security.cs.allow-unsigned-executable-memory
+        com.apple.security.get-task-allow
+        com.apple.security.files.all / temporary-exception.*
+        com.apple.security.device.* (no camera, no microphone, no USB)
+      Each for the reason given in TwinVPNTunnel.entitlements, and each checked
+      by the `codesign` entitlements dump of SIGNING.md §4 rather than by review.
+    -->
+</dict>
+</plist>

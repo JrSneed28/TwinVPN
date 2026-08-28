@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-use futures_util::StreamExt as _;
 use twinvpn_platform::mock::{MockAdapter, MockOptions};
 use twinvpn_platform::{
     InterfaceIndex, InterfaceName, InterfaceProvider, LinkClass, NetworkChange, PlatformAdapter,
@@ -24,6 +23,18 @@ use twinvpn_platform_macos::{
     testkit, MacosAdapterParts, MacosPlatformAdapter, ShutdownLatch, TunnelProvenance, BINDING_NAME,
 };
 use twinvpn_types::AddressFamily;
+
+/// The next item from a change stream.
+///
+/// Hand-rolled rather than `futures_util::StreamExt::next`, so this crate takes
+/// no dev-dependency `core/Cargo.toml`'s lockfile does not already carry — the
+/// lockfile is the integration lead's, and a test helper is not a reason to
+/// touch it.
+async fn next(
+    stream: &mut std::pin::Pin<Box<dyn futures_core::Stream<Item = NetworkChange> + Send>>,
+) -> Option<NetworkChange> {
+    std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await
+}
 
 fn parts(provenance: TunnelProvenance) -> (MacosAdapterParts, testkit::Recorders) {
     let (carriers, recorders) = testkit::daemon_carriers();
@@ -249,7 +260,7 @@ async fn a_decoded_route_message_reaches_a_subscriber_as_a_per_family_fact() {
         present: true,
     });
     assert_eq!(
-        stream.next().await,
+        next(&mut stream).await,
         Some(NetworkChange::DefaultRouteChanged {
             family: AddressFamily::V6,
             present: true,
@@ -264,8 +275,8 @@ async fn two_subscribers_both_see_every_change() {
     let mut b = provider.subscribe().expect("subscribes");
     assert_eq!(provider.subscriber_count(), 2);
     provider.publish(NetworkChange::ResolversChanged);
-    assert_eq!(a.next().await, Some(NetworkChange::ResolversChanged));
-    assert_eq!(b.next().await, Some(NetworkChange::ResolversChanged));
+    assert_eq!(next(&mut a).await, Some(NetworkChange::ResolversChanged));
+    assert_eq!(next(&mut b).await, Some(NetworkChange::ResolversChanged));
 }
 
 #[tokio::test]
@@ -277,7 +288,7 @@ async fn a_subscriber_that_falls_behind_is_told_how_many_it_missed() {
     for _ in 0..(twinvpn_platform_macos::iface::CHANGE_BUFFER + 8) {
         provider.publish(NetworkChange::ResolversChanged);
     }
-    let first = stream.next().await.expect("an item");
+    let first = next(&mut stream).await.expect("an item");
     match first {
         NetworkChange::EventsLost { count } => {
             assert!(
@@ -289,7 +300,10 @@ async fn a_subscriber_that_falls_behind_is_told_how_many_it_missed() {
         other => panic!("expected an EventsLost, got {other:?}"),
     }
     // And the stream keeps delivering: a lag is a gap, never an end.
-    assert_eq!(stream.next().await, Some(NetworkChange::ResolversChanged));
+    assert_eq!(
+        next(&mut stream).await,
+        Some(NetworkChange::ResolversChanged)
+    );
 }
 
 #[test]
@@ -382,7 +396,7 @@ async fn a_resume_forces_a_re_enumeration_before_anything_can_look_green() {
     provider.publish_all(journal.observe_message(msg::SYSTEM_WILL_SLEEP).0);
     assert_eq!(journal.phase(), PowerPhase::Sleeping);
     assert_eq!(
-        stream.next().await,
+        next(&mut stream).await,
         Some(NetworkChange::LinkPostureChanged {
             metered: false,
             low_power: true,
@@ -391,12 +405,12 @@ async fn a_resume_forces_a_re_enumeration_before_anything_can_look_green() {
 
     provider.publish_all(journal.observe_message(msg::SYSTEM_HAS_POWERED_ON).0);
     assert_eq!(
-        stream.next().await,
+        next(&mut stream).await,
         Some(NetworkChange::EventsLost { count: None }),
         "the gap is reported before anything else"
     );
     assert_eq!(
-        stream.next().await,
+        next(&mut stream).await,
         Some(NetworkChange::LinkPostureChanged {
             metered: false,
             low_power: false,

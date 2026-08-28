@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Info.plist for com.twinvpn.sysext — the NetworkExtension packet-tunnel
+  provider, packaged as a SYSTEM EXTENSION.
+
+  Authority: ADR-0016 §11.2's macOS component row (`com.twinvpn.sysext`, NE
+  system extension, root), §12.6 / MX-1 (Developer ID + notarized system
+  extension; MX-2, the Mac App Store app-extension variant, is REJECTED because
+  the App Sandbox forbids the LaunchDaemon and the pf anchor that ADR-0012 §11.6
+  names for macOS, which would silently downgrade boot enforcement — an unstated
+  K7 downgrade on a desktop platform); ADR-0017 C-13.
+
+  ============================== SYSTEM EXTENSION, NOT APP EXTENSION
+
+  The two are different bundle shapes and the difference is load-bearing:
+
+    - a system extension lives at Contents/Library/SystemExtensions/ inside the
+      containing app, is activated once by OSSystemExtensionRequest with
+      administrator approval, runs as ROOT, and survives logout and "no user
+      logged in";
+    - an app extension lives at Contents/PlugIns/, runs in the containing app's
+      sandbox as the user, and dies with the login session.
+
+  ADR-0016 §12.6 rejects the second on a security ground. Only the first can be
+  a component of a product whose authority must outlive a login session (R-25,
+  Q2), and only the first coexists with the ksd LaunchDaemon that ADR-0012 §11.6
+  names as the macOS boot artifact.
+
+  UNVERIFIED, and it matters: this domain has NOT confirmed on a Mac that a
+  packet-tunnel provider delivered as a *system* extension uses the same
+  `NSExtension`/`NEProviderClasses` keys as the app-extension form. Apple's
+  NetworkExtension system-extension samples do use NSExtension with
+  NEProviderClasses, and `NEMachServiceName` is the additional key some provider
+  kinds require. If the shape is wrong, `systemextensionsd` refuses the
+  activation request with an OSSystemExtensionError rather than failing quietly
+  — SystemExtensionInstaller.swift surfaces that error unparsed.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+
+    <!-- The provider executable inside the .systemextension bundle. -->
+    <key>CFBundleExecutable</key>
+    <string>TwinVPNTunnel</string>
+
+    <!--
+      ADR-0016 §11.2's macOS row names this component `com.twinvpn.sysext`.
+      A system extension's bundle identifier MUST be prefixed by the containing
+      app's identifier, so the app is `com.twinvpn.app` and this is
+      `com.twinvpn.app.sysext`.
+
+      **This contradicts the ADR's literal `com.twinvpn.sysext`**, which is not
+      a prefix of any plausible app identifier and would be refused by
+      systemextensionsd. Reported rather than resolved locally: the ADR names
+      the component, the platform constrains the spelling, and the reconciliation
+      is the integration lead's. See shells/macos/README.md §7.
+    -->
+    <key>CFBundleIdentifier</key>
+    <string>com.twinvpn.app.sysext</string>
+
+    <key>CFBundleName</key>
+    <string>TwinVPNTunnel</string>
+
+    <key>CFBundlePackageType</key>
+    <string>SYSX</string>
+
+    <!--
+      ADR-0018 §11.12's three-number table keeps the ABI version, the protocol
+      version and the product version separate. These two are the PRODUCT
+      version and are what a user and an update path see; they are not the
+      `abi_major`/`abi_minor` of twinvpn.h and MUST NOT be compared against it
+      (VR-2 forbids abi_* as a compatibility input anywhere except between a
+      shell and a core in the same process).
+
+      The build stamps both; the literals here are placeholders that the
+      packaging step replaces. They have never been produced by a build.
+    -->
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!--
+      ADR-0016 §11.2 and ADR-0021: the minimum macOS this ships to. 11.0 is the
+      floor because ADR-0016 §11.2 names SMJobBless as the ksd install route on
+      macOS 11-12 and SMAppService on 13+, so 11.0 is the earliest release the
+      component set is defined for.
+    -->
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+
+    <!--
+      The NetworkExtension provider declaration.
+
+      NEProviderClasses maps an extension POINT to the class that implements it.
+      `com.apple.networkextension.packet-tunnel` is the packet-tunnel point, and
+      the value is the Objective-C-visible name of the NEPacketTunnelProvider
+      subclass. Because the class is written in Swift, it MUST be exported to the
+      Objective-C runtime under a stable name — `PacketTunnelProvider.swift`
+      declares it `@objc(TwinVPNPacketTunnelProvider)` and that name is what
+      appears here. Swift's default mangled name (`$s…`) would not be resolvable
+      by NetworkExtension, and the failure mode is a provider that never starts.
+
+      NSExtensionPointIdentifier is NOT set: for NE providers the point is
+      carried by the NEProviderClasses key. UNVERIFIED for the system-extension
+      shape specifically.
+    -->
+    <key>NetworkExtension</key>
+    <dict>
+        <key>NEProviderClasses</key>
+        <dict>
+            <key>com.apple.networkextension.packet-tunnel</key>
+            <string>TwinVPNPacketTunnelProvider</string>
+        </dict>
+        <!--
+          NEMachServiceName lets the containing app reach the extension over
+          XPC. ADR-0017 §11.2's macOS row wants NSXPCConnection to
+          `com.twinvpn.agent.mgmt` with audit-token attestation as the preferred
+          MI binding. That binding is NOT implemented in this wave (the AF_UNIX
+          one is), so the key is present but points at the extension's own
+          service name rather than at the management service, and nothing
+          connects to it yet.
+
+          UNVERIFIED: whether NEMachServiceName is required, optional or ignored
+          for a packet-tunnel system extension. It is required for some provider
+          kinds (app-proxy, DNS-proxy) and this domain has not confirmed which
+          list packet-tunnel is on.
+        -->
+        <key>NEMachServiceName</key>
+        <string>com.twinvpn.app.sysext</string>
+    </dict>
+
+    <!--
+      Deliberately absent:
+
+      - NSExtension / NSExtensionAttributes: the APP-extension shape's keys.
+        Present in an app extension's Info.plist, and their presence here would
+        describe the bundle shape ADR-0016 §12.6 rejects.
+      - LSApplicationCategoryType, NSHumanReadableCopyright, icons: a system
+        extension has no user-facing presentation. CB-4 keeps rendered strings
+        out of anything that is not a UI, and the extension is not one.
+      - NSAppTransportSecurity: FC-1 §6 instance 5 puts the signed-contract
+        fetch in the EXTENSION, so this bundle does make network requests — but
+        it makes them over the core's own transport with its own pinning, not
+        over URLSession, so ATS never sees them and an ATS exception here would
+        be a permission granted to nothing.
+    -->
+</dict>
+</plist>

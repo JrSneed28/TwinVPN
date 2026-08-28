@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.twinvpn.ksd — the KS-19 BOOT ARTIFACT. Installed at
+  /Library/LaunchDaemons/com.twinvpn.ksd.plist.
+
+  Authority: ADR-0016 §11.2 (the macOS component table), §11.5 (the macOS
+  durability row), PS-7, PS-8; ADR-0012 KS-19, KS-20, KS-20a, §11.6's macOS row.
+
+  ============================================================ WHAT ksd IS NOT
+
+  ADR-0016 §11.2, "macOS, normatively", verbatim:
+
+    "The system extension is the authority; the `LaunchDaemon` `ksd` is *not* a
+     general-purpose privileged helper and MUST NOT accept any request other
+     than (a) apply the boot anchor and (b) the unblock command's local,
+     admin-authenticated invocation."
+
+  So this job has NO network access, NO core, NO key access and NO management
+  interface. It runs, applies /etc/twinvpn/pf.anchor, and exits. The authority
+  is com.twinvpn.sysext (the NetworkExtension system extension) and its
+  LaunchDaemon companion com.twinvpn.twinvpnd — a DIFFERENT job, in a different
+  plist, so that this one can stay small enough to review line by line.
+
+  ADR-0016 §11.5's macOS row says why this exists as a second privileged
+  component at all: "a sysext can be deactivated by the user, and the boot
+  artifact must not be able to be."
+
+  ================================================ PS-7: THE PACKAGE OWNS THIS
+
+  "installed by the package, modified only by atomic replace under ADMINISTER;
+   the authority MUST NOT rewrite it as a runtime action, and MUST NOT be a
+   prerequisite for it to apply."
+
+  Both halves are structural here. The authority never opens this file (it has
+  no code path that does), and this job does not depend on the authority: it
+  runs at load, before systemextensionsd has activated anything, and succeeds
+  or fails on its own.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- ADR-0016 §11.2's macOS row names this component `com.twinvpn.ksd`. The
+         label is also the launchd service name, so `launchctl print
+         system/com.twinvpn.ksd` is how an operator inspects it. -->
+    <key>Label</key>
+    <string>com.twinvpn.ksd</string>
+
+    <!--
+      The binary. ADR-0016 §11.2 says ksd "is installed by
+      SMAppService.daemon(plistName:) on macOS 13+ and by SMJobBless on macOS
+      11-12, in both cases signed with the same Team ID and embedded in the app
+      bundle."
+
+      Those two installation routes want DIFFERENT keys, and this file carries
+      the pkg-installer form:
+
+        - pkg installer (this file, /Library/LaunchDaemons/): ProgramArguments
+          with an ABSOLUTE path, as below.
+        - SMAppService.daemon(plistName:) (macOS 13+): the plist lives at
+          Contents/Library/LaunchDaemons/com.twinvpn.ksd.plist INSIDE the app
+          bundle and names the executable with `BundleProgram`, a path relative
+          to the bundle root (e.g. Contents/MacOS/twinvpn-ksd). launchd resolves
+          it against the registering bundle.
+
+      UNVERIFIED: whether a single plist can carry both keys and be accepted by
+      both routes. This domain has not tested it. The installer ships this
+      absolute-path form; the SMAppService variant is a separate build product
+      and is NOT in this wave.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Application Support/TwinVPN/twinvpn-ksd</string>
+        <string>--apply-boot-anchor</string>
+    </array>
+
+    <!-- KS-19: "the rule set that covers the interval between the network stack
+         coming up and the agent starting". RunAtLoad is what puts the deny
+         before the first packet the host can emit. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!--
+      ADR-0016 §11.5's macOS supervisor row, verbatim: "launchd for ksd:
+      KeepAlive={SuccessfulExit:false}, subject to launchd's 10 s throttle."
+
+      SuccessfulExit=false means: restart on a CRASH, do not restart on a clean
+      exit. That is exactly right for a job that applies a ruleset and exits 0.
+    -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!--
+      launchd's throttle. ADR-0016 §11.5 names 10 s for this job.
+
+      **This does NOT discharge PS-9 or PS-10.** The same row is explicit:
+      "launchd has no burst limit, so the authority maintains its OWN durable
+      restart counter (S-40) and latches quarantine itself." A ThrottleInterval
+      spaces restarts out; it never gives up, so it cannot be the crash-loop
+      containment those rules require. The counter that can is in the authority
+      (com.twinvpn.twinvpnd), not here. This plist must not be read as if the
+      key below were the containment.
+    -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!--
+      Runs as root. ADR-0016 §11.2's macOS row: "`ksd`: root, no network, no
+      core, no key access."
+
+      There is deliberately no UserName key dropping to `_twinvpn`: pfctl needs
+      root, and this job's entire surface is one pfctl invocation. The
+      mitigation for running as root is not a privilege drop, it is that the
+      job is tiny, has no input channel, and exits.
+    -->
+    <key>UserName</key>
+    <string>root</string>
+
+    <key>GroupName</key>
+    <string>wheel</string>
+
+    <!-- Background: no UI, low scheduling priority, no App Nap participation.
+         `Background` also disables the automatic throttling `Adaptive` applies. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!--
+      No network. ADR-0016 §11.2's macOS row again: ksd has "no network".
+      launchd has no key that revokes networking, so this is not enforceable
+      from the plist — it is a property of the BINARY, which links no socket
+      code. Recorded here because a reader looking for the enforcement will not
+      find it and should know it is elsewhere rather than missing.
+    -->
+
+    <!--
+      ADR-0016 §11.9's hardening intent, as far as launchd expresses it.
+      HardResourceLimits/SoftResourceLimits cap what a compromised ksd could do;
+      the numbers are deliberately small because the job opens one file and
+      spawns pfctl.
+    -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>64</integer>
+        <key>NumberOfProcesses</key>
+        <integer>16</integer>
+    </dict>
+
+    <!--
+      Diagnostics. ADR-0015: never a tunnel payload, a key or a token. This job
+      handles none of those; what it writes is the pfctl exit status and the
+      reason_code for a refusal.
+
+      /var/log/twinvpn/ is created 0750 root:wheel by the installer. StandardOut
+      is deliberately /dev/null: a boot-path job that writes to a log on every
+      boot is a log that nobody reads and a disk that eventually fills.
+    -->
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/twinvpn/ksd.err.log</string>
+
+    <!--
+      ADR-0016 Q10: a privileged process MUST NOT inherit a search path, preload
+      variable or plugin directory that could supply it executable code. launchd
+      gives a daemon a minimal environment already; PATH is pinned to the two
+      system directories that hold pfctl so that nothing else can be found under
+      that name.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/sbin:/sbin:/usr/bin:/bin</string>
+    </dict>
+
+    <!--
+      No MachServices, no Sockets, no WatchPaths, no StartInterval. ADR-0016
+      §11.2 forbids ksd accepting "any request other than (a) apply the boot
+      anchor and (b) the unblock command's local, admin-authenticated
+      invocation" — and (b) is a SEPARATE, single-purpose privileged Mach
+      service per ADR-0017 §11.21's macOS row, which is NOT in this wave and is
+      therefore not declared here. Declaring an unused MachServices key would
+      create the request channel the rule forbids.
+    -->
+</dict>
+</plist>

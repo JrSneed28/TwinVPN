@@ -54,4 +54,3 @@ tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", 
 # trait object, so a property that holds for one and not the other is a decision
 # that leaked into this adapter.
 twinvpn-platform = { workspace = true, features = ["mock"] }
-futures-util     = { workspace = true }
