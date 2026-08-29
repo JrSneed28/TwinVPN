@@ -136,13 +136,13 @@ SendMessage({ to: "researcher", summary: "Start", message: "[task context]" })
 
 ### Config
 - **Topology**: hierarchical-mesh (anti-drift)
-- **Max Agents**: 10
+- **Max Agents**: 15
 - **Memory**: hybrid
 - **HNSW**: Enabled
 - **Neural**: Enabled
 
 ```bash
-./scripts/ruflo swarm init --topology hierarchical --max-agents 8 --strategy specialized
+./scripts/ruflo swarm init --topology hierarchical-mesh --max-agents 15 --strategy specialized
 ```
 
 ### Agent Routing
@@ -241,31 +241,79 @@ npm run build && npm test
 
 52 commands, 140+ subcommands. Use `--help` on any command for details.
 
-> `scripts/ruflo` is the only supported entry point: it runs the pinned local
-> install and refuses to run on version drift. Never `npx ruflo` — under npx the
-> CLI resolves `@claude-flow/aidefence` against the npx cache (the `aidefence_*`
-> MCP tools then fail) and refetches on every launch, blowing the 30s MCP
-> connect timeout.
+> For CLI work, `./scripts/ruflo` is the only supported entry point: it execs
+> `node ./node_modules/ruflo/bin/ruflo.js` and refuses to run on version drift.
+> Never invoke the ruflo CLI through `npx` — under npx it runs from the npx
+> cache, whose tree is not the project's.
 
 ## Setup
 
 `.mcp.json` is checked in, so a fresh clone only needs:
 
 ```bash
-npm install              # installs ruflo at the .ruflo-version pin
+npm install              # caret range ^3.38.20 — may float OFF .ruflo-version
 ./scripts/ruflo doctor   # verify; --fix prints suggestions, applies nothing
 ```
 
-If the MCP server ever needs re-registering, register the local entry point —
-not npx:
+`.ruflo-version` is the pin of record, but `package.json` carries a caret range,
+so `npm install` alone does not guarantee the pin. `scripts/ruflo` checks the
+installed version on every call and fails closed on a mismatch. To upgrade, bump
+`.ruflo-version` and `package.json` together.
+
+### Entry points differ by surface — deliberately
+
+| Surface | Launches via | Pinned? |
+|---------|--------------|---------|
+| CLI (`./scripts/ruflo`) | `node ./node_modules/ruflo/bin/ruflo.js` | yes, drift-guarded |
+| MCP servers (`.mcp.json`) | `npx -y ruflo@latest`, `npx ruv-swarm` | no, floats |
+
+The MCP servers run through npx by deliberate choice. npx runs them out of
+`~/.npm/_npx/<hash>/`, which does not contain two packages ruflo imports by bare
+specifier. Both are optional and declared nowhere in its dependency graph, so
+npx never installs them, and both fail **silently**:
+
+| Missing package | Symptom if absent |
+|-----------------|-------------------|
+| `@claude-flow/aidefence` | every `aidefence_*` tool returns `AIDefence package not available` |
+| `@huggingface/transformers` | `generateEmbedding()` falls back to a hash stub; `memory_bridge_status` reports `sql.js + MOCK (hash fallback)` and semantic recall is meaningless |
+
+`ruflo doctor` cannot detect either — it runs from the project's local install,
+which has both, so it reports them healthy while the MCP surface is broken.
+
+**`./scripts/npx-mcp-deps` fixes this**, and is idempotent. It links both
+packages into `~/.npm/_npx/node_modules`, the parent of every hashed npx tree —
+Node's bare-specifier resolution walks up from the importing module, so every
+tree picks them up and npx never manages that directory. Linking rather than
+installing keeps the MCP server on the same versions as the CLI. The script also
+clears partial installs: a `@huggingface/transformers` with `src/` and `dist/`
+but no `package.json` will shadow the link and make resolution fail outright.
+
+Re-run it after `npm install`, after any ruflo version bump, and any time
+`aidefence_*` starts erroring or `memory_bridge_status` reports a `mock` backend.
+
+One caveat remains with no fix: `@latest` bypasses the `.ruflo-version` pin. The
+drift guard in `scripts/ruflo` only covers the CLI path, so the MCP server can
+silently run a different version than the CLI.
+
+Verify the MCP side with a direct JSON-RPC `tools/call` against the entry point,
+never with `doctor`:
 
 ```bash
-claude mcp add claude-flow -- node ./node_modules/ruflo/bin/ruflo.js mcp start
+{ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"a","version":"1"}}}'
+  sleep 4
+  echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_bridge_status","arguments":{}}}'
+  sleep 80
+} | npx -y ruflo@latest mcp start 2>/dev/null | grep -o '"embeddingBackend[^,]*'
+# want: onnx   —   mock means npx-mcp-deps needs re-running
 ```
 
-> The background `daemon` is optional. It runs interval workers that each spawn
-> a headless `claude` session, so it consumes tokens continuously. Start it only
-> if you want those sweeps: `./scripts/ruflo daemon start` (self-stops after 12h
-> by default; `--ttl 0` to disable, `daemon status --all` to audit running daemons).
+> The background `daemon` is ON for sessions: `RUFLO_DAEMON_AUTOSTART=1` is set
+> in both `.mcp.json` and `.claude/settings.json`. It runs interval workers that
+> each spawn a headless `claude` session, so it bills tokens continuously — this
+> is intended, do not "fix" it. `scripts/ruflo` defaults the same variable to `0`
+> so read-only CLI calls do not leave workers running. Daemons self-stop after
+> 12h (`--ttl 0` to disable). Audit with `ps`, not `daemon status --all`, which
+> reports false negatives.
 
 **Agent tool** handles execution (agents, files, code, git). **MCP tools** handle coordination (swarm, memory, hooks). **CLI** is the same via Bash.

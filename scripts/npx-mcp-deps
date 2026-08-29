@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Make the npx-launched MCP servers resolve ruflo's optional packages.
+#
+# .mcp.json deliberately launches ruflo via `npx -y ruflo@latest`, so the server
+# runs out of ~/.npm/_npx/<hash>/. Two packages ruflo imports by bare specifier
+# are optional and declared nowhere in its dependency graph, so npx never
+# installs them:
+#
+#   @claude-flow/aidefence     -> without it every aidefence_* MCP tool returns
+#                                 "AIDefence package not available"
+#   @huggingface/transformers  -> without it generateEmbedding() silently falls
+#                                 back to a hash stub; memory_bridge_status then
+#                                 reports backend "sql.js + MOCK (hash fallback)"
+#                                 and semantic recall is meaningless
+#
+# Both failures are silent, and `ruflo doctor` cannot see either: doctor runs
+# from the project's local install, which has both packages.
+#
+# Fix: link them into ~/.npm/_npx/node_modules, the parent of every hashed npx
+# tree. Node's bare-specifier resolution walks up from the importing module, so
+# every npx tree picks them up, and npx never manages that directory. Linking
+# rather than installing keeps the MCP server on the same versions as the CLI.
+#
+# Also clears partial installs: on 2026-08-29 the tree held a
+# @huggingface/transformers with src/ and dist/ but no package.json, which
+# shadowed the link and made Node fail to resolve the package at all.
+set -euo pipefail
+
+PROJECT_MODULES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/node_modules"
+NPX_PARENT="${HOME}/.npm/_npx/node_modules"
+PACKAGES=(@claude-flow/aidefence @huggingface/transformers @xenova/transformers)
+
+status=0
+
+# Drop any package.json-less directory shadowing a link we are about to make.
+for tree in "${HOME}"/.npm/_npx/*/node_modules; do
+  [ -d "$tree" ] || continue
+  for pkg in "${PACKAGES[@]}"; do
+    dir="$tree/$pkg"
+    if [ -d "$dir" ] && [ ! -e "$dir/package.json" ]; then
+      mv "$dir" "$dir.broken-$(date +%s)"
+      echo "cleared partial install: $dir"
+    fi
+  done
+done
+
+for pkg in "${PACKAGES[@]}"; do
+  target="$PROJECT_MODULES/$pkg"
+  if [ ! -d "$target" ]; then
+    echo "missing in project, run npm install: $pkg" >&2
+    status=1
+    continue
+  fi
+  mkdir -p "$NPX_PARENT/$(dirname "$pkg")"
+  ln -sfn "$target" "$NPX_PARENT/$pkg"
+done
+
+# Resolution check from inside a real npx tree, not from the project.
+for tree in "${HOME}"/.npm/_npx/*/node_modules/ruflo; do
+  [ -d "$tree" ] || continue
+  probe="$(cd "$(dirname "$tree")/.." && pwd)"
+  for pkg in @claude-flow/aidefence @huggingface/transformers; do
+    if (cd "$probe" && node --input-type=module \
+          -e "await import('$pkg')" >/dev/null 2>&1); then
+      echo "ok   $pkg resolves from $(basename "$probe")"
+    else
+      echo "FAIL $pkg does not resolve from $(basename "$probe")" >&2
+      status=1
+    fi
+  done
+  break
+done
+
+exit "$status"

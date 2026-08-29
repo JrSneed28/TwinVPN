@@ -5,7 +5,7 @@ version: "3.0.0"
 
 swarm:
   topology: hierarchical-mesh
-  maxAgents: 10
+  maxAgents: 15
   autoScale: true
   coordinationStrategy: consensus
 

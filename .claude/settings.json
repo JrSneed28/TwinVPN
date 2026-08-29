@@ -266,7 +266,7 @@
       }
     },
     "swarm": {
-      "topology": "hierarchical",
+      "topology": "hierarchical-mesh",
       "maxAgents": 15,
       "strategy": "specialized",
       "heartbeatInterval": 5000,
@@ -287,7 +287,7 @@
     "memory": {
       "type": "hybrid",
       "enableHNSW": true,
-      "path": "./data",
+      "path": ".claude-flow/data",
       "maxEntries": 10000,
       "ttl": 86400,
       "hnsw": {
