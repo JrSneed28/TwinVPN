@@ -38,6 +38,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -64,10 +65,25 @@ def probe_command(workspace: str, command: str, run: bool):
     proc = subprocess.run(
         ["bash", "-c", shell], cwd=wd, capture_output=True, text=True, timeout=5400
     )
-    if proc.returncode == 0:
-        return PASS, command
-    tail = (proc.stdout + proc.stderr).strip().splitlines()[-12:]
-    return FAIL, command + "\n" + "\n".join(tail)
+    out = proc.stdout + proc.stderr
+    if proc.returncode != 0:
+        tail = out.strip().splitlines()[-12:]
+        return FAIL, command + "\n" + "\n".join(tail)
+
+    # A VACUOUS RUN IS NOT A PASS.
+    #
+    # `cargo test <filter>` exits 0 when the filter matches nothing, so a
+    # renamed or deleted test turns this probe green while proving nothing --
+    # which is precisely the failure mode the whole gate exists to catch, and
+    # it would be embarrassing to ship it inside the gate itself. If every
+    # reported test result ran zero tests, the probe found no evidence and
+    # says so.
+    results = re.findall(r"^test result: \w+\. (\d+) passed", out, re.MULTILINE)
+    if results and all(int(n) == 0 for n in results):
+        return FAIL, (command + "\n"
+                      + "ran 0 tests -- the filter matched nothing, so this "
+                        "probe found no evidence. A vacuous run is not a pass.")
+    return PASS, command
 
 
 def probe_no_unwired_entrypoint(symbols: list[str], run: bool):
@@ -81,22 +97,32 @@ def probe_no_unwired_entrypoint(symbols: list[str], run: bool):
         return NOT_EXECUTED, "not run (pass --run)"
     unwired = []
     for sym in symbols:
+        # Word-boundaried on purpose. A substring match would count
+        # `disarm_resumption` as a caller of `arm_resumption` and report the
+        # entry point wired when nothing calls it -- the exact false PASS this
+        # probe exists to prevent.
+        call = re.compile(rf"(?<![A-Za-z0-9_])\.?{re.escape(sym)}\s*\(")
+        define = re.compile(rf"^(pub(\([^)]*\))?\s+)?(const\s+)?(async\s+)?fn\s+{re.escape(sym)}\b")
         proc = subprocess.run(
-            ["grep", "-rn", "--include=*.rs", sym, "core", "services", "shells"],
+            ["grep", "-rn", "--include=*.rs", "-w", sym, "core", "services", "shells"],
             cwd=REPO, capture_output=True, text=True,
         )
         callers = []
         for line in proc.stdout.splitlines():
-            path = line.split(":", 1)[0]
+            parts = line.split(":", 2)
+            if len(parts) < 3:
+                continue
+            path, lineno, body = parts
             if "/tests/" in path or path.endswith("_test.rs") or "/target/" in path:
                 continue
-            # The definition site and its own doc comments are not callers.
-            body = line.split(":", 2)[-1].lstrip()
-            if body.startswith(("///", "//!", "//", "pub fn " + sym, "fn " + sym)):
+            body = body.lstrip()
+            # Comments describe; they do not call. The definition site is not
+            # a caller of itself.
+            if body.startswith(("///", "//!", "//")) or define.match(body):
                 continue
-            if f"{sym}(" not in body and f".{sym}" not in body:
+            if not call.search(body):
                 continue
-            callers.append(line.split(":")[0] + ":" + line.split(":")[1])
+            callers.append(f"{path}:{lineno}")
         if not callers:
             unwired.append(sym)
     if unwired:
@@ -198,7 +224,9 @@ def build_rows(run: bool):
     v, d = probe_source_absent(
         "core/crates/twinvpn-core/src/resume/driver.rs", "local_role: Role", run)
     add("F-1", "local role type/state safety", v, d)
-    v, d = probe_command("core", "cargo test -q -p twinvpn-crypto --test replay", run)
+    # `replay` is a unit-test module inside src/replay.rs, not an integration
+    # target, so this is a filter rather than a `--test`.
+    v, d = probe_command("core", "cargo test -p twinvpn-crypto --lib replay::tests", run)
     add("F-1", "replay commit-last regression", v, d)
     v, d = probe_command(
         "core", "cargo test -q -p twinvpn-core --test resume reflected", run)
@@ -216,7 +244,7 @@ def build_rows(run: bool):
         "core", "cargo test -q -p twinvpn-core --test pairing_production", run)
     add("F-2", "complete MI-P1 PairingOffer returned", v, d)
     v, d = probe_command(
-        "core", "cargo test -q -p twinvpn-crypto --test pairing_offer_render", run)
+        "core", "cargo test -q -p twinvpn-crypto --test pairing_offer", run)
     add("F-2", "QR/text carriage available", v, d)
     v, d = probe_command("shells/linux", "cargo test -q --workspace", run)
     add("F-2", "C-B integration flow", v, d)

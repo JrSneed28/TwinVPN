@@ -1,106 +1,106 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-08-29T22:58:30.947045+00:00",
-  "commit": "0a908c4595e7ed304d1e68a21422d24ea8a2bf18",
+  "generated_at": "2026-08-29T23:00:50.627796+00:00",
+  "commit": "61540ec3fb1f5ff7c443a12c4895203b23d49c93",
   "worktree_dirty": true,
-  "probes_executed": false,
+  "probes_executed": true,
   "rows": [
     {
       "section": "F-1",
       "criterion": "crypto producer wired",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "FAIL",
+      "detail": "no non-test caller for: arm_resumption",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "crypto consumer wired",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "FAIL",
+      "detail": "no non-test caller for: resume_on_wire",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "real datagram roundtrip",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "FAIL",
+      "detail": "cargo test -q -p twinvpn-core --test crypto_carriage\n    command_path\n    core_lite_profile\n    cp_binding\n    data_plane_composed\n    datapath\n    falsification\n    pairing\n    pairing_refusals\n    relay\n    resume\n    resume_lifecycle\n    vault",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "handshake secret type safety",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "FAIL",
+      "detail": "core/crates/twinvpn-core/src/resume/driver.rs still contains `handshake_secret: &[u8]`",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "local role type/state safety",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "FAIL",
+      "detail": "core/crates/twinvpn-core/src/resume/driver.rs still contains `local_role: Role`",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "replay commit-last regression",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -p twinvpn-crypto --lib replay::tests",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "reflection rejection",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpn-core --test resume reflected",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "RS-6 regression",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpn-core --test resume_lifecycle",
       "required": true
     },
     {
       "section": "F-2",
       "criterion": "production enrolment installation",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "FAIL",
+      "detail": "no non-test caller for: install_pairing_enrolment",
       "required": true
     },
     {
       "section": "F-2",
       "criterion": "pair.begin production path",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpn-core --test pairing",
       "required": true
     },
     {
       "section": "F-2",
       "criterion": "complete MI-P1 PairingOffer returned",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "FAIL",
+      "detail": "cargo test -q -p twinvpn-core --test pairing_production\n    command_path\n    core_lite_profile\n    cp_binding\n    data_plane_composed\n    datapath\n    falsification\n    pairing\n    pairing_refusals\n    relay\n    resume\n    resume_lifecycle\n    vault",
       "required": true
     },
     {
       "section": "F-2",
       "criterion": "QR/text carriage available",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpn-crypto --test pairing_offer",
       "required": true
     },
     {
       "section": "F-2",
       "criterion": "C-B integration flow",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q --workspace",
       "required": true
     },
     {
       "section": "F-2",
       "criterion": "missing identity reason (AUTH.IDENTITY_MISSING)",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpn-core --test pairing_refusals",
       "required": true
     },
     {
@@ -186,6 +186,6 @@
     }
   ],
   "required_total": 23,
-  "required_pass": 0,
+  "required_pass": 7,
   "phase_5_eligibility": "FAIL"
 }

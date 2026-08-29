@@ -1,32 +1,32 @@
 # First Implementation Wave — acceptance report
 
-Commit `0a908c4595e7ed304d1e68a21422d24ea8a2bf18` (DIRTY WORKTREE — not release evidence)
-Probes executed: **False**
+Commit `61540ec3fb1f5ff7c443a12c4895203b23d49c93` (DIRTY WORKTREE — not release evidence)
+Probes executed: **True**
 
 
 ## F-1
 
 | criterion | verdict | evidence |
 |---|---|---|
-| crypto producer wired | **NOT-EXECUTED** | not run (pass --run) |
-| crypto consumer wired | **NOT-EXECUTED** | not run (pass --run) |
-| real datagram roundtrip | **NOT-EXECUTED** | not run (pass --run) |
-| handshake secret type safety | **NOT-EXECUTED** | not run (pass --run) |
-| local role type/state safety | **NOT-EXECUTED** | not run (pass --run) |
-| replay commit-last regression | **NOT-EXECUTED** | not run (pass --run) |
-| reflection rejection | **NOT-EXECUTED** | not run (pass --run) |
-| RS-6 regression | **NOT-EXECUTED** | not run (pass --run) |
+| crypto producer wired | **FAIL** | no non-test caller for: arm_resumption |
+| crypto consumer wired | **FAIL** | no non-test caller for: resume_on_wire |
+| real datagram roundtrip | **FAIL** | cargo test -q -p twinvpn-core --test crypto_carriage |
+| handshake secret type safety | **FAIL** | core/crates/twinvpn-core/src/resume/driver.rs still contains `handshake_secret: &[u8]` |
+| local role type/state safety | **FAIL** | core/crates/twinvpn-core/src/resume/driver.rs still contains `local_role: Role` |
+| replay commit-last regression | **PASS** | cargo test -p twinvpn-crypto --lib replay::tests |
+| reflection rejection | **PASS** | cargo test -q -p twinvpn-core --test resume reflected |
+| RS-6 regression | **PASS** | cargo test -q -p twinvpn-core --test resume_lifecycle |
 
 ## F-2
 
 | criterion | verdict | evidence |
 |---|---|---|
-| production enrolment installation | **NOT-EXECUTED** | not run (pass --run) |
-| pair.begin production path | **NOT-EXECUTED** | not run (pass --run) |
-| complete MI-P1 PairingOffer returned | **NOT-EXECUTED** | not run (pass --run) |
-| QR/text carriage available | **NOT-EXECUTED** | not run (pass --run) |
-| C-B integration flow | **NOT-EXECUTED** | not run (pass --run) |
-| missing identity reason (AUTH.IDENTITY_MISSING) | **NOT-EXECUTED** | not run (pass --run) |
+| production enrolment installation | **FAIL** | no non-test caller for: install_pairing_enrolment |
+| pair.begin production path | **PASS** | cargo test -q -p twinvpn-core --test pairing |
+| complete MI-P1 PairingOffer returned | **FAIL** | cargo test -q -p twinvpn-core --test pairing_production |
+| QR/text carriage available | **PASS** | cargo test -q -p twinvpn-crypto --test pairing_offer |
+| C-B integration flow | **PASS** | cargo test -q --workspace |
+| missing identity reason (AUTH.IDENTITY_MISSING) | **PASS** | cargo test -q -p twinvpn-core --test pairing_refusals |
 
 ## F-5
 
@@ -54,7 +54,7 @@ Probes executed: **False**
 
 ## Phase 5 eligibility
 
-`0` of `23` required criteria are PASS.
+`7` of `23` required criteria are PASS.
 
 **Phase 5 eligibility: FAIL**
 
