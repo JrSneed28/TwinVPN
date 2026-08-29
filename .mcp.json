@@ -30,20 +30,6 @@
         "npm_config_update_notifier": "false"
       },
       "optional": true
-    },
-    "flow-nexus": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "flow-nexus@latest",
-        "mcp",
-        "start"
-      ],
-      "env": {
-        "npm_config_update_notifier": "false"
-      },
-      "optional": true,
-      "requiresAuth": true
     }
   }
 }
