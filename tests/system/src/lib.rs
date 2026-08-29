@@ -32,7 +32,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod crossing;
 pub mod fuzz;
+pub mod noise;
 
 use std::future::Future;
 use std::pin::Pin;

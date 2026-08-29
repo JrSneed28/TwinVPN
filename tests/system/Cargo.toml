@@ -51,6 +51,13 @@ twinvpn-control-plane = { workspace = true }
 # copies into can be asserted identical from both ends — the device's and the
 # service's. A dev-dependency, for the reason above: no shipped crate gains it.
 twinvpn-relay-health = { workspace = true }
+# The relay data plane itself, so `e2e/real_crypto_relay_leg.rs` can run the
+# device's leg against the SHIPPED relay's own Noise_IK responder, frame parser,
+# counter window, control encoder and production MAC provider -- rather than
+# against a hand-transcribed copy of them, which is all `core/` can reach. A
+# dev-dependency, for the reason above: no shipped crate gains it, and CD-I5 is
+# untouched because nothing here is a data-plane crate.
+twinvpn-relay = { workspace = true }
 twinvpn-service-common = { workspace = true }
 futures = "0.3"
 prost      = { workspace = true }
@@ -102,6 +109,19 @@ path = "../e2e/scenario_matrix.rs"
 [[test]]
 name = "e2e_composed_core"
 path = "../e2e/composed_core.rs"
+
+# The crossing under REAL cryptography. `core/crates/twinvpn-core/tests/datapath.rs`
+# proves the same pump pair over `StubKeys`, which its own header calls "not
+# cryptography"; this workspace can enable `twinvpn-crypto/test-support`, so this
+# one runs over a genuine Noise_IKpsk2 handshake and production `SessionKeys`.
+[[test]]
+name = "e2e_real_crypto_crossing"
+path = "../e2e/real_crypto_crossing.rs"
+
+# The same crossing over the relay leg, against the shipped relay's own codec.
+[[test]]
+name = "e2e_real_crypto_relay_leg"
+path = "../e2e/real_crypto_relay_leg.rs"
 
 [[test]]
 name = "chaos_journal_write_behind"

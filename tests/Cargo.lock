@@ -3524,6 +3524,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "twinvpn-relay"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "twinvpn-crypto",
+ "twinvpn-schema",
+ "twinvpn-service-common",
+ "twinvpn-types",
+]
+
+[[package]]
 name = "twinvpn-relay-client"
 version = "0.1.0"
 dependencies = [
@@ -3656,6 +3672,7 @@ dependencies = [
  "twinvpn-path",
  "twinvpn-platform",
  "twinvpn-platform-linux",
+ "twinvpn-relay",
  "twinvpn-relay-client",
  "twinvpn-relay-health",
  "twinvpn-route",

@@ -15,7 +15,7 @@ cross-domain defects turned out to be.
 ```bash
 source build/toolchain/env.sh
 cd tests
-cargo test --workspace          # 198 tests, ~12 s after the first build
+cargo test --workspace          # 210 tests, ~12 s after the first build
 ```
 
 `tests/` is a fifth cargo workspace and is in the `Makefile`'s `WORKSPACES`, so
@@ -35,6 +35,8 @@ kind of reason — see §7.
 | `e2e/composed_core.rs` | 7 — end-to-end, the real `twinvpn_core::Core` | 28 |
 | `e2e/session_lifecycle.rs` | 7 — end-to-end, the leaf-crate pipeline | 12 |
 | `e2e/fail_closed_leak.rs` | 7 + 12 — end-to-end, security | 15 |
+| `e2e/real_crypto_crossing.rs` | 7 + 12 — end-to-end, **real `Noise_IKpsk2`** | 8 |
+| `e2e/real_crypto_relay_leg.rs` | 7 + 12 — end-to-end, the same crossing over a relay leg | 4 |
 | `integration/dual_stack_parity.rs` | 6 + 9 — integration, networking | 12 |
 | `integration/cross_component_agreement.rs` | 4 — contract | 20 |
 | `integration/tunnel_wire_agreement.rs` | 6 — sender against receiver | 8 |
@@ -54,6 +56,33 @@ kind of reason — see §7.
 `system/Cargo.toml` declares each file as a `[[test]]` target with an explicit
 `path`, so the directories say what level a file belongs to without anyone
 having to open it.
+
+### The two real-cryptography files
+
+`core/crates/twinvpn-core/tests/datapath.rs` runs two `Pump`s against each other
+and is the strongest existing proof that the product carries a packet. Its own
+support file says the rest: the transport keys are `StubKeys`, "**not
+cryptography**", because reaching `twinvpn_tunnel::bind::SessionKeys` needs a
+`VerifiedTunnelKey`, hence a signed `TunnelKeyBinding`, hence
+`twinvpn-crypto`'s `test-support` fixtures — a dev-dependency feature
+`twinvpn-core`'s manifest does not enable. **So the test that proved a packet
+crosses proved it through a stub cipher.**
+
+This workspace already enables that feature, so `e2e/real_crypto_crossing.rs`
+closes it: two composed endpoints, a genuine `Noise_IKpsk2` handshake through
+`twinvpn_crypto::noise` and `twinvpn_tunnel::bind`, production `SessionKeys`,
+`twinvpn_core::datapath::Pump` on both ends over `MockAdapter`, and an on-path
+observer that hands every datagram over by hand. The shared rig is
+`system/src/noise.rs` (the key material) and `system/src/crossing.rs` (the
+fabric).
+
+`e2e/real_crypto_relay_leg.rs` carries the same real record over
+`twinvpn_core::relay` and `Sealed::{from_tunnel, into_tunnel}`. Its relay is
+**not** another hand-written one: §8's server artifacts mean the stand-in can be
+built from `twinvpn_relay`'s own `LegHandshake`, `RelayFrame::parse`,
+`CounterWindow`, `control::encode_frame`, `RelayFrame::reframe` and production
+`CryptoProvider` MAC, so a green test means the two ends agree rather than that
+one end agrees with itself.
 
 ### The rig
 
@@ -97,6 +126,10 @@ paired with something that breaks it:
   removed, so "the assembler refuses a leak" is not vacuous;
 - the golden-vector runner is exercised by a provider that is wrong in exactly
   one byte, so "the corpus agrees" is not "the corpus compares nothing";
+- the real-cryptography crossing's "the plaintext is not on the wire" is paired
+  with the same detector run against a datagram whose body *is* the plaintext,
+  and its rig asserts that the family it was asked for is the family it bound —
+  so a v6 arm that silently ran v4 twice fails rather than passing;
 - the NAT class-pair matrix is parsed from `docs/networking.md` §3.2 rather than
   restated, so a change to the document changes the expectations;
 - every family-shaped assertion is a loop over `[V4, V6]` that fails if either
@@ -262,6 +295,13 @@ privilege, and the only filesystem it touches is
 - **No network namespace is created.** Everything here is in-process against
   `MockAdapter`. The namespace-backed half is `lab/`'s, and `lab/README.md` §2
   says exactly what that could and could not produce.
+- **The two real-cryptography files still inject deterministic entropy.**
+  `system/src/noise.rs`'s `SeededEntropy` is a reproducible stream and says so.
+  A handshake's *correctness* does not depend on unpredictable ephemerals; its
+  forward secrecy does, and that is a property of the `Env` a shell injects
+  (**W-7**) which nothing in this workspace can observe. Reaching the platform
+  CSPRNG here would be an ADR-0018 CD-3 violation as well as a source of
+  flakiness.
 - **No key material is committed.** The `ReversibleKeys` stand-in in
   `integration/tunnel_wire_agreement.rs` is explicitly not cryptography and says
   so; the crypto corpus is published test vectors. `chaos/journal_write_behind.rs`
