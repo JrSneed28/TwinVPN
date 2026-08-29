@@ -5,32 +5,54 @@
 //! `contracts/registry/reason_codes.json`, `docs/implementation/ownership.md`
 //! §6 rule 12.
 //!
-//! # An open contract gap, worked around rather than patched
+//! # The gap that was worked around, and is now closed
 //!
-//! ADR-0020 §11.12 registers **twenty** `STORE.*` codes. The frozen registry
-//! contains **six**: `VAULT_CORRUPT`, `ROLLBACK_DETECTED`, `ANCHOR_MISMATCH`,
-//! `CUSTODY_DEGRADED`, `SCHEMA_TOO_NEW`, `PRESERVE_RULE_MISSING`. The fourteen
-//! absent ones include several this implementation genuinely reaches:
-//! `STORE.RECORD_CORRUPT`, `STORE.NAMESPACE_REBUILT`, `STORE.ANCHOR_MISSING`,
-//! `STORE.MIGRATION_FAILED`, `STORE.LOCK_CONTENDED`,
-//! `STORE.WRITE_SPACE_EXHAUSTED`, `STORE.READONLY_FILESYSTEM`,
-//! `STORE.KEYSTORE_LOCKED`, `STORE.KEYSTORE_UNAVAILABLE`,
-//! `STORE.KEY_INVALIDATED`, `STORE.PATH_UNSUITABLE`,
-//! `STORE.BACKUP_EXCLUSION_FAILED`, `STORE.RESTORED_FOREIGN_HOST`,
-//! `STORE.WIPE_INCOMPLETE`. ADR-0020 ST-23 also names
-//! `CONTROL.CONSISTENCY.VERSION_ROLLBACK_REJECTED`, which is likewise absent —
-//! the registry has only `CONTROL.CONSISTENCY.REPLICA_BEHIND_CURSOR`.
+//! ADR-0020 §11.12 registers **twenty** `STORE.*` codes. The freeze of
+//! 2026-08-27 carried **six** of them, so this module mapped each unavailable
+//! condition onto the nearest registered code and named the intended one in the
+//! variant's documentation "so the mapping is removable in one edit once the
+//! registry is amended".
 //!
-//! `contracts/` is frozen (`ownership.md` §3), and "a genuine defect is a
-//! finding you report, not a patch you land". So this module maps each
-//! unavailable condition onto the **nearest registered code that does not
-//! overstate or understate the condition**, and names the intended code in the
-//! variant's documentation so the mapping is removable in one edit once the
-//! registry is amended. The choices are conservative in one direction: where the
-//! nearest available code is *more* severe than the intended one, that is
-//! preferred to a code that would let a caller treat a real failure as routine.
+//! **Amendment 1 to `contracts/FROZEN` amended it** (201 → 454 codes, W-18), and
+//! the fourteen absent `STORE.*` codes — and ST-23's
+//! `CONTROL.CONSISTENCY.VERSION_ROLLBACK_REJECTED` — have been registered since.
+//! The edit the old text promised is this one: every condition below is emitted
+//! under **its own** code, and no `STORE.*` condition is reported under another
+//! condition's identifier any more.
 //!
-//! This is reported to the integration lead as a contract gap.
+//! What that cost while it stood, recorded rather than quietly dropped: an
+//! L1 single-record tag failure (`TRANSIENT`/`WARN`, "wait") arrived as
+//! `STORE.VAULT_CORRUPT` (`PERSISTENT`/`ERROR`, "Local data was damaged and has
+//! been rebuilt", user-actionable), a survivable migration failure said the same
+//! thing about a store that was intact, a contended lock — ADR-0020 SI-5's
+//! *security event* — was indistinguishable from a corrupt vault, and every
+//! secure-storage refusal degraded on the `AUTH` prefix to "authentication
+//! problem" when the truth was "this device's local secure storage is not
+//! answering". ADR-0015 §11.2 rule 5's prefix degradation is what made the
+//! domain half of that a real cost and not a cosmetic one.
+//!
+//! # The residue, stated
+//!
+//! Two distinctions ADR-0020 §11.12 draws still cannot be drawn here, because
+//! the *seam* does not carry them rather than because the registry does not:
+//!
+//! - `STORE.KEYSTORE_LOCKED` vs `STORE.KEYSTORE_UNAVAILABLE`.
+//!   [`twinvpn_platform::PlatformError`] coarsens every Tier-1 refusal to
+//!   `SecureStoreUnavailable`, so "the device is locked" and "the backend is not
+//!   answering" arrive identical. Both are `TRANSIENT` and both remediate by
+//!   waiting, so the emitted code is the non-accusatory of the two.
+//! - The four `VaultIo` file-set conditions are separated by
+//!   [`crate::vault`]'s closed-set `detector`, which is exactly ST-32a's
+//!   coarsening of `errno` — so `WRITE_SPACE_EXHAUSTED`, `READONLY_FILESYSTEM`,
+//!   `LOCK_CONTENDED` and `PATH_UNSUITABLE` are emitted by name, and anything
+//!   the detector does not name stays `STORE.VAULT_CORRUPT` rather than being
+//!   guessed into one of them. **No `errno` crosses this boundary**, so the
+//!   `errno`/`syscall`/`os_error_code`/`platform` evidence those codes declare is
+//!   deliberately not attached.
+//!
+//! A test-only `INTENDED` table pins every pairing above, and a test asserts
+//! each intended code is **registered** — the inverse of the tripwire the other
+//! domains carry, and the one this module lacked while its prose went stale.
 
 use twinvpn_types::{codes, Component, Diagnostic, EvidenceValue, ReasonCode};
 
@@ -83,11 +105,10 @@ pub enum StoreError {
 
     /// One record failed its AEAD tag or its checksum. Rung L1.
     ///
-    /// **Intended code:** `STORE.RECORD_CORRUPT` (TRANSIENT/WARN), which the
-    /// frozen registry does not contain. Mapped to `STORE.VAULT_CORRUPT`, which
-    /// is *more* severe than intended — deliberately, because the alternative
-    /// available codes would either claim a rollback (`ROLLBACK_DETECTED`, a
-    /// security event) or say nothing about the store at all.
+    /// **Registered and emitted:** `STORE.RECORD_CORRUPT` (`TRANSIENT`/`WARN`,
+    /// remediation `WAIT`). One record is not the vault: this used to be emitted
+    /// as `STORE.VAULT_CORRUPT`, which told the user their local data "has been
+    /// rebuilt" for a condition rung L1 recovers from in place.
     #[error("record corrupt in {namespace}: {detector}")]
     RecordCorrupt {
         /// Which namespace the record was in.
@@ -135,11 +156,11 @@ pub enum StoreError {
 
     /// The anchor is absent while the identity is present.
     ///
-    /// **Intended code:** `STORE.ANCHOR_MISSING`, absent from the registry.
-    /// Mapped to `STORE.ANCHOR_MISMATCH`, which is the closest registered
-    /// statement about the anchor. That is *more* severe (FATAL rather than
-    /// PERSISTENT), which is the safe direction: ADR-0020 ST-24 suspends granted
-    /// authority in this state either way.
+    /// **Registered and emitted:** `STORE.ANCHOR_MISSING` (`PERSISTENT`/`ERROR`).
+    /// It used to be emitted as `STORE.ANCHOR_MISMATCH`, which is `FATAL` and
+    /// `terminal` — the safe direction while the code was unavailable, but a
+    /// terminal verdict on a state ADR-0020 ST-24 recovers from by suspending
+    /// granted authority and re-anchoring.
     #[error("anti-rollback anchor absent")]
     AnchorMissing,
 
@@ -158,11 +179,11 @@ pub enum StoreError {
 
     /// A schema migration failed; the pre-migration store is intact.
     ///
-    /// **Intended code:** `STORE.MIGRATION_FAILED`, absent from the registry.
-    /// Mapped to `STORE.VAULT_CORRUPT`, whose user-facing text ("Local data was
-    /// damaged and has been rebuilt") overstates the outcome — the previous
-    /// store *is* intact — which is why this is called out as a gap rather than
-    /// accepted as adequate.
+    /// **Registered and emitted:** `STORE.MIGRATION_FAILED`, with the
+    /// `schema_from` / `schema_to` / `step` evidence the registry declares. It
+    /// used to be emitted as `STORE.VAULT_CORRUPT`, whose user-facing text
+    /// ("Local data was damaged and has been rebuilt") contradicted this
+    /// variant's own guarantee that the pre-migration store is intact.
     #[error("migration from schema {from} to {to} failed at {step}")]
     MigrationFailed {
         /// The schema migrated from.
@@ -182,23 +203,29 @@ pub enum StoreError {
 
     /// The platform's Tier-1 store refused an operation.
     ///
-    /// **Intended codes:** `STORE.KEYSTORE_LOCKED` / `STORE.KEYSTORE_UNAVAILABLE`,
-    /// neither registered. Mapped to `AUTH.KEY_STORE_UNAVAILABLE`, which **is**
-    /// registered, is non-terminal, and carries the right meaning — the
-    /// `STORE.*` variants exist to distinguish locked from unavailable, and that
-    /// distinction is lost until the registry carries them.
+    /// **Registered and emitted:** `STORE.KEYSTORE_UNAVAILABLE`
+    /// (`TRANSIENT`/`WARN`, remediation `WAIT`) — the same class and severity as
+    /// the `AUTH.KEY_STORE_UNAVAILABLE` this used to emit, in the domain the
+    /// condition actually belongs to. `STORE.KEYSTORE_LOCKED` is registered too
+    /// and is **not** emitted here: the platform seam coarsens both to one
+    /// variant (see the module header's residue note), and claiming "locked"
+    /// would tell the user to unlock a device that may be answering fine.
     #[error("tier-1 secure storage unavailable")]
     SecureStoreUnavailable,
 
     /// Vault file I/O failed.
     ///
-    /// **Intended codes:** `STORE.WRITE_SPACE_EXHAUSTED`,
-    /// `STORE.READONLY_FILESYSTEM`, `STORE.PATH_UNSUITABLE`,
-    /// `STORE.LOCK_CONTENDED` — none registered. Mapped to
-    /// `STORE.VAULT_CORRUPT`, and the `detector` field carries which condition it
-    /// actually was so a support bundle is not silent about it. **No `errno`
-    /// crosses this boundary** (ST-32a): `detector` is a closed set of
-    /// `&'static str`.
+    /// **Registered and emitted, one code per detector:**
+    /// `STORE.WRITE_SPACE_EXHAUSTED`, `STORE.READONLY_FILESYSTEM`,
+    /// `STORE.LOCK_CONTENDED` and `STORE.PATH_UNSUITABLE`, with
+    /// `STORE.VAULT_CORRUPT` for a detector that names none of them. The split is
+    /// [`StoreError::reason_code`]'s, over the same closed set
+    /// [`crate::vault`] coarsens `io::ErrorKind` into. **No `errno` crosses this
+    /// boundary** (ST-32a): `detector` is a closed set of `&'static str`.
+    ///
+    /// `STORE.LOCK_CONTENDED` matters most of the four: ADR-0020 SI-5 calls a
+    /// second opener "a security event rather than a retryable condition", and
+    /// under `STORE.VAULT_CORRUPT` it read as damaged data.
     #[error("vault i/o failed: {detector}")]
     VaultIo {
         /// A closed-set name for the condition. Never an `errno`.
@@ -229,22 +256,35 @@ pub enum StoreError {
 impl StoreError {
     /// The registered `reason_code`.
     ///
-    /// Where the intended code is absent from the frozen registry, the mapping
-    /// and its justification are in the variant's own documentation.
+    /// Every condition is emitted under its own registered code; the module
+    /// header records the two distinctions the platform seam cannot draw.
+    ///
+    /// Not `const`: the `VaultIo` split matches on the detector's closed set of
+    /// `&'static str`, and `str` comparison is not yet available in a `const fn`.
     #[must_use]
-    pub const fn reason_code(&self) -> ReasonCode {
+    pub fn reason_code(&self) -> ReasonCode {
         match self {
-            StoreError::VaultCorrupt { .. }
-            | StoreError::RecordCorrupt { .. }
-            | StoreError::MigrationFailed { .. }
-            | StoreError::VaultIo { .. } => codes::STORE_VAULT_CORRUPT,
+            StoreError::VaultCorrupt { .. } => codes::STORE_VAULT_CORRUPT,
+            StoreError::RecordCorrupt { .. } => codes::STORE_RECORD_CORRUPT,
+            StoreError::MigrationFailed { .. } => codes::STORE_MIGRATION_FAILED,
+            // The detector is `vault::io_error`'s ST-32a coarsening of
+            // `io::ErrorKind`. A detector this match does not name stays
+            // `STORE.VAULT_CORRUPT` rather than being sorted into the nearest
+            // file-set code, which is the direction that does not invent a
+            // diagnosis.
+            StoreError::VaultIo { detector } => match *detector {
+                "no space" => codes::STORE_WRITE_SPACE_EXHAUSTED,
+                "read-only filesystem" => codes::STORE_READONLY_FILESYSTEM,
+                "lock contended" => codes::STORE_LOCK_CONTENDED,
+                "permission denied" | "path absent" => codes::STORE_PATH_UNSUITABLE,
+                _ => codes::STORE_VAULT_CORRUPT,
+            },
             StoreError::FloorWouldDecrease { .. } => codes::AUTH_TRUST_EPOCH_ROLLBACK,
             StoreError::RollbackDetected { .. } => codes::STORE_ROLLBACK_DETECTED,
-            StoreError::AnchorMismatch { .. } | StoreError::AnchorMissing => {
-                codes::STORE_ANCHOR_MISMATCH
-            }
+            StoreError::AnchorMismatch { .. } => codes::STORE_ANCHOR_MISMATCH,
+            StoreError::AnchorMissing => codes::STORE_ANCHOR_MISSING,
             StoreError::SchemaTooNew { .. } => codes::STORE_SCHEMA_TOO_NEW,
-            StoreError::SecureStoreUnavailable => codes::AUTH_KEY_STORE_UNAVAILABLE,
+            StoreError::SecureStoreUnavailable => codes::STORE_KEYSTORE_UNAVAILABLE,
             StoreError::CustodyDegraded { .. } => codes::STORE_CUSTODY_DEGRADED,
             StoreError::UndeclaredNamespace | StoreError::CryptoInvariant { .. } => {
                 codes::INTERNAL_INVARIANT_VIOLATED
@@ -274,17 +314,37 @@ impl StoreError {
             StoreError::CryptoInvariant { invariant } => {
                 b = b.evidence("invariant", EvidenceValue::Text((*invariant).to_owned()));
             }
-            // The remaining registered codes declare no evidence fields the
-            // frozen registry would accept — `STORE.VAULT_CORRUPT`'s
-            // `rung`/`detector` and `STORE.ROLLBACK_DETECTED`'s
-            // `store_seq_anchor`/`store_seq_vault` are named by ADR-0020 §11.12
-            // but are NOT in `reason_codes.json`'s `evidence_fields` for those
-            // codes, which lists none. Attaching them would be silently dropped
-            // by `Evidence::new`, so they are deliberately not attached and the
-            // gap is reported with the missing codes above.
+            // Declared by `STORE.RECORD_CORRUPT` since Amendment 1, and both
+            // are closed-set `&'static str` rather than anything the record
+            // itself contained: `record_class` is not attached because this
+            // layer knows the namespace, not the class within it.
+            StoreError::RecordCorrupt {
+                namespace,
+                detector,
+            } => {
+                b = b
+                    .evidence("namespace", EvidenceValue::Text((*namespace).to_owned()))
+                    .evidence("detector", EvidenceValue::Text((*detector).to_owned()));
+            }
+            // Declared by `STORE.MIGRATION_FAILED` since Amendment 1. `step` is
+            // this crate's own closed set of step names, never an OS string.
+            StoreError::MigrationFailed { from, to, step } => {
+                b = b
+                    .evidence("schema_from", EvidenceValue::Uint(u64::from(*from)))
+                    .evidence("schema_to", EvidenceValue::Uint(u64::from(*to)))
+                    .evidence("step", EvidenceValue::Text((*step).to_owned()));
+            }
+            // The remaining codes declare no evidence field this layer can
+            // honestly fill. `STORE.VAULT_CORRUPT`'s `rung`/`detector` and
+            // `STORE.ROLLBACK_DETECTED`'s `store_seq_anchor`/`store_seq_vault`
+            // are named by ADR-0020 §11.12 but are NOT in
+            // `reason_codes.json`'s `evidence_fields` for those codes, which
+            // lists none; attaching them would be silently dropped by
+            // `Evidence::new`. The four `VaultIo` codes declare
+            // `errno`/`syscall`/`os_error_code`/`platform`, and ST-32a is why
+            // none of them crosses this boundary — the detector chose the code
+            // and is not itself re-attached as a raw status.
             StoreError::VaultCorrupt { .. }
-            | StoreError::RecordCorrupt { .. }
-            | StoreError::MigrationFailed { .. }
             | StoreError::VaultIo { .. }
             | StoreError::RollbackDetected { .. }
             | StoreError::AnchorMismatch { .. }
@@ -303,8 +363,12 @@ impl From<twinvpn_platform::PlatformError> for StoreError {
     /// Keystore exception class) MUST NOT be attached: they are coarsened to the
     /// declared category field, because a raw status is both unstable across OS
     /// versions and a fingerprinting surface." `PlatformError` already carries
-    /// only coarse categories, and this conversion drops even those rather than
-    /// inventing a `STORE.*` code the registry does not have.
+    /// only coarse categories, and this conversion drops even those.
+    ///
+    /// It is also where `STORE.KEYSTORE_LOCKED` is lost: the collapse happens
+    /// here, in the seam, not in the registry. Splitting it needs a
+    /// `PlatformError` variant that says *locked* — a change to
+    /// [`twinvpn_platform`]'s contract, and therefore not this crate's to make.
     fn from(_: twinvpn_platform::PlatformError) -> Self {
         StoreError::SecureStoreUnavailable
     }
@@ -326,3 +390,142 @@ impl From<twinvpn_crypto::CryptoError> for StoreError {
 
 /// The crate's result alias.
 pub type Result<T> = core::result::Result<T, StoreError>;
+
+/// Every condition that used to be substituted, and the code it is emitted
+/// under now.
+///
+/// The inverse of the tripwire tables the other domains carry. Theirs assert a
+/// spelling is still **absent**, so registering one fails the build; this one
+/// asserts each is **present**, so a registry that lost a code — or a build
+/// wired to a stale one — fails here rather than degrading a diagnosis silently.
+/// The pairing that went stale in this module's prose for a whole amendment
+/// cycle is the reason it is a test and not a paragraph.
+#[cfg(test)]
+const INTENDED: &[(&str, &str)] = &[
+    ("record corrupt", "STORE.RECORD_CORRUPT"),
+    ("anchor missing", "STORE.ANCHOR_MISSING"),
+    ("migration failed", "STORE.MIGRATION_FAILED"),
+    ("tier-1 refusal", "STORE.KEYSTORE_UNAVAILABLE"),
+    ("no space", "STORE.WRITE_SPACE_EXHAUSTED"),
+    ("read-only filesystem", "STORE.READONLY_FILESYSTEM"),
+    ("lock contended", "STORE.LOCK_CONTENDED"),
+    ("path unsuitable", "STORE.PATH_UNSUITABLE"),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use twinvpn_types::Evidence;
+
+    /// Every code this module now emits is in the frozen registry.
+    #[test]
+    fn every_intended_code_is_registered() {
+        for (condition, code) in INTENDED {
+            assert!(
+                ReasonCode::lookup(code).is_some(),
+                "{condition} emits {code}, which the frozen registry does not carry"
+            );
+        }
+    }
+
+    /// The conditions that were collapsed onto one code are distinguishable
+    /// again — asserted as a set, so a future collapse fails here.
+    #[test]
+    fn no_two_store_conditions_share_one_code() {
+        let emitted = [
+            StoreError::VaultCorrupt {
+                rung: Rung::L3,
+                detector: "header",
+            }
+            .reason_code(),
+            StoreError::RecordCorrupt {
+                namespace: "peer",
+                detector: "aead tag",
+            }
+            .reason_code(),
+            StoreError::MigrationFailed {
+                from: 1,
+                to: 2,
+                step: "rewrite",
+            }
+            .reason_code(),
+            StoreError::VaultIo {
+                detector: "no space",
+            }
+            .reason_code(),
+            StoreError::VaultIo {
+                detector: "read-only filesystem",
+            }
+            .reason_code(),
+            StoreError::VaultIo {
+                detector: "lock contended",
+            }
+            .reason_code(),
+            StoreError::VaultIo {
+                detector: "permission denied",
+            }
+            .reason_code(),
+            StoreError::AnchorMismatch { store_seq: 3 }.reason_code(),
+            StoreError::AnchorMissing.reason_code(),
+            StoreError::SecureStoreUnavailable.reason_code(),
+        ];
+        let mut seen: Vec<&str> = emitted.iter().map(|c| c.as_str()).collect();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(
+            before,
+            seen.len(),
+            "two conditions share one code: {seen:?}"
+        );
+    }
+
+    /// A detector the split does not name is not sorted into the nearest
+    /// file-set code. The positive control is in the same test: the four it
+    /// does name are.
+    #[test]
+    fn an_unnamed_detector_stays_vault_corrupt() {
+        assert_eq!(
+            StoreError::VaultIo {
+                detector: "vault i/o"
+            }
+            .reason_code()
+            .as_str(),
+            "STORE.VAULT_CORRUPT"
+        );
+        assert_eq!(
+            StoreError::VaultIo {
+                detector: "path absent"
+            }
+            .reason_code()
+            .as_str(),
+            "STORE.PATH_UNSUITABLE"
+        );
+    }
+
+    /// The evidence Amendment 1 declared is actually attached — and survives
+    /// `Evidence`'s declared-set filter, which silently drops what a code does
+    /// not declare. A test that only built the diagnostic would pass either way.
+    #[test]
+    fn the_declared_evidence_survives_the_filter() {
+        let d = StoreError::RecordCorrupt {
+            namespace: "peer",
+            detector: "aead tag",
+        }
+        .diagnostic(Component::Store);
+        let keys: Vec<&str> = d.evidence().entries().iter().map(Evidence::key).collect();
+        assert!(keys.contains(&"namespace"), "evidence dropped: {keys:?}");
+        assert!(keys.contains(&"detector"), "evidence dropped: {keys:?}");
+
+        let m = StoreError::MigrationFailed {
+            from: 1,
+            to: 2,
+            step: "rewrite",
+        }
+        .diagnostic(Component::Store);
+        let keys: Vec<&str> = m.evidence().entries().iter().map(Evidence::key).collect();
+        for k in ["schema_from", "schema_to", "step"] {
+            assert!(keys.contains(&k), "evidence dropped: {k} not in {keys:?}");
+        }
+    }
+}

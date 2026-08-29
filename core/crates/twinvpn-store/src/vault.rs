@@ -365,8 +365,8 @@ pub fn quarantine_vault(paths: &VaultPaths, tag: &str) -> Result<PathBuf> {
 /// # Errors
 ///
 /// [`StoreError::VaultIo`] with `detector = "lock contended"` if the lock
-/// exists. That maps to `STORE.VAULT_CORRUPT` today because
-/// `STORE.LOCK_CONTENDED` is absent from the frozen registry — see
+/// exists, which [`StoreError::reason_code`] emits as `STORE.LOCK_CONTENDED` —
+/// SI-5's security event, and no longer a corrupt-vault verdict. See
 /// [`crate::error`].
 pub fn acquire_lock(paths: &VaultPaths, owner: &str) -> Result<()> {
     match fs::OpenOptions::new()

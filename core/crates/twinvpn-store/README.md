@@ -73,9 +73,13 @@ effect.
 
 ### Known gaps, stated
 
-- **The `STORE.*` registry gap.** ADR-0020 §11.12 registers twenty codes;
-  `contracts/registry/reason_codes.json` contains six. `error.rs` documents each
-  mapping and why it was chosen. Reported to the integration lead.
+- **The `STORE.*` registry gap — CLOSED.** ADR-0020 §11.12 registers twenty
+  codes; the freeze of 2026-08-27 carried six, and Amendment 1 registered the
+  rest. `error.rs` now emits each condition under its own code, and a test
+  asserts every one of them is registered rather than asserting, as the other
+  domains' tripwires do, that a spelling is still absent. Two distinctions
+  remain unmade — `KEYSTORE_LOCKED` vs `KEYSTORE_UNAVAILABLE` — because
+  `PlatformError` coarsens them, which is a seam limit and not a registry one.
 - **The engine is not the `redb`-class CoW B-tree ADR-0020 names.** `redb` is
   not in the workspace dependency table. This wave commits by
   `write → fsync → rename → fsync(dir)`, which meets ST-12's E1–E4 and E6–E8 but
