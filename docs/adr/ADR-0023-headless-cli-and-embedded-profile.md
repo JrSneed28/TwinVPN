@@ -594,11 +594,54 @@ cryptography (**I2**).
 
 | # | Channel | Ceremony | When | Authorization |
 |---|---|---|---|---|
-| **E1** | **Terminal QR.** `twinvpn pair begin --qr` renders the `PairingOffer` as a QR made of Unicode half-block glyphs (or `--qr=ascii` using `##`/`  ` pairs where `LANG` is not UTF-8) on the controlling terminal. The operator's paired admin device photographs the terminal. | [ADR-0007](ADR-0007-device-identity-and-pairing.md) **C-B**, 256-bit | Default whenever the terminal is ≥ 71 columns × 37 rows | OSK holding `ENROLL` (C-D) |
+| **E1** | **Terminal QR.** `twinvpn pair begin --qr` renders the `PairingOffer` as a QR made of Unicode half-block glyphs (or `--qr=ascii` using `##`/`  ` pairs where `LANG` is not UTF-8) on the controlling terminal. The operator's paired admin device photographs the terminal. | [ADR-0007](ADR-0007-device-identity-and-pairing.md) **C-B**, 256-bit | Default whenever the terminal is ≥ **79 columns × 41 rows** (EM-22a) | OSK holding `ENROLL` (C-D) |
 | **E2** | **Text offer.** `twinvpn pair begin --text` renders the same dCBOR bytes as Crockford base32 in groups of eight, for copy-paste into the admin device. | **C-B**, 256-bit | Small terminals; serial consoles; `PLATFORM.EMBEDDED.ENROLMENT_TERMINAL_TOO_SMALL` steers here automatically | OSK `ENROLL` |
 | **E3** | **Reverse ceremony.** The admin device generates the offer; the operator transports it into the headless device: `twinvpn pair accept --offer -`. The headless device displays nothing. | **C-B**, 256-bit | Operator has physical access to an admin device with a camera and shell access to the target | OSK `ENROLL` |
 | **E4** | **First-boot provisioning.** At first boot the device generates its identity and **emits** a `PairingOffer` to a declared local sink: a file (mode 0600), the serial console, or a `ubus` event. A provisioning system carries it to an OSK holder. | **C-B**, 256-bit | Appliance and fleet installation | OSK `ENROLL`, offline, batchable |
 | — | SPAKE2 9-digit code | [ADR-0007](ADR-0007-device-identity-and-pairing.md) **C-A**, ~2^29.9 | **Retained as the last resort only**, e.g. a 7-bit 40-column serial line where even E2 is impractical | OSK `ENROLL` |
+
+**Rule EM-22a — E1's symbol is pinned, and the geometry is derived from it, not chosen.**
+
+E1 named a terminal size and nothing else. **Nothing in the corpus fixed the QR
+version, the error-correction level or the quiet zone** — and those three decide
+whether the default enrolment channel works at all, so two conforming
+implementations could disagree about whether a given terminal is large enough.
+Recorded as finding **F-1** under `docs/implementation/ownership.md` §11 G-9 and
+closed here.
+
+| Parameter | Value | Why |
+|---|---|---|
+| Symbol | QR **version 13** (69 modules), **byte mode** | The `PairingOffer` measures **377 bytes** (ADR-0007 §7.4; the per-field arithmetic is in `contracts/registry/limits.json` `pairing`). v11 holds 321 at level L and v12 holds 367 — **both are under 377**, so v13 is the smallest symbol that carries this payload at all |
+| Error correction | **L** | **Forced, not preferred.** v13-M holds 331 < 377, and the smallest level-M symbol that holds 377 is v15 — 87 columns, which breaks EM-44's 80-column rule. At this payload size there is no level-M configuration that fits a compliant terminal. See the note below: this is the strongest argument for shrinking the payload rather than growing the terminal |
+| Quiet zone | **4 modules**, all four sides | ISO/IEC 18004 §6.3.9. A symbol rendered without it is not a conforming QR and a decoder may refuse it |
+| Rendering | Unicode half-block: **1 module = 1 column**, **2 module rows = 1 character row**, plus a **1-character border** on every side | The border keeps the quiet zone from merging into surrounding terminal output, which is the same failure a missing quiet zone produces |
+
+The geometry follows arithmetically and is no longer a number anyone may choose:
+
+```
+columns = modules + 2*4 (quiet) + 2*1 (border) = 69 + 8 + 2 = 79
+rows    = ceil((modules + 8) / 2) + 2*1        = 39 + 2      = 41
+```
+
+The same formula reproduces E1's previous **71 × 37** from v11 — 61 + 8 + 2 = 71,
+and ceil(69/2) + 2 = 37 — which is the evidence that this is the model E1 was
+already using rather than one invented here. **79 ≤ 80, so EM-44's
+"legible at 80 columns" rule still holds, with one column to spare.**
+
+> **This is the interim fix, and the better one is not ours.** Growing the
+> terminal makes the declared channel work, but it buys the **weakest** error
+> correction for a symbol that is photographed off a glowing screen, and it
+> raises the bar for what counts as a large-enough terminal. The alternative is
+> to shrink the payload: `binding` is **219 of the 377 bytes**, and the
+> `TunnelKeyBinding` inside it re-states `tk_pub` — which the offer already
+> carries in field 3 — alongside a `device-id` and an `identity-id`. Carried by
+> reference, or as a bare ES256 signature over a payload the receiver
+> reconstructs from the offer's own fields, the offer measures **≈224 bytes**,
+> which fits **v11 at level M (251)** — the *original* 71 × 37 geometry, at the
+> stronger error-correction level. That is strictly better on every axis and it
+> is an **ADR-0007 §7.4 change**, owned by SECURITY: W-23 is the wave's standing
+> lesson that a specified derivation is not an implementation agent's to
+> improve. If it lands, EM-22a reverts to v11/M and E1 returns to 71 × 37.
 
 **Rule EM-23 — no TwinVPN artifact may contain a pre-shared enrolment secret.** Not an image, not
 a package, not a configuration file, not a `keep.d` entry. An image is copied; a secret in an

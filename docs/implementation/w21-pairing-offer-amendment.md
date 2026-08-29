@@ -620,7 +620,9 @@ together decide whether the product's default enrolment channel works at all.
 
 Two exits exist and both are somebody else's:
 1. **E1's geometry grows.** A 377-byte offer at version 13 with a conforming
-   quiet zone needs **77 columns × 39 rows**, not 71 × 37. That is an ADR-0023
+   quiet zone needs **79 columns × 41 rows**, not 71 × 37 — this document first
+   said 77 × 39, which omitted the 1-character border E1's own 71 × 37 implies
+   (61 + 8 + 2 = 71); corrected when EM-22a pinned the model. That is an ADR-0023
    EM-22 edit.
 2. **`binding` shrinks.** It is **219 of the 377 bytes — 58% of the payload** —
    and the `TunnelKeyBinding` inside it re-states `tk_pub`, which the offer
