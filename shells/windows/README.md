@@ -21,7 +21,7 @@ run.** It was written on a Linux host. What exists is:
 
 | Claim | How far it goes |
 |---|---|
-| it compiles for `x86_64-pc-windows-msvc` with `-D warnings` | the adapter crate and `twinvpnctl`: **yes**, cleanly. `twinvpnsvc` with its `service` feature: **not on this host** — `ring`'s build script needs an MSVC-targeting C compiler and there is none here. See §7.19 |
+| it compiles for `x86_64-pc-windows-msvc` with `-D warnings` | the adapter crate, `twinvpnctl` and `twinvpnsvc` **`--features service`**: yes, cleanly, and `make cross-check` runs all three. `twinvpnsvc` **`--features core-host`**: **not checked by any target we run** — that profile reaches `twinvpn-cp-client` → `quinn` → `rustls` → `ring`, whose build script needs an MSVC-targeting C compiler and `cross-check` invokes none. So the core-hosting half is compiled by nothing in the gate. See §7.19 |
 | its target-free layers behave correctly | `cargo test --workspace` here and in the adapter crate, on Linux. Real, and bounded by what "target-free" covers. |
 | the MSI installs a working service | **no evidence whatsoever.** WiX has never run. |
 
@@ -99,8 +99,9 @@ There is no Windows toolchain here, so what is available is the compile proof:
 source build/toolchain/env.sh
 
 # The compile proof, as far as this host can take it. `make cross-check` runs
-# the first of these and then a `--workspace` clippy over this directory, which
-# stops inside `ring`'s build script — §7.19 says why, and what to do about it.
+# ALL THREE of these — §7.19 says what the third one does and does not prove.
+# A `--workspace` clippy is NOT one of them: it would reach `core-host`, and
+# with it `ring`'s build script, which has no MSVC compiler here.
 cd core && cargo clippy -p twinvpn-platform-windows --all-targets \
     --target x86_64-pc-windows-msvc -- -D warnings
 cd ../shells/windows
@@ -519,15 +520,36 @@ Each of these is a gap this wave did not close, with the reason.
     records it as future work: it requires ELAM signing, which is a Microsoft
     process this project has not started.
 
-19. **`make cross-check` now covers this whole workspace — this gap is closed.**
-    It previously stopped at the crates that do not link the core, because
-    `twinvpnsvc` → `twinvpn-core` → `snow` → `ring`, and `ring`'s build script
-    refuses a GNU compiler for `x86_64-pc-windows-msvc`. The integration lead
-    removed that edge (`core/Cargo.toml` selects `snow`'s default resolver, which
-    keeps ADR-0001 §11's primitives exactly), and the first full run found a real
-    error in `main.rs` — two dead imports in `build_adapter`, in code nothing had
-    ever compiled. `service/runtime.rs`, `service/server.rs` and `main.rs` are
-    now type-checked for the target with `-D warnings` like everything else.
+19. **`make cross-check` covers the `service` profile of this workspace. It
+    does NOT cover `core-host`, and that gap is open.**
+
+    The history in three steps, because each one changed what this row may
+    claim. (a) The target once stopped at the crates that do not link the core,
+    because `twinvpnsvc` → `twinvpn-core` → `snow` → `ring` and `ring`'s build
+    script refuses a GNU compiler for `x86_64-pc-windows-msvc`. (b) The
+    integration lead removed *that* edge (`core/Cargo.toml` selects `snow`'s
+    default resolver, which keeps ADR-0001 §11's primitives exactly), the
+    workspace was checked whole, and the first full run found a real error in
+    `main.rs` — two dead imports in `build_adapter`, in code nothing had ever
+    compiled. (c) **L-CONTROL put `ring` back by another road** —
+    `twinvpn-cp-client` → `quinn` → `quinn-proto`/`rustls` → `ring` — so
+    `core-host` is uncompilable here again. `ownership.md` §11 carries it as
+    G-4, and G-6 records why the obvious fix (a different rustls
+    `CryptoProvider`) does not work.
+
+    What runs today is the **`--no-default-features --features service`** proof
+    this crate's `Cargo.toml` documents, plus `twinvpnctl`. That is the whole
+    `#[cfg(windows)]` service surface — SCM registration, the privilege posture,
+    the pipe DACL, `SERVICE_CONTROL_POWEREVENT`, the WTS console-seat check, the
+    start sequence. **`service/runtime.rs`, `service/server.rs`,
+    `service/events.rs` and `main.rs` are NOT covered**: they are `core-host`.
+
+    And while the workspace was exempted wholesale, that gap hid a compile
+    error rather than merely leaving one uncaught: `service/mod.rs` did not gate
+    `pub mod events;`, `events.rs` names `twinvpn_core`, and so `--features
+    service` did not build **for any target, this host included**. One
+    `#[cfg(feature = "core-host")]` fixes it; `make cross-check` now runs the
+    command that would have caught it. `ownership.md` §11, G-7.
 
 20. **Files exceed the 500-line guidance in several places.** The adapter's
     `sock.rs` (1561), `custody.rs` (1398), `wintun.rs` (1020) and `iface.rs`

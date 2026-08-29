@@ -78,7 +78,13 @@ twinvpn-gateway        = { path = "crates/twinvpn-gateway" }
 twinvpn-session        = { path = "crates/twinvpn-session" }
 twinvpn-diag           = { path = "crates/twinvpn-diag" }
 twinvpn-mgmt           = { path = "crates/twinvpn-mgmt" }
-twinvpn-core           = { path = "crates/twinvpn-core" }
+# `default-features = false` so the one consumer in this workspace,
+# `twinvpn-ffi`, can forward the PROFILE rather than inherit it. `twinvpn-ffi`
+# re-enables `full` through its own default feature, so every build in this
+# workspace is what it was; the point is that a `core-lite` ABI becomes
+# buildable, which is the only way `shells/android/jni` gets compiled at all on
+# a host with no NDK. `ownership.md` §11, G-4/G-6.
+twinvpn-core           = { path = "crates/twinvpn-core", default-features = false }
 twinvpn-platform-linux = { path = "crates/twinvpn-platform-linux" }
 twinvpn-platform-windows = { path = "crates/twinvpn-platform-windows" }
 twinvpn-platform-macos = { path = "crates/twinvpn-platform-macos" }

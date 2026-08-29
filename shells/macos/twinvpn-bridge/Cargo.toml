@@ -48,14 +48,34 @@ description = "the macOS NE system extension: the hosted core, the datapath, and
 name       = "twinvpn_bridge"
 crate-type = ["staticlib", "rlib"]
 
+# The core's PROFILE, forwarded. Not a switch on this crate's own code: every
+# line below is compiled either way, and `default = ["full"]` keeps the shipped
+# system extension exactly what it was. What the pair buys is a profile
+# `make cross-check` can reach on a host with no Darwin C toolchain --
+# `core-lite` (ADR-0018 §11.12, S-46) drops `twinvpn-cp-client`, and with it
+# `quinn` -> `rustls` -> `ring`, whose build script needs an Apple SDK.
+#
+# It is a PARTIAL proof and the banner says so: under `core-lite` the lines that
+# name the `full`-only core API are not type-checked. The shipping profile is
+# `full`, and only a real Darwin builder discharges it. `ownership.md` §11, G-4.
+[features]
+default   = ["full"]
+full      = ["twinvpn-core/full"]
+core-lite = ["twinvpn-core/core-lite"]
+
 [dependencies]
 # The authority's half. `core-host` was a FEATURE here until wave 3, gated only
 # because `twinvpn-crypto` selected `snow`'s `ring-accelerated` resolver and
 # `ring`'s C sources could not be cross-compiled on the Linux CI host.
-# `core/Cargo.toml` now selects snow's default resolver, so the gate's only
-# reason is gone and the core edge is unconditional -- which means
-# `make cross-check` type-checks it for aarch64-apple-darwin with `-D warnings`
-# like everything else.
+# `core/Cargo.toml` now selects snow's default resolver, so THAT reason is gone
+# and the core edge is unconditional.
+#
+# It is not the only reason any more. L-CONTROL put `ring` back by another road
+# -- `twinvpn-cp-client` -> `quinn` -> `quinn-proto`/`rustls` -> `ring` -- so
+# `make cross-check` type-checks this crate for aarch64-apple-darwin in
+# `core-lite` and NOT in `full`. The feature pair above is how; `ownership.md`
+# §11 G-4 and G-6 are why, and G-6 records why a different rustls
+# `CryptoProvider` would not have helped.
 twinvpn-core           = { workspace = true }
 twinvpn-diag           = { workspace = true }
 twinvpn-mgmt           = { workspace = true }

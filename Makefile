@@ -335,6 +335,11 @@ fmt:
 # between "shell code that has never been built" -- the failure mode wave 1
 # named -- and shell code whose behaviour has not yet been observed.
 #
+# READ THAT LAST PARAGRAPH WITH THE `ring` BLOCK BELOW. Since L-CONTROL it is
+# true of the two ADAPTERS and of the shell code outside the core-hosting
+# profile, and NOT of the core-hosting profile itself. The block below says
+# exactly which half is which, and so does this target's closing banner.
+#
 # The behaviour half is discharged by the adapters' own host-runnable tests:
 # both wave-2 adapters keep their translation layers (filter and anchor
 # construction, route and DNS programme rendering, error mapping) target-free,
@@ -348,10 +353,18 @@ fmt:
 # WAVE 3 (mobile) joins this target on exactly the same terms. `aarch64-apple-ios`
 # and `aarch64-linux-android` rust-std install here too, so both mobile adapters
 # are type-checked against the real Darwin and bionic sys crates with
-# `-D warnings`. NOTHING Swift and NOTHING Kotlin is reached: there is no Xcode,
-# no Darwin SDK, no JDK, no Android SDK and no NDK on this host, so
-# `shells/ios` and `shells/android` are WRITTEN, NOT COMPILED in ownership.md
-# 9.2's sense, and no `make` target may claim otherwise.
+# `-D warnings`. NOTHING Swift and NOTHING Kotlin is reached: this target
+# invokes no Swift and no Kotlin compiler over `shells/ios` or `shells/android`,
+# so both are WRITTEN, NOT COMPILED in ownership.md 9.2's sense, and no `make`
+# target may claim otherwise.
+#
+# Said as a fact about THIS TARGET, deliberately, rather than about the machine.
+# A JDK and `kotlinc` ARE on this host -- `make bootstrap` prints their versions
+# and `verify-bindings` compiles the JVM bindings with them -- so "there is no
+# JDK here", which this comment used to say, was false and would have made a
+# reader distrust the rest. What is absent for the SHELLS is an Android SDK, an
+# NDK and a Darwin SDK, and what matters for a coverage claim is which compiler
+# this recipe actually runs.
 WIN_TARGET := x86_64-pc-windows-msvc
 MAC_TARGET := aarch64-apple-darwin
 IOS_TARGET := aarch64-apple-ios
@@ -377,22 +390,60 @@ cross-check:
 # -> `quinn-proto`/`rustls` -> `ring`. So every crate that hosts a core is again
 # uncompilable for a foreign target on this host, and the target says which
 # crates those are instead of dying at the first one and leaving the iOS and
-# Android checks unrun. The fix is a rustls `CryptoProvider` decision, not a
-# Makefile edit; `ownership.md` §11 carries it as an open finding with an owner.
+# Android checks unrun.
+#
+# WHAT WILL NOT LIFT IT, and this is the correction G-6 records: swapping the
+# rustls `CryptoProvider`. `ring` is NOT reached only through rustls. In
+# quinn-proto 0.11.17 the feature graph is `rustls = ["rustls-ring"]` and
+# `rustls-ring = ["dep:rustls", "rustls?/ring", "ring"]`, so the ONLY two ways
+# to compile quinn's rustls integration at all are `ring` or `aws-lc-rs` -- and
+# `aws-lc-rs` builds C, cmake and bindgen, which is strictly worse here. Beyond
+# the provider seam quinn-proto uses ring DIRECTLY: `crypto/ring_like.rs`
+# implements `HmacKey`, `HandshakeTokenKey` and `AeadKey` on ring's own types,
+# `config/mod.rs` builds the default reset and token keys with `ring::hmac` and
+# `ring::hkdf`, and `crypto/rustls.rs` selects the provider under `#[cfg]` with
+# no override. A pure-Rust provider would therefore leave this edge exactly
+# where it is. Removing it means forking quinn-proto or leaving quinn, which is
+# an architecture decision; `ownership.md` §11 carries G-4 and G-6 with owners.
+#
+# WHAT THIS TARGET DOES ABOUT IT, short of that decision: it compiles the four
+# core-hosting crates under the REDUCED PROFILE the repository already declares,
+# rather than not compiling them at all. `core-lite` is ADR-0018 §11.12's
+# parse-and-verify-only profile (S-46) and it carries no data-plane crate and no
+# `twinvpn-cp-client` -- so no `quinn`, no `rustls`, no `ring`, and no C. Every
+# shell below keeps `default = ["full"]`, so nothing that ships changes; what is
+# new is a second profile a Linux host can reach.
+#
+# BE PRECISE ABOUT WHAT THAT PROVES. It is a PARTIAL proof. The shipping profile
+# is `full`, and the lines that name the `full`-only core API are still compiled
+# by nothing here. What it converts is the far larger remainder -- every line of
+# the Win32 service surface, the Darwin bridge and the JNI carriage that does not
+# name a `full`-only symbol -- from "never compiled for its target" to
+# "compiled". The residue is exactly what a real Windows, macOS or Android
+# builder is for, and the banner at the end of this target names it.
 	@if [ -f shells/windows/Cargo.toml ]; then \
-	  echo "==> cross-check shells/windows ($(WIN_TARGET)) -- see BLOCKED below"; \
+	  echo "==> cross-check shells/windows ($(WIN_TARGET)), --features service"; \
+	  ( cd shells/windows && $(CARGO) clippy -p twinvpnsvc \
+	      --no-default-features --features service --all-targets \
+	      --target $(WIN_TARGET) -- -D warnings ) || exit 1; \
+	  ( cd shells/windows && $(CARGO) clippy -p twinvpnctl --all-targets \
+	      --target $(WIN_TARGET) -- -D warnings ) || exit 1; \
 	  ( cd shells/windows && $(CARGO) tree -i ring --target $(WIN_TARGET) >/dev/null 2>&1 ) \
-	    || { echo "    ring has LEFT the windows graph: delete this exclusion and"; \
-	         echo "    restore the whole-workspace check"; exit 1; }; \
+	    || { echo "    ring has LEFT the windows graph UNDER core-host: drop the"; \
+	         echo "    --no-default-features split and check the workspace whole"; exit 1; }; \
 	fi
 	@if [ -f shells/macos/Cargo.toml ]; then \
 	  echo "==> cross-check shells/macos ($(MAC_TARGET))"; \
 	  ( cd shells/macos && $(CARGO) clippy -p twinvpn-mi -p twinvpnctl -p ksd \
 	      -p twinvpn-unblock --all-targets --all-features \
 	      --target $(MAC_TARGET) -- -D warnings ) || exit 1; \
+	  echo "==> cross-check shells/macos twinvpn-bridge ($(MAC_TARGET)), core-lite"; \
+	  ( cd shells/macos && $(CARGO) clippy -p twinvpn-bridge \
+	      --no-default-features --features core-lite --all-targets \
+	      --target $(MAC_TARGET) -- -D warnings ) || exit 1; \
 	  ( cd shells/macos && $(CARGO) tree -i ring --target $(MAC_TARGET) >/dev/null 2>&1 ) \
-	    || { echo "    ring has LEFT the macos graph: delete this exclusion and"; \
-	         echo "    restore -p twinvpn-bridge"; exit 1; }; \
+	    || { echo "    ring has LEFT the macos graph UNDER full: drop the core-lite"; \
+	         echo "    split and check twinvpn-bridge in its shipping profile"; exit 1; }; \
 	fi
 	@echo "==> cross-check twinvpn-platform-ios ($(IOS_TARGET))"
 	@cd core && $(CARGO) clippy -p twinvpn-platform-ios --all-targets \
@@ -403,22 +454,40 @@ cross-check:
 # The Android shell's Rust half. Two libraries, not one: CD-I5 forbids
 # `twinvpn-platform-android` to name `twinvpn-core`, so the core's JNI entries
 # live in their own crate and their own `.so`. It hosts a core, so it is in the
-# blocked set above for the same reason and by the same edge.
+# blocked set above for the same reason and by the same edge, and it is reached
+# the same way: `core-lite` forwarded through `twinvpn-ffi`.
 	@if [ -f shells/android/jni/Cargo.toml ]; then \
-	  echo "==> cross-check shells/android/jni ($(AND_TARGET)) -- see BLOCKED below"; \
+	  echo "==> cross-check shells/android/jni ($(AND_TARGET)), core-lite"; \
+	  ( cd shells/android/jni && $(CARGO) clippy --workspace \
+	      --no-default-features --features core-lite --all-targets \
+	      --target $(AND_TARGET) -- -D warnings ) || exit 1; \
 	  ( cd shells/android/jni && $(CARGO) tree -i ring --target $(AND_TARGET) >/dev/null 2>&1 ) \
-	    || { echo "    ring has LEFT the android graph: delete this exclusion and"; \
-	         echo "    restore the whole-workspace check"; exit 1; }; \
+	    || { echo "    ring has LEFT the android graph UNDER full: drop the core-lite"; \
+	         echo "    split and check the workspace in its shipping profile"; exit 1; }; \
 	fi
 	@echo "==> cross-check OK (compile only -- nothing was linked or run)"
-	@echo "    BLOCKED, and therefore NOT compiled by anything on this host:"
-	@echo "      shells/windows twinvpnsvc, twinvpnctl"
-	@echo "      shells/macos   twinvpn-bridge"
-	@echo "      shells/android/jni twinvpn-android-jni"
-	@echo "    Cause: quinn/rustls -> ring, whose build script needs an MSVC,"
-	@echo "    Darwin or NDK C toolchain. ownership.md 11, finding G-4."
-	@echo "    NOT covered: Swift (shells/ios), Kotlin (shells/android) -- no"
-	@echo "    Darwin SDK, no JDK/Android SDK/NDK on this host. ownership.md 9.2."
+	@echo "    PARTIAL, and the partiality is the point. The core-hosting crates"
+	@echo "    were compiled in core-lite; the full profile's QUIC lines are"
+	@echo "    compiled by NOTHING THIS TARGET RUNS. Per crate, exactly:"
+	@echo "      shells/windows     twinvpnsvc  --features service"
+	@echo "                                         core-host  NOT CHECKED"
+	@echo "      shells/windows     twinvpnctl  whole"
+	@echo "      shells/macos       twinvpn-bridge      core-lite"
+	@echo "                                         full       NOT CHECKED"
+	@echo "      shells/android/jni twinvpn-android-jni core-lite"
+	@echo "                                         full       NOT CHECKED"
+	@echo "    Cause: core-host and full reach quinn/rustls -> ring, whose build"
+	@echo "    script needs an MSVC, Darwin or NDK C toolchain and this target"
+	@echo "    invokes none. ownership.md 11, findings G-4 and G-7."
+	@echo "    A rustls CryptoProvider swap does NOT lift this: quinn-proto"
+	@echo "    reaches ring outside the provider seam. ownership.md 11, G-6."
+	@echo "    NOT COMPILED HERE AT ALL: Swift (shells/ios) and Kotlin"
+	@echo "    (shells/android) -- this target invokes no Swift and no Kotlin"
+	@echo "    compiler for them. ownership.md 9.2."
+	@echo "    Every NOT CHECKED above is a statement about THIS TARGET's"
+	@echo "    coverage, not about the machine. A native Windows or Darwin build"
+	@echo "    lane would change which of these lines is still true; until one"
+	@echo "    exists and is wired in here, read them as written."
 
 # ADR-0018 CD-3 / CD-I2 / CD-I5 / CB-3. Owned by core-foundation.
 arch-lint:
