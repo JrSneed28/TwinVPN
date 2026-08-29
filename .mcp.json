@@ -15,7 +15,8 @@
         "CLAUDE_FLOW_MAX_AGENTS": "10",
         "CLAUDE_FLOW_MEMORY_BACKEND": "hybrid",
         "CLAUDE_FLOW_MCP_TOOLS": "memory,swarm,agent,hooks,task,aidefence,hive-mind,guidance,federation,coordination,session",
-        "CLAUDE_FLOW_CONTEXT_WINDOW_TOKENS": "200000"
+        "CLAUDE_FLOW_CONTEXT_WINDOW_TOKENS": "200000",
+        "RUFLO_DAEMON_AUTOSTART": "0"
       },
       "autoStart": false
     },

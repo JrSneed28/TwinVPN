@@ -35,4 +35,18 @@ if [[ "$HAVE" != "$WANT" ]]; then
   exit 1
 fi
 
+# Ruflo auto-starts a detached background daemon on EVERY command except
+# `daemon` itself (@claude-flow/cli src/index.js), so a read-only `doctor` or
+# `status` silently leaves workers running for up to 12h — and each interval
+# worker spawns a headless `claude`, so it bills tokens. Note this is NOT the
+# same switch as `.claude/settings.json`'s `claudeFlow.daemon.autoStart`, which
+# the autostart path never reads.
+#
+# Opt out here rather than in `claude-flow.config.json`: ConfigFileManager
+# returns that file VERBATIM instead of merging it over its defaults, so a
+# file holding only the daemon key would blank every other default it serves.
+# Explicit override still wins - `RUFLO_DAEMON_AUTOSTART=1 ./scripts/ruflo ...`
+# and `./scripts/ruflo daemon start` both still start it.
+export RUFLO_DAEMON_AUTOSTART="${RUFLO_DAEMON_AUTOSTART:-0}"
+
 exec node "$ENTRY" "$@"
