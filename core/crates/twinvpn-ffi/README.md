@@ -110,12 +110,39 @@ declares.
    found no rules of ours. A posture value this core does not recognize is
    **refused**, never rounded: rounding up asserts protection nobody stated, and
    rounding down hides a shell defect behind a plausible reading.
-2. **STILL OPEN (W-25). No socket provider and no interface enumerator.** ADR-0018 §11.2 row 2.10
-   puts all NAT traversal in the core with "sockets via the adapter", and
-   `PlatformAdapter` requires `sockets()` and `interfaces()`. Neither has a
-   vtable entry, so a shell that binds *only* this ABI cannot do NAT traversal.
-   (§11.5's Rust hosts link the `staticlib` and use `twinvpn-platform-*`
-   directly, so this bites the Swift and Kotlin consumers.)
+2. **W-25 — no socket provider and no interface enumerator. RULED, as G-11, and
+   the two halves get different answers.** ADR-0018 §11.2 row 2.10 puts all NAT
+   traversal in the core with "sockets via the adapter", and `PlatformAdapter`
+   requires `sockets()` and `interfaces()`. Neither has a vtable entry.
+
+   **Sockets: not added, and MUST NOT be.** A UDP socket is on the datapath.
+   PB-1 budgets zero FFI crossings per packet and PB-4 prices the split at
+   **0 ns/packet** on Linux, Windows, Android and OpenWrt; at PB-3's desktop
+   userspace gate that datapath is ≈ **47 500 datagrams per second per
+   direction**, and no per-datagram crossing costs 0 ns. F-6 adds a mandatory
+   thread hop on top, because a vtable callee may not re-enter a mutating core
+   function. The capability stays in Rust in the shell's process over
+   `twinvpn-platform-*` — which is what **all five** shells already do, not a
+   workaround: `shells/linux` links `twinvpn-platform-linux`, and
+   `shells/macos/twinvpn-bridge`, `shells/ios/Sources/TwinVPNBridge` and
+   `shells/android/jni` are the per-platform `extern "C"` bridges §10.4 ruled
+   for. **No shell in the tree binds only this vtable**, which narrows W-25's
+   premise from "the Swift and Kotlin consumers" to a shape nothing is.
+
+   **Interface enumeration: admissible at control rate, blocked on an
+   encoding.** It is called on a gather and a network change, so PB-1 and PB-4
+   do not reach it — but F-8 requires an ADR-0003 contract artifact to carry it,
+   and `contracts/` has none that can. `twinvpn.v1.NetworkInterface` has no
+   interface index, no `link_class`, and `addresses` as `repeated IPPrefix` —
+   the shape `InterfaceFacts::addresses` records as the defect three domains
+   reported independently, and the one W-39 shows drops `fe80::/10`. That is a
+   §3 amendment ask, not a patch.
+
+   The refusals both moved from `PLATFORM.ADAPTER_UNAVAILABLE` to
+   `PLATFORM.OS_UNSUPPORTED`: the first is `LOCAL_ACTION` and sends a user to
+   fix something locally, and nothing local gives a vtable-only binding a
+   socket. The second is `UPDATE_REQUIRED`, which is the truth — and is what
+   the other three structurally-absent capabilities in this file already say.
 3. **STILL OPEN. No `set_mtu`, and no encoding for `LinkFacts` or the `apply` plan.**
    DPLPMTUD raises and lowers the MTU as it probes (`networking.md` §6.2), and
    `query_link_facts` returns a blob whose shape no document defines. Decoding a

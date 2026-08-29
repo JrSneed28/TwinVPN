@@ -1046,7 +1046,28 @@ impl NetworkConfig for HostNetworkConfig {
     }
 }
 
-/// Sockets, which F-9 does not carry.
+/// Sockets, which F-9 does not carry — and, per **G-11**, will not.
+///
+/// # This absence is a decision, not a hole waiting for an entry
+///
+/// A UDP socket is on the **datapath**, and PB-1's headline rule is *zero FFI
+/// crossings per packet*: its table reads `0` for every target but the Apple
+/// app-extension's `NEPacketTunnelFlow`, which is a Swift API and not this ABI.
+/// PB-4 then prices the split at **0 ns/packet** on Linux, Windows, Android and
+/// OpenWrt. A `udp_send`/`udp_recv` pair here would make both false *by
+/// construction* — at PB-3's desktop userspace gate (≥ 60 % of ≥ 90 % of 1 GbE,
+/// so ≈ 540 Mbit/s) a 1420-byte payload is ≈ 47 500 datagrams per second per
+/// direction, and no per-datagram crossing costs 0 ns.
+///
+/// F-6 makes it worse than a call cost. A vtable callee MUST NOT re-enter a
+/// mutating core function, so a datagram received inside `udp_recv` cannot be
+/// handed to the core on the thread that received it: every datagram would owe
+/// a hop to the single mutating thread S-47 allows. That hop is scheduler
+/// latency, not nanoseconds, and it is per packet.
+///
+/// So the refusal below is the design. The capability lives in Rust, in the
+/// shell's own process, over `twinvpn-platform-*` — which is what all five
+/// shells already do (§10.4's ruling, generalised by X-7).
 #[derive(Debug, Clone, Copy)]
 pub struct NoSockets;
 
@@ -1055,7 +1076,15 @@ impl SocketProvider for NoSockets {
         &'a self,
         _spec: &'a UdpBindSpec,
     ) -> BoxFuture<'a, Result<Box<dyn UdpSocket>, PlatformError>> {
-        Box::pin(async move { Err(PlatformError::AdapterUnavailable(None)) })
+        // `OsUnsupported`, not `AdapterUnavailable`, and the difference is the
+        // registry's: `PLATFORM.ADAPTER_UNAVAILABLE` is `LOCAL_ACTION` — it
+        // sends the user to restart something — while
+        // `PLATFORM.OS_UNSUPPORTED` is `UPDATE_REQUIRED`, which is the truth.
+        // No local action gives a vtable-only binding sockets; only a shell
+        // built with a platform adapter has them. `SocketProvider::bind_udp`'s
+        // own contract already names `OsUnsupported` as the code for a socket
+        // shape this host cannot open.
+        Box::pin(async move { Err(PlatformError::OsUnsupported(None)) })
     }
 
     fn supported_families(&self) -> BoxFuture<'_, Result<SupportedFamilies, PlatformError>> {
@@ -1063,7 +1092,7 @@ impl SocketProvider for NoSockets {
         // doc says substituting a family is "how a v6-only network silently
         // becomes a v4-only session"; reporting a capability this ABI cannot
         // deliver would be the same defect one layer up.
-        Box::pin(async move { Err(PlatformError::AdapterUnavailable(None)) })
+        Box::pin(async move { Err(PlatformError::OsUnsupported(None)) })
     }
 
     fn socket_capabilities(&self) -> twinvpn_platform::SocketCapabilities {
@@ -1077,7 +1106,29 @@ impl SocketProvider for NoSockets {
     }
 }
 
-/// Interface enumeration, which F-9 does not carry.
+/// Interface enumeration, which F-9 does not carry — and, per **G-11**, cannot
+/// carry today for a different reason from [`NoSockets`]'.
+///
+/// # This half is control-rate and would be admissible; it has no encoding
+///
+/// `enumerate` is called on a gather and on a network change, not per packet,
+/// so PB-1 and PB-4 have nothing to say about it. What blocks it is **F-8**:
+/// structured data crosses as blobs generated from ADR-0003's contract
+/// artifacts, and `contracts/` holds no message that can carry
+/// [`InterfaceFacts`]. The only candidate, `twinvpn.v1.NetworkInterface`, is
+/// lossy in three ways at once — it has no interface **index** (the identity
+/// [`twinvpn_platform::InterfaceIndex`] exists to be, *"deliberately not a
+/// name"*), no `link_class` (so `NET.LINK.DOWN_WIFI` and `NET.LINK.DOWN_CELLULAR`
+/// become one code), and its `addresses` are `repeated IPPrefix` — the exact
+/// shape [`InterfaceFacts::addresses`] records as the defect three domains
+/// reported independently, which masks `10.0.0.7/24` to the network address and
+/// which W-39 shows drops `fe80::/10` outright.
+///
+/// Encoding over it would reinstate a defect the corpus has already fixed once,
+/// so this refuses instead — the same stop `query_link_facts` takes above, for
+/// the same stated reason: decoding a shape nobody has specified is inventing a
+/// contract. Closing it needs a `contracts/` amendment under §3, which is an ask
+/// and not a patch.
 #[derive(Debug, Clone, Copy)]
 pub struct NoInterfaces;
 
@@ -1085,8 +1136,15 @@ impl InterfaceProvider for NoInterfaces {
     fn enumerate(&self) -> BoxFuture<'_, Result<Vec<InterfaceFacts>, PlatformError>> {
         // An empty vector would read as "this host has no interfaces", which is
         // a fact rather than an absence of one. The typed refusal keeps the two
-        // distinguishable.
-        Box::pin(async move { Err(PlatformError::AdapterUnavailable(None)) })
+        // distinguishable — and `host.network_changed` depends on exactly that,
+        // returning early on a refusal rather than inventing a link-down that
+        // would tear down a healthy session.
+        //
+        // `OsUnsupported` for the same reason as `NoSockets::bind_udp`: the
+        // remediation is a shell that carries an adapter, which is
+        // `UPDATE_REQUIRED`, not the `LOCAL_ACTION` that
+        // `PLATFORM.ADAPTER_UNAVAILABLE` would send a user to attempt.
+        Box::pin(async move { Err(PlatformError::OsUnsupported(None)) })
     }
 
     fn subscribe(
@@ -1099,7 +1157,7 @@ impl InterfaceProvider for NoInterfaces {
         // `host.network_changed` command submission, precisely so a notification
         // cannot arrive on an arbitrary thread while a mutating call is in
         // flight (F-6). There is deliberately no outbound stream here.
-        Err(PlatformError::AdapterUnavailable(None))
+        Err(PlatformError::OsUnsupported(None))
     }
 }
 
@@ -1714,5 +1772,93 @@ mod tests {
         // (3) What it did declare still works. This is the whole claim of a
         // minor bump: the older shell paid nothing for the addition.
         assert!(ready(config.set_ruleset(ContractGeneration(1), Ruleset::Blocked)).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // W-25 / G-11 — sockets and interface enumeration, refused on purpose
+    // -----------------------------------------------------------------------
+
+    /// The refusal names the remediation that can actually work.
+    ///
+    /// `PLATFORM.ADAPTER_UNAVAILABLE` is `LOCAL_ACTION` in the registry, which
+    /// tells a user to go and fix something locally. Nothing local gives a
+    /// vtable-only binding a socket or an interface table: the remediation is a
+    /// shell built with a `twinvpn-platform-*` adapter, and that is
+    /// `PLATFORM.OS_UNSUPPORTED`'s `UPDATE_REQUIRED`. Pinned because the wrong
+    /// one is not merely imprecise — it sends an operator to try something that
+    /// cannot succeed, and it is the same class of defect W-24 named when it
+    /// refused to let a shell echo its own belief back.
+    #[test]
+    fn the_absent_capabilities_refuse_as_unsupported_and_never_as_unavailable() {
+        // `.err()` rather than `expect_err`: `Box<dyn UdpSocket>` and the
+        // `NetworkChange` stream are not `Debug`, so the `Ok` side cannot be
+        // formatted and `unwrap_err` does not compile.
+        let refusals = [
+            ready(NoSockets.bind_udp(&UdpBindSpec {
+                family: twinvpn_platform::SocketFamily::V4,
+                local: None,
+                options: twinvpn_platform::SocketOptions::default(),
+            }))
+            .err(),
+            ready(NoSockets.supported_families()).err(),
+            ready(NoInterfaces.enumerate()).err(),
+            NoInterfaces.subscribe().err(),
+        ];
+        for refusal in refusals {
+            let err = refusal.expect("every one of the four refuses");
+            assert!(
+                matches!(err, PlatformError::OsUnsupported(_)),
+                "a structurally absent capability is UPDATE_REQUIRED, not LOCAL_ACTION: {err:?}"
+            );
+        }
+    }
+
+    /// Absence is reported as absence, never as a fact about the host.
+    ///
+    /// This is the half that would be dangerous to get wrong in the other
+    /// direction. `supported_families` answering `{v4: false, v6: false}` would
+    /// say *"this host has no IP stack"*, and `enumerate` answering `[]` would
+    /// say *"this host has no interfaces"* — both are findings the core would
+    /// act on, and neither is true. `host.network_changed` reads exactly this
+    /// distinction: on `Err` it returns early rather than deriving a link-down
+    /// that would tear down a healthy session.
+    #[test]
+    fn an_absent_capability_is_a_refusal_and_never_a_fact_about_the_host() {
+        assert!(ready(NoSockets.supported_families()).is_err());
+        assert!(ready(NoInterfaces.enumerate()).is_err());
+        // The one thing that IS answered rather than refused, because a
+        // capability nobody can honour is honestly `false` in both fields —
+        // there is no socket for the option to fail to apply to.
+        let caps = NoSockets.socket_capabilities();
+        assert!(!caps.reuse_port && !caps.firewall_mark);
+    }
+
+    /// **G-11's design claim, asserted rather than left in prose: no entry this
+    /// ABI carries is on the datapath.**
+    ///
+    /// PB-1 budgets zero FFI crossings per packet and PB-4 prices the split at
+    /// 0 ns/packet on four of six targets. The property that keeps both true is
+    /// structural — `twinvpn.h` declares no entry that takes or returns a
+    /// packet, so `HostAdapter` cannot be a datapath and says so by reporting
+    /// `KernelOffload` and refusing the per-packet calls outright. A future
+    /// `udp_send`/`udp_recv` pair would break this test, which is the point.
+    #[test]
+    fn no_vtable_entry_sits_on_the_datapath() {
+        let adapter = HostAdapter::new(host(|_| {}));
+        assert_eq!(adapter.tunnel().datapath(), Datapath::KernelOffload);
+        assert!(matches!(
+            ready(adapter.tunnel().read_packet(TunnelHandle(1), &mut [0u8; 4])),
+            Err(PlatformError::OsUnsupported(_))
+        ));
+        assert!(matches!(
+            ready(adapter.tunnel().write_packet(TunnelHandle(1), &[0u8; 4])),
+            Err(PlatformError::OsUnsupported(_))
+        ));
+        // And the underlay half of the datapath is refused by the same rule:
+        // a datagram socket carries packets at the same rate the tunnel does.
+        assert!(matches!(
+            ready(adapter.sockets().supported_families()),
+            Err(PlatformError::OsUnsupported(_))
+        ));
     }
 }
