@@ -155,15 +155,22 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_descriptor_is_an_errno_and_never_a_silent_false() {
+    fn an_invalid_descriptor_is_an_errno_and_never_a_silent_false() {
         // EBADF must not read as "somebody else holds it": that would report
         // PS-1's violation for a programming error, and an operator would go
         // looking for a second agent that does not exist.
-        let (path, file) = temp_file("ebadf");
-        let fd = file.as_raw_fd();
-        drop(file);
-        let error = flock(fd, libc::LOCK_EX | libc::LOCK_NB).expect_err("EBADF");
+        //
+        // The descriptor is one that CANNOT be open rather than one this test
+        // closed. Closing a `File` and reusing its number raced the rest of the
+        // suite: `cargo test` runs these on threads of one process, so another
+        // test opening a file between the drop and the `flock` takes the freed
+        // number, and the call then succeeds against a stranger's file — the
+        // assertion failed as `EBADF: true`, and on the run where it did not,
+        // it was locking a file belonging to another test. `RawFd::MAX` is
+        // above any `RLIMIT_NOFILE` a process can raise, so no thread can make
+        // it valid and the errno is the same one every time.
+        let error =
+            flock(std::os::unix::io::RawFd::MAX, libc::LOCK_EX | libc::LOCK_NB).expect_err("EBADF");
         assert_eq!(error.raw_os_error(), Some(libc::EBADF));
-        let _ = std::fs::remove_file(&path);
     }
 }
