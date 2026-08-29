@@ -7,13 +7,16 @@
 //! [ADR-0023](../../../docs/adr/ADR-0023-headless-cli-and-embedded-profile.md)
 //! EM-34, EM-36, EM-37, EM-38, EM-42 … EM-45; ADR-0018 CB-2.
 //!
-//! # NAMING DEVIATION, reported
+//! # The installed name is `twinvpn`; the cargo target stays `twinvpnctl`
 //!
 //! ADR-0016 §11.2 and ADR-0017 §11.12 both name this binary **`twinvpn`**, and
 //! EM-42's rendered next actions say `run 'twinvpn peer disconnect nas-attic'`.
-//! The path this domain was given is `twinvpnctl`, and renaming a
-//! integration-lead-placed directory is not this domain's to do. See
-//! `Cargo.toml` and `shells/linux/README.md`.
+//! `ownership.md` §9.5 **D-1** closes W-41: the cargo target keeps the name
+//! `twinvpnctl` — renaming it churns three shells for nothing a user sees — and
+//! the package installs the artifact as `twinvpn`, with `twinvpnctl` kept beside
+//! it as a compatibility symlink. Every string this binary prints therefore says
+//! `twinvpn`, because that is the name the operator typed. See `Cargo.toml` and
+//! `shells/linux/README.md` §3.
 //!
 //! # CB-2: this binary holds no decision
 //!
@@ -141,9 +144,9 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(usage) => {
             // Exit 2, and nothing was sent to the agent.
-            eprintln!("twinvpnctl: {usage}");
-            eprintln!("usage: twinvpnctl [--output human|json|json-lines] <noun> <verb>");
-            eprintln!("       twinvpnctl --help");
+            eprintln!("twinvpn: {usage}");
+            eprintln!("usage: twinvpn [--output human|json|json-lines] <noun> <verb>");
+            eprintln!("       twinvpn --help");
             exit::USAGE
         }
     };
@@ -257,7 +260,7 @@ fn call(request: mi::wire::Request, output: Output, stdout_is_tty: bool, locale:
     {
         Ok(runtime) => runtime,
         Err(_) => {
-            eprintln!("twinvpnctl: MGMT.UNAVAILABLE: the local runtime could not start");
+            eprintln!("twinvpn: MGMT.UNAVAILABLE: the local runtime could not start");
             return exit::UNAVAILABLE;
         }
     };
@@ -445,9 +448,9 @@ fn exit_for(reason_code: &str) -> u8 {
 }
 
 fn print_help() {
-    println!("twinvpnctl — the TwinVPN local management CLI");
+    println!("twinvpn — the TwinVPN local management CLI");
     println!();
-    println!("usage: twinvpnctl [--output human|json|json-lines] <noun> <verb>");
+    println!("usage: twinvpn [--output human|json|json-lines] <noun> <verb>");
     println!();
     println!("operations (generated from the core's command catalogue — MI-C1):");
     let mut last_noun = "";

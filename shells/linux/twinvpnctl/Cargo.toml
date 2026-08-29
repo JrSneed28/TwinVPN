@@ -2,15 +2,16 @@
 #
 # Owner: desktop-linux.
 #
-# NAMING DEVIATION, reported rather than papered over: ADR-0016 §11.2's process
-# table and ADR-0017 §11.12's command shape both name this binary `twinvpn`, not
-# `twinvpnctl` — and ADR-0023 EM-42's rendered `next_action` strings say
-# "run 'twinvpn peer disconnect nas-attic'". The skeleton the integration lead
-# placed here is `twinvpnctl`, and this domain does not rename a path it was
-# given. Raised for the integration lead: either the binary is renamed to
-# `twinvpn`, or a `twinvpn` symlink ships beside it, or ADR-0016 §11.2 is
-# amended. Until then the rendered next actions name a command that is not
-# installed under that name.
+# THE CARGO TARGET IS `twinvpnctl`; THE INSTALLED COMMAND IS `twinvpn`.
+#
+# ADR-0016 §11.2's process table and ADR-0017 §11.12's command shape both name
+# this binary `twinvpn`, and ADR-0023 EM-42's rendered `next_action` strings say
+# "run 'twinvpn peer disconnect nas-attic'". `ownership.md` §9.5 D-1 closes W-41:
+# the cargo target and this `[package] name` stay `twinvpnctl` — renaming them
+# churns three shells for nothing a user sees — and the package installs the
+# artifact as `/usr/bin/twinvpn` with a `twinvpnctl` symlink beside it as a
+# compatibility alias. Do not rename this package to match the installed name;
+# `shells/linux/README.md` §3 carries the install lines that create both.
 [package]
 name    = "twinvpnctl"
 version.workspace      = true

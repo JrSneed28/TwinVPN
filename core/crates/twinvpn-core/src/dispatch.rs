@@ -157,9 +157,13 @@ pub const fn disposition(op: CoreCommand) -> Disposition {
         // whole reason this function exists rather than a wildcard.
         C::PairBegin => Disposition::NotWired {
             code: codes::AUTH_PAIRING_NOT_AUTHORIZED,
-            why: "producing an offer needs entropy and an IdentityCustody signature over the \
-                  TunnelKeyBinding, and the composed core holds no PairingLedger to begin a \
-                  ceremony in. Composition-root wiring, not a missing contract",
+            why: "the composed core holds no PairingLedger to begin a ceremony in. That is \
+                  now the WHOLE of it: G-14 named three further producer gaps and all three \
+                  are closed — twinvpn_crypto::cose::es256_cose_key encodes field 2, \
+                  twinvpn_crypto::tk::TunnelStaticKey generates and unseals field 3 under \
+                  ownership.md §11.4 D-6, and binding::emit_tunnel_key_binding emits field 4. \
+                  Composition-root wiring, and this time the reason has been re-measured \
+                  rather than inherited — ownership.md G-14, G-17, G-21",
         },
         C::PairConfirm => Disposition::NotWired {
             code: codes::CONTROL_UNREACHABLE,
@@ -170,7 +174,7 @@ pub const fn disposition(op: CoreCommand) -> Disposition {
         C::PairCancel | C::PairStatus => Disposition::NotWired {
             code: codes::AUTH_PAIRING_NOT_AUTHORIZED,
             why: "both read the PairingLedger, and the composed core holds none. They are \
-                  local operations blocked only on pair.begin's wiring, not on a peer",
+                  local operations blocked only on that ledger, not on a peer",
         },
         C::DeviceRevoke | C::KeyRotate => Disposition::NotWired {
             code: codes::CONTROL_UNREACHABLE,

@@ -170,8 +170,14 @@ install -d -o root -g wheel -m 0755 /usr/local/sbin
 install -o root -g wheel -m 0755 \
     "${SRC}/../target/release/twinvpn-unblock" "/usr/local/sbin/twinvpn-unblock"
 
+# `ownership.md` §9.5 D-1: the cargo target stays `twinvpnctl` and the PACKAGE
+# installs it as `twinvpn` — the name ADR-0016 §11.2, ADR-0017 §11.12 and
+# ADR-0023 EM-11/EM-42 all use — with `twinvpnctl` kept beside it as a
+# compatibility alias. `ln -sfn` rather than a second copy: one file to sign,
+# one file to replace on upgrade, and no way for the two names to drift apart.
 install -o root -g wheel -m 0755 \
-    "${SRC}/../target/release/twinvpnctl" "/usr/local/bin/twinvpnctl"
+    "${SRC}/../target/release/twinvpnctl" "/usr/local/bin/twinvpn"
+ln -sfn twinvpn "/usr/local/bin/twinvpnctl"
 
 # ---------------------------------------------------------------------------
 # 4. The KS-19 boot artifact.

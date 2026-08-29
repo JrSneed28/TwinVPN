@@ -113,7 +113,7 @@ pub fn usage(columns: usize) -> String {
     // instead — losing the tail of a scope name is legible, losing half a flag
     // is not.
     for line in wrap(
-        "usage: twinvpnctl [--output human|json|json-lines] <noun> <verb>",
+        "usage: twinvpn [--output human|json|json-lines] <noun> <verb>",
         width,
     ) {
         out.push_str(&line);

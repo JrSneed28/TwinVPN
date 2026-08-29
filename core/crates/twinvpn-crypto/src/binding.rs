@@ -37,6 +37,7 @@
 //! change a reviewer should refuse.
 
 use crate::cose::{cose_key_x25519, VerifiedStatement};
+use crate::emit::{Item, StatementToSign};
 use crate::error::StatementKind;
 use crate::{CryptoError, Result};
 
@@ -250,4 +251,163 @@ fn fixed32(v: Option<&crate::dcbor::Value>, what: &'static str) -> Result<[u8; 3
     b.try_into().map_err(|_| CryptoError::BindingInvalid {
         step: "identifier width",
     })
+}
+
+/// Builds this device's own `TunnelKeyBinding`, ready for `identity_sign`.
+///
+/// The counterpart to [`verify_tunnel_key_binding`], and the reason this module
+/// stopped being verify-only. ADR-0007 **N-4** requires the statement in
+/// production — a peer must verify one before writing TK into `TrustedPeer` —
+/// and until now every construction of one in the workspace was a testkit
+/// fixture, so the tree could check a binding it could not author. That is
+/// `docs/implementation/ownership.md` §11.2 **G-14 (c)**.
+///
+/// # The signature is not here, and cannot be
+///
+/// CB-5 row 1 keeps IK inside the platform element, so this returns a
+/// [`StatementToSign`] rather than a signed statement. The caller hands
+/// [`StatementToSign::to_be_signed`] to `IdentityCustody::identity_sign` and
+/// puts the answer back with [`StatementToSign::assemble`]. No signing key is
+/// named in this crate and there is nowhere to put one (CD-I4).
+///
+/// # Why the emitter re-checks what the verifier checks
+///
+/// `tk_pub` is refused if it is the all-zero point, exactly as
+/// [`verify_tunnel_key_binding`] refuses it. Emitting one would produce a
+/// binding that every conforming peer rejects, and the failure would surface at
+/// the far end of a pairing ceremony as `AUTH.BINDING_INVALID` against the
+/// *joining* device — a diagnosis pointing at the wrong machine. Refusing at the
+/// source costs one comparison.
+///
+/// The `crit` set is `["tk_generation"]`, which the CDDL states as a MUST and
+/// which [`verify_tunnel_key_binding`] enforces on the way back in. It is a
+/// `const` here rather than a parameter for the reason encoding rule 5 gives:
+/// the field set of a signed statement is fixed by the contract, so a caller
+/// that could vary it could author a statement no peer understands.
+///
+/// # Parameters
+///
+/// `tk_generation` is separately monotone from the identity `generation`
+/// (N-22), and the CDDL requires it to advance at least every
+/// [`TK_ROTATION_MAX_DAYS`] days. `not_after_ms` is mandatory on every statement
+/// (encoding rule 6); choosing it is the caller's, because this crate takes no
+/// clock — see [`verify_tunnel_key_binding`]'s note on why expiry is evaluated
+/// in `twinvpn-trust`.
+///
+/// # Errors
+///
+/// [`CryptoError::BindingInvalid`] if `tk_pub` is the all-zero point, or as
+/// [`crate::emit::encode`] for a duplicate map key — unreachable here, since
+/// every label is a `const` in [`label`].
+pub fn emit_tunnel_key_binding(
+    device_id: &[u8; 32],
+    identity_id: &[u8; 32],
+    tk_pub: &[u8; 32],
+    tk_generation: u64,
+    not_after_ms: u64,
+) -> Result<StatementToSign> {
+    if tk_pub == &[0u8; 32] {
+        return Err(CryptoError::BindingInvalid {
+            step: "refusing to bind the all-zero point",
+        });
+    }
+    // Field 3 is `cose-key`, not a raw 32-byte string: signed_statements.cddl §2
+    // carries `tk_pub` as a COSE_Key and `verify_tunnel_key_binding` parses it
+    // with `cose_key_x25519`. `pairing_offer.cddl` field 3 carries the SAME key
+    // as a bare `bstr .size 32` and says so as a finding rather than a choice —
+    // ownership.md §11 G-9. This is the signed-statement side, so it is the
+    // COSE_Key form.
+    let payload = Item::Map(vec![
+        (
+            Item::Uint(label::DEVICE_ID),
+            Item::Bytes(device_id.to_vec()),
+        ),
+        (
+            Item::Uint(label::IDENTITY_ID),
+            Item::Bytes(identity_id.to_vec()),
+        ),
+        (
+            Item::Uint(label::TK_PUB),
+            Item::Bytes(crate::cose::x25519_cose_key(tk_pub)),
+        ),
+        (Item::Uint(label::TK_GENERATION), Item::Uint(tk_generation)),
+        (Item::Uint(label::NOT_AFTER_MS), Item::Uint(not_after_ms)),
+        (
+            Item::Uint(label::CRIT),
+            Item::Array(
+                REQUIRED_CRIT
+                    .iter()
+                    .map(|f| Item::Text((*f).to_owned()))
+                    .collect(),
+            ),
+        ),
+    ]);
+    // ES256, and no `kid`. ADR-0007 N-1 fixes ES256 for every IK, and the
+    // verifier resolves the key from the `DeviceIdentityRecord` or the
+    // `PairingOffer` it is already holding rather than from a hint in the
+    // envelope — `verify_tunnel_key_binding` never reads `kid`. An identifier
+    // that no verifier consults is bytes in a QR code.
+    StatementToSign::new(&payload, crate::cose::COSE_ALG_ES256, None)
+}
+
+#[cfg(test)]
+mod emit_tests {
+    use super::*;
+    use crate::error::StatementKind;
+
+    /// The round trip the emitter exists for: what this device authors is what
+    /// a peer's verifier accepts. `testkit::verified_tunnel_key` already drives
+    /// the same path, so this is the direct statement of the property rather
+    /// than an inference from a fixture.
+    #[test]
+    fn what_the_emitter_writes_is_what_the_verifier_accepts() {
+        let issuer = crate::testkit::FixtureIdentity::from_seed(b"emit-roundtrip");
+        let device_id = [7u8; 32];
+        let identity_id = [9u8; 32];
+        let tk_pub = [3u8; 32];
+
+        let unsigned =
+            emit_tunnel_key_binding(&device_id, &identity_id, &tk_pub, 4, 1_700_000_000_000)
+                .expect("emits");
+        let octets = issuer.sign_prepared(&unsigned);
+
+        let statement = crate::verify_cose_sign1(
+            &octets,
+            StatementKind::TunnelKeyBinding,
+            &issuer.verifying_key(),
+        )
+        .expect("the emitted envelope verifies");
+        let verified = verify_tunnel_key_binding(&statement, &device_id, &identity_id)
+            .expect("the emitted binding verifies");
+
+        assert_eq!(verified.tk_pub(), &tk_pub);
+        assert_eq!(verified.tk_generation(), 4);
+        assert_eq!(verified.not_after_ms(), 1_700_000_000_000);
+    }
+
+    /// The emitter refuses the point the verifier refuses, so the failure lands
+    /// on the device that made the mistake rather than on its peer.
+    #[test]
+    fn the_all_zero_point_is_refused_at_the_source() {
+        let err = emit_tunnel_key_binding(&[1u8; 32], &[2u8; 32], &[0u8; 32], 1, 1)
+            .expect_err("must refuse");
+        assert!(matches!(err, CryptoError::BindingInvalid { .. }));
+    }
+
+    /// A binding authored for one device does not verify as another's. The
+    /// negative control for the round trip above.
+    #[test]
+    fn a_binding_naming_another_device_is_refused() {
+        let issuer = crate::testkit::FixtureIdentity::from_seed(b"emit-wrong-device");
+        let unsigned =
+            emit_tunnel_key_binding(&[7u8; 32], &[9u8; 32], &[3u8; 32], 1, 1).expect("emits");
+        let octets = issuer.sign_prepared(&unsigned);
+        let statement = crate::verify_cose_sign1(
+            &octets,
+            StatementKind::TunnelKeyBinding,
+            &issuer.verifying_key(),
+        )
+        .expect("verifies as an envelope");
+        assert!(verify_tunnel_key_binding(&statement, &[8u8; 32], &[9u8; 32]).is_err());
+    }
 }

@@ -170,6 +170,17 @@ impl Namespace {
         match self {
             // `PairSecret` and `EpochSeed` (N-19, S-33) live in `peer/` and
             // `trust/`; the sealed `TK` lives in `identity/`.
+            //
+            // That last clause was one of two production comments placing the
+            // same key in two different tiers — ownership.md §11.2 G-17, whose
+            // other half was `twinvpn-platform/src/custody.rs` saying TK
+            // "reaches the core as a sealed blob through `SecureStore`", i.e.
+            // Tier 1. §11.4 D-6 ruled for THIS one, on ADR-0020 ST-1: rule 1
+            // admits to Tier 1 only a value never readable by the process, and
+            // ADR-0007 N-5 requires TK to be unsealed *into* locked core
+            // memory. The record key is `twinvpn_crypto::tk::TK_RECORD_KEY`;
+            // its Tier-1 WRAPPING key is `tk::TK_WRAP_ITEM`, which is the item
+            // ST-1 names in the words "the `TunnelStaticKey` wrapping key".
             Namespace::Identity | Namespace::Peer | Namespace::Trust => Secrecy::SecretBearing,
             Namespace::Doc | Namespace::Net | Namespace::Policy | Namespace::Consent => {
                 Secrecy::Sensitive

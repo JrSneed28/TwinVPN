@@ -128,6 +128,8 @@ cargo build --target x86_64-pc-windows-msvc
 .\twinvpnsvc.exe --console
 
 # In another console:
+# The cargo artifact, in `target\...\`. The INSTALLED command is `twinvpn`
+# (D-1); this is the build output, before packaging renames it.
 .\twinvpnctl.exe status get
 ```
 
@@ -268,14 +270,23 @@ table per host, and two tests mutating them concurrently would be testing a race
 
 ---
 
-## 6. `twinvpnctl`
+## 6. The CLI — cargo target `twinvpnctl`, installed as `twinvpn.exe`
 
 ```
-usage: twinvpnctl [--output human|json|json-lines] <noun> <verb>
+usage: twinvpn [--output human|json|json-lines] <noun> <verb>
 ```
+
+**Installed name.** `ownership.md` §9.5 **D-1**: `packaging/TwinVPN.wxs`
+installs the `twinvpnctl.exe` build artifact under the name `twinvpn.exe` and
+declares a `DuplicateFile` alias `twinvpnctl.exe` beside it — Windows has no
+symlink an MSI may create without `SeCreateSymbolicLinkPrivilege`, and
+`DuplicateFile` is Windows Installer's own equivalent: installed, upgraded and
+removed with the component. Both spellings work; `twinvpn` is the one the usage
+line, every rendered `next_action` and ADR-0023 EM-11's `twinvpn config check`
+all name.
 
 The verb table is **generated from the core's command catalogue** (MI-C1), so
-`twinvpnctl --help` lists exactly ADR-0017 §11.9's operations, in its order. A
+`twinvpn --help` lists exactly ADR-0017 §11.9's operations, in its order. A
 verb with no catalogue entry, or an entry with no verb, fails the build.
 
 **Exit codes** are ADR-0017 §11.12's, and 64+ is prohibited:
@@ -357,13 +368,16 @@ Each of these is a gap this wave did not close, with the reason.
    binaries, so a WiX build fails at `light.exe` with a missing file — which is
    the correct direction.
 
-4. **The binary is named `twinvpnctl`, and ADR-0016 §11.2 names it
-   `twinvpn.exe`.** ADR-0023 EM-42's rendered next actions say
-   `run 'twinvpn peer disconnect nas-attic'`, which names a command that is not
-   installed under that name. `shells/linux` raised the same conflict as W-41 and
-   shipped `twinvpnctl`; this shell matched it rather than shipping two different
-   names for one CLI on two platforms. **Needs a decision** — rename both, ship a
-   `twinvpn` alias beside each, or amend the ADRs.
+4. ~~**The binary is named `twinvpnctl`, and ADR-0016 §11.2 names it
+   `twinvpn.exe`.**~~ **CLOSED by D-1.** `ownership.md` §9.5: the cargo target
+   stays `twinvpnctl` and the package installs it as `twinvpn`, with
+   `twinvpnctl` kept as a compatibility alias. `TwinVPN.wxs`'s `Cli` component
+   now installs the artifact as `twinvpn.exe` with a `DuplicateFile` alias
+   `twinvpnctl.exe`, and every string the CLI prints says `twinvpn` — so
+   ADR-0023 EM-42's rendered `run 'twinvpn peer disconnect nas-attic'` names a
+   command an installed machine has. Linux and macOS made the same split. It is
+   still **not built**: no WiX toolset has run against this file (item 2), so the
+   alias is specified and unverified like everything else in it.
 
 5. **KS-9(2)'s per-socket exemption is not expressible on this platform.** The
    rule requires the bootstrap exemption to be scoped to a socket *registered

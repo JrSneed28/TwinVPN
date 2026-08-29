@@ -87,7 +87,12 @@ TWINVPN_MGMT_SOCKET=/tmp/twinvpn/mgmt.sock ./target/debug/twinvpnctl status get
 
 ```sh
 install -Dm0755 target/release/twinvpnd    /usr/lib/twinvpn/twinvpnd
-install -Dm0755 target/release/twinvpnctl  /usr/bin/twinvpnctl
+# D-1: the cargo target stays `twinvpnctl`; the INSTALLED command is `twinvpn`,
+# the name ADR-0016 §11.2, ADR-0017 §11.12 and ADR-0023 EM-11/EM-42 all use.
+# `twinvpnctl` is kept beside it as a compatibility alias — a symlink, so there
+# is one file to replace on upgrade and the two names cannot drift apart.
+install -Dm0755 target/release/twinvpnctl  /usr/bin/twinvpn
+ln -sfn twinvpn                            /usr/bin/twinvpnctl
 install -Dm0755 target/release/twinvpn-unblock /usr/sbin/twinvpn-unblock
 install -Dm0644 packaging/twinvpnd.service /etc/systemd/system/twinvpnd.service
 install -Dm0644 packaging/twinvpn-killswitch.service \
@@ -278,14 +283,19 @@ the un-inverted `fwmark` rule that made table 52 unreachable to every ordinary
 packet while `program()` returned `Ok` and the table held exactly the right route
 (this wave — see §7's note on what it cost).
 
-## 6. `twinvpnctl`
+## 6. The CLI — cargo target `twinvpnctl`, installed as `twinvpn`
 
 ```
-usage: twinvpnctl [--output human|json|json-lines] <noun> <verb>
+usage: twinvpn [--output human|json|json-lines] <noun> <verb>
 ```
+
+**Installed name.** `ownership.md` §9.5 **D-1**: the package installs the
+`twinvpnctl` build artifact as `/usr/bin/twinvpn` and ships `/usr/bin/twinvpnctl`
+beside it as a compatibility symlink. Both spellings work; `twinvpn` is the one
+every rendered `next_action`, every usage line and every error prefix names.
 
 The verb table is **generated from the core's command catalogue** (MI-C1), so
-`twinvpnctl --help` lists exactly ADR-0017 §11.9's operations, in its order. A
+`twinvpn --help` lists exactly ADR-0017 §11.9's operations, in its order. A
 verb with no catalogue entry, or an entry with no verb, fails the build.
 
 **Exit codes** are ADR-0017 §11.12's, and 64+ is prohibited:
@@ -315,28 +325,24 @@ unattended device is indistinguishable from a wedge."
 Each of these is a gap this wave did not close, with the reason. Wave 1's list
 had eight; six are closed, and what follows is the **new** set.
 
-### 1. The binary is named `twinvpnctl`, and the ADRs name it `twinvpn`. *(Still open — needs a decision, not code.)*
+### 1. ~~The binary is named `twinvpnctl`, and the ADRs name it `twinvpn`.~~ **CLOSED by D-1.**
 
-ADR-0016 §11.2's process table and ADR-0017 §11.12's command shape both name it
-`twinvpn`, and ADR-0023 EM-42's rendered `next_action` strings say
-`run 'twinvpn peer disconnect nas-attic'` — a command that is not installed under
-that name. It is now **worse than it was**, because ADR-0023 EM-35 adds a
-requirement wave 1 did not have to weigh: the catalogue nouns "must appear" under
-a command surface that includes `config`, and EM-11 names the dry run
-`twinvpn config check` in the same spelling.
+`ownership.md` §9.5 **D-1** settled it: *"The cargo target stays `twinvpnctl`
+(renaming it churns three shells for nothing a user sees) and the package
+installs it as `twinvpn`, with `twinvpnctl` kept as a compatibility alias."*
 
-Three ways out, and this domain does not get to pick:
+So the two install lines in §3 are the whole fix — `/usr/bin/twinvpn` is the
+real file, `/usr/bin/twinvpnctl` is a symlink to it — and the strings this
+binary prints say `twinvpn`. ADR-0016 §11.2's process table, ADR-0017 §11.12's
+command shape, ADR-0023 EM-11's `twinvpn config check` and EM-42's
+`run 'twinvpn peer disconnect nas-attic'` now all name a command this host
+installs. The cargo package name and `[[bin]]` entry are deliberately unchanged;
+`twinvpnctl/Cargo.toml`'s header carries the same note so it cannot be lost with
+this file.
 
-- rename the binary to `twinvpn`;
-- ship a `twinvpn` symlink beside `twinvpnctl` (cheapest, and the rendered next
-  actions become true immediately);
-- amend ADR-0016 §11.2, ADR-0017 §11.12 and ADR-0023's EM-11/EM-42 to say
-  `twinvpnctl`.
-
-**Recommendation, offered not taken:** the symlink. It costs one `install -s`
-line, makes every rendered `next_action` correct today, and leaves the rename
-available later. Recorded in `twinvpnctl/Cargo.toml`'s header too, so it cannot
-be lost with this file.
+Still not here: `twinvpn config check` itself. D-1 fixed the *name*, not the
+`config` noun — EM-11's dry run and the `IntentDocument` remain out of this wave
+(§2's note on the agent reading no configuration file).
 
 ### 2. ~~Four of the five event topics carry an empty payload.~~ **CLOSED.** `CoreEventKind::encoded_payload()` landed in the seam work package; `payload_of` is a one-line delegation with no branch on which variant carries a body, so a variant that gains one is carried the day it lands. `Compacted` stays empty, which is the whole truth rather than a missing encoder.
 

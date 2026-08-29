@@ -44,8 +44,8 @@ final class LeakTests: XCTestCase {
         try await super.setUp()
         try XCTSkipUnless(DeviceCapabilities.isPhysicalDevice)
         try XCTSkipUnless(CaptureHarness.isReachable,
-                          "a leak is a packet we did not see the device emit; asking \
-                           the device whether it leaked is asking the wrong process")
+                          "a leak is a packet we did not see the device emit; asking "
+                          + "the device whether it leaked is asking the wrong process")
     }
 
     /// With the latch up and no tunnel, **nothing** protected egresses on either
@@ -90,8 +90,8 @@ final class LeakTests: XCTestCase {
         // also a signal — if this ever comes back empty, either the OS changed
         // or the test stopped exercising mDNS.
         XCTAssertFalse(capture.multicastDnsPackets().isEmpty,
-                       "ADR-0011 N2: mDNSResponder sends .local to multicast \
-                        regardless of configuration. This is DISCLOSED, not fixed.")
+                       "ADR-0011 N2: mDNSResponder sends .local to multicast "
+                       + "regardless of configuration. This is DISCLOSED, not fixed.")
     }
 
     /// IPv6 arriving **after** the tunnel is up does not acquire a way out.
@@ -108,8 +108,8 @@ final class LeakTests: XCTestCase {
             try await TrafficGenerator.attemptEgress(family: .v6)
         }
         XCTAssertTrue(capture.protectedPackets(family: .v6).isEmpty,
-                      "R6: IPv6 must not bypass tunnel policy, INCLUDING when it \
-                       appears after the tunnel is up")
+                      "R6: IPv6 must not bypass tunnel policy, INCLUDING when it "
+                      + "appears after the tunnel is up")
     }
 
     /// A Wi-Fi to cellular roam does not leak during the migration.
@@ -178,9 +178,9 @@ final class AttachToArmTests: XCTestCase {
             .map { ($0.armedMicros - $0.attachedMicros) / 1_000 }
             .sorted()
         XCTAssertEqual(windows.count, samples.count,
-                       "a backwards reading means the wrong clock was read; it is \
-                        NOT a zero-length window, which is precisely the value \
-                        ADR-0012 forbids assuming")
+                       "a backwards reading means the wrong clock was read; it is "
+                       + "NOT a zero-length window, which is precisely the value "
+                       + "ADR-0012 forbids assuming")
 
         let rank = max(1, Int((Double(windows.count) * 0.95).rounded(.up)))
         let p95 = windows[rank - 1]
@@ -192,8 +192,8 @@ final class AttachToArmTests: XCTestCase {
         }
         XCTAssertLessThanOrEqual(
             p95, 500,
-            "ADR-0012 §14 condition 5: above 500 ms at p95, iOS must be \
-             reclassified as best-effort or restricted to supervised Always-On")
+            "ADR-0012 §14 condition 5: above 500 ms at p95, iOS must be "
+            + "reclassified as best-effort or restricted to supervised Always-On")
     }
 
     /// The boot window has no artifact to close it, and the build says so.
@@ -207,7 +207,7 @@ final class AttachToArmTests: XCTestCase {
         XCTAssertFalse(posture.bootEnforcementAvailable,
                        "ADR-0012 §11.6's iOS boot column is 'None available'")
         XCTAssertFalse(posture.hostFirewallAvailable,
-                       "which is why KS-9(1)'s iOS clause is implicit, and why \
-                        networking.md §5.4's fetch split had to be corrected")
+                       "which is why KS-9(1)'s iOS clause is implicit, and why "
+                       + "networking.md §5.4's fetch split had to be corrected")
     }
 }

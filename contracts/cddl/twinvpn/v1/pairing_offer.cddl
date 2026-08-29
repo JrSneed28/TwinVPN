@@ -99,11 +99,20 @@ cose-key   = bstr .size (1..80)
                              ; signed_statements.cddl carries one: the inner
                              ; encoding is verified as received, never
                              ; re-serialized. `pairing.max_offer_cose_key_bytes`.
-                             ; A P-256 compressed EC2 key measures 43 bytes; the
-                             ; bound admits the uncompressed form so a producer
-                             ; that ignores §7.4's "compressed point" is refused
-                             ; by THIS FILE'S words rather than by a length
-                             ; accident.
+                             ; AMENDED 2026-08-29. This comment used to say a
+                             ; compressed EC2 key measures 43 bytes and that the
+                             ; bound "admits the uncompressed form so a producer
+                             ; that ignores §7.4's compressed point is refused by
+                             ; THIS FILE'S words". That had it backwards: the
+                             ; UNCOMPRESSED form is normative and the aside in
+                             ; ADR-0007 §7.4 was the error, now amended there too.
+                             ; The reason is ADR-0007 N-2 -- identity_id is
+                             ; SHA-256 over these exact octets, so the point form
+                             ; is not a spelling, it is the device's NAME. The
+                             ; form is fixed by contracts/docs/identifiers.md §2's
+                             ; golden vector. An uncompressed EC2 key measures 77
+                             ; bytes, which the 80-byte bound admits. ownership.md
+                             ; §11.2 G-20.
 
 ; --- PairingOffer -------------------------------------------------------------
 ; ADR-0007 §7.4, C-B (the QR path, primary). The joining device generates
@@ -122,7 +131,9 @@ pairing-offer = {
   1: bstr .size 32,          ; pairing_secret. THE SECRET. 32 random bytes
                              ; (ADR-0007 §7.4). `pairing.secret_bytes`.
                              ; Optical-confidential; NEVER transits the network.
-  2: cose-key,               ; ik_pub. ES256 / P-256, compressed point.
+  2: cose-key,               ; ik_pub. ES256 / P-256, UNCOMPRESSED --
+                             ; {1: 2, -1: 1, -2: x, -3: y}. See `cose-key`
+                             ; above and ADR-0007 §7.4 as amended.
   3: bstr .size 32,          ; tk_pub. X25519, raw.
                              ; NOTE, and it is a finding rather than a choice:
                              ; signed_statements.cddl's tunnel-key-binding

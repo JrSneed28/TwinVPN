@@ -181,9 +181,9 @@ final class LifecycleTests: XCTestCase {
         try await ProviderHarness.suspendDevice(forSeconds: 300)
         let gap = try await ProviderHarness.lastReportedResumeGapMilliseconds()
         XCTAssertGreaterThan(gap, 250_000,
-                             "a gap near zero means mach_absolute_time was read \
-                              where mach_continuous_time was meant — LC-8's \
-                              invisible-on-CI failure")
+                             "a gap near zero means mach_absolute_time was read "
+                             + "where mach_continuous_time was meant — LC-8's "
+                             + "invisible-on-CI failure")
     }
 
     // MARK: - helpers

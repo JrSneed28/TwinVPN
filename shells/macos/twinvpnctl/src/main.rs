@@ -3,6 +3,16 @@
 //! **Authority:** ADR-0017 §11.6 (the output modes), §11.12 (the exit codes and
 //! MI-C1), MI-15, MI-C3; ADR-0023 EM-37, EM-38, EM-42, EM-43, EM-44.
 //!
+//! # The installed name is `twinvpn`; the cargo target stays `twinvpnctl`
+//!
+//! `ownership.md` §9.5 **D-1** closes W-41: the cargo target keeps the name
+//! `twinvpnctl` — renaming it churns three shells for nothing a user sees — and
+//! `packaging/install.sh` installs the artifact as `/usr/local/bin/twinvpn`,
+//! with a `twinvpnctl` symlink beside it as a compatibility alias. So the usage
+//! text in [`verbs::usage`] says `twinvpn`, which is what the operator typed,
+//! and EM-42's rendered `run 'twinvpn peer disconnect nas-attic'` names a
+//! command this host installs.
+//!
 //! # EM-38: it never prompts
 //!
 //! > A command that blocks on a terminal read is a hung cron job, which on an

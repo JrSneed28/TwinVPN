@@ -101,10 +101,11 @@ pub mod statements;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testkit;
+pub mod tk;
 pub mod transcript;
 
 pub use aead::{AeadOpenError, StoreKey};
-pub use binding::{verify_tunnel_key_binding, VerifiedTunnelKey};
+pub use binding::{emit_tunnel_key_binding, verify_tunnel_key_binding, VerifiedTunnelKey};
 pub use blake2s::{frame_mac, hrw_weight_digest, verify_frame_mac};
 pub use cose::{verify_cose_sign1, x25519_cose_key, PublicVerifyingKey, VerifiedStatement};
 pub use deviceid::{

@@ -531,6 +531,91 @@ pub fn x25519_cose_key(pubkey: &[u8; 32]) -> Vec<u8> {
     .expect("an OKP COSE_Key of fixed shape always encodes")
 }
 
+/// The ES256 / P-256 COSE_Key encoder — **the one definition** of the encoding
+/// `identity_id` is derived over.
+///
+/// Emits `{1: 2, -1: 1, -2: x, -3: y}` in RFC 8949 §4.2.1 core deterministic
+/// encoding: `kty` = EC2, `crv` = P-256, and the two 32-byte affine
+/// coordinates. That is exactly the map ADR-0007 N-2 hashes —
+/// `identity_id = SHA-256("TwinVPN/DeviceIdentity/v1" ‖ 0x00 ‖ dCBOR(COSE_Key(IK_pub)))`
+/// — and `contracts/docs/identifiers.md` §2's golden vector is computed over it.
+///
+/// # Why this function exists at all, given three call sites already encoded it
+///
+/// It is the [`x25519_cose_key`] argument one curve over, and it is the same
+/// finding twice. **RZ-8**: "a specified encoding must not exist in two places,
+/// because two copies that disagree by one byte derive two different names for
+/// one device, and nothing fails until a device cannot bind." Before this
+/// function the map was assembled in `twinvpn-service-common`'s
+/// `spki_to_es256_cose_key` (for a peer's key, off a TLS channel) and again in
+/// [`crate::testkit`] (for a fixture's), so the encoding RZ-8 single-homed had
+/// quietly acquired a second home in a different workspace. Both now call this.
+///
+/// CD-I2 is the other half of the reason: this crate is the only one permitted a
+/// cryptographic dependency, and a key encoding is cryptography even when it
+/// looks like serialization.
+///
+/// # Uncompressed, and that is a contract, not a preference
+///
+/// The `y` coordinate is carried as a 32-byte `bstr`, not as RFC 9052 §7.1.1's
+/// sign bit. ADR-0007 §7.4's `PairingOffer` sketch says "P-256, compressed
+/// point" and `pairing_offer.cddl` repeats it, and **the tree, the frozen golden
+/// vector, and every existing producer are uncompressed**. The two cannot both
+/// hold: N-2 derives `identity_id` from these octets, so a compressed encoding
+/// renames every device in the fleet. The frozen contract wins here and the
+/// divergence is recorded rather than silently resolved —
+/// `docs/implementation/ownership.md` §11.2 **G-20**, which is `G-9` one field
+/// over.
+///
+/// # Panics
+///
+/// Never for this input. The map's four keys are `const` and distinct, so the
+/// only error `encode` can return — a duplicate key — is unreachable.
+#[must_use]
+pub fn es256_cose_key(x: &[u8; 32], y: &[u8; 32]) -> Vec<u8> {
+    crate::emit::encode(&crate::emit::Item::Map(vec![
+        (
+            crate::emit::int_item(KEY_KTY),
+            crate::emit::Item::Uint(KTY_EC2),
+        ),
+        (
+            crate::emit::int_item(KEY_CRV),
+            crate::emit::Item::Uint(CRV_P256),
+        ),
+        (
+            crate::emit::int_item(KEY_X),
+            crate::emit::Item::Bytes(x.to_vec()),
+        ),
+        (
+            crate::emit::int_item(KEY_Y),
+            crate::emit::Item::Bytes(y.to_vec()),
+        ),
+    ]))
+    .expect("an EC2 COSE_Key of fixed shape always encodes")
+}
+
+/// [`es256_cose_key`] for a key already parsed by [`p256`].
+///
+/// The device's own IK path: `IdentityCustody::identity_public` vends an SPKI,
+/// which parses to a `VerifyingKey`, which this encodes into the octets N-2
+/// hashes. Splitting the coordinates out of the SEC 1 point is the step that
+/// `spki_to_es256_cose_key` does by byte offset over DER; doing it through
+/// [`p256`] here means the *device's own* name is derived from a point the curve
+/// implementation has accepted, rather than from 64 bytes at a fixed offset.
+#[must_use]
+pub fn es256_cose_key_from_verifying_key(key: &p256::ecdsa::VerifyingKey) -> Vec<u8> {
+    let point = key.to_sec1_point(false);
+    let sec1 = point.as_ref();
+    // `to_sec1_point(false)` is the uncompressed SEC 1 form: 0x04 ‖ x ‖ y,
+    // 65 bytes, for every P-256 public key. The two slices below are therefore
+    // always exactly 32 bytes.
+    let mut x = [0u8; 32];
+    let mut y = [0u8; 32];
+    x.copy_from_slice(&sec1[1..33]);
+    y.copy_from_slice(&sec1[33..65]);
+    es256_cose_key(&x, &y)
+}
+
 /// Parses an OKP/X25519 COSE_Key and returns the 32-byte public value.
 ///
 /// Separate from [`PublicVerifyingKey::from_cose_key`] **on purpose**: an

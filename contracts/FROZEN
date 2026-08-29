@@ -1,4 +1,4 @@
-06f0464b5c961bb904834afe57caa08cb9bbfcaa01fd7873fef61d63435c8184
+2b312e111430b0056371bae932795a545c0f54760df42e01b38a3a39eef590c6
 
 TwinVPN Phase 2 contract freeze — re-declared 2026-08-28.
 AMENDMENT 1 to the freeze of 2026-08-27 (digest 2f5323cf3351a757...).
@@ -464,3 +464,101 @@ Evidence at re-declaration, against the digest on line 1:
 
 What this file authorizes: unchanged from the 2026-08-27 declaration.
 What it does NOT authorize: any further change to contracts/.
+
+================================================================================
+AMENDMENT 6 to the freeze — 2026-08-29. Digest on line 1 is this amendment's.
+Amendment 5's digest was 06f0464b5c961bb9...
+================================================================================
+
+WHAT CHANGED, and nothing else changed:
+  cddl/twinvpn/v1/pairing_offer.cddl   TWO COMMENTS. Field 2's `ik_pub` note and
+                                  the `cose-key` rule's note said the P-256 key
+                                  is a COMPRESSED point and that the 80-byte
+                                  bound "admits the uncompressed form so a
+                                  producer that ignores §7.4's compressed point
+                                  is refused by THIS FILE'S words". Both now say
+                                  UNCOMPRESSED, {1: 2, -1: 1, -2: x, -3: y}.
+  registry/limits.json            ONE prose string. `pairing._offer_note`'s
+                                  measured offer size 377 -> 409 bytes, with the
+                                  reason and the F-1 consequence stated.
+
+  NO rule, type, field or bound moved in the CDDL — the grammar is
+  character-identical and only comments changed. NO registry_version moved (see
+  below). NO .proto, NO reason code, NO capability. contracts/gen/** is
+  BYTE-IDENTICAL. The other three registries are untouched.
+
+WHY IT IS A DEFECT AND NOT AN INCONVENIENCE (§3 step 1):
+  This is finding G-20 in docs/implementation/ownership.md §11.2, found while
+  writing the ES256 `COSE_Key` encoder G-14 (a) asked for.
+
+  The corpus spelled one key encoding two ways, and under ADR-0007 N-2 the two
+  are not two spellings — they are two different NAMES for every device in the
+  fleet. N-2 fixes
+  `identity_id = SHA-256("TwinVPN/DeviceIdentity/v1" ‖ 0x00 ‖ dCBOR(COSE_Key(IK_pub)))`,
+  so the point form IS the identifier's preimage.
+
+  Everything that exists is uncompressed, and two of the three are frozen:
+    - contracts/docs/identifiers.md §2's golden vector — `dbf92e89…`, asserted by
+      `deviceid.rs`, whose own comment reads "Moving this literal renames every
+      device in the fleet" — is computed over {1: 2, -1: 1, -2: Gx, -3: Gy};
+    - `contracts/tests` assert that vector, and passed unchanged through this
+      amendment;
+    - `twinvpn-service-common`'s `spki_to_es256_cose_key` has emitted the
+      uncompressed map in production since RZ-8, and refuses a compressed point
+      BY NAME.
+
+  So this file's comment did not merely differ from the ADR — it asserted that a
+  conforming producer of the ONLY form anything emits "is refused by THIS FILE'S
+  WORDS". A reader who implemented what the comment said would have produced a
+  device whose every peer computes a different `device_id` for it, and nothing
+  would fail until enrolment. ADR-0007 §7.4 is amended in the same change, and
+  the aside there is the half that was wrong.
+
+WHY NO registry_version BUMP:
+  Amendment 5's rule, applied unchanged. `_offer_note` is prose for a human
+  reader, it is not among check_registry_append_only.py's FROZEN_REASON_ATTRS,
+  no consumer validates against it, and nothing machine-readable moved. Bumping
+  an unchanged registry "would claim a change a reader could not find". The
+  schema_digest DOES move, which is the honest signal: the bytes changed, the
+  meaning did not.
+
+WHY IT IS COMPATIBLE (§3 step 5):
+  Nothing executable changed anywhere. The CDDL grammar is character-identical,
+  so no encoder, decoder or validator behaves differently; CDDL has no codegen in
+  this repository, so no binding regenerates. `max_offer_cose_key_bytes` is 80
+  and the uncompressed key measures 75 — measured through
+  `twinvpn_crypto::cose::es256_cose_key`, not estimated — so THE BOUND ALREADY
+  ADMITTED IT and no limit moves. The per-field sum stays 493, at or below
+  `max_offer_bytes` = 512, and the contract test that asserts that relation
+  passed unchanged.
+
+WHAT IT COSTS, RECORDED — AND IT IS NOT NOTHING:
+  Amendment 4 measured the representative offer at 377 bytes using a compressed
+  43-byte `ik_pub`. The honest number is 409. **That widens F-1 by 32 bytes.**
+  F-1 is ADR-0023 E1's QR channel being too small for its own payload; Amendment
+  5 recorded EM-22a pinning the symbol at version 13, EC level L, 4-module quiet
+  zone, 79×41. This amendment does NOT resolve F-1, does not narrow it, and
+  makes it 32 bytes worse. It is stated here rather than left for someone to
+  re-measure, because Amendment 4's own text is now the stale number and the
+  registry note that carried it is corrected in the same change.
+
+  Both exits remain exactly as Amendment 4 named them and both are an ADR
+  owner's: grow EM-22's geometry, or carry the 216-byte `binding` field by
+  reference instead of by value. The second is worth more now than it was —
+  removing it saves 216 of 409 bytes.
+
+APPROVED BY (§3 step 6): the repository owner, explicitly, on 2026-08-29, on
+being shown that the CDDL comment asserted the refusal of the only form the
+frozen golden vector, the frozen contract tests and every production encoder in
+the tree actually produce.
+
+Evidence at re-declaration, against the digest on line 1:
+  20 .proto files compile and lint clean, UNCHANGED
+  649 generated files across rust, swift, kotlin, csharp — BYTE-IDENTICAL
+  44785 contract checks, 0 failures
+  455 reason codes across 16 domains; 28 capabilities; 12 canonical states
+  3 .cddl files; pairing_offer.cddl comments only, grammar unchanged
+
+What this file authorizes: unchanged from the 2026-08-27 declaration.
+What it does NOT authorize: any further change to contracts/. In particular it
+does NOT resolve F-1, which this amendment makes measurably worse.

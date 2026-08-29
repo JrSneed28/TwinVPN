@@ -400,6 +400,38 @@ devices apart in a list.
 | Linux (desktop/server) | TPM 2.0 via tpm2-tss, key created under the SRK with `fixedTPM \| fixedParent`; handle held in the kernel keyring | TPM-sealed wrapping key; plaintext in `mlock`ed, `MADV_DONTDUMP` memory, core dumps disabled | TPM 2.0 where present | `TPM2_Certify` quote | No TPM: file at mode 0600 in a 0700 directory, optionally Argon2id-passphrase-wrapped; `hardware_backed = false` |
 | Router / OpenWrt | file-backed | file-backed | No | none | `hardware_backed = false`, always |
 
+**Availability class per target (N-24b's required declaration), and where `TK` lives.**
+N-24b requires every row above to declare an availability class and the table did not carry
+one; the sealing column named a *mechanism* and no column named a *home*. Both are supplied
+here. `TK`'s class is not an independent choice — the sealed blob is inert ciphertext, so what
+gates its use is the availability of the **wrapping key**, which sits in the same element as IK
+and therefore carries the same class. Ruled at
+[ownership.md](../implementation/ownership.md) §11.4 **D-6**, closing **G-17**.
+
+| Platform | Availability class (IK, and the `TK` wrapping key) | Why |
+|---|---|---|
+| iOS / iPadOS | `AFTER_FIRST_UNLOCK` | `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, stated in the row above |
+| macOS | `AFTER_FIRST_UNLOCK` | as iOS |
+| Android | `AFTER_FIRST_UNLOCK` | N-24a's correction: `setUnlockedDeviceRequired(false)` is chosen precisely to be "the correct Android equivalent of the iOS posture", not to be stronger than it |
+| Windows | `ALWAYS` | TPM-bound DPAPI-NG descriptor and a CNG key under the Platform Crypto Provider; neither is unlock-gated |
+| Linux (desktop/server) | `ALWAYS` | TPM handle in the kernel keyring, or the 0600 file fallback |
+| Router / OpenWrt | `ALWAYS` | file-backed, and **`HC-3` requires it**: no user is ever present to unlock a router |
+
+**The two consequences §7.3.1 already fixed, restated against this table.** On the three
+`AFTER_FIRST_UNLOCK` targets a boot-started authority has no `TK` until first unlock, so the
+tunnel does **not** come up on a rebooted, never-unlocked phone; that gap MUST fail **closed**
+as `PLATFORM.LIFECYCLE.KEY_UNAVAILABLE_PRE_UNLOCK` and MUST NOT be resolved by generating a
+replacement `TK`. On the three `ALWAYS` targets **I5** holds whole — control-plane-free
+reconnect at boot — which is what makes the headless profile conforming.
+
+**Residence, which the sealing column does not state.** The sealed `TK` blob lives in **Tier 2
+`identity/`**; its wrapping key is the **Tier-1** item ADR-0020 ST-1 already names as "the
+`TunnelStaticKey` wrapping key". `TK` is **not** a Tier-1 item and is absent from the Tier-1
+set for a reason, not by oversight: ST-1's rule 1 admits only values never readable by the
+process, and N-5 requires `TK` to be unsealed **into** locked core memory. `twinvpn-crypto`
+generates it from the host CSPRNG when the `DeviceIdentity` is created, and the core unseals
+it; no host-ABI entry is involved.
+
 **What `hardware_backed` means to a relying peer.** It is a claim in the
 `DeviceCertificate` about where the private half lives, corroborated — where the platform
 supports it — by a platform attestation blob that is verified **once, by the approving OSK
@@ -470,7 +502,7 @@ bytes) and displays a QR encoding a deterministic-CBOR payload:
 ```
 PairingOffer {
   1 pairing_secret : bstr(32)      # optical-confidential; never transits the network
-  2 ik_pub         : COSE_Key      # P-256, compressed point
+  2 ik_pub         : COSE_Key      # ES256 / P-256, UNCOMPRESSED: {1:2, -1:1, -2:x, -3:y}
   3 tk_pub         : bstr(32)      # X25519
   4 binding        : bstr          # COSE_Sign1(IK) over TunnelKeyBinding
   5 attestation    : bstr / null   # platform attestation blob, if any
@@ -478,6 +510,19 @@ PairingOffer {
   7 not_after_ms   : uint          # issued + 120 000
 }
 ```
+**`ik_pub`'s point form — amended 2026-08-29.** This sketch read "compressed
+point" and that was an unreasoned aside, corrected here for the same reason
+**D-4** corrected ADR-0016's service start type: a reasoned clause elsewhere
+already governs. **N-2 derives `identity_id` from these exact octets**, so the
+point form is not a spelling choice — a compressed encoding is a *different
+name* for every device in the fleet. `contracts/docs/identifiers.md` §2 fixes the
+form with a golden vector over `{1: 2, -1: 1, -2: x, -3: y}`, and every producer
+in the tree already emits it: `twinvpn_crypto::cose::es256_cose_key` and
+`twinvpn-service-common`'s `spki_to_es256_cose_key`, which refuses a compressed
+point **by name**. `pairing_offer.cddl` field 2 carried the same aside and is
+amended with it. Recorded as
+[ownership.md](../implementation/ownership.md) §11.2 **G-20**.
+
 `pairing_id = SHA-256(pairing_secret)[0..15]` is the public rendezvous handle;
 `K_pair = HKDF-SHA-256(salt = pairing_id, ikm = pairing_secret, info = "TwinVPN/Pair/v1")`
 wraps every subsequent ceremony message in ChaCha20-Poly1305. The rendezvous forwards opaque
@@ -943,6 +988,7 @@ measurable to the 1-RTT budget of
 | [ADR-0012](ADR-0012-kill-switch-and-leak-prevention.md) | Local revocation MUST drive `BLOCKED` under `FAIL_CLOSED`, never a silent drop to untunneled networking |
 | [ADR-0014](ADR-0014-protocol-versioning-and-capability-negotiation.md) | In-tunnel transcript confirmation of the negotiated set; the monotonic floor values consumed by the prologue |
 | [ADR-0015](ADR-0015-observability-and-diagnostics.md) | Registration of the `AUTH.*` codes in §11.4 with class, severity, and next-action keys |
+| [ADR-0020](ADR-0020-local-persistence-and-secure-storage.md) | **Custody and residence for both halves of the `DeviceIdentity` N-1 defines.** Tier 1 holds the IK handle and the `TunnelStaticKey` **wrapping** key, per ST-1; **Tier 2 `identity/` holds the sealed `TK` blob**, per ST-1's else-branch and §11.2's residence table. ST-3 covers its `SECRET` classification and ST-34 its crypto-erase. This row was absent until 2026-08-29, which is why §7.3's `TK` sealing column named a mechanism and no ADR named a **home** — recorded as ownership.md §11.2 **G-17** and ruled by §11.4 **D-6** |
 | [docs/reliability.md](../reliability.md) | Registration of `T_TRUST_REFRESH`, `T_TRUST_STALE`, `T_TRUST_HARD`, `T_IK_OVERLAP`, `T_TK_OVERLAP` in §5 as credential-lifecycle constants; no new states or transitions are requested |
 
 ### 11.3 State-ownership rows required

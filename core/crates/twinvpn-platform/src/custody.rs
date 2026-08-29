@@ -27,12 +27,33 @@
 //! §11.16 (c) are explicit that TK is hardware-*wrapped* and unsealed into
 //! `twinvpn-crypto`'s locked allocator, precisely because platform key APIs
 //! largely do not offer X25519 ECDH — and an earlier wording that read as
-//! requiring in-element `agree` would have contradicted ADR-0007 N-5. TK reaches
-//! the core as a sealed blob through [`SecureStore`], and unsealing it is
-//! `core-security`'s.
+//! requiring in-element `agree` would have contradicted ADR-0007 N-5.
+//!
+//! **Corrected 2026-08-29.** This paragraph used to end "TK reaches the core as
+//! a sealed blob through [`SecureStore`]", which put the sealed TK in **Tier 1**
+//! and contradicted `twinvpn-store`'s `namespace.rs`, which put it in Tier 2
+//! `identity/`. Two production modules, two tiers, one key —
+//! `docs/implementation/ownership.md` §11.2 **G-17**. The ruling is §11.4
+//! **D-6** and `namespace.rs` was the right one:
+//!
+//! - the **sealed TK blob** is a **Tier-2 `identity/` record**, because ADR-0020
+//!   ST-1's rule 1 admits to Tier 1 only a value never readable by the process,
+//!   and N-5 requires TK to be unsealed *into* locked core memory;
+//! - the **TK wrapping key** is the **Tier-1** item — which is what ST-1 already
+//!   named in the words "the `TunnelStaticKey` wrapping key", and it is
+//!   `twinvpn_crypto::tk::TK_WRAP_ITEM`. That one *does* come through
+//!   [`SecureStore`], which is what the old sentence was half-remembering.
+//!
+//! So [`SecureStore`] carries TK's **wrapping key** and never TK. Generation,
+//! sealing and unsealing are all `core-security`'s, in `twinvpn_crypto::tk`, and
+//! **`tw_host_vtable` gains no wrap or unwrap entry** — there is no ABI change
+//! here.
 //!
 //! The residual is stated, not argued away: **TM-14 — TK extraction from process
-//! memory is undefended.**
+//! memory is undefended.** D-6 does not move it, and putting the sealed blob in
+//! Tier 2 rather than Tier 1 does not move it either: the *unsealed* key was
+//! always going to be in core memory, which is what B-09 buys PB-1 and PB-2
+//! with.
 
 use futures_core::future::BoxFuture;
 use twinvpn_types::{DeviceId, IdentityId};

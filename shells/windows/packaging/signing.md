@@ -19,7 +19,7 @@
 | Artifact | Signature | Why |
 |---|---|---|
 | `twinvpnsvc.exe` | Authenticode | It is the authority (ADR-0016 PS-1). A tampered service is a total compromise |
-| `twinvpnctl.exe` | Authenticode | It connects to the pipe and is on the machine PATH |
+| `twinvpnctl.exe` | Authenticode | It connects to the pipe and is on the machine PATH. This is the **cargo artifact** name; D-1 has the MSI install it as `twinvpn.exe` with a `twinvpnctl.exe` `DuplicateFile` alias. Sign the artifact once — Authenticode rides inside the file, so the duplicate the installer makes is signed too |
 | `twinvpn-unblock.exe` | Authenticode | ADR-0016 O13's elevated recovery tool. **Not built** — see README §7 |
 | `twinvpn-restore.exe` | Authenticode | ADR-0011 DN-20's restore service. **Not built** |
 | `TwinVPN.msi` | Authenticode | ADR-0021 §11: "Authenticode-signed per-machine MSI (WiX)" |

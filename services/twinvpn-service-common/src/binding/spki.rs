@@ -42,7 +42,6 @@
 //! malformed input is rejected rather than hashed into **some other device's
 //! name**, which is the failure that would matter.
 
-use twinvpn_crypto::emit::{encode, int_item, Item};
 use twinvpn_types::DeviceId;
 
 use crate::tls::ChannelIdentity;
@@ -120,20 +119,20 @@ pub fn spki_to_es256_cose_key(spki: &[u8]) -> Result<Vec<u8>, SpkiError> {
     if point[0] != SEC1_UNCOMPRESSED {
         return Err(SpkiError::NotP256Uncompressed);
     }
-    // COSE_Key labels: 1 = kty (2 = EC2), -1 = crv (1 = P-256), -2 = x, -3 = y.
-    // `emit::encode` sorts map keys by their encodings, so canonical ordering is
-    // not this caller's to get right — which is the point of using the crate's
-    // encoder rather than writing the bytes here.
-    encode(&Item::Map(vec![
-        (Item::Uint(1), Item::Uint(2)),
-        (int_item(-1), Item::Uint(1)),
-        (int_item(-2), Item::Bytes(point[1..33].to_vec())),
-        (int_item(-3), Item::Bytes(point[33..65].to_vec())),
-    ]))
-    // `encode` fails only on duplicate map keys, and the four above are
-    // literals. Folding it into the same refusal keeps the signature honest
-    // without inventing a variant no input can reach.
-    .map_err(|_| SpkiError::NotP256Uncompressed)
+    // The map itself is `twinvpn-crypto`'s to build, not this module's. RZ-8 is
+    // the finding that a specified encoding must not exist in two places, and
+    // assembling `{1: 2, -1: 1, -2: x, -3: y}` here was the second place —
+    // in a different workspace from the device that derives its own name the
+    // same way. CD-I2 says the same thing from the other end: a key encoding
+    // belongs to the one crate permitted a cryptographic dependency.
+    //
+    // What stays here is the DER half: proving these 91 bytes are that exact
+    // SPKI, and finding the two coordinates inside it.
+    let mut x = [0u8; 32];
+    let mut y = [0u8; 32];
+    x.copy_from_slice(&point[1..33]);
+    y.copy_from_slice(&point[33..65]);
+    Ok(twinvpn_crypto::cose::es256_cose_key(&x, &y))
 }
 
 /// Derives the `device_id` a channel identity speaks for, if it speaks for one.

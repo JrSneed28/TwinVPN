@@ -185,6 +185,43 @@ jobs:
         run: cd "${{ matrix.workspace }}" && cargo test --locked --workspace
 
   # =========================================================================
+  # The Swift shells are compiled by NOTHING, and that used to include CI.
+  #
+  # `shells/ios` and `shells/macos` import NetworkExtension, SystemExtensions,
+  # SwiftUI, Security and Network, so a Linux Swift cannot TYPE-CHECK them and
+  # will not until a Darwin SDK is present -- which for shells/macos means Apple
+  # hardware, because the SDK licence confines it there (ADR-0018 BM-3, and
+  # ownership.md 9.2).
+  #
+  # What a Linux Swift CAN do is PARSE them, and the difference between "nothing
+  # checks this" and "a compiler checks its syntax" is not rhetorical: wiring
+  # this lane found seven invalid string-literal line continuations in
+  # shells/ios/TwinVPNTests that had reached main unnoticed.
+  #
+  # The claim this job makes is exactly "the Swift sources parse under the
+  # pinned compiler", and `make swift-parse` is the one definition of it --
+  # `make cross-check` calls the same target locally.
+  # =========================================================================
+  swift-parse:
+    name: swift-parse (shells/ios, shells/macos -- SYNTAX ONLY)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container: swift:6.1.2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: parse the Swift shells
+        id: parse
+        run: make swift-parse
+
+      - name: explain the failure
+        if: failure() && steps.parse.outcome == 'failure'
+        run: |
+          echo "::error title=Swift sources do not parse::A file under shells/ios or shells/macos is not syntactically valid Swift 6.1.2. Owner: the shell's platform team."
+          echo "This job proves SYNTAX ONLY. It does not type-check, does not link,"
+          echo "and says nothing about whether the shell works -- see ownership.md 9.2."
+
+  # =========================================================================
   # ADR-0018 T1 ARCHITECTURAL LINTS.
   #
   # STATUS: GREEN. core-foundation has landed core/xtask and all four checks
@@ -258,4 +295,148 @@ jobs:
           echo "This job is deliberately NOT skipped and NOT continue-on-error. A skipped"
           echo "check reads as green on the PR page; B-19 says I5 is undischarged while"
           echo "this check is 'absent OR DISABLED'."
+          exit 1
+
+  # =========================================================================
+  # CROSS-TARGET COMPILE PROOF -- the four targets nothing else in this file
+  # touches.
+  #
+  # G-16: `make cross-check` was run by NOTHING BUT A HUMAN TYPING IT, so every
+  # claim this repository makes about Windows, macOS, iOS and Android compiling
+  # at all rested on someone remembering a command. This job is that command,
+  # on every pull request and every commit on main.
+  #
+  # `make gate` is deliberately NOT where this went. cross-check needs four
+  # rustup targets a fresh clone does not have, so folding it into the gate
+  # would fail every fresh clone -- which is why it was split out in the first
+  # place. It stays split out; CI installs the targets instead.
+  #
+  # ONE DEFINITION, TWO CALLERS -- the W-20 / X-4 / R-14 rule the `swift-parse`
+  # target already follows. Every lane lives in the Makefile and nowhere else;
+  # this job adds only the environment the recipe's own guards look for, and
+  # copies no lane into YAML where the two could drift.
+  # =========================================================================
+  cross-check:
+    name: cross-check (win/mac/ios/android -- COMPILE ONLY)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25          # docs/testing-strategy.md §6.1: hard fail at 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pinned toolchain and the four cross targets
+        run: |
+          # rust-toolchain.toml pins the version and lists `clippy`, but lists
+          # no targets, so the four the recipe compiles for are added here --
+          # against that same pinned toolchain, because `rustup target add`
+          # follows the active one.
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add clippy
+          rustup target add \
+            x86_64-pc-windows-msvc \
+            aarch64-apple-darwin \
+            aarch64-apple-ios \
+            aarch64-linux-android
+          rustc --version
+          cargo clippy --version
+          rustup target list --installed
+
+      # ------------------------------------------------------------------
+      # THE ANDROID `full` LANE'S C TOOLCHAIN, and why it is named here.
+      #
+      # That lane compiles `ring` for bionic with `CC=clang` and `AR=llvm-ar`
+      # -- LITERAL PROGRAM NAMES handed to cc-rs. On the dev host both resolve
+      # only because build/toolchain/env.sh puts the pinned Swift toolchain's
+      # LLVM on PATH, and that toolchain does not exist on this runner.
+      # Ubuntu's `llvm` metapackage is what provides the UNVERSIONED
+      # /usr/bin/llvm-ar (a symlink to llvm-ar-<N>); the versioned name alone
+      # would not satisfy cc-rs, which is handed the string `llvm-ar`.
+      #
+      # The Makefile lane is ALSO guarded on both and degrades to
+      # "NOT CHECKED (no llvm-ar)". Installing them here is what stops this job
+      # taking that branch: a green run has to mean the lane RAN, not that it
+      # was skipped. If the log ever shows that line, this step regressed.
+      # ------------------------------------------------------------------
+      - name: android C toolchain (ring for aarch64-linux-android)
+        run: |
+          if ! command -v llvm-ar >/dev/null || ! command -v clang >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq llvm clang
+          fi
+          # Asserted with `command -v`, NOT with `llvm-ar --version | head -1`.
+          # A step's default shell here is `bash -e`, with no `pipefail`: a
+          # missing tool at the head of a pipe leaves the pipeline's status at
+          # `head`'s zero, so the version print alone would pass silently and
+          # the Makefile guard would then quietly report NOT CHECKED.
+          for t in llvm-ar clang; do
+            command -v "$t" >/dev/null || {
+              echo "::error title=android C toolchain::$t is still missing after 'apt-get install llvm clang'. This is an ENVIRONMENT failure in this job, not a code failure - without it the Makefile lane reports NOT CHECKED and the job goes green on a lane that never ran."
+              exit 1
+            }
+          done
+          llvm-ar --version | head -1
+          clang --version | head -1
+
+      # The `workspace` job above explains this key at length; the same rules
+      # apply, including NO `restore-keys` prefix fallback. What differs is the
+      # breadth: this job compiles four workspaces, so the key binds all four
+      # lockfiles and manifests rather than one.
+      - name: cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            core/target
+            shells/windows/target
+            shells/macos/target
+            shells/android/jni/target
+          key: >-
+            twinvpn-cargo-${{ runner.os }}-${{ runner.arch }}-crosscheck-${{
+            hashFiles('rust-toolchain.toml') }}-${{
+            hashFiles('core/Cargo.lock', 'shells/windows/Cargo.lock',
+            'shells/macos/Cargo.lock', 'shells/android/jni/Cargo.lock') }}-${{
+            hashFiles('core/Cargo.toml', 'shells/windows/Cargo.toml',
+            'shells/macos/Cargo.toml', 'shells/android/jni/Cargo.toml') }}-${{
+            hashFiles('.github/workflows/rust-t1.yml') }}
+
+      - name: cross-check
+        id: cross
+        run: make cross-check
+
+      # A failure here must say WHOSE it is, and a PASS must not be readable as
+      # more than it is. Both belong in this step.
+      - name: explain the failure
+        if: failure() && steps.cross.outcome == 'failure'
+        run: |
+          echo "::error title=cross-check (compile-only proof)::A non-host target stopped compiling. Owner: the crate's platform team - ownership.md 9.1 (wave 2) / 10.1 (wave 3)."
+          echo "WHAT THIS JOB PROVES, at exactly its strength and no further:"
+          echo ""
+          echo "  COMPILE ONLY. NOTHING IS LINKED AND NOTHING IS RUN. There is no"
+          echo "  MSVC linker, no Darwin SDK, no WFP engine and no NetworkExtension"
+          echo "  host on this runner. A green square here is a compile proof, never"
+          echo "  a behaviour proof, and must not be reported as one."
+          echo ""
+          echo "  PARTIAL BY DESIGN. Several lanes print NOT CHECKED and still exit"
+          echo "  0. The recipe's closing banner in the log above names the coverage"
+          echo "  THIS RUN actually had; read it rather than the job's colour."
+          echo "    windows twinvpnsvc core-host  NOT CHECKED on any GitHub runner:"
+          echo "                                  it needs an MSVC header tree under"
+          echo "                                  /mnt/c, which no runner has."
+          echo "    macos twinvpn-bridge full     NOT CHECKED anywhere: ring needs"
+          echo "                                  <TargetConditionals.h> and cc-rs"
+          echo "                                  needs xcrun. Apple SDK, Apple"
+          echo "                                  hardware. G-4 / G-6 / G-7."
+          echo "    Swift                         NOT CHECKED here - no swiftc in"
+          echo "                                  this image. The swift-parse job"
+          echo "                                  covers it in a pinned container."
+          echo "    Kotlin                        not compiled by this target at"
+          echo "                                  all. ownership.md 9.2."
+          echo "  The android full lane IS expected to RUN here - this job installs"
+          echo "  llvm and clang for it. 'NOT CHECKED (no llvm-ar)' in the log is an"
+          echo "  ENVIRONMENT regression in this job, not a code failure."
+          echo ""
+          echo "This job is deliberately NOT continue-on-error. A skipped check reads"
+          echo "as green on the PR page, and ownership.md 6 rule 14 says a"
+          echo "continue-on-error here would resolve a conflict by pretending."
           exit 1

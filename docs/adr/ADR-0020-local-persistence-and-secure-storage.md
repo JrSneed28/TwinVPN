@@ -394,6 +394,7 @@ lives on a device, *where it physically is*. Rows S-01…S-37 are **cited, not r
 | Row | Fact | Physical residence | Notes |
 |---|---|---|---|
 | S-01 | `DeviceKey` private material | **Tier 1** | §11.3 per platform; never in the vault (RQ-2) |
+| S-01b | `TunnelStaticKey` (`TK`) — the **sealed** blob | Tier 2 **`identity/`**; its **wrapping key** is Tier 1 | The second half of the `DeviceIdentity` [ADR-0007](ADR-0007-device-identity-and-pairing.md) N-1 defines; S-01 is the IK half. **ST-1 decides this and was never run against `TK`**: rule 1 admits only a value never readable by the process, and N-5, CB-5 row 2, [ADR-0018](ADR-0018-shared-core-and-build-architecture.md) §11.16 (c) and B-09 all require `TK` to be unsealed **into** locked core memory, because platform key APIs largely do not offer X25519 ECDH. Rule 2 is no — live tunnel key state is S-13, Tier 0. `SECRET` ⇒ ST-3; erased by ST-34 step 1 with the handles. Availability class per target: ADR-0007 §7.3. This row was missing entirely until 2026-08-29 — ownership.md §11.2 **G-17**, ruled by §11.4 **D-6** |
 | S-02 | `DeviceIdentity` record + membership | Tier 2 `doc/membership` | verbatim signed octets (RQ-7) |
 | S-03 | Revocation list / trust epoch | Tier 2 `doc/trust` + **floor mirrored in Tier 1** | floor is the load-bearing half (§11.7) |
 | S-04 | `Pairing` record | Tier 2 `peer/<device_id>/pairing` | includes the `CEREMONY` idempotency key ([ADR-0008](ADR-0008-idempotency.md) N-4) |

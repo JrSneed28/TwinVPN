@@ -59,17 +59,15 @@ impl FixtureIdentity {
     }
 
     /// The COSE_Key octets for the public half.
+    ///
+    /// Delegates to [`crate::cose::es256_cose_key_from_verifying_key`] rather
+    /// than re-encoding, for the reason [`x25519_cose_key`] already gives one
+    /// curve over: a fixture that encoded the key its own way would let the
+    /// production encoder drift away from the fixtures that exist to catch
+    /// exactly that. This was the third copy of an encoding RZ-8 single-homed.
     #[must_use]
     pub fn cose_key(&self) -> Vec<u8> {
-        let point = self.signing.verifying_key().to_sec1_point(false);
-        let sec1 = point.as_ref();
-        encode(&Item::Map(vec![
-            (Item::Uint(1), Item::Uint(2)),
-            (int_item(-1), Item::Uint(1)),
-            (int_item(-2), Item::Bytes(sec1[1..33].to_vec())),
-            (int_item(-3), Item::Bytes(sec1[33..65].to_vec())),
-        ]))
-        .expect("encode cose key")
+        crate::cose::es256_cose_key_from_verifying_key(self.signing.verifying_key())
     }
 
     /// The public half as a **SubjectPublicKeyInfo**, DER.
@@ -123,6 +121,16 @@ impl FixtureIdentity {
     #[must_use]
     pub fn sign(&self, payload: &Item) -> Vec<u8> {
         let unsigned = StatementToSign::new(payload, -7, Some(b"k")).expect("build");
+        self.sign_prepared(&unsigned)
+    }
+
+    /// Signs a [`StatementToSign`] a production emitter already built.
+    ///
+    /// The fixture's stand-in for `IdentityCustody::identity_sign`: it is the
+    /// one operation CB-5 puts inside the element, and a test needs a local
+    /// substitute for it to exercise an emitter at all.
+    #[must_use]
+    pub fn sign_prepared(&self, unsigned: &StatementToSign) -> Vec<u8> {
         let sig: p256::ecdsa::Signature = self.signing.sign(unsigned.to_be_signed());
         unsigned.assemble(&sig.to_bytes()).expect("assemble")
     }
@@ -197,18 +205,21 @@ pub const TK_BINDING_IDENTITY_ID: [u8; 32] = [0x12; 32];
 #[must_use]
 pub fn verified_tunnel_key(tk_pub: &[u8; 32]) -> crate::VerifiedTunnelKey {
     let issuer = FixtureIdentity::from_seed(b"twinvpn/testkit/tunnel-key-binding");
-    let payload = Item::Map(vec![
-        (Item::Uint(1), Item::Bytes(TK_BINDING_DEVICE_ID.to_vec())),
-        (Item::Uint(2), Item::Bytes(TK_BINDING_IDENTITY_ID.to_vec())),
-        (Item::Uint(3), Item::Bytes(x25519_cose_key(tk_pub))),
-        (Item::Uint(4), Item::Uint(1)),
-        (Item::Uint(5), Item::Uint(2_000_000_000_000)),
-        (
-            Item::Uint(6),
-            Item::Array(vec![Item::Text("tk_generation".to_owned())]),
-        ),
-    ]);
-    let octets = issuer.sign(&payload);
+    // Built by the PRODUCTION emitter, not by a hand-assembled map. The fixture
+    // used to spell the payload out itself, which meant the gate every test
+    // relies on was exercised against an encoding no shipping code produced.
+    let unsigned = crate::binding::emit_tunnel_key_binding(
+        &TK_BINDING_DEVICE_ID,
+        &TK_BINDING_IDENTITY_ID,
+        tk_pub,
+        1,
+        2_000_000_000_000,
+    )
+    .expect("fixture binding is well formed");
+    let sig: p256::ecdsa::Signature = issuer.signing.sign(unsigned.to_be_signed());
+    let octets = unsigned
+        .assemble(&sig.to_bytes())
+        .expect("fixture binding assembles");
     let verified = crate::verify_cose_sign1(
         &octets,
         StatementKind::TunnelKeyBinding,

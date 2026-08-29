@@ -272,18 +272,34 @@
     <!--
       The unprivileged CLI.
 
-      NAMING DEVIATION: ADR-0016 §11.2's process table names this
-      `twinvpn.exe`, and ADR-0023 EM-42's rendered next actions say
-      `run 'twinvpn peer disconnect nas-attic'`. It is installed as
-      `twinvpnctl.exe` to match the Linux shell that shipped in wave 1. Raised
-      for the integration lead; see the CLI's own Cargo.toml and README §7.
+      THE CARGO TARGET IS `twinvpnctl`; THE INSTALLED COMMAND IS `twinvpn.exe`.
+      ADR-0016 §11.2's process table names this `twinvpn.exe`, ADR-0017 §11.12's
+      command shape is `twinvpn <noun> <verb>`, and ADR-0023 EM-42's rendered
+      next actions say `run 'twinvpn peer disconnect nas-attic'`.
+      `ownership.md` §9.5 D-1 closes W-41: the build still produces
+      `twinvpnctl.exe` — renaming the cargo target churns three shells for
+      nothing a user sees — and this package installs that artifact under the
+      name `twinvpn.exe`, so every rendered next action names a command the
+      machine has.
+
+      `twinvpnctl.exe` is kept beside it as a COMPATIBILITY ALIAS. Windows has
+      no symlink an unprivileged MSI may create — `CreateSymbolicLink` needs
+      SeCreateSymbolicLinkPrivilege or Developer Mode, neither of which an
+      installer may assume — so the alias is a Windows Installer `DuplicateFile`
+      row, which is this packaging system's own equivalent: the copy is made by
+      `DuplicateFiles` on install, removed by `RemoveDuplicateFiles` on
+      uninstall, and replaced with the component on upgrade, so the two names
+      cannot drift apart. Authenticode rides inside the file, so the duplicate
+      is signed exactly as the original is.
 
       The CLI is on the machine PATH for every user. It holds no privilege of
       its own, and every request it makes is authorized by the service
       impersonating the caller's token (ADR-0016 §11.9).
     -->
     <Component Id="Cli" Directory="INSTALLFOLDER" Guid="7477696E-7670-6E00-434C-490000000001">
-      <File Id="twinvpnctl.exe" Name="twinvpnctl.exe" Source="$(var.BinDir)\twinvpnctl.exe" KeyPath="yes" />
+      <File Id="twinvpn.exe" Name="twinvpn.exe" Source="$(var.BinDir)\twinvpnctl.exe" KeyPath="yes">
+        <CopyFile Id="TwinvpnctlAlias" DestinationDirectory="INSTALLFOLDER" DestinationName="twinvpnctl.exe" />
+      </File>
       <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="yes" />
     </Component>
 

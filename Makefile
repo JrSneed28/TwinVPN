@@ -29,7 +29,7 @@ BASELINE   := $(CONTRACTS)/.baseline.binpb
 .PHONY: help bootstrap toolchains contracts contracts-lint contracts-gen \
         contracts-breaking contracts-freshness verify-bindings test-contracts \
         build lint test clean gate freeze freeze-scope build-rust lint-rust \
-        test-rust fmt arch-lint doc-check cross-check infra-bootstrap infra-check infra-up \
+        test-rust fmt arch-lint doc-check cross-check swift-parse infra-bootstrap infra-check infra-up \
         infra-up-v6 infra-down budgets budgets-images redaction-check \
         dev-issuer plane-up plane-up-v6 plane-probe plane-ceremony plane-status plane-down \
         pg-up pg-down pg-reset \
@@ -430,8 +430,42 @@ cross-check:
 	  ( cd shells/windows && $(CARGO) clippy -p twinvpnctl --all-targets \
 	      --target $(WIN_TARGET) -- -D warnings ) || exit 1; \
 	  ( cd shells/windows && $(CARGO) tree -i ring --target $(WIN_TARGET) >/dev/null 2>&1 ) \
-	    || { echo "    ring has LEFT the windows graph UNDER core-host: drop the"; \
-	         echo "    --no-default-features split and check the workspace whole"; exit 1; }; \
+	    || { echo "    ring has LEFT the windows graph UNDER core-host: the"; \
+	         echo "    --no-default-features service check below is now redundant"; \
+	         echo "    with the core-host one and should be deleted"; exit 1; }; \
+	fi
+# The core-host half, which used to be NOT CHECKED, and the reason it no longer
+# has to be. `ring` needs an MSVC-target C compiler; it does NOT need `cl.exe`.
+# ring 0.17.14's build.rs branches on `is_like_clang_cl()`, and `clang-cl` is a
+# NATIVE LINUX BINARY that the pinned Swift 6.1.2 toolchain already ships (it
+# carries a whole LLVM 17: clang-cl, lld-link, llvm-ar). It takes Linux paths and
+# reads the MSVC and Windows SDK headers as ordinary files, so nothing crosses a
+# WSL interop boundary and `lib.exe` is not wanted either -- `llvm-ar` serves.
+# NASM is not wanted: ring ships 17 pre-assembled COFF objects and uses them for
+# any non-git checkout.
+#
+# `CC_SHELL_ESCAPED_FLAGS=1` is load-bearing. The SDK paths contain spaces and
+# cc-rs word-splits CFLAGS without it; the failure looks like a path problem and
+# is not one.
+#
+# GUARDED, because the headers come from a Windows installation this recipe
+# cannot require: no MSVC tree, no lane, and the banner says which it got. That
+# is the same rule the rest of this target follows -- report the coverage you
+# actually have.
+	@win_vc=$$(ls -d "/mnt/c/Program Files/Microsoft Visual Studio/"*/*/VC/Tools/MSVC/*/ 2>/dev/null | sort -V | tail -1); \
+	win_sdk="/mnt/c/Program Files (x86)/Windows Kits/10"; \
+	win_sdkv=$$(ls "$$win_sdk/Include" 2>/dev/null | sort -V | tail -1); \
+	if [ -f build/toolchain/env.sh ]; then . build/toolchain/env.sh; fi; \
+	if [ -n "$$win_vc" ] && [ -n "$$win_sdkv" ] && command -v clang-cl >/dev/null; then \
+	  echo "==> cross-check shells/windows twinvpnsvc ($(WIN_TARGET)), core-host"; \
+	  CC_x86_64_pc_windows_msvc=clang-cl \
+	  AR_x86_64_pc_windows_msvc=llvm-ar \
+	  CC_SHELL_ESCAPED_FLAGS=1 \
+	  CFLAGS_x86_64_pc_windows_msvc="-imsvc'$$win_vc/include' -imsvc'$$win_sdk/Include/$$win_sdkv/ucrt' -imsvc'$$win_sdk/Include/$$win_sdkv/um' -imsvc'$$win_sdk/Include/$$win_sdkv/shared'" \
+	  sh -c 'cd shells/windows && exec $(CARGO) clippy -p twinvpnsvc --all-targets --target $(WIN_TARGET) -- -D warnings' \
+	    || exit 1; \
+	else \
+	  echo "==> cross-check twinvpnsvc core-host      NOT CHECKED (no MSVC headers)"; \
 	fi
 	@if [ -f shells/macos/Cargo.toml ]; then \
 	  echo "==> cross-check shells/macos ($(MAC_TARGET))"; \
@@ -463,32 +497,122 @@ cross-check:
 	      --no-default-features --features core-lite --all-targets \
 	      --target $(AND_TARGET) -- -D warnings ) || exit 1; \
 	  ( cd shells/android/jni && $(CARGO) tree -i ring --target $(AND_TARGET) >/dev/null 2>&1 ) \
-	    || { echo "    ring has LEFT the android graph UNDER full: drop the core-lite"; \
-	         echo "    split and check the workspace in its shipping profile"; exit 1; }; \
+	    || { echo "    ring has LEFT the android graph UNDER full: the core-lite"; \
+	         echo "    check is now redundant with the full one and should be"; \
+	         echo "    deleted"; exit 1; }; \
 	fi
+# The full profile, by the same route and with a caveat the core-host lane does
+# not need. `clang` targeting `aarch64-linux-android21` compiles ring here, with
+# NO NDK -- but only because `-nostdlibinc -DRING_CORE_NOSTDLIBINC=1` substitutes
+# ring's own headers for bionic's. ring applies that combination itself only for
+# wasm32 and non-x86_64 musl, so this is a WEAKER check than an NDK build: it
+# proves the Rust half type-checks for bionic, and it does NOT produce a
+# shippable object. Stated here and in the banner rather than left for someone to
+# infer from a green line.
+#
+# GUARDED on `llvm-ar` and `clang`, for the same reason the MSVC lane above is
+# guarded and by the same rule -- report the coverage you actually have.
+# `AR_aarch64_linux_android=llvm-ar` and `CC_..=clang` are LITERAL PROGRAM NAMES
+# handed to cc-rs, and on this host they resolve only because
+# `build/toolchain/env.sh` puts the pinned Swift toolchain's LLVM 17 on PATH
+# (the same LLVM the Windows lane takes `clang-cl` from). A host without that
+# toolchain -- a bare CI runner is the case that matters -- fails inside ring's
+# build script with an exec error that READS AS A CODE FAILURE AND IS NOT ONE.
+# So: no llvm-ar, no lane, and the banner says which it got.
+# `.github/workflows/rust-t1.yml` installs `llvm` and `clang` on the runner so
+# that the lane genuinely runs there rather than quietly reporting NOT CHECKED.
+	@if [ -f shells/android/jni/Cargo.toml ]; then \
+	  if [ -f build/toolchain/env.sh ]; then . build/toolchain/env.sh; fi; \
+	  if ! command -v llvm-ar >/dev/null; then \
+	    echo "==> cross-check android/jni full          NOT CHECKED (no llvm-ar)"; \
+	  elif ! command -v clang >/dev/null; then \
+	    echo "==> cross-check android/jni full          NOT CHECKED (no clang)"; \
+	  else \
+	    echo "==> cross-check shells/android/jni ($(AND_TARGET)), full"; \
+	    CC_aarch64_linux_android=clang \
+	    AR_aarch64_linux_android=llvm-ar \
+	    CFLAGS_aarch64_linux_android="--target=aarch64-linux-android21 -nostdlibinc -DRING_CORE_NOSTDLIBINC=1" \
+	    sh -c 'cd shells/android/jni && exec $(CARGO) clippy --locked --workspace --all-targets --target $(AND_TARGET) -- -D warnings' \
+	      || exit 1; \
+	  fi; \
+	fi
+# The Swift half, and it is a PARSE and not a compile. Said in those words
+# because the difference is the whole of what this target is for.
+#
+# `shells/ios` and `shells/macos` import NetworkExtension, SystemExtensions,
+# SwiftUI, Security and Network. A Linux Swift 6.1.2 has Foundation and has none
+# of those, so `-typecheck` cannot run here and will not until a Darwin SDK does
+# -- which for `shells/macos` means Apple hardware, because the SDK licence
+# confines it there. What `-parse` DOES establish is that every one of these
+# files is syntactically valid Swift under the pinned compiler, which is
+# strictly more than the nothing that checked them before: an unbalanced brace,
+# a malformed expression or a stray token in a file no CI compiles used to reach
+# `main` unnoticed.
+#
+# So this moves ownership.md 9.2's "WRITTEN, NOT COMPILED" to "PARSED, NOT
+# TYPE-CHECKED" for Swift, and moves Kotlin not at all -- see the banner.
+	@$(MAKE) --no-print-directory swift-parse
 	@echo "==> cross-check OK (compile only -- nothing was linked or run)"
 	@echo "    PARTIAL, and the partiality is the point. The core-hosting crates"
 	@echo "    were compiled in core-lite; the full profile's QUIC lines are"
 	@echo "    compiled by NOTHING THIS TARGET RUNS. Per crate, exactly:"
 	@echo "      shells/windows     twinvpnsvc  --features service"
-	@echo "                                         core-host  NOT CHECKED"
+	@echo "                                         core-host  see above"
 	@echo "      shells/windows     twinvpnctl  whole"
 	@echo "      shells/macos       twinvpn-bridge      core-lite"
 	@echo "                                         full       NOT CHECKED"
 	@echo "      shells/android/jni twinvpn-android-jni core-lite"
-	@echo "                                         full       NOT CHECKED"
-	@echo "    Cause: core-host and full reach quinn/rustls -> ring, whose build"
-	@echo "    script needs an MSVC, Darwin or NDK C toolchain and this target"
-	@echo "    invokes none. ownership.md 11, findings G-4 and G-7."
-	@echo "    A rustls CryptoProvider swap does NOT lift this: quinn-proto"
-	@echo "    reaches ring outside the provider seam. ownership.md 11, G-6."
-	@echo "    NOT COMPILED HERE AT ALL: Swift (shells/ios) and Kotlin"
-	@echo "    (shells/android) -- this target invokes no Swift and no Kotlin"
-	@echo "    compiler for them. ownership.md 9.2."
+	@echo "                                         full       see above"
+	@echo "    What changed, and what did not. G-18: ring needs an MSVC-target C"
+	@echo "    compiler, NOT cl.exe -- its build.rs has an is_like_clang_cl()"
+	@echo "    branch, and the pinned Swift toolchain ships clang-cl, lld-link"
+	@echo "    and llvm-ar as native Linux binaries. So Windows core-host is"
+	@echo "    checked WHEN an MSVC header tree is visible, and android full"
+	@echo "    WHEN llvm-ar and clang are on PATH -- build/toolchain/env.sh"
+	@echo "    supplies both from that same LLVM. The two lines above say which"
+	@echo "    of them this run actually got; neither is unconditional."
+	@echo "    The android full lane is WEAKER than an NDK build: -nostdlibinc"
+	@echo "    substitutes ring's headers for bionic's, so it proves the Rust"
+	@echo "    half type-checks and yields NO shippable object."
+	@echo "    macOS/iOS stay blocked and the cause is specific: ring's"
+	@echo "    include/ring-core/base.h includes <TargetConditionals.h>, which"
+	@echo "    -nostdlibinc cannot supply, and cc-rs needs xcrun for iOS"
+	@echo "    regardless of CC. Apple SDK, Apple hardware. ownership.md 11,"
+	@echo "    findings G-4, G-6, G-7 and G-18."
+	@echo "    Swift (shells/ios, shells/macos): PARSED, NOT TYPE-CHECKED."
+	@echo "    swiftc -parse proves the syntax under the pinned compiler and"
+	@echo "    proves NOTHING about types: NetworkExtension, SystemExtensions,"
+	@echo "    SwiftUI, Security and Network are absent from a Linux Swift, so"
+	@echo "    -typecheck needs a Darwin SDK -- Apple hardware for shells/macos."
+	@echo "    Kotlin (shells/android): NOT COMPILED HERE AT ALL. 22 of its 24"
+	@echo "    .kt files import android.* / androidx.*, and the two that do not"
+	@echo "    (NativeBridge.kt, Rendered.kt) reference NativeHost, which does."
+	@echo "    kotlinc IS on this host; an android.jar is not. ownership.md 9.2."
 	@echo "    Every NOT CHECKED above is a statement about THIS TARGET's"
 	@echo "    coverage, not about the machine. A native Windows or Darwin build"
 	@echo "    lane would change which of these lines is still true; until one"
 	@echo "    exists and is wired in here, read them as written."
+
+# The Swift syntax lane, as its OWN target so that `cross-check` and CI call one
+# definition rather than two that can drift -- the defect class W-20, X-4 and
+# R-14 all belong to. `cross-check` depends on it; `.github/workflows/rust-t1.yml`
+# runs it inside a pinned Swift container, which is the only place a Swift
+# compiler is guaranteed.
+#
+# Each shell is parsed SEPARATELY. `swiftc` refuses two files with the same
+# basename in one invocation, and `shells/ios` and `shells/macos` both carry a
+# `PacketTunnelProvider.swift` -- correctly, since they are two modules.
+swift-parse:
+	@if [ -f build/toolchain/env.sh ]; then . build/toolchain/env.sh; fi; \
+	if ! command -v swiftc >/dev/null; then \
+	  echo "==> parse-check Swift                     NOT CHECKED (no swiftc)"; \
+	  exit 0; \
+	fi; \
+	for sh in ios macos; do \
+	  echo "==> parse-check shells/$$sh (Swift, syntax only)"; \
+	  swiftc -parse $$(find shells/$$sh -name '*.swift') \
+	    || { echo "    shells/$$sh Swift does not PARSE"; exit 1; }; \
+	done
 
 # ADR-0018 CD-3 / CD-I2 / CD-I5 / CB-3. Owned by core-foundation.
 arch-lint:

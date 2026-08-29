@@ -299,14 +299,20 @@ sudo TWINVPN_DARWIN_WRITE_TEST=1 \
 
 ---
 
-## 6. `twinvpnctl`
+## 6. The CLI — cargo target `twinvpnctl`, installed as `twinvpn`
 
 ```
-usage: twinvpnctl [--output human|json|json-lines] <noun> <verb>
+usage: twinvpn [--output human|json|json-lines] <noun> <verb>
 ```
+
+**Installed name.** `ownership.md` §9.5 **D-1**: `packaging/install.sh` installs
+the `twinvpnctl` build artifact as `/usr/local/bin/twinvpn` and leaves
+`/usr/local/bin/twinvpnctl` beside it as a compatibility symlink. Both spellings
+work; `twinvpn` is the one the usage line, every rendered `next_action` and
+ADR-0023 EM-11's `twinvpn config check` all name.
 
 The verb table is **generated from the core's command catalogue** (MI-C1), so
-`twinvpnctl --help` lists exactly ADR-0017 §11.9's operations, in its order. A
+`twinvpn --help` lists exactly ADR-0017 §11.9's operations, in its order. A
 verb with no catalogue entry, or an entry with no verb, fails
 `mi_c1_the_verb_set_and_the_catalogue_are_equal_in_both_directions`.
 
@@ -504,12 +510,14 @@ not preserved.
     requires clients to use the value **verbatim**, so an empty string renders as
     unknown rather than as a wrong version — the right failure.
 
-19. **The binary is `twinvpnctl`, and ADR-0016 §11.2 / ADR-0017 §11.12 name it
-    `twinvpn`.** ADR-0023 EM-42's rendered next actions say `run 'twinvpn peer
-    disconnect nas-attic'`, which names a command installed under another name.
-    `shells/linux` raised the same deviation; this shell matches it rather than
-    having the CLI called one thing on Linux and another on macOS. **Needs a
-    decision.**
+19. ~~**The binary is `twinvpnctl`, and ADR-0016 §11.2 / ADR-0017 §11.12 name
+    it `twinvpn`.**~~ **CLOSED by D-1.** `ownership.md` §9.5: the cargo target
+    stays `twinvpnctl` and the package installs it as `twinvpn`, with
+    `twinvpnctl` kept as a compatibility alias. `packaging/install.sh` writes
+    `/usr/local/bin/twinvpn` and symlinks `/usr/local/bin/twinvpnctl` to it, and
+    the usage text says `twinvpn` — so ADR-0023 EM-42's rendered `run 'twinvpn
+    peer disconnect nas-attic'` names a command this host installs. Linux and
+    Windows made the same split, so the CLI is called one thing everywhere.
 
 20. **`isatty` is not called**, because it needs `unsafe` and `twinvpnctl`
     forbids it. The CLI therefore assumes **not a TTY**, which under EM-43 means

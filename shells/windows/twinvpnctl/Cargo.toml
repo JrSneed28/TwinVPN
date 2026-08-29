@@ -3,20 +3,17 @@
 #
 # Owner: desktop-windows.
 #
-# NAMING DEVIATION, reported rather than papered over, and it is the same one
-# `shells/linux/twinvpnctl` raised as W-41. ADR-0016 §11.2's Windows process
-# table names this binary `twinvpn.exe`, ADR-0017 §11.12's command shape is
-# `twinvpn <noun> <verb>`, and ADR-0023 EM-42's rendered `next_action` strings
-# say "run 'twinvpn peer disconnect nas-attic'". This domain has named it
-# `twinvpnctl` to match the Linux shell that shipped in wave 1 rather than
-# shipping two different names for one CLI across two platforms — which would
-# make the rendered next actions wrong on exactly one of them.
+# THE CARGO TARGET IS `twinvpnctl`; THE INSTALLED COMMAND IS `twinvpn.exe`.
 #
-# Neither name is this domain's to settle. Raised for the integration lead:
-# either both binaries are renamed to `twinvpn`, or a `twinvpn` alias ships
-# beside each, or ADR-0016 §11.2 and ADR-0023 EM-42 are amended. Until then the
-# rendered next actions name a command that is not installed under that name, on
-# both platforms, identically.
+# ADR-0016 §11.2's Windows process table names this binary `twinvpn.exe`,
+# ADR-0017 §11.12's command shape is `twinvpn <noun> <verb>`, and ADR-0023
+# EM-42's rendered `next_action` strings say "run 'twinvpn peer disconnect
+# nas-attic'". `ownership.md` §9.5 D-1 closes W-41: the cargo target and this
+# `[package] name` stay `twinvpnctl` — renaming them churns three shells for
+# nothing a user sees — and `packaging/TwinVPN.wxs` installs the artifact as
+# `twinvpn.exe` with a `twinvpnctl.exe` duplicate beside it as a compatibility
+# alias. The same split holds on Linux and macOS, so one CLI has one installed
+# name on all three.
 [package]
 name    = "twinvpnctl"
 version.workspace      = true

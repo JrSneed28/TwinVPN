@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn a_three_segment_name_splits_at_the_first_dot_only() {
         // `killswitch.disarm.begin` is noun `killswitch`, verb `disarm.begin` —
-        // so `twinvpnctl killswitch disarm.begin` is the invocation and the
+        // so `twinvpn killswitch disarm.begin` is the invocation and the
         // round trip holds.
         let verb = verbs()
             .into_iter()

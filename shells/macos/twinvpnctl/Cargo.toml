@@ -3,14 +3,16 @@
 #
 # Owner: desktop-macos.
 #
-# NAMING DEVIATION, reported rather than papered over: ADR-0016 §11.2's process
-# table and ADR-0017 §11.12's command shape both name this binary `twinvpn`, not
-# `twinvpnctl` — and ADR-0023 EM-42's rendered `next_action` strings say
-# "run 'twinvpn peer disconnect nas-attic'". `shells/linux` raised the same
-# deviation and kept `twinvpnctl`; this shell matches it, because a CLI called
-# one thing on Linux and another on macOS would be worse than either. Raised for
-# the integration lead: either both are renamed to `twinvpn`, or a `twinvpn`
-# symlink ships beside each, or ADR-0016 §11.2 is amended.
+# THE CARGO TARGET IS `twinvpnctl`; THE INSTALLED COMMAND IS `twinvpn`.
+#
+# ADR-0016 §11.2's process table and ADR-0017 §11.12's command shape both name
+# this binary `twinvpn`, and ADR-0023 EM-42's rendered `next_action` strings say
+# "run 'twinvpn peer disconnect nas-attic'". `ownership.md` §9.5 D-1 closes W-41:
+# the cargo target and this `[package] name` stay `twinvpnctl` — renaming them
+# churns three shells for nothing a user sees — and `packaging/install.sh`
+# installs the artifact as `/usr/local/bin/twinvpn` with a `twinvpnctl` symlink
+# beside it as a compatibility alias. The same split holds on Linux and Windows,
+# so one CLI has one installed name on all three.
 [package]
 name    = "twinvpnctl"
 version.workspace      = true
