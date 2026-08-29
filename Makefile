@@ -226,7 +226,7 @@ build-rust:
 # ---------------------------------------------------------------------------
 # lint
 # ---------------------------------------------------------------------------
-lint: contracts-lint lint-rust doc-check redaction-check
+lint: contracts-lint lint-rust arch-lint doc-check redaction-check
 	@echo "==> linting python"
 	@python3 -m compileall -q $(CONTRACTS)/tests >/dev/null
 	@echo "==> linting javascript"
@@ -235,9 +235,10 @@ lint: contracts-lint lint-rust doc-check redaction-check
 	@python3 scripts/check_doc_links.py
 	@echo "==> lint OK"
 
-# rustfmt --check and clippy -D warnings across every workspace, then the
-# ADR-0018 T1 architectural lints. The architectural lints are NOT optional
-# extras: CD-3 says the deny-list "is the actual mechanism", and CD-I5 is the
+# rustfmt --check and clippy -D warnings across every workspace. The ADR-0018 T1
+# architectural lints are the sibling `arch-lint` target, and as of this gate
+# pass they are a prerequisite of `lint` rather than a target someone remembers
+# to run: CD-3 says the deny-list "is the actual mechanism", and CD-I5 is the
 # artifact ADR-0002 §11.8 step 3 requires and B-19 blocks a release without.
 lint-rust:
 	@for w in $(WORKSPACES); do \
