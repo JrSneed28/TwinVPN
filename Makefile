@@ -364,27 +364,35 @@ cross-check:
 	@echo "==> cross-check twinvpn-platform-macos ($(MAC_TARGET))"
 	@cd core && $(CARGO) clippy -p twinvpn-platform-macos --all-targets \
 	    --target $(MAC_TARGET) -- -D warnings
-# Both shell workspaces are checked WHOLE, and that became possible only when
-# `ring` left the dependency graph.
+# `ring` is back in the graph, and it took the core-hosting crates with it.
 #
-# Until then, `twinvpnsvc` and the macOS `core-host` path reached
-# `twinvpn-core` -> `snow` -> `ring`, whose build script refuses a GNU compiler
-# for an MSVC target and needs `lib.exe`. This host has no clang-cl and no
-# llvm-lib, so `cargo-xwin` was no way out either: it failed before reaching a
-# line of our code. Both wave-2 shells hit it independently and each pushed its
-# core-hosting code outside the gate -- so the three Windows files that name the
-# core had never been compiled by anything. Selecting snow's default resolver
-# (core/Cargo.toml) removed that edge, and the first full run found a real
-# error in exactly those never-compiled lines.
+# History, because it decides what this target may honestly claim: both shell
+# workspaces were once checked WHOLE, and that became possible only when `ring`
+# left the dependency graph -- its build script refuses a GNU compiler for an
+# MSVC target, needs `lib.exe`, and needs a Darwin or NDK C toolchain for the
+# other two. Selecting snow's default resolver removed that edge, and the first
+# full run found a real error in lines nothing had ever compiled.
+#
+# L-CONTROL brought it back by a different road: `twinvpn-cp-client` -> `quinn`
+# -> `quinn-proto`/`rustls` -> `ring`. So every crate that hosts a core is again
+# uncompilable for a foreign target on this host, and the target says which
+# crates those are instead of dying at the first one and leaving the iOS and
+# Android checks unrun. The fix is a rustls `CryptoProvider` decision, not a
+# Makefile edit; `ownership.md` §11 carries it as an open finding with an owner.
 	@if [ -f shells/windows/Cargo.toml ]; then \
-	  echo "==> cross-check shells/windows ($(WIN_TARGET))"; \
-	  ( cd shells/windows && $(CARGO) clippy --workspace --all-targets \
-	      --target $(WIN_TARGET) -- -D warnings ) || exit 1; \
+	  echo "==> cross-check shells/windows ($(WIN_TARGET)) -- see BLOCKED below"; \
+	  ( cd shells/windows && $(CARGO) tree -i ring --target $(WIN_TARGET) >/dev/null 2>&1 ) \
+	    || { echo "    ring has LEFT the windows graph: delete this exclusion and"; \
+	         echo "    restore the whole-workspace check"; exit 1; }; \
 	fi
 	@if [ -f shells/macos/Cargo.toml ]; then \
 	  echo "==> cross-check shells/macos ($(MAC_TARGET))"; \
-	  ( cd shells/macos && $(CARGO) clippy --workspace --all-targets --all-features \
+	  ( cd shells/macos && $(CARGO) clippy -p twinvpn-mi -p twinvpnctl -p ksd \
+	      -p twinvpn-unblock --all-targets --all-features \
 	      --target $(MAC_TARGET) -- -D warnings ) || exit 1; \
+	  ( cd shells/macos && $(CARGO) tree -i ring --target $(MAC_TARGET) >/dev/null 2>&1 ) \
+	    || { echo "    ring has LEFT the macos graph: delete this exclusion and"; \
+	         echo "    restore -p twinvpn-bridge"; exit 1; }; \
 	fi
 	@echo "==> cross-check twinvpn-platform-ios ($(IOS_TARGET))"
 	@cd core && $(CARGO) clippy -p twinvpn-platform-ios --all-targets \
@@ -394,15 +402,21 @@ cross-check:
 	    --target $(AND_TARGET) -- -D warnings
 # The Android shell's Rust half. Two libraries, not one: CD-I5 forbids
 # `twinvpn-platform-android` to name `twinvpn-core`, so the core's JNI entries
-# live in their own crate and their own `.so`. It is checked here for the same
-# reason the platform adapters are -- it is Rust, it ships, and nothing else on
-# this host compiles it.
+# live in their own crate and their own `.so`. It hosts a core, so it is in the
+# blocked set above for the same reason and by the same edge.
 	@if [ -f shells/android/jni/Cargo.toml ]; then \
-	  echo "==> cross-check shells/android/jni ($(AND_TARGET))"; \
-	  ( cd shells/android/jni && $(CARGO) clippy --workspace --all-targets \
-	      --target $(AND_TARGET) -- -D warnings ) || exit 1; \
+	  echo "==> cross-check shells/android/jni ($(AND_TARGET)) -- see BLOCKED below"; \
+	  ( cd shells/android/jni && $(CARGO) tree -i ring --target $(AND_TARGET) >/dev/null 2>&1 ) \
+	    || { echo "    ring has LEFT the android graph: delete this exclusion and"; \
+	         echo "    restore the whole-workspace check"; exit 1; }; \
 	fi
 	@echo "==> cross-check OK (compile only -- nothing was linked or run)"
+	@echo "    BLOCKED, and therefore NOT compiled by anything on this host:"
+	@echo "      shells/windows twinvpnsvc, twinvpnctl"
+	@echo "      shells/macos   twinvpn-bridge"
+	@echo "      shells/android/jni twinvpn-android-jni"
+	@echo "    Cause: quinn/rustls -> ring, whose build script needs an MSVC,"
+	@echo "    Darwin or NDK C toolchain. ownership.md 11, finding G-4."
 	@echo "    NOT covered: Swift (shells/ios), Kotlin (shells/android) -- no"
 	@echo "    Darwin SDK, no JDK/Android SDK/NDK on this host. ownership.md 9.2."
 
