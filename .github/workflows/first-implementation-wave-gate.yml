@@ -477,9 +477,23 @@ jobs:
       - macos-link-run
       - ios-link-run
       - android-link-run
-      - windows-privileged-lifecycle
-      - macos-privileged-lifecycle
-      - ios-device-lifecycle
+    # THE THREE PRIVILEGED JOBS ARE REQUIRED, AND ARE DELIBERATELY NOT IN
+    # `needs:`.
+    #
+    # They run on self-hosted runners. A `needs:` on a job whose runner label
+    # is not registered does not fail -- it QUEUES, for up to twenty-four
+    # hours, and the gate sits pending instead of returning a verdict. A check
+    # that cannot go red is not a gate.
+    #
+    # So the requirement is enforced where it can be enforced promptly: each
+    # privileged job writes its own evidence file with `privileged: true`, and
+    # build/acceptance/report.py has a required row per file. No runner means
+    # no file means NOT-EXECUTED, which counts against Phase 5 eligibility
+    # exactly as a failure does -- immediately, and by name.
+    #
+    # This is strictly stronger than `needs:` would be, not a relaxation: a
+    # self-hosted job that runs and goes green still cannot satisfy the row
+    # unless it also recorded a real privileged lifecycle.
     steps:
       - uses: actions/checkout@v4
         with:

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-08-29T22:57:17.921019+00:00",
-  "commit": "74d49e5d4a36f20acceabcced602c4085f62ebe8",
+  "generated_at": "2026-08-29T22:58:30.947045+00:00",
+  "commit": "0a908c4595e7ed304d1e68a21422d24ea8a2bf18",
   "worktree_dirty": true,
   "probes_executed": false,
   "rows": [
@@ -123,44 +123,10 @@
     {
       "section": "Platforms",
       "criterion": "Linux",
-      "verdict": "PASS",
-      "detail": "linux-link-run on local (local), 3 transition(s): STARTING->READY, READY->STOPPING, STOPPING->STOPPED",
+      "verdict": "NOT-EXECUTED",
+      "detail": "no evidence at build/ci/evidence/linux.json",
       "required": true,
-      "evidence": {
-        "schema_version": 1,
-        "platform": "linux",
-        "job_name": "linux-link-run",
-        "runner": "local",
-        "runner_kind": "local",
-        "privileged": false,
-        "github_run_id": null,
-        "github_run_url": null,
-        "commit": "74d49e5d4a36f20acceabcced602c4085f62ebe8",
-        "toolchain": {
-          "rustc": "rustc 1.90.0 (1159e78c4 2025-09-14)",
-          "cargo": "cargo 1.90.0 (840b83a10 2025-07-30)",
-          "kernel": "Linux 6.18.33.2-microsoft-standard-WSL2"
-        },
-        "compiled": true,
-        "linked_real_core": true,
-        "loaded": true,
-        "invoked_core": true,
-        "received_result": true,
-        "lifecycle_transitions": [
-          "STARTING->READY",
-          "READY->STOPPING",
-          "STOPPING->STOPPED"
-        ],
-        "graceful_shutdown": true,
-        "test_command": "cargo test -q -p twinvpnd --test lifecycle -- --nocapture",
-        "test_exit_code": 0,
-        "artifacts": [
-          "build/ci/logs/linux/lifecycle.log"
-        ],
-        "notes": "",
-        "verdict": "PASS",
-        "generated_at": "2026-08-29T22:55:34Z"
-      }
+      "evidence": {}
     },
     {
       "section": "Platforms",
@@ -193,9 +159,33 @@
       "detail": "no evidence at build/ci/evidence/android.json",
       "required": true,
       "evidence": {}
+    },
+    {
+      "section": "Privileged / physical",
+      "criterion": "Windows privileged lifecycle",
+      "verdict": "NOT-EXECUTED",
+      "detail": "no evidence at build/ci/evidence/windows-privileged.json",
+      "required": true,
+      "evidence": {}
+    },
+    {
+      "section": "Privileged / physical",
+      "criterion": "macOS NetworkExtension lifecycle",
+      "verdict": "NOT-EXECUTED",
+      "detail": "no evidence at build/ci/evidence/macos-privileged.json",
+      "required": true,
+      "evidence": {}
+    },
+    {
+      "section": "Privileged / physical",
+      "criterion": "iOS physical-device lifecycle",
+      "verdict": "NOT-EXECUTED",
+      "detail": "no evidence at build/ci/evidence/ios-device.json",
+      "required": true,
+      "evidence": {}
     }
   ],
-  "required_total": 20,
-  "required_pass": 1,
+  "required_total": 23,
+  "required_pass": 0,
   "phase_5_eligibility": "FAIL"
 }

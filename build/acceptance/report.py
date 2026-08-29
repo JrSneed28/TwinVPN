@@ -255,6 +255,25 @@ def build_rows(run: bool):
         add("Platforms", label, v, d)
         rows[-1]["evidence"] = ev
 
+    # -- Privileged / physical lifecycle -----------------------------------
+    #
+    # A hosted runner proves linking and execution. It does not prove
+    # privileged platform behaviour, and this section exists so that the two
+    # can never be conflated: these rows read SEPARATE evidence files, and a
+    # file whose `privileged` is false fails the row no matter how green the
+    # job that wrote it was.
+    #
+    # No self-hosted runner registered means no file, means NOT-EXECUTED,
+    # means Phase 5 is not eligible. That is the intended behaviour: the
+    # privileged criterion is undischarged until somebody actually discharges
+    # it on real hardware.
+    for stem, label in (("windows-privileged", "Windows privileged lifecycle"),
+                        ("macos-privileged", "macOS NetworkExtension lifecycle"),
+                        ("ios-device", "iOS physical-device lifecycle")):
+        v, d, ev = probe_platform(stem, require_privileged=True)
+        add("Privileged / physical", label, v, d)
+        rows[-1]["evidence"] = ev
+
     return rows
 
 

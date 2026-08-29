@@ -1,6 +1,6 @@
 # First Implementation Wave — acceptance report
 
-Commit `74d49e5d4a36f20acceabcced602c4085f62ebe8` (DIRTY WORKTREE — not release evidence)
+Commit `0a908c4595e7ed304d1e68a21422d24ea8a2bf18` (DIRTY WORKTREE — not release evidence)
 Probes executed: **False**
 
 
@@ -38,15 +38,23 @@ Probes executed: **False**
 
 | criterion | verdict | evidence |
 |---|---|---|
-| Linux | **PASS** | linux-link-run on local (local), 3 transition(s): STARTING->READY, READY->STOPPING, STOPPING->STOPPED |
+| Linux | **NOT-EXECUTED** | no evidence at build/ci/evidence/linux.json |
 | Windows link/run | **NOT-EXECUTED** | no evidence at build/ci/evidence/windows.json |
 | macOS link/run | **NOT-EXECUTED** | no evidence at build/ci/evidence/macos.json |
 | iOS link/run | **NOT-EXECUTED** | no evidence at build/ci/evidence/ios.json |
 | Android link/run | **NOT-EXECUTED** | no evidence at build/ci/evidence/android.json |
 
+## Privileged / physical
+
+| criterion | verdict | evidence |
+|---|---|---|
+| Windows privileged lifecycle | **NOT-EXECUTED** | no evidence at build/ci/evidence/windows-privileged.json |
+| macOS NetworkExtension lifecycle | **NOT-EXECUTED** | no evidence at build/ci/evidence/macos-privileged.json |
+| iOS physical-device lifecycle | **NOT-EXECUTED** | no evidence at build/ci/evidence/ios-device.json |
+
 ## Phase 5 eligibility
 
-`1` of `20` required criteria are PASS.
+`0` of `23` required criteria are PASS.
 
 **Phase 5 eligibility: FAIL**
 
