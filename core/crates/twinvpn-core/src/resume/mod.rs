@@ -17,29 +17,23 @@
 //! full handshake. This module is the wire flow the contract describes — one
 //! authenticated datagram, no key exchange, no control plane, ~1 RTT.
 //!
-//! # NOT REACHED BY THE PRODUCT YET — read this before believing the table below
+//! # What is wired, and what is still not — read this before believing the table
 //!
-//! **Every call site of [`crate::session_loop::SessionRuntime::arm_resumption`],
-//! [`ResumeState::offer`], [`ResumeState::accept`] and `resume_on_wire` outside
-//! this module is a test.** No datagram from a socket reaches `accept`, and
-//! nothing transmits what `offer` produces. Both halves are unreached, not just
-//! the producer's keying seam.
+//! **Arming is real.** [`crate::execute::establishment`] arms every `Session`
+//! that completes a production `Noise_IKpsk2` handshake, from the
+//! [`twinvpn_crypto::EstablishedHandshake`] that handshake produced. The keying
+//! seam this module used to be blocked on is closed: the secret is
+//! `HKDF-Extract(salt, k1 ‖ k2)` over Noise's own split outputs, computed inside
+//! `twinvpn-crypto` and reachable no other way. `twinvpn_crypto::established`
+//! states the construction and why it is the right one.
 //!
-//! So the rows below are properties of [`ResumeState`] **in isolation**, proven
-//! by `tests/resume.rs` and `tests/resume_lifecycle.rs`, and they are **not yet**
-//! properties of a running TwinVPN. A reader who takes "wire-level session
-//! resumption is implemented" from this file would be wrong in the way that
-//! matters: a real session still cannot resume.
-//!
-//! Two distinct things are owed, and neither is in this crate:
-//!
-//! 1. **Arming**, blocked on a `twinvpn-crypto` accessor for the per-session
-//!    secret — see the `# Security` block on `arm_resumption`, which explains
-//!    why the handshake hash is not a substitute and why snow's
-//!    `dangerously_get_raw_split` is not one either.
-//! 2. **Carriage**, which is not blocked on anything cryptographic: something in
-//!    the datapath has to send the bytes `offer` returns and hand what arrives
-//!    to `accept`. That is ordinary wiring and it has simply not been done.
+//! **Carriage is still not.** Nothing transmits the bytes [`ResumeState::offer`]
+//! returns, and no datagram from a socket reaches [`ResumeState::accept`]: the
+//! datapath allocates no frame type for a resume. That is ordinary wiring, it is
+//! blocked on nothing cryptographic, and until it is done a real `Session` holds
+//! usable material and never spends it. A reader who takes "wire-level session
+//! resumption is implemented" from this file would still be wrong about the
+//! wire, and right about the keys.
 //!
 //! | Rule | Where it lives here |
 //! |---|---|
@@ -81,8 +75,8 @@
 use core::time::Duration;
 
 use prost::Message as _;
-use twinvpn_crypto::noise::{Role, REKEY_AFTER_TIME};
-use twinvpn_crypto::ReplayWindow;
+use twinvpn_crypto::noise::REKEY_AFTER_TIME;
+use twinvpn_crypto::{EstablishedHandshake, ReplayWindow};
 use twinvpn_env::ElapsedInstant;
 use twinvpn_schema::{v1, validate, Channel};
 use twinvpn_types::{Identifier as _, SessionNonce};
@@ -173,17 +167,21 @@ pub struct ResumeState {
 impl ResumeState {
     /// Arms resumption for a `Session` whose handshake just completed.
     ///
+    /// `handshake` is the authenticated result of that handshake, and it is the
+    /// only source of both the secret and this device's role — see
+    /// [`ResumptionKeys::derive`] for what accepting either from a caller used
+    /// to allow.
+    ///
     /// `path_epoch` is the epoch the `Session` was established at; it seeds both
     /// directions, so the first resume in either direction must present a
     /// strictly greater one.
     pub fn armed(
-        handshake_secret: &[u8],
-        local_role: Role,
+        handshake: &EstablishedHandshake,
         session_nonce: SessionNonce,
         path_epoch: u64,
         now: ElapsedInstant,
     ) -> Result<Self, ResumeRefusal> {
-        let keys = ResumptionKeys::derive(handshake_secret, local_role)?;
+        let keys = ResumptionKeys::derive(handshake)?;
         let mut seen = ReplayWindow::new();
         // Seeding the window is what makes "strictly greater than the epoch we
         // established at" true for the very first inbound resume, rather than

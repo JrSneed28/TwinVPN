@@ -72,9 +72,11 @@ use snow::params::NoiseParams;
 use snow::resolvers::{CryptoResolver, DefaultResolver};
 use snow::types::Random;
 use twinvpn_env::{Entropy, Env};
+use zeroize::Zeroize as _;
 
 use crate::binding::VerifiedTunnelKey;
 use crate::erase::ErasingTransport;
+use crate::established::{EstablishedHandshake, HandshakeSecret};
 use crate::locked::LockedBytes;
 use crate::psk::{TwinNetPsk, PSK_LEN};
 use crate::replay::{ReplayWindow, SendCounter};
@@ -307,6 +309,66 @@ impl Handshake {
             send: SendCounter::new(),
             recv: ReplayWindow::new(),
         })
+    }
+
+    /// Completes the handshake into a transport session **and** the
+    /// authenticated result ADR-0001 §7.3.2 keys resumption from.
+    ///
+    /// This is the **only** thing in the workspace that can mint an
+    /// [`EstablishedHandshake`]. It consumes the handshake, so a second call is
+    /// not a thing that exists, and every field of the result is taken from the
+    /// handshake rather than from a caller:
+    ///
+    /// - the role is `self.role`, fixed by [`Handshake::new`] before a byte
+    ///   moved;
+    /// - the peer static is the one `snow` says the peer **proved** it holds —
+    ///   absent, this refuses rather than returning an "authenticated" value
+    ///   that authenticated nobody;
+    /// - the secret is HKDF-Extract over Noise's own `Split()` outputs, which
+    ///   `crate::established` documents in full.
+    ///
+    /// [`Self::into_transport`] is unchanged and still available for a caller
+    /// that wants only the traffic keys.
+    ///
+    /// # Why the raw split, and why that is not the transport keys leaking
+    ///
+    /// `snow`'s `dangerously_get_raw_split` returns the same two 32-byte values
+    /// the two cipher states are keyed from, and this method calls it **before**
+    /// converting the state — `SymmetricState::split_raw` only reads the
+    /// chaining key, so the transport session that follows is keyed identically
+    /// to one from [`Self::into_transport`]. Those two values do not leave this
+    /// function: what escapes is `HKDF-Extract(salt, k1 ‖ k2)`, and inverting
+    /// that is a preimage attack on HMAC-SHA-256. Resumption material therefore
+    /// cannot yield transport keys, which is the property `crate::established`
+    /// exists to make true.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::HandshakeRejected`] if the handshake is not complete or
+    /// authenticated no peer static;
+    /// [`CryptoError::LockedAllocationUnavailable`] if the locked allocator
+    /// could not hold the secret — fail-closed, because a secret this crate
+    /// cannot protect is one it must not hand out.
+    pub fn split(mut self) -> Result<(TransportSession, EstablishedHandshake)> {
+        if !self.is_finished() {
+            return Err(CryptoError::HandshakeRejected {
+                step: "handshake incomplete",
+            });
+        }
+        let remote_static: [u8; STATIC_KEY_LEN] = self
+            .remote_static()
+            .and_then(|rs| <[u8; STATIC_KEY_LEN]>::try_from(rs).ok())
+            .ok_or_else(crate::established::no_peer_static)?;
+        let role = self.role;
+        // Erased on the way out whatever happens below: these two arrays are
+        // the transport keys in the clear, and an early return must not leave
+        // them on the stack.
+        let (mut k1, mut k2) = self.state.dangerously_get_raw_split();
+        let secret = HandshakeSecret::extract(&k1, &k2);
+        k1.zeroize();
+        k2.zeroize();
+        let established = EstablishedHandshake::new(role, remote_static, secret?);
+        Ok((self.into_transport()?, established))
     }
 }
 

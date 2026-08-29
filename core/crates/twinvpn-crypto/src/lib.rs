@@ -36,10 +36,11 @@
 //! [`dcbor`]'s canonicity check, and the type-level gates in [`binding`] and
 //! [`cose`].
 //!
-//! # The three gates that are types rather than comments
+//! # The four gates that are types rather than comments
 //!
 //! | Rule | Where a comment would have gone | The type instead |
 //! |---|---|---|
+//! | "`resumption_secret` is derived from the completed handshake" (ADR-0001 §7.3.2 RS-1) | a `// pass the real handshake secret, and your own role` | [`established::EstablishedHandshake`] has no public constructor, carries the **authenticated** role, and is minted only by [`noise::Handshake::split`] |
 //! | "peers MUST verify the `TunnelKeyBinding` before trusting a static key" (ADR-0001 §11.4, K3) | a `// remember to verify` | [`binding::VerifiedTunnelKey`] has no public constructor, and [`noise::HandshakeConfig`] takes one |
 //! | "VERIFIED OVER THE RECEIVED OCTETS … MUST NOT re-serialize before verifying" (CDDL rule 3) | a `// do not re-encode` | [`cose::VerifiedStatement`] has no public constructor, and [`emit::Item`] does not convert from [`dcbor::Value`] |
 //! | "MUST NOT reset the L-DATA nonce counter or replay window" (ADR-0001 §7.2, §7.3.2 RS-3) | a `// do not reset` | [`replay::ReplayWindow`] has no `reset`, and its only mutation moves forward |
@@ -89,6 +90,7 @@ pub mod emit;
 // point of the type is that there is no such thing as an unerased one.
 mod erase;
 pub mod error;
+pub mod established;
 pub mod kdf;
 pub mod locked;
 pub mod noise;
@@ -112,6 +114,7 @@ pub use deviceid::{
     derive_device_id, derive_device_id_checked, derive_identity_id, derive_identity_id_checked,
 };
 pub use error::{CryptoError, Result, StatementKind};
+pub use established::{EstablishedHandshake, HandshakeSecret};
 pub use kdf::{hkdf_expand_label, hkdf_sha256, sha256, HkdfSha256};
 pub use locked::{LockedBytes, LockedMemoryReport};
 pub use pairing_offer::{OfferReject, PairingOffer};
