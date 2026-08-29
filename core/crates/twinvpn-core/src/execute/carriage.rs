@@ -288,9 +288,10 @@ pub(crate) fn stop_all(core: &Core) {
 /// build today, and the reason a `Session` with no direct path stays out of a
 /// steady state rather than quietly ending up on none.
 pub(crate) fn open_relay(core: &Core, session_id: SessionId) -> Result<(), Box<Diagnostic>> {
-    let deadline = core.env().now_monotonic().saturating_add(
-        twinvpn_session::timers::T_CONNECT.default,
-    );
+    let deadline = core
+        .env()
+        .now_monotonic()
+        .saturating_add(twinvpn_session::timers::T_CONNECT.default);
     let mut sessions = core.sessions();
     let Some(entry) = sessions.get_mut(&session_id) else {
         return Err(Box::new(refuse(codes::NET_SESSION_CLOSED_BY_USER)));
@@ -312,7 +313,9 @@ pub(crate) fn open_relay(core: &Core, session_id: SessionId) -> Result<(), Box<D
 
     let mut opened: Option<Result<crate::relay::RelayLeg, LegError>> = None;
     core.env().runtime().block_on(Box::pin(async {
-        opened = Some(crate::relay::open_leg(core.env(), socket.as_ref(), access.params(), deadline).await);
+        opened = Some(
+            crate::relay::open_leg(core.env(), socket.as_ref(), access.params(), deadline).await,
+        );
     }));
     let mut leg = match opened.expect("block_on drives the future to completion") {
         Ok(leg) => leg,
@@ -337,7 +340,8 @@ pub(crate) fn open_relay(core: &Core, session_id: SessionId) -> Result<(), Box<D
         );
     }));
     match bound.expect("block_on drives the future to completion") {
-        Ok(crate::relay::BindOutcome::Bound { .. } | crate::relay::BindOutcome::Pending { .. }) => {}
+        Ok(crate::relay::BindOutcome::Bound { .. } | crate::relay::BindOutcome::Pending { .. }) => {
+        }
         Ok(crate::relay::BindOutcome::Refused(refusal)) => {
             return Err(Box::new(refuse(
                 refusal.reason_code().unwrap_or(codes::RELAY_NONE_REACHABLE),
@@ -425,37 +429,35 @@ fn relay_outbound(
     core.env().runtime().block_on(Box::pin(async {
         sent = Some(crate::relay::send_sealed(socket.as_ref(), pair.primary_mut(), &sealed).await);
     }));
-    match sent {
-        Some(Ok(())) => length,
-        // A send that the leg or the platform refused is a **real observation**
-        // about the leg, and §11.4 is what decides whether it is the relay's
-        // fault. It is fed to the attribution rather than counted as a drop.
-        _ => {
-            // §11.4's inputs, as facts rather than as a verdict. A refused
-            // send is a **hard leg signal** — a socket error, an ICMP
-            // unreachable — and it is emphatically not `half_flow_silent`,
-            // which would attribute the peer's silence to the relay and move a
-            // session that has nowhere better to go.
-            observe(
-                core,
-                entry,
-                Observation {
-                    missed_leg_pings: 0,
-                    leg_hard_signal: true,
-                    drain_deadline_reached: false,
-                    // Emphatically not set: attributing the peer's silence to
-                    // the relay is what §11.4 forbids, and `Observation` has no
-                    // `Default` precisely so that every field is a stated fact.
-                    half_flow_silent: false,
-                    quality_violated: false,
-                    all_legs_on_interface_dead: false,
-                    capacity_rejected: false,
-                    region_failed: false,
-                },
-            );
-            0
-        }
+    if let Some(Ok(())) = sent {
+        return length;
     }
+    // A send that the leg or the platform refused is a **real observation**
+    // about the leg, and §11.4 is what decides whether it is the relay's
+    // fault. It is fed to the attribution rather than counted as a drop.
+    //
+    // §11.4's inputs, as facts rather than as a verdict. A refused send is a
+    // **hard leg signal** — a socket error, an ICMP unreachable — and it is
+    // emphatically not `half_flow_silent`, which would attribute the peer's
+    // silence to the relay and move a session that has nowhere better to go.
+    observe(
+        core,
+        entry,
+        Observation {
+            missed_leg_pings: 0,
+            leg_hard_signal: true,
+            drain_deadline_reached: false,
+            // Emphatically not set: attributing the peer's silence to the relay
+            // is what §11.4 forbids, and `Observation` has no `Default`
+            // precisely so that every field is a stated fact.
+            half_flow_silent: false,
+            quality_violated: false,
+            all_legs_on_interface_dead: false,
+            capacity_rejected: false,
+            region_failed: false,
+        },
+    );
+    0
 }
 
 /// `DATA` frame → [`Sealed`] → open → TUN.
@@ -556,10 +558,12 @@ fn observe(core: &Core, entry: &mut SessionEntry, observation: Observation) {
         core.publish_diagnostic(&Diagnostic::builder(code, Component::RelayClient).build());
     }
     match outcome {
-        Failover::PromotedStandby { .. } => {
-            // T19: make-before-break. The `Session` stays on `Relayed` because
-            // the promoted leg is already bound and already carrying.
-        }
+        // T19: make-before-break — the `Session` stays on `Relayed` because the
+        // promoted leg is already bound and already carrying — and `NoMove`,
+        // where §11.4 attributed the observation to something a relay move
+        // cannot fix. Two different reasons for the same action, which is
+        // *nothing*: the leg in hand keeps carrying.
+        Failover::PromotedStandby { .. } | Failover::NoMove { .. } => {}
         Failover::NeedsSelection { .. } => {
             // T20, not T19. There is no standby, so there is genuinely no
             // carrying path for as long as a fresh selection takes — and
@@ -567,7 +571,6 @@ fn observe(core: &Core, entry: &mut SessionEntry, observation: Observation) {
             // not happening. The leg is dropped so nothing sends on it.
             entry.relay = None;
         }
-        Failover::NoMove { .. } => {}
     }
 }
 

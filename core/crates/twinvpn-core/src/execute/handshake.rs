@@ -228,6 +228,31 @@ pub fn ordered(local: DeviceId, peer: DeviceId) -> (DeviceId, DeviceId) {
 /// Runs one complete L-DATA handshake and returns a live tunnel.
 ///
 /// Both roles are driven from here, because both are reachable from the same
+/// The one attempt's worth of facts [`drive`] needs, in one value.
+///
+/// A struct rather than six more parameters: the six travel together, every one
+/// of them is read off the same `SessionEntry`, and passing them as a group is
+/// what keeps a caller from pairing one session's `keying` with another's
+/// `peer`. The lifetime is the `TunnelKeying` borrow — the key material is
+/// **borrowed for the handshake and never moved into it**, so a refusal leaves
+/// it exactly where T12's retry will look for it.
+#[derive(Debug, Clone, Copy)]
+pub struct Attempt<'a> {
+    /// The `Session` this handshake belongs to; also the `TunnelId`'s source.
+    pub session: SessionId,
+    /// This device's `DeviceId`. With `peer`, it decides the roles.
+    pub local_device: DeviceId,
+    /// The peer's `DeviceId`.
+    pub peer: DeviceId,
+    /// Where to send message 1. `None` refuses with `Refusal::NoEndpoint`
+    /// rather than guessing an address.
+    pub peer_endpoint: Option<Endpoint>,
+    /// The keys. `None` refuses with `Refusal::NoKeyMaterial`.
+    pub keying: Option<&'a TunnelKeying>,
+    /// ADR-0007 N-20's epoch, covered by the prologue on both ends.
+    pub trust_epoch: u64,
+}
+
 /// `session.connect`: two peers that connect at the same moment must not both
 /// wait, and two that connect at different moments must not both send.
 ///
@@ -247,14 +272,17 @@ pub fn ordered(local: DeviceId, peer: DeviceId) -> (DeviceId, DeviceId) {
 pub async fn drive(
     env: &Env,
     socket: &dyn UdpSocket,
-    session: SessionId,
-    local_device: DeviceId,
-    peer: DeviceId,
-    peer_endpoint: Option<Endpoint>,
-    keying: Option<&TunnelKeying>,
-    trust_epoch: u64,
+    attempt: Attempt<'_>,
     deadline: MonotonicInstant,
 ) -> Result<Handshaken, Refusal> {
+    let Attempt {
+        session,
+        local_device,
+        peer,
+        peer_endpoint,
+        keying,
+        trust_epoch,
+    } = attempt;
     let keying = keying.ok_or(Refusal::NoKeyMaterial)?;
     let endpoint = peer_endpoint.ok_or(Refusal::NoEndpoint)?;
     let role = role_for(local_device, peer);
@@ -306,9 +334,7 @@ pub async fn drive(
                 // unrelated attempt cannot consume this handshake's state.
                 return Err(Refusal::Malformed);
             }
-            let keys = binding
-                .read_response(body)
-                .map_err(|_| Refusal::Rejected)?;
+            let keys = binding.read_response(body).map_err(|_| Refusal::Rejected)?;
             (keys, peer_index)
         }
         Role::Responder => {

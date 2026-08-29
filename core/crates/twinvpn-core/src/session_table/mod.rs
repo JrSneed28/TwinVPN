@@ -140,8 +140,8 @@ pub struct Established {
     /// Whether the two directions are running as spawned work.
     ///
     /// `false` on a runtime whose `spawn` is inline — see
-    /// [`crate::core::Core::start_pump`] — where the pump is stepped from
-    /// [`crate::core::Core::tick`] instead. Recorded rather than inferred so a
+    /// `execute::carriage::start`, which sets it — where the pump is stepped
+    /// from [`crate::core::Core::tick`] instead. Recorded rather than inferred so a
     /// caller can tell "the pump is running elsewhere" from "the pump is mine to
     /// step", which are different facts about the same object.
     pub spawned: bool,
@@ -260,10 +260,7 @@ impl SessionEntry {
     #[must_use]
     pub fn is_carrying(&self) -> bool {
         self.established.as_ref().is_some_and(|e| {
-            !e.cancel.is_cancelled()
-                && e.tunnel
-                    .lock()
-                    .is_ok_and(|t| t.state().carries_traffic())
+            !e.cancel.is_cancelled() && e.tunnel.lock().is_ok_and(|t| t.state().carries_traffic())
         })
     }
 }

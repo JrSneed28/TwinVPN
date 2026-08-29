@@ -782,11 +782,16 @@ impl Core {
                         .build(),
                 ));
             };
-            (binding.transport(), binding.attach_config(mobile_background))
+            (
+                binding.transport(),
+                binding.attach_config(mobile_background),
+            )
         };
-        attach.0.attach(&attach.1).await.map_err(|e| {
-            Box::new(twinvpn_cp_client::CpError::from(e).diagnostic())
-        })
+        attach
+            .0
+            .attach(&attach.1)
+            .await
+            .map_err(|e| Box::new(twinvpn_cp_client::CpError::from(e).diagnostic()))
     }
 
     /// Records the endpoint a peer is reachable at.

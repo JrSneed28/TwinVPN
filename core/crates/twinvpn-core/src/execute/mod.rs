@@ -246,18 +246,17 @@ fn connect(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnost
     // `Session` they come from the ledger instead — the same facts, recorded by
     // the gather that did run, rather than re-derived from a gather that did
     // not.
-    let (usable_candidate, no_candidate_either_family) = match gathered.as_ref() {
-        Some(gathered) => (
+    let (usable_candidate, no_candidate_either_family) = if let Some(gathered) = gathered.as_ref() {
+        (
             gathered.usable_candidate(),
             gathered.no_candidate_either_family(),
-        ),
-        None => {
-            let sessions = core.sessions();
-            let rows = sessions
-                .get(&session_id)
-                .map_or(0, |entry| entry.ledger.rows().len());
-            (rows > 0, rows == 0)
-        }
+        )
+    } else {
+        let sessions = core.sessions();
+        let rows = sessions
+            .get(&session_id)
+            .map_or(0, |entry| entry.ledger.rows().len());
+        (rows > 0, rows == 0)
     };
 
     // 2. T01's two trust guards, READ rather than asserted.
@@ -351,12 +350,45 @@ fn connect(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnost
     //    peer's silence every other `Session`'s stall.
     drop(sessions);
     effects = effects.saturating_add(establishment::carry(core, session_id, submission));
+
+    // A `Session` closed under us while the handshake ran is a refusal, not a
+    // silent success — and the lock taken to check that is released before
+    // `recorded` takes it again.
+    if !core.sessions().contains_key(&session_id) {
+        return Err(Box::new(reject(codes::NET_SESSION_CLOSED_BY_USER)));
+    }
+
+    // 7 and 8, which are one concern — what this connect leaves behind — and
+    //    are extracted so this function stays inside T1's length bound.
+    effects = effects.saturating_add(recorded(core, session_id, peer, submission, now));
+
+    Ok(Outcome::new(Vec::new(), effects))
+}
+
+/// Steps 7 and 8 of [`connect`]: the durable record, and the §4.4 local event.
+///
+/// Extracted whole rather than split at the `drop(sessions)`, because the two
+/// share the one fact they both report — the state the machine actually reached
+/// — and reading it twice would let the record and the event disagree about the
+/// same connect. The session lock is taken here and released before the event is
+/// published, exactly as it was inline.
+fn recorded(
+    core: &Core,
+    session_id: SessionId,
+    peer: twinvpn_types::DeviceId,
+    submission: &Submission,
+    now: twinvpn_env::MonotonicInstant,
+) -> u32 {
+    let mut effects = 0u32;
     let mut sessions = core.sessions();
     let Some(entry) = sessions.get_mut(&session_id) else {
-        return Err(Box::new(reject(codes::NET_SESSION_CLOSED_BY_USER)));
+        // The `Session` was closed under us while the handshake ran. There is
+        // nothing to record and nothing to announce; `connect` has already
+        // published everything it did.
+        return effects;
     };
 
-    // 7. The durable half (S-12). Queued here; `Core::flush` makes it durable.
+    // The durable half (S-12). Queued here; `Core::flush` makes it durable.
     let state = entry.runtime.machine().state();
     let record = DurableSession {
         session_id,
@@ -368,9 +400,9 @@ fn connect(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnost
         effects += 1;
     }
 
-    // 8. The §4.4 local event. `NAT.SINGLE_FAMILY_CANDIDATES` is what
-    //    `protocol.md` §4.1 requires to be flagged, and `single_family` is the
-    //    fact it turns on.
+    // The §4.4 local event. `NAT.SINGLE_FAMILY_CANDIDATES` is what
+    // `protocol.md` §4.1 requires to be flagged, and `single_family` is the
+    // fact it turns on.
     let context = core.emitter().context(
         Some(session_id),
         None,
@@ -393,9 +425,7 @@ fn connect(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnost
     );
     drop(sessions);
     core.publish_session_event(event, submission.actor_principal.clone());
-    effects += 1;
-
-    Ok(Outcome::new(Vec::new(), effects))
+    effects + 1
 }
 
 /// `session.reconnect` — forces re-establishment on an existing `Session`.

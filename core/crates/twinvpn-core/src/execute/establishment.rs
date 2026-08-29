@@ -121,12 +121,8 @@ pub(crate) fn carry(core: &Core, session_id: SessionId, submission: &Submission)
     // T08–T12 — CONNECTING. The handshake, and nothing else, decides.
     match direct(core, session_id) {
         Ok(()) => {
-            effects = effects.saturating_add(reached(
-                core,
-                session_id,
-                PathClass::WanDirect,
-                submission,
-            ));
+            effects =
+                effects.saturating_add(reached(core, session_id, PathClass::WanDirect, submission));
         }
         Err(direct_refusal) => {
             // The direct race produced no validated path. ADR-0006's answer is a
@@ -145,7 +141,7 @@ pub(crate) fn carry(core: &Core, session_id: SessionId, submission: &Submission)
                         core,
                         session_id,
                         &direct_refusal,
-                        relay_refusal,
+                        &relay_refusal,
                         submission,
                     ));
                 }
@@ -165,12 +161,7 @@ fn direct(core: &Core, session_id: SessionId) -> Result<(), handshake::Refusal> 
         let mut sessions = core.sessions();
         sessions.get_mut(&session_id).and_then(|entry| {
             let socket = entry.sockets.first().map(std::sync::Arc::clone)?;
-            Some((
-                socket,
-                entry.peer,
-                entry.peer_endpoint,
-                entry.keying.take(),
-            ))
+            Some((socket, entry.peer, entry.peer_endpoint, entry.keying.take()))
         })
     }) else {
         return Err(handshake::Refusal::NoEndpoint);
@@ -188,12 +179,14 @@ fn direct(core: &Core, session_id: SessionId) -> Result<(), handshake::Refusal> 
             handshake::drive(
                 core.env(),
                 socket.as_ref(),
-                session_id,
-                local_device.unwrap_or(peer),
-                peer,
-                peer_endpoint,
-                keying.as_ref(),
-                trust_epoch,
+                handshake::Attempt {
+                    session: session_id,
+                    local_device: local_device.unwrap_or(peer),
+                    peer,
+                    peer_endpoint,
+                    keying: keying.as_ref(),
+                    trust_epoch,
+                },
                 deadline,
             )
             .await,
@@ -264,12 +257,7 @@ fn relayed(core: &Core, session_id: SessionId) -> Result<(), Box<Diagnostic>> {
 }
 
 /// Fires `EV_HANDSHAKE_OK{class}` with the guards the handshake established.
-fn reached(
-    core: &Core,
-    session_id: SessionId,
-    class: PathClass,
-    submission: &Submission,
-) -> u32 {
+fn reached(core: &Core, session_id: SessionId, class: PathClass, submission: &Submission) -> u32 {
     fire(
         core,
         session_id,
@@ -305,12 +293,12 @@ fn failed(
     core: &Core,
     session_id: SessionId,
     direct_refusal: &handshake::Refusal,
-    relay_refusal: Box<Diagnostic>,
+    relay_refusal: &Diagnostic,
     submission: &Submission,
 ) -> u32 {
-    let code = direct_refusal.reason_code();
-    core.publish_diagnostic(&refuse(code));
-    core.publish_diagnostic(&relay_refusal);
+    let refused_with = direct_refusal.reason_code();
+    core.publish_diagnostic(&refuse(refused_with));
+    core.publish_diagnostic(relay_refusal);
     let mut effects = 2u32;
     effects = effects.saturating_add(fire(
         core,
@@ -321,7 +309,7 @@ fn failed(
             ..Guards::default()
         },
         Context {
-            transport_code: Some(code),
+            transport_code: Some(refused_with),
             ..Context::default()
         },
         submission,
