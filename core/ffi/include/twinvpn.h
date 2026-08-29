@@ -70,6 +70,31 @@
  *     mi.catalogue.get, event.resync, the MI half of version.get). Each is
  *     about THE CONNECTION, which does not exist in-process, and each MUST NOT
  *     acquire an ABI counterpart (ADR-0018 §11.16 (o)).
+ *   - SOCKETS. ownership.md §8 W-25 / §11.2 G-11. A UDP socket is on the
+ *     datapath, so the first bullet governs it: at PB-3's desktop userspace
+ *     gate (>= 60% of >= 90% of 1 GbE, so ~540 Mbit/s) a 1420-byte payload is
+ *     ~47,500 datagrams per second PER DIRECTION, and PB-4 prices the split at
+ *     0 ns/packet on Linux, Windows, Android and OpenWrt. No per-datagram
+ *     crossing costs 0 ns, so a `udp_send`/`udp_recv` pair here would falsify
+ *     PB-1 and PB-4 BY CONSTRUCTION rather than on a measurement. F-6 compounds
+ *     it: a vtable callee MUST NOT re-enter a mutating core function, so every
+ *     received datagram would additionally owe a hop to the one mutating thread
+ *     S-47 allows -- scheduler latency, per packet. THIS ENTRY MUST NOT BE
+ *     ADDED. Sockets belong in Rust in the shell's own process, over
+ *     `twinvpn-platform-*`, which is what all five shells already do
+ *     (ownership.md §10.4, generalised by X-7).
+ *   - INTERFACE ENUMERATION. Same finding, DIFFERENT reason, and the difference
+ *     matters because this one is closeable. It is control-rate -- a gather and
+ *     a network change, never a packet -- so PB-1 and PB-4 say nothing about
+ *     it. What blocks it is F-8: structured data crosses as blobs generated
+ *     from ADR-0003's contract artifacts, and `contracts/` holds no message
+ *     that can carry `InterfaceFacts`. `twinvpn.v1.NetworkInterface` is lossy
+ *     three ways -- no interface INDEX, no `link_class`, and `addresses` as
+ *     `repeated IPPrefix`, the shape that masks 10.0.0.7/24 to its network
+ *     address and drops fe80::/10 outright (W-39). Encoding over it would
+ *     reinstate a defect the corpus has already fixed once. Closing this needs
+ *     a `contracts/` amendment under ownership.md §3; it is an ask, not a patch,
+ *     and `contracts/` is FROZEN.
  */
 
 #ifndef TWINVPN_H
