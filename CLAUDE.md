@@ -110,7 +110,7 @@ SendMessage({ to: "researcher", summary: "Start", message: "[task context]" })
 - **Neural**: Enabled
 
 ```bash
-npx @claude-flow/cli@latest swarm init --topology hierarchical --max-agents 8 --strategy specialized
+./scripts/ruflo swarm init --topology hierarchical --max-agents 8 --strategy specialized
 ```
 
 ### Agent Routing
@@ -139,14 +139,14 @@ npx @claude-flow/cli@latest swarm init --topology hierarchical --max-agents 8 --
 
 ### Before Any Task
 ```bash
-npx @claude-flow/cli@latest memory search --query "[task keywords]" --namespace patterns
-npx @claude-flow/cli@latest hooks route --task "[task description]"
+./scripts/ruflo memory search --query "[task keywords]" --namespace patterns
+./scripts/ruflo hooks route --task "[task description]"
 ```
 
 ### After Success
 ```bash
-npx @claude-flow/cli@latest memory store --namespace patterns --key "[name]" --value "[what worked]"
-npx @claude-flow/cli@latest hooks post-task --task-id "[id]" --success true --store-results true
+./scripts/ruflo memory store --namespace patterns --key "[name]" --value "[what worked]"
+./scripts/ruflo hooks post-task --task-id "[id]" --success true --store-results true
 ```
 
 ### MCP Tools (use `ToolSearch("keyword")` to discover)
@@ -172,7 +172,7 @@ npx @claude-flow/cli@latest hooks post-task --task-id "[id]" --success true --st
 | `document` | After API changes |
 
 ```bash
-npx @claude-flow/cli@latest hooks worker dispatch --trigger audit
+./scripts/ruflo hooks worker dispatch --trigger audit
 ```
 
 ## Agents
@@ -198,27 +198,42 @@ npm run build && npm test
 ## CLI Quick Reference
 
 ```bash
-npx @claude-flow/cli@latest init --wizard           # Setup
-npx @claude-flow/cli@latest swarm init --v3-mode     # Start swarm
-npx @claude-flow/cli@latest memory search --query "" # Vector search
-npx @claude-flow/cli@latest hooks route --task ""    # Route to agent
-npx @claude-flow/cli@latest doctor --fix             # Diagnostics
-npx @claude-flow/cli@latest security scan            # Security scan
-npx @claude-flow/cli@latest performance benchmark    # Benchmarks
+./scripts/ruflo init --wizard             # Setup
+./scripts/ruflo swarm init --v3-mode      # Start swarm
+./scripts/ruflo memory search --query ""  # Vector search
+./scripts/ruflo hooks route --task ""     # Route to agent
+./scripts/ruflo doctor --fix              # Diagnostics
+./scripts/ruflo security scan             # Security scan
+./scripts/ruflo performance benchmark     # Benchmarks
 ```
 
-26 commands, 140+ subcommands. Use `--help` on any command for details.
+52 commands, 140+ subcommands. Use `--help` on any command for details.
+
+> `scripts/ruflo` is the only supported entry point: it runs the pinned local
+> install and refuses to run on version drift. Never `npx ruflo` — under npx the
+> CLI resolves `@claude-flow/aidefence` against the npx cache (the `aidefence_*`
+> MCP tools then fail) and refetches on every launch, blowing the 30s MCP
+> connect timeout.
 
 ## Setup
 
+`.mcp.json` is checked in, so a fresh clone only needs:
+
 ```bash
-claude mcp add claude-flow -- npx -y ruflo@latest mcp start
-npx ruflo@latest doctor --fix
+npm install              # installs ruflo at the .ruflo-version pin
+./scripts/ruflo doctor   # verify; --fix prints suggestions, applies nothing
+```
+
+If the MCP server ever needs re-registering, register the local entry point —
+not npx:
+
+```bash
+claude mcp add claude-flow -- node ./node_modules/ruflo/bin/ruflo.js mcp start
 ```
 
 > The background `daemon` is optional. It runs interval workers that each spawn
 > a headless `claude` session, so it consumes tokens continuously. Start it only
-> if you want those sweeps: `npx ruflo@latest daemon start` (self-stops after 12h
+> if you want those sweeps: `./scripts/ruflo daemon start` (self-stops after 12h
 > by default; `--ttl 0` to disable, `daemon status --all` to audit running daemons).
 
 **Agent tool** handles execution (agents, files, code, git). **MCP tools** handle coordination (swarm, memory, hooks). **CLI** is the same via Bash.
