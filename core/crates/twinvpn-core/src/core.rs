@@ -22,14 +22,25 @@
 //! installed rules in the OS's custody precisely so a core fault cannot drop
 //! protection.
 
+// Three imports and three methods below are `full`-only, and they are gated
+// rather than left to warn because `make cross-check` now COMPILES `core-lite`
+// (it is the profile that reaches a Darwin or Android target on a host with no
+// C toolchain for one -- `ownership.md` §11, G-4/G-6). Until it did, this
+// profile was declared and never built, so nothing said so.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+#[cfg(feature = "full")]
+use std::sync::MutexGuard;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_core::future::BoxFuture;
 use twinvpn_diag::{Emitter, Ledger, Tier};
-use twinvpn_env::{Env, MonotonicInstant};
-use twinvpn_mgmt::{catalogue, CoreCommand, Submission};
+use twinvpn_env::Env;
+#[cfg(feature = "full")]
+use twinvpn_env::MonotonicInstant;
+#[cfg(feature = "full")]
+use twinvpn_mgmt::CoreCommand;
+use twinvpn_mgmt::{catalogue, Submission};
 use twinvpn_platform::PlatformAdapter;
 use twinvpn_schema::v1;
 use twinvpn_types::{codes, Component, Diagnostic, EvidenceValue, ReasonCode};
@@ -532,6 +543,7 @@ impl Core {
     }
 
     /// The Tier-0 emitter.
+    #[cfg(feature = "full")]
     pub(crate) const fn emitter(&self) -> &Emitter {
         &self.emitter
     }
@@ -819,6 +831,7 @@ impl Core {
     }
 
     /// Publishes a local, device-authoritative session event.
+    #[cfg(feature = "full")]
     pub(crate) fn publish_session_event(&self, event: v1::SessionEvent, actor: Option<String>) {
         if let Ok(mut ledger) = self.ledger.lock() {
             ledger.push(
@@ -838,6 +851,7 @@ impl Core {
     /// adapter's own contract bounds it (§11.6, `ApplyBudget`). On the lab's
     /// virtual-time runtime it is inline and deterministic **by that runtime's
     /// design**, which is what makes a scenario reproducible.
+    #[cfg(feature = "full")]
     pub(crate) fn block_on_adapter<'a, T: Send + 'static>(
         &'a self,
         make: impl FnOnce(&'a Env, &'a Arc<dyn PlatformAdapter>) -> BoxFuture<'a, T>,

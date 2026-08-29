@@ -35,7 +35,12 @@ license      = "Apache-2.0"
 repository   = "https://github.com/twinvpn/twinvpn"
 
 [workspace.dependencies]
-twinvpn-core           = { path = "../../core/crates/twinvpn-core" }
+# `default-features = false` so the ONE member that hosts a core --
+# `twinvpn-bridge` -- can choose the profile. It re-enables `full` through its
+# own default feature, so a real build of this shell is byte-for-byte what it
+# was; what the line buys is a SECOND, reduced profile that `make cross-check`
+# can compile on a host with no Darwin C toolchain. `ownership.md` §11, G-4/G-6.
+twinvpn-core           = { path = "../../core/crates/twinvpn-core", default-features = false }
 twinvpn-types          = { path = "../../core/crates/twinvpn-types" }
 twinvpn-env            = { path = "../../core/crates/twinvpn-env" }
 twinvpn-platform       = { path = "../../core/crates/twinvpn-platform" }

@@ -43,6 +43,19 @@ crate-type = ["cdylib"]
 # through their Rust declarations rather than through the C header, because it
 # is in the same address space and linking the header twice would give one
 # process two copies of the surface F-1 makes a permanent obligation.
-twinvpn-ffi = { path = "../../../core/crates/twinvpn-ffi" }
+twinvpn-ffi = { path = "../../../core/crates/twinvpn-ffi", default-features = false }
 
 jni = "0.21"
+
+# The core's PROFILE, forwarded through `twinvpn-ffi`. CB-2 means nothing here
+# branches on it — the marshalling is the same either way — so `default =
+# ["full"]` is the shipped `.so` unchanged. `core-lite` exists so
+# `make cross-check` can type-check this crate for `aarch64-linux-android` on a
+# host with no NDK: `full` reaches `twinvpn-cp-client` -> `quinn` -> `rustls` ->
+# `ring`, and `ring`'s build script wants `aarch64-linux-android-clang`. It is a
+# PARTIAL proof, and the cross-check banner says which half is still unproven.
+# `ownership.md` §11, G-4/G-6.
+[features]
+default   = ["full"]
+full      = ["twinvpn-ffi/full"]
+core-lite = ["twinvpn-ffi/core-lite"]

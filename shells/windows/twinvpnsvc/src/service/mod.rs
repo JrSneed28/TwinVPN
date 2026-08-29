@@ -29,6 +29,14 @@
 //! | [`server`] | the whole frame loop, over any `AsyncRead + AsyncWrite` | the pipe itself |
 //! | [`logging`] | the level mapping | — |
 
+// `core-host`, not `service`, and the omission was a real compile break rather
+// than a tidiness point: `events` names `twinvpn_core::{Core, CoreEvent,
+// CoreEventKind}`, and `twinvpn-core` is pulled in by `core-host` alone. Its
+// only two callers, `runtime` and `server`, are gated the same way — so this
+// gate removes nothing from any real build, and without it the `--features
+// service` compile proof this crate's `Cargo.toml` documents does not build.
+// `ownership.md` §11, finding G-7.
+#[cfg(feature = "core-host")]
 pub mod events;
 pub mod logging;
 pub mod peer;
