@@ -216,35 +216,108 @@ jobs:
   # =========================================================================
   windows-link-run:
     name: windows-link-run
+    # PINNED. `windows-latest` moves between images, and an image move that
+    # changed the MSVC toolset would change what this evidence is about with no
+    # diff to point at.
     runs-on: windows-2025
+    # A cold cargo build of the core plus the shell for MSVC is the long pole.
+    # 90 minutes is a hard fail, not a target: docs/testing-strategy.md rule C-1
+    # says a tier that exceeds its budget moves work down a tier, never raises
+    # the budget silently.
     timeout-minutes: 90
+    permissions:
+      contents: read
     defaults:
       run:
+        # `build/ci/ci-windows.sh` is bash and Windows runners have it. It
+        # refuses to run anywhere but Windows, so this line is load-bearing:
+        # PowerShell would not find the script at all and the failure would read
+        # as a missing file.
         shell: bash
     steps:
       - uses: actions/checkout@v4
+
+      # The toolchain versions the evidence records. Printed here as well as by
+      # the script, so a reader of the log sees them before the first compile
+      # error rather than after it.
       - name: toolchain versions
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
           cargo --version
+          rustc -vV | grep '^host:'
           cmd //c ver
+          vswhere='/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe'
+          if [ -x "$vswhere" ]; then
+            "$vswhere" -latest -products '*' -property installationVersion
+            ls "$("$vswhere" -latest -products '*' -property installationPath | tr -d '\r' | sed 's|\\\\|/|g; s|^C:|/c|')/VC/Tools/MSVC"
+          else
+            echo "vswhere.exe absent: the MSVC toolset version cannot be reported"
+          fi
+
+      # No `restore-keys` prefix fallback, for the reason `.github/workflows/
+      # rust-t1.yml` gives at length: a prefix fallback is exactly the mechanism
+      # that serves a cache built with a different toolchain or lockfile, and a
+      # wrong hit is a green build of the wrong thing.
       - uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo
-            ~/.rustup
-          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            core/target
+            shells/windows/target
+          key: fwg-windows-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'core/Cargo.lock', 'shells/windows/Cargo.lock', 'build/ci/ci-windows.sh') }}
+
       - name: make ci-windows
         run: make ci-windows
+
+      # ARTIFACTS, and what may never be in them.
+      #
+      # `build/ci/logs/windows/` carries the test binary's stdout and, on a
+      # privileged run, the WFP state dump. It carries NO private device key, NO
+      # pairing secret, NO authentication token, NO tunnel plaintext and NO
+      # packet capture: this job establishes no tunnel and moves no packet, and
+      # ADR-0015 §11.4 classes an address SENSITIVE so nothing in this shell
+      # logs one. The paths are enumerated rather than globbed from the repo
+      # root, so a future file cannot be swept in by accident.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: evidence-windows
           path: |
             build/ci/evidence/windows.json
-            build/ci/logs/windows/**
+            build/ci/logs/windows/lifecycle.log
+          # `error`, not `ignore`: a missing evidence file means the script did
+          # not reach its own write, and a silently empty artifact would let the
+          # acceptance report read NOT-EXECUTED without anyone noticing why.
           if-no-files-found: error
+
+      # Linker and load diagnostics, on failure only. Separated from the
+      # evidence artifact so that a green run uploads the smallest thing that is
+      # still evidence.
+      - name: linker and image diagnostics
+        if: failure()
+        run: |
+          # This step runs only after a failure, so the command below is
+          # EXPECTED to fail and its status is captured rather than propagated.
+          # `set +e` is used instead of `|| true` so that the intent is visible:
+          # the exit code is read and reported, not discarded.
+          mkdir -p build/ci/logs/windows
+          set +e
+          ( cd shells/windows && cargo build --locked --workspace --all-targets -v ) \
+            > build/ci/logs/windows/linker.log 2>&1
+          status=$?
+          set -e
+          echo "verbose rebuild exited $status; tail of build/ci/logs/windows/linker.log:"
+          tail -60 build/ci/logs/windows/linker.log
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-windows-link-run
+          path: build/ci/logs/windows/**
+          if-no-files-found: ignore
 
   # =========================================================================
   # macOS -- hosted. Real macOS shared-core/native boundary, NetworkExtension
@@ -333,40 +406,106 @@ jobs:
   # =========================================================================
   android-link-run:
     name: android-link-run
+    # PINNED. The emulator needs KVM, which the hosted `ubuntu-24.04` image
+    # provides and `ubuntu-latest` may not once it moves.
     runs-on: ubuntu-24.04
+    # Four ABIs of `ring` + `quinn` from cold, a Gradle assemble of debug,
+    # androidTest and release, an emulator boot and an instrumentation run.
     timeout-minutes: 120
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+
+      # Without this the emulator falls back to software rendering AND software
+      # CPU, and the boot exceeds any sane timeout. The rule makes /dev/kvm
+      # world-accessible to the runner user.
       - name: enable KVM for the emulator
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      # JDK 21, matching `build/toolchain/env.sh`'s TWINVPN_JDK_VERSION=21.0.5
+      # and `shells/android/gradle/libs.versions.toml`'s header. NOT optional:
+      # `app/build.gradle.kts` sets `jvmTarget = JVM_21`, and the runner image's
+      # default JAVA_HOME is older -- a Gradle run under it fails with an
+      # unsupported-target error that reads as a Kotlin problem.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - name: toolchain versions
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
+          cargo --version
           java -version
+          gradle --version | sed -n '1,8p'
           echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "ANDROID_NDK_LATEST_HOME=$ANDROID_NDK_LATEST_HOME"
+          "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -1
+
+      # `ci-android.sh` reads ANDROID_NDK_HOME first. The runner image sets both
+      # it and ANDROID_NDK_LATEST_HOME, and they can differ: pinning the script
+      # to the LATEST one here makes the r27+ that C-12's 16 KiB alignment wants
+      # the version that is actually used, rather than whichever the image
+      # happened to make default.
+      - name: pin the NDK
+        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+
       - uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo
-            ~/.rustup
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: fwg-android-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock', 'shells/android/**/*.gradle.kts') }}
+            build/ci/android-target
+          key: fwg-android-${{ hashFiles('rust-toolchain.toml', 'core/Cargo.lock', 'shells/android/jni/Cargo.lock', 'shells/android/**/*.gradle.kts', 'shells/android/gradle/libs.versions.toml', 'build/ci/ci-android.sh') }}
+
       - name: make ci-android
         run: make ci-android
+
+      # ARTIFACTS, and what may never be in them.
+      #
+      # `logcat.txt` is a device log: reason codes, package names, stack traces.
+      # It carries NO private device key, NO pairing secret, NO authentication
+      # token, NO tunnel plaintext and NO packet capture. `NativeLinkRunTest`
+      # never calls `VpnService.establish()`, so no tunnel exists to capture,
+      # and ADR-0015 §11.4 classes an address SENSITIVE so nothing in this shell
+      # logs one. It is uploaded on FAILURE only; a green run uploads the
+      # evidence file and the normalised transition list and nothing else.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: evidence-android
           path: |
             build/ci/evidence/android.json
-            build/ci/logs/android/**
+            build/ci/logs/android/lifecycle.log
           if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-android-link-run
+          path: |
+            build/ci/logs/android/instrumentation.log
+            build/ci/logs/android/logcat.txt
+            build/ci/logs/android/emulator.log
+          if-no-files-found: ignore
+
+      # The emulator is a background process this job started. Killing it on
+      # every path keeps a self-hosted runner usable for the next workflow and
+      # costs nothing on a hosted one.
+      - name: stop the emulator and remove the packages
+        if: always()
+        run: build/ci/ci-android.sh --cleanup
 
   # =========================================================================
   # PRIVILEGED / PHYSICAL LIFECYCLE -- self-hosted.
@@ -387,25 +526,83 @@ jobs:
   windows-privileged-lifecycle:
     name: windows-privileged-lifecycle
     runs-on: [self-hosted, Windows, twinvpn-vpn-lifecycle]
+    # Shorter than the hosted job on purpose: the rig keeps a warm cargo cache,
+    # and a privileged run that hangs is a runner left with filters installed.
+    # Timing out is how it gets to `--cleanup`.
     timeout-minutes: 60
+    permissions:
+      contents: read
+    # A fork's pull request must never reach a self-hosted runner: the job would
+    # execute unreviewed code as a privileged account on a machine inside the
+    # network. This is the standard guard and it is not optional here.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+          rustc -vV | grep '^host:'
+          cmd //c ver
+          sc.exe query state= all | grep -i twinvpn || echo "no TwinVPN service registered"
+
+      # A privileged run that starts dirty proves nothing: filters left by the
+      # previous run would make "the ruleset was reclaimed" true for the wrong
+      # reason. `--reset` FAILS rather than cleaning, because a rig that needs
+      # cleaning at the start was not restored and its state is unknown.
       - name: reset to a known-clean state
         run: build/ci/ci-windows.sh --reset
-      - name: privileged lifecycle
+
+      - name: privileged WFP, driver and service lifecycle
         run: build/ci/ci-windows.sh --privileged
+
+      # EVERY exit path, including a timeout and a cancelled run. A failed
+      # lifecycle test must not leave the runner's networking stack blocked for
+      # the next workflow. `--cleanup` never fails the job, so it cannot mask
+      # the real failure above it.
       - name: tear down tunnel, routes and firewall state
         if: always()
         run: build/ci/ci-windows.sh --cleanup
+
+      # DIAGNOSTICS ON FAILURE ONLY, and enumerated rather than globbed.
+      #
+      # `wfp-state-after.xml` is `netsh wfp show state`: filter and provider
+      # definitions plus the host's own addresses. It carries NO private device
+      # key, NO pairing secret, NO authentication token, NO tunnel plaintext and
+      # NO packet capture -- this job captures no traffic and establishes no
+      # session. The evidence file is deliberately NOT uploaded under an
+      # `evidence-*` name: `build/acceptance/report.py` reads exactly
+      # `build/ci/evidence/windows.json`, and two jobs uploading that name would
+      # let whichever finished last decide what the report says.
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: diagnostics-windows-privileged
-          path: build/ci/logs/windows/**
+          path: |
+            build/ci/logs/windows/lifecycle.log
+            build/ci/logs/windows/windows-host.log
+            build/ci/logs/windows/wfp-state-after.xml
+          if-no-files-found: ignore
+
+      # The privileged evidence, under its own name so it can be read beside the
+      # hosted file without replacing it.
+      - name: publish the privileged evidence under its own name
+        if: always()
+        run: |
+          if [ -f build/ci/evidence/windows.json ]; then
+            mv build/ci/evidence/windows.json build/ci/evidence/windows-privileged.json
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-windows-privileged
+          path: build/ci/evidence/windows-privileged.json
           if-no-files-found: ignore
 
   macos-privileged-lifecycle:
