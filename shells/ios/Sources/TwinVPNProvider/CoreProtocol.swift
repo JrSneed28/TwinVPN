@@ -118,29 +118,96 @@ enum CoreCommand {
         return request("net.up")
     }
 
-    /// `host.lifecycle`, carrying the raw `NEProviderStopReason`.
+    /// `host.lifecycle`'s ONE-BYTE phase selector.
     ///
-    /// The RAW value, undecoded: `twinvpn_platform_ios::lifecycle::
-    /// ProviderStopReason` carries an unrecognised one as `Unknown(raw)` rather
-    /// than coercing it, because "a stop this build cannot name is not evidence
-    /// of an orderly one" and `clean_shutdown` must not be set for it. A Swift
-    /// `switch` here would be the coercion that rule forbids.
-    static func stopReason(_ raw: Int) -> Data {
-        request("host.lifecycle", params: Data(String(raw).utf8))
+    /// ADR-0018 §11.16 (e): lifecycle is delivered as commands —
+    /// `SUSPEND`/`RESUME`/`BACKGROUND`/`FOREGROUND` — and the core holds no OS
+    /// lifecycle assumption of its own. `twinvpn-core`'s
+    /// `dispatch::Lifecycle::from_params` reads `params.first()` and maps
+    /// **1/2/3/4** onto those four; anything else is `None`, which
+    /// `dispatch::missing_parameter` turns into `PROTO.MALFORMED_MESSAGE`. It is
+    /// deliberately not a defaulted decode: "defaulting to FOREGROUND would wake
+    /// a device that asked to sleep."
+    ///
+    /// **This enum is a MIRROR of the core's selector, not a second vocabulary.**
+    /// It carries no TwinVPN domain fact and no branch on one — it is the wire
+    /// encoding of a phase the OS reported, which is exactly what CB-2 permits a
+    /// shell to marshal.
+    enum Phase: UInt8 {
+        case suspend = 1
+        case resume = 2
+        case background = 3
+        case foreground = 4
     }
 
-    /// `host.lifecycle` — the app moved to the background.
-    static var sleep: Data { request("host.lifecycle", params: Data("background".utf8)) }
+    /// `host.lifecycle` — the OS put the device to sleep.
+    ///
+    /// **CORRECTED.** This used to send `Data("background".utf8)`, whose first
+    /// byte is `'b'` (0x62) — not one of the four selectors — so **every**
+    /// lifecycle submission this shell made was refused with
+    /// `PROTO.MALFORMED_MESSAGE` and no phase ever reached the core. Nothing
+    /// caught it because nothing had ever linked the two halves and run them;
+    /// `shells/ios/TwinVPNIntegrationTests` is what catches it now, and it keeps
+    /// the old byte as its negative control.
+    ///
+    /// SUSPEND rather than BACKGROUND, deliberately: this is
+    /// `NEPacketTunnelProvider.sleep()`, which is the DEVICE sleeping, not the
+    /// app being backgrounded. The two are different facts and ADR-0022 responds
+    /// to them differently.
+    static var sleep: Data { request("host.lifecycle", params: Data([Phase.suspend.rawValue])) }
+
+    /// `host.lifecycle` — the device woke. The counterpart of `sleep`.
+    static var wake: Data { request("host.lifecycle", params: Data([Phase.resume.rawValue])) }
+
+    /// `host.lifecycle` — the app moved to the background (scene-level, not
+    /// device-level). ADR-0019 §11.8: on iPadOS "visible" and "foreground" are
+    /// not the same fact, which is why this is separate from `sleep`.
+    static var background: Data {
+        request("host.lifecycle", params: Data([Phase.background.rawValue]))
+    }
 
     /// `host.lifecycle` — the app came to the foreground.
-    static var wake: Data { request("host.lifecycle", params: Data("foreground".utf8)) }
+    static var foreground: Data {
+        request("host.lifecycle", params: Data([Phase.foreground.rawValue]))
+    }
 
     /// `path.probe` — packets are waiting on the tunnel's read side.
     static var packetsAvailable: Data { request("path.probe") }
 
-    /// `host.lifecycle`, carrying the resident-byte reading ADR-0022 bounds.
+    /// The raw `NEProviderStopReason`, which **has no carriage on this ABI**.
+    ///
+    /// FINDING, reported to the integration lead rather than papered over.
+    /// `host.lifecycle` carries a four-value PHASE selector and nothing else;
+    /// there is no core operation that accepts an OS stop reason, and
+    /// ADR-0017 §11.9's operation table has no row for one. This method used to
+    /// send `Data(String(raw).utf8)`, which the core refuses as
+    /// `PROTO.MALFORMED_MESSAGE`, so the stop reason has never reached it.
+    ///
+    /// Inventing an encoding here would be worse than the gap: the params byte
+    /// is the core's, and a shell that stuffed a second meaning into it would be
+    /// the "second vocabulary" MI-20 forbids. So the stop is reported as the
+    /// phase it actually is — the provider is going away, which is a SUSPEND —
+    /// and the raw reason is logged by the caller and dropped here, visibly.
+    ///
+    /// `twinvpn_platform_ios::lifecycle::ProviderStopReason` still exists and
+    /// still decodes the raw value in Rust; what is missing is a submission that
+    /// can carry it to the core. That is an ADR-0017 §11.9 addition, not a
+    /// Swift change.
+    static func stopReason(_ raw: Int) -> Data {
+        _ = raw
+        return request("host.lifecycle", params: Data([Phase.suspend.rawValue]))
+    }
+
+    /// The resident-byte reading ADR-0022 bounds — **also uncarried**.
+    ///
+    /// Same finding as `stopReason`: `host.lifecycle` has no memory-reading
+    /// parameter and this used to send `"memory:<n>"`, refused as
+    /// `PROTO.MALFORMED_MESSAGE`. Reported as a BACKGROUND phase, which is the
+    /// true fact the OS delivered alongside the warning, with the reading
+    /// dropped rather than smuggled into a selector byte.
     static func memoryPressure(_ residentBytes: UInt64) -> Data {
-        request("host.lifecycle", params: Data("memory:\(residentBytes)".utf8))
+        _ = residentBytes
+        return request("host.lifecycle", params: Data([Phase.background.rawValue]))
     }
 
     /// `host.network_changed`, carrying one `NWPathMonitor` snapshot.

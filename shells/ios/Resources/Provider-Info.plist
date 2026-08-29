@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Info.plist for `net.twinvpn.client.provider` — the iOS/iPadOS
+  `NEPacketTunnelProvider`, packaged as an APP EXTENSION.
+
+  Authority: ADR-0016 §11.2's iOS/iPadOS component row; ADR-0018 CB-1 (b) ("the
+  OS starts it"), §11.9 row 1; ADR-0022 §11.3–§11.10; ADR-0017 §11.2.1.
+
+  ===========================================================================
+  APP EXTENSION HERE, SYSTEM EXTENSION ON macOS. THE DIFFERENCE IS THE PLATFORM
+  ===========================================================================
+  `shells/macos/packaging/TwinVPNTunnel.Info.plist` uses the SYSTEM-extension
+  shape — `NetworkExtension` / `NEProviderClasses`, activated by
+  `OSSystemExtensionRequest`, running as root — and ADR-0016 §12.6 argues at
+  length for why macOS must take that form.
+
+  iOS has no system extensions. The only shape available is the app extension:
+  `NSExtension` / `NSExtensionPointIdentifier` /
+  `NSExtensionPrincipalClass`, embedded in the containing app's `PlugIns/`,
+  started by the OS on demand. So the two plists differ in shape ON PURPOSE, and
+  neither is a copy of the other with a platform string changed.
+
+  ===========================================================================
+  `NSExtensionPrincipalClass` IS MODULE-QUALIFIED, AND THAT IS LOAD-BEARING
+  ===========================================================================
+  `PacketTunnelProvider` is a Swift class with no `@objc(...)` name, so its
+  Objective-C-visible name is the module-qualified `TwinVPNProvider.
+  PacketTunnelProvider`, not the bare identifier. `$(PRODUCT_MODULE_NAME)` is
+  what keeps this key correct if the target is ever renamed. The failure mode of
+  getting it wrong is a provider the OS cannot instantiate — the tunnel simply
+  never starts, with no build error.
+
+  The macOS sibling solves the same problem the other way, with an explicit
+  `@objc(TwinVPNPacketTunnelProvider)`. Both are valid; this one is Xcode's own
+  template form and needs no attribute in the source.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+
+    <!-- The PRODUCT version, per ADR-0018 §11.12's three-number table. It must
+         match the containing app's or the App Store refuses the upload; the
+         packaging step stamps both from one source. -->
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <key>MinimumOSVersion</key>
+    <string>15.0</string>
+
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.networkextension.packet-tunnel</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>$(PRODUCT_MODULE_NAME).PacketTunnelProvider</string>
+    </dict>
+
+    <!--
+      Deliberately absent:
+
+      - UIBackgroundModes. The extension's background execution comes from the
+        packet-tunnel-provider entitlement and from the OS starting it; a
+        background mode here would be a second, weaker claim to the same thing.
+        `ownership.md` §10.2 forbids the app-side equivalents outright.
+      - Any user-facing string. C-7 keeps UI out of this bundle entirely, and
+        CB-4 puts every rendered string in the core's catalogue. An extension
+        with a localisable name would be the first crack in both.
+      - `NEMachServiceName`. That key belongs to the macOS system-extension form
+        and to ADR-0017 §11.2's macOS XPC carriage. On iOS the ONLY sanctioned
+        app<->provider path is `NETunnelProviderSession.sendProviderMessage`
+        (ADR-0017 §11.2.1), which needs no vended service, and `ManagementClient
+        .swift` implements exactly the three emulations that section sanctions.
+    -->
+</dict>
+</plist>

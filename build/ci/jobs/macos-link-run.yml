@@ -1,0 +1,132 @@
+# build/ci/jobs/macos-link-run.yml
+#
+# A JOB BODY, not a workflow. Paste it under a workflow's `jobs:` key at this
+# indentation; it is kept as its own file so the Apple half of the platform
+# lifecycle gate is reviewable by the domain that owns it (`desktop-macos`)
+# rather than buried in a file three domains edit.
+#
+# ===========================================================================
+# WHAT THIS JOB CLAIMS, AND WHAT IT EXPLICITLY DOES NOT
+# ===========================================================================
+# CLAIMS: the shared core compiles for both macOS arches, the real
+# NetworkExtension SYSTEM extension links the real archive, the archive loads,
+# Swift crosses `twinvpn_bridge.h` into TwinVPN core code, a typed result comes
+# back, and lifecycle transitions execute.
+#
+# DOES NOT CLAIM: NetworkExtension activation, `pf` programming, or any part of
+# the signed system-extension lifecycle. A GitHub-hosted runner has no Developer
+# ID, no system-extension entitlement and no root, so `tvb_ext_start` refuses at
+# ADR-0016 §11.6's `privilege_posture` step — and PS-18 says it MUST. The
+# evidence this job writes carries `privileged: false` and says so in `notes`.
+# `build/ci/jobs/macos-privileged-lifecycle.yml` is the ONLY place that claim
+# lives.
+#
+# ===========================================================================
+# THE XCODE PIN
+# ===========================================================================
+# The version is NOT written here. `build/ci/ci-macos.sh --print-xcode-path`
+# resolves it, so the pin lives in exactly one place
+# (`build/ci/ci-common-apple.sh`'s `TWINVPN_XCODE_VERSION`, currently 16.4) and
+# a workflow cannot drift from a script.
+#
+# Where the requirement comes from: ADR-0018 §11.3 requires "one exact toolchain
+# version pinned … advanced only by a reviewed commit that re-runs the full
+# §11.9 matrix", and `build/toolchain/env.sh:10` applies that to Swift —
+# `TWINVPN_SWIFT_VERSION=6.1.2`. Xcode 16.4 is the release that ships Swift
+# 6.1.2, so pinning Xcode is how the Swift pin is honoured on a Darwin builder.
+# `ci-common-apple.sh`'s `apple_require_pinned_swift` then ASSERTS the pair, so
+# a runner-image update that quietly moved Swift fails the job instead of
+# changing the binary nobody reviewed.
+#
+# `shells/ios/README.md:79` separately documents a FLOOR ("Xcode 15+"). A floor
+# is not a pin and this job uses the pin.
+#
+# The `maxim-lobanov/setup-xcode` step below is the FALLBACK for a runner image
+# that does not ship the pinned Xcode side by side. It is commented out rather
+# than deleted because turning it on is the correct response to
+# `--print-xcode-path` failing, and a reviewer should not have to invent it.
+#
+# ===========================================================================
+# WHAT IS UPLOADED, AND WHAT MUST NEVER BE
+# ===========================================================================
+# Uploaded on failure: the `.xcresult` bundle, the xcodebuild logs (which carry
+# the linker diagnostics), the native lifecycle log, and any crash report the
+# run produced.
+#
+# NEVER uploaded: signing identities or private keys, pairing secrets,
+# authentication tokens, tunnel plaintext, or unredacted packet captures. The
+# paths below are enumerated rather than globbed from the repository root for
+# exactly that reason — `path: .` would sweep up whatever a future step happens
+# to leave behind. `~/Library/Keychains` and `~/Library/MobileDevice` are not
+# named here and must not be added.
+
+  macos-link-run:
+    name: macos-link-run
+    # PINNED. Not `macos-latest`: R-32's failure mode is "it does not build for
+    # that target any more", arriving one silent runner-image update at a time.
+    runs-on: macos-26
+    # The whole job: two cargo builds for two arches with `ring` compiled from
+    # C, an xcodegen run, two xcodebuild invocations. 90 minutes is the hard
+    # fail, not a target. Rule C-1: a budget is raised by a reviewed change, not
+    # silently.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # The FALLBACK, if `--print-xcode-path` reports the pin is absent from the
+      # image. Uncomment and keep the version in step with
+      # `TWINVPN_XCODE_VERSION` in build/ci/ci-common-apple.sh.
+      # - uses: maxim-lobanov/setup-xcode@v1
+      #   with:
+      #     xcode-version: '16.4'
+
+      - name: select the pinned Xcode and print every toolchain version
+        run: |
+          # The pin lives in build/ci/ci-common-apple.sh and nowhere else.
+          sudo xcode-select -s "$(build/ci/ci-macos.sh --print-xcode-path)"
+          xcodebuild -version
+          swift --version
+          xcrun --sdk macosx --show-sdk-version
+          xcrun --sdk macosx --show-sdk-path
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          sw_vers
+
+      - name: install xcodegen
+        # Both Apple shells keep an XcodeGen spec rather than a committed
+        # .xcodeproj (shells/macos/project.yml's header says why). Without the
+        # generator there is no project to build.
+        run: brew install --quiet xcodegen
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: make ci-macos
+        run: make ci-macos
+
+      - name: collect crash reports
+        if: failure()
+        # A crash inside the extension or the test host is the most informative
+        # artifact this job can produce and it is deleted with the runner. It is
+        # COPIED rather than uploaded from its home directory so the upload step
+        # below cannot be pointed at ~/Library by accident.
+        run: |
+          mkdir -p build/ci/logs/macos/crashes
+          cp -R ~/Library/Logs/DiagnosticReports/* build/ci/logs/macos/crashes/ 2>/dev/null \
+            || echo "no crash reports"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-macos
+          # ENUMERATED, never `path: .`. See the header for what must never be
+          # uploaded from an Apple runner.
+          path: |
+            build/ci/evidence/macos.json
+            build/ci/logs/macos/**
+          if-no-files-found: error
+          retention-days: 14
