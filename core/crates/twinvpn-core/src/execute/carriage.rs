@@ -61,11 +61,14 @@ use std::sync::Arc;
 
 use twinvpn_env::RuntimeKind;
 use twinvpn_relay_client::failover::Observation;
+use twinvpn_session::state::SessionState;
+use twinvpn_session::{Context, Guards};
 use twinvpn_types::{codes, Component, Diagnostic, PathClass, SessionId};
 
 use crate::core::Core;
 use crate::datapath::{Buffers, DataHeader, Pump, PumpParts, Step};
 use crate::relay::{Failover, Inbound, LegError, RelayPair, Sealed};
+use crate::resume::PeerTrustFacts;
 use crate::session_table::{Established, SessionEntry};
 
 /// How long one stepped receive waits before giving the tick back.
@@ -204,7 +207,7 @@ fn report_stop(report: &crate::datapath::Report) {
 /// A pump that `start` managed to spawn is **not** stepped here: it is already
 /// running, and stepping it as well would put two readers on one socket.
 pub(crate) fn step(core: &Core, session_id: SessionId) -> usize {
-    let (pump, cancelled) = {
+    let (pump, spawned, cancelled) = {
         let sessions = core.sessions();
         let Some(entry) = sessions.get(&session_id) else {
             return 0;
@@ -212,15 +215,23 @@ pub(crate) fn step(core: &Core, session_id: SessionId) -> usize {
         let Some(established) = entry.established.as_ref() else {
             return 0;
         };
-        if established.spawned {
-            return 0;
-        }
         let Some(pump) = established.pump.as_ref().map(Arc::clone) else {
             return 0;
         };
-        (pump, established.cancel.is_cancelled())
+        (pump, established.spawned, established.cancel.is_cancelled())
     };
     if cancelled {
+        return 0;
+    }
+
+    // Before the `spawned` return, and deliberately: a spawned pump carries its
+    // own packets but cannot move the state machine, so this is the only place
+    // a resume it recognised is ever collected. See `deliver_resume`.
+    deliver_resume(core, session_id, &pump);
+
+    // A pump that `start` managed to spawn is not stepped here: it is already
+    // running, and stepping it as well would put two readers on one socket.
+    if spawned {
         return 0;
     }
 
@@ -236,7 +247,105 @@ pub(crate) fn step(core: &Core, session_id: SessionId) -> usize {
     if let Step::Moved(bytes) = block_on_step(core, &pump, &mut buffers, false) {
         moved += bytes;
     }
+    // The stepped path drains again after the inbound step, so a resume that
+    // arrived during *this* tick is delivered in this tick rather than the next.
+    deliver_resume(core, session_id, &pump);
     moved
+}
+
+/// Hands one inbound `ResumeSession` to the state machine that owns it.
+///
+/// **Authority:** ADR-0001 §7.3.2 RS-2 (one authenticated datagram), RS-4, RS-5;
+/// `docs/protocol.md` §12.1 (resumption is the first recovery attempt and every
+/// fallback step MUST be visible); `docs/reliability.md` §4.5 T35; ADR-0015
+/// O-05 (only `SessionRuntime` moves the machine).
+///
+/// # This is the consumer half of F-1A
+///
+/// [`crate::datapath::Pump`] recognises a resume frame on the shared socket and
+/// sets it aside; this is the other end of that. The split exists because the
+/// two halves need different things and must not be given each other's: the
+/// pump owns the socket and no route to the session table, and this owns the
+/// `Core` and never reads a socket.
+///
+/// # Only in `RECONNECTING{parked}`, and that is a narrowing
+///
+/// §4.5 T35 is the **one** row `EV_RESUME` appears in, and its state guard is
+/// `RECONNECTING{parked}`. Firing the event anywhere else would move nothing —
+/// except `TimerProfile`, which `SessionMachine` shifts to `Foreground` on
+/// `EV_RESUME` in any state. That is small, but it is a state change an
+/// **off-path attacker** could provoke on a healthy `Session` with one forged
+/// datagram, and `crate::datapath::outcome`'s whole discipline is that one
+/// injected datagram must not do that. So the resume is dropped unless the
+/// machine is in the state that has something to do with it. A legitimate resume
+/// that arrives a tick early is simply refused-by-absence; the peer retries, and
+/// RS-4's strictly increasing `path_epoch` means nothing is left inconsistent.
+///
+/// # Nothing here authenticates, and everything here is fail-closed
+///
+/// [`crate::session_loop::SessionRuntime::resume_on_wire`] verifies the MAC and
+/// commits the `path_epoch` **only** on full success, and every refusal falls
+/// back to a full handshake by construction. The trust facts below are read from
+/// the local cache and never from the datagram: `peer_authorized` answers
+/// `false` for a peer this device has not cached, which on a build with no
+/// `ControlTransport` (W-12) means the honest, fail-closed `PeerRevoked`.
+///
+/// # The publish rate is bounded by the tick, not by the attacker
+///
+/// §12.1 requires each fallback step to be visible, so every verdict is
+/// published — including the ones `ResumeRefusal::silent_on_the_wire` covers,
+/// because "silently" there is about not answering the *peer*, not about hiding
+/// the event locally. That is not a log-amplification vector: the pump holds one
+/// slot, so at most one resume is delivered per `Core::tick` however many an
+/// attacker sends.
+fn deliver_resume(core: &Core, session_id: SessionId, pump: &Pump) {
+    let Some(datagram) = pump.take_resume() else {
+        return;
+    };
+    let view = core.data_plane_view();
+    let Some((verdict, outcome)) = ({
+        let mut sessions = core.sessions();
+        sessions.get_mut(&session_id).and_then(|entry| {
+            if !matches!(
+                entry.runtime.machine().state(),
+                SessionState::Reconnecting { parked: true }
+            ) {
+                return None;
+            }
+            let facts = PeerTrustFacts {
+                revocation_epoch: entry
+                    .keying
+                    .as_ref()
+                    .map_or(0, |keying| view.trust_epoch(keying.twinnet())),
+                // ADR-0007 N-4: a peer whose `TunnelKeyBinding` has not verified
+                // is not a `TrustedPeer`, and RS-5 refuses a resume from one.
+                peer_revoked: !view.peer_authorized(entry.peer),
+            };
+            Some(entry.runtime.resume_on_wire(
+                &datagram,
+                facts,
+                Guards::default(),
+                Context::default(),
+            ))
+        })
+    }) else {
+        return;
+    };
+
+    let reason = match verdict {
+        Ok(accepted) => accepted.reason_code(),
+        Err(refusal) => refusal.reason_code(),
+    };
+    core.publish_diagnostic(&Diagnostic::builder(reason, Component::TunnelEngine).build());
+    if let Some(record) = outcome
+        .record()
+        .map(twinvpn_session::TransitionRecord::to_proto)
+    {
+        // No actor: nothing a local principal submitted produced this. It came
+        // off the wire, and attributing it to whoever last used the core would
+        // be a false line in the Tier-0 ledger.
+        core.publish_transition(record, None);
+    }
 }
 
 /// Runs one step to completion, or gives it up at the step budget.

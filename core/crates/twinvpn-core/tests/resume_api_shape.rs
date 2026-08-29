@@ -25,6 +25,8 @@
 //! These tests read the source of the **workspace as checked out**, so they fail
 //! on the change rather than on a stale expectation.
 
+const CARRIAGE: &str = include_str!("../src/execute/carriage.rs");
+const DATAPATH: &str = include_str!("../src/datapath/mod.rs");
 const ESTABLISHMENT: &str = include_str!("../src/execute/establishment.rs");
 const HANDSHAKE: &str = include_str!("../src/execute/handshake.rs");
 const BIND: &str = include_str!("../../twinvpn-tunnel/src/bind.rs");
@@ -278,6 +280,65 @@ fn the_production_establishment_path_arms_resumption() {
     assert!(
         !BIND.contains("self.established.clone()") && !BIND.contains("established.as_ref()"),
         "no path may hand out a second copy of the resumption material"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F-1A. The inbound consumer is reachable from a socket
+// ---------------------------------------------------------------------------
+
+/// **F-1A, consumer half.** `resume_on_wire` has a non-test caller, and a
+/// datagram arriving on the shared socket can reach it.
+///
+/// # The defect this closes
+///
+/// `accept_resume_offer` read as wired only because `resume_on_wire` called it
+/// inside `src/`; nothing called `resume_on_wire`, so the entire inbound
+/// consumer was dead in production. Worse, it was **unreachable**: a
+/// `ResumeSession` is not a `DataHeader` frame, so the inbound pump refused one
+/// as malformed before it could be routed anywhere.
+///
+/// Both halves are asserted, because either alone is still a dead path.
+#[test]
+fn an_inbound_resume_datagram_can_reach_the_state_machine() {
+    // (a) The pump recognises the frame and sets it aside.
+    assert!(
+        DATAPATH.contains("return self.divert_resume("),
+        "the inbound step must demux a resume before the data path sees it"
+    );
+    assert!(
+        DATAPATH.contains("pub fn take_resume(&self)"),
+        "the session layer must be able to collect what the pump set aside"
+    );
+
+    // (b) The layer that owns the `Core` collects it and dispatches.
+    assert!(
+        CARRIAGE.contains("resume_on_wire("),
+        "the production carriage must hand an inbound resume to the state machine"
+    );
+    assert!(
+        CARRIAGE.contains("pump.take_resume()"),
+        "and it must take it from the pump rather than read the socket itself"
+    );
+    assert!(
+        !CARRIAGE.contains("#[cfg(test)]"),
+        "carriage.rs carries no test module, so its resume_on_wire call is production code"
+    );
+
+    // (c) The dispatch is narrowed to the one state §4.5 T35 acts on, so a
+    //     forged datagram cannot provoke a state change on a healthy `Session`.
+    assert!(
+        CARRIAGE.contains("SessionState::Reconnecting { parked: true }"),
+        "a resume must be dropped outside the state that has something to do with it"
+    );
+
+    // (d) Nothing on the divert path opens a record under the transport keys,
+    //     so a forged resume cannot advance the L-DATA replay window. The
+    //     runtime proof is `crypto_carriage.rs`; this is the shape of it.
+    let divert = signature_of(DATAPATH, "divert_resume");
+    assert!(
+        divert.contains("&self") && divert.contains("datagram: &[u8]"),
+        "divert_resume takes the datagram and the pump, and nothing keyed; got ({divert})"
     );
 }
 

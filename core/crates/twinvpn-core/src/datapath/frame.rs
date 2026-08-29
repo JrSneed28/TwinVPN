@@ -35,6 +35,38 @@ pub const TYPE_TRANSPORT_DATA: u8 = 4;
 /// counter.
 pub const HEADER_BYTES: usize = 16;
 
+/// The message type carrying an ADR-0001 §7.3.2 `ResumeSession`.
+///
+/// # Why a type octet at all, when RS-2 does not mention one
+///
+/// RS-2 fixes the resume *message* — `{resumption_id, session_nonce,
+/// path_epoch, new_endpoint_hint, MAC}` — and says nothing about carriage,
+/// exactly as §7.2 fixes the Noise handshake messages and leaves their framing
+/// to the transport. `crate::execute::handshake` makes the same split for types
+/// `1` and `2`: "what crosses this boundary is the **Noise message** … and the
+/// framing around it is the transport's". This is that framing for a resume,
+/// and it is the same shape — type, three reserved octets, one little-endian
+/// receiver index.
+///
+/// **Why it is needed:** a resume and a data frame share one UDP socket, and
+/// the inbound pump has to tell them apart *before* it reaches the AEAD. ADR-0001
+/// §7.2 anticipates exactly this — it permits "multiplexing a small disco
+/// message type on the same socket" — and [`Reject::Malformed`]'s own
+/// documentation already cites it. Sniffing instead (try a `DataHeader`, and on
+/// failure try a resume) would mean the data path accepted things it cannot
+/// name, which is the widening this must not do.
+///
+/// `5` because `1`, `2` and `4` are WireGuard's and `3` is its cookie reply,
+/// which this build does not implement but must not collide with.
+pub const TYPE_RESUME: u8 = 5;
+
+/// The resume frame's header, in bytes: type, three reserved, receiver index.
+///
+/// Four octets shorter than [`HEADER_BYTES`]: a resume carries no AEAD counter,
+/// because it is not sealed under the transport keys. Its own MAC is inside the
+/// payload, under the resumption secret, and `crate::resume` owns it.
+pub const RESUME_HEADER_BYTES: usize = 8;
+
 /// The ChaCha20-Poly1305 tag width.
 pub const TAG_BYTES: usize = 16;
 
@@ -173,6 +205,68 @@ impl DataHeader {
                 counter: u64::from_le_bytes(counter_bytes),
             },
             &datagram[HEADER_BYTES..],
+        ))
+    }
+}
+
+/// One resume frame's header.
+///
+/// Carries the receiver index and nothing else — see [`TYPE_RESUME`] for why
+/// this framing exists and why it is not a [`DataHeader`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumeHeader {
+    /// Whose tunnel the resume is addressed to.
+    pub receiver: ReceiverIndex,
+}
+
+impl ResumeHeader {
+    /// Appends the header to `out`.
+    pub fn write(self, out: &mut Vec<u8>) {
+        out.push(TYPE_RESUME);
+        out.extend_from_slice(&[0u8; 3]);
+        out.extend_from_slice(&self.receiver.0.to_le_bytes());
+    }
+
+    /// Splits a received datagram into its header and the `ResumeSession`
+    /// payload.
+    ///
+    /// # What this deliberately does NOT check
+    ///
+    /// Anything about the payload. The datapath's job here is **demux**, not
+    /// validation: `crate::resume::ResumeState::accept` decodes it, checks the
+    /// length against its own tag width, verifies the MAC and only then commits
+    /// anything. Duplicating a length rule here would put a second opinion on
+    /// one wire format, and the weaker of two opinions is the one an attacker
+    /// gets to use.
+    ///
+    /// The one bound that *is* enforced is the caller's: `datagram` is a slice
+    /// of a receive buffer already sized from the MTU budget, so nothing an
+    /// attacker declared has driven an allocation by the time this runs.
+    ///
+    /// # Errors
+    ///
+    /// [`Reject::Malformed`] if the datagram is too short to hold a header, is
+    /// not a resume frame, or has non-zero reserved bytes.
+    pub fn parse(datagram: &[u8]) -> Result<(Self, &[u8]), Reject> {
+        if datagram.len() <= RESUME_HEADER_BYTES {
+            // A header with no message is not a message. `<=` rather than `<`
+            // so an empty payload is refused here instead of reaching a decoder.
+            return Err(Reject::Malformed);
+        }
+        if datagram[0] != TYPE_RESUME {
+            return Err(Reject::Malformed);
+        }
+        if datagram[1..4] != [0u8; 3] {
+            // As `DataHeader::parse`: reserved means reserved, so a future use
+            // of those octets stays negotiable.
+            return Err(Reject::Malformed);
+        }
+        let receiver = u32::from_le_bytes([datagram[4], datagram[5], datagram[6], datagram[7]]);
+        Ok((
+            Self {
+                receiver: ReceiverIndex(receiver),
+            },
+            &datagram[RESUME_HEADER_BYTES..],
         ))
     }
 }

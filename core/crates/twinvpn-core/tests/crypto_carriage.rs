@@ -465,6 +465,176 @@ fn producer_and_consumer_direction_keys_are_separated() {
 }
 
 // ---------------------------------------------------------------------------
+// The inbound resume demux (F-1A, consumer half)
+// ---------------------------------------------------------------------------
+
+/// One resume frame addressed to `receiver`, carrying `payload` verbatim.
+fn resume_frame(receiver: twinvpn_core::datapath::ReceiverIndex, payload: &[u8]) -> Vec<u8> {
+    let mut datagram = Vec::new();
+    twinvpn_core::datapath::ResumeHeader { receiver }.write(&mut datagram);
+    datagram.extend_from_slice(payload);
+    datagram
+}
+
+/// A resume datagram is recognised on the shared socket and set aside, rather
+/// than carried to the interface or counted as a forgery.
+///
+/// **The gap this closes.** Before the demux, `DataHeader::parse` refused a
+/// resume as `Reject::Malformed` — a `ResumeSession` is not a type-4 frame — so
+/// no datagram from a socket could ever reach `resume_on_wire`, and the whole
+/// inbound consumer was dead in production.
+///
+/// The payload here is deliberately **not** a valid `ResumeSession`: the pump
+/// must divert on the frame type alone and authenticate nothing. The MAC check
+/// belongs to `crate::resume`, one layer up, and a datapath that pre-judged it
+/// would be a second opinion on one wire format.
+#[test]
+fn a_resume_frame_is_diverted_rather_than_carried_or_rejected() {
+    let (fabric, _env, _spare) = support::fabric();
+    let payload = b"not a ResumeSession, and that is the point".to_vec();
+
+    inject(
+        &fabric,
+        &resume_frame(dp::RIGHT_INDEX, &payload),
+        fabric.right.endpoint,
+    );
+    let mut buffers = fabric.right.pump.buffers();
+    assert_eq!(
+        ready(fabric.right.pump.step_inbound(&mut buffers)),
+        Step::Diverted,
+        "a resume is neither carried nor discarded"
+    );
+    assert_eq!(
+        fabric.right.pump.take_resume(),
+        Some(payload),
+        "the payload reaches the session layer byte for byte, header stripped"
+    );
+    assert_eq!(
+        fabric.right.pump.take_resume(),
+        None,
+        "one datagram is delivered to the state machine exactly once"
+    );
+    assert!(
+        fabric.right.written().is_empty(),
+        "a resume is not traffic and must never reach the interface"
+    );
+    assert!(fabric.right.carries_traffic());
+}
+
+/// A resume addressed to another tunnel is shed before it reaches the inbox.
+#[test]
+fn a_resume_for_another_receiver_index_never_reaches_the_inbox() {
+    let (fabric, _env, _spare) = support::fabric();
+
+    inject(
+        &fabric,
+        &resume_frame(dp::LEFT_INDEX, b"addressed elsewhere"),
+        fabric.right.endpoint,
+    );
+    let mut buffers = fabric.right.pump.buffers();
+    assert_eq!(
+        ready(fabric.right.pump.step_inbound(&mut buffers)),
+        Step::Rejected(twinvpn_core::datapath::Reject::ForeignReceiver)
+    );
+    assert_eq!(fabric.right.pump.take_resume(), None);
+}
+
+/// **The property the demux must not cost.** A forged resume flood does not
+/// advance the L-DATA replay window, does not disturb the data-frame path, and
+/// does not accumulate.
+///
+/// This is `datapath::outcome`'s standing rule applied to the new frame type:
+/// "an attacker who can inject one datagram must not be able to tear a tunnel
+/// down". A resume is never opened under the transport keys, so no quantity of
+/// them can touch the window a data frame depends on — and the inbox holds one
+/// slot, so the flood costs one small allocation rather than growing memory.
+#[test]
+fn a_forged_resume_does_not_disturb_the_data_frame_path() {
+    let (fabric, _env, _spare) = support::fabric();
+    let plaintext = packet(PAYLOAD);
+    // Captured first, so it is sealed at counter 0 and its acceptance afterwards
+    // proves the window never moved.
+    let genuine = capture(&fabric, &plaintext);
+
+    for nonce in 0u8..64 {
+        inject(
+            &fabric,
+            &resume_frame(dp::RIGHT_INDEX, &[nonce; 48]),
+            fabric.right.endpoint,
+        );
+        let mut buffers = fabric.right.pump.buffers();
+        assert_eq!(
+            ready(fabric.right.pump.step_inbound(&mut buffers)),
+            Step::Diverted
+        );
+    }
+    // One slot: the newest supersedes, and nothing queued up.
+    assert_eq!(fabric.right.pump.take_resume(), Some(vec![63u8; 48]));
+    assert_eq!(fabric.right.pump.take_resume(), None);
+
+    // The genuine data frame still opens, which it could not if any of the 64
+    // forgeries had advanced the replay window.
+    inject(&fabric, &genuine, fabric.right.endpoint);
+    let mut buffers = fabric.right.pump.buffers();
+    assert_eq!(
+        ready(fabric.right.pump.step_inbound(&mut buffers)),
+        Step::Moved(plaintext.len()),
+        "a resume flood must leave the data path exactly where it was"
+    );
+    assert_eq!(fabric.right.written(), vec![plaintext]);
+}
+
+/// The demux does not widen what the data path accepts.
+///
+/// A datagram that is neither type 4 nor type 5 is refused exactly as before,
+/// and a truncated resume frame is refused rather than handed on as an empty
+/// payload.
+#[test]
+fn the_demux_does_not_widen_what_the_data_path_accepts() {
+    use twinvpn_core::datapath::{Reject, ResumeHeader, RESUME_HEADER_BYTES, TYPE_RESUME};
+
+    let (fabric, _env, _spare) = support::fabric();
+
+    // A header and nothing else is not a message.
+    let mut bare = Vec::new();
+    ResumeHeader {
+        receiver: dp::RIGHT_INDEX,
+    }
+    .write(&mut bare);
+    assert_eq!(bare.len(), RESUME_HEADER_BYTES);
+    inject(&fabric, &bare, fabric.right.endpoint);
+    let mut buffers = fabric.right.pump.buffers();
+    assert_eq!(
+        ready(fabric.right.pump.step_inbound(&mut buffers)),
+        Step::Rejected(Reject::Malformed)
+    );
+
+    // Reserved means reserved, on this type as on type 4.
+    let mut reserved = resume_frame(dp::RIGHT_INDEX, b"body");
+    reserved[2] = 0x01;
+    inject(&fabric, &reserved, fabric.right.endpoint);
+    let mut buffers = fabric.right.pump.buffers();
+    assert_eq!(
+        ready(fabric.right.pump.step_inbound(&mut buffers)),
+        Step::Rejected(Reject::Malformed)
+    );
+
+    // And an unknown type is still refused, not sniffed into either path.
+    let mut unknown = resume_frame(dp::RIGHT_INDEX, b"body");
+    unknown[0] = TYPE_RESUME.wrapping_add(1);
+    inject(&fabric, &unknown, fabric.right.endpoint);
+    let mut buffers = fabric.right.pump.buffers();
+    assert_eq!(
+        ready(fabric.right.pump.step_inbound(&mut buffers)),
+        Step::Rejected(Reject::Malformed)
+    );
+
+    assert_eq!(fabric.right.pump.take_resume(), None);
+    assert!(fabric.right.written().is_empty());
+    assert!(fabric.right.carries_traffic());
+}
+
+// ---------------------------------------------------------------------------
 // Shared assertions
 // ---------------------------------------------------------------------------
 
