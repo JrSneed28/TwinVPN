@@ -86,7 +86,7 @@ pub struct Gathered {
     pub candidates: Vec<Candidate>,
     /// The sockets that produced them, held so a probe leaves from the same
     /// local endpoint the candidate names.
-    pub sockets: Vec<Box<dyn UdpSocket>>,
+    pub sockets: Vec<Arc<dyn UdpSocket>>,
     /// Per-family outcome. **Both halves always present** — `PerFamily` makes
     /// forgetting the v6 half a compile error rather than a review comment.
     pub outcome: PerFamily<FamilyOutcome>,
@@ -219,7 +219,7 @@ pub async fn gather(
             let _ = prefixes_seen;
             FamilyOutcome::NoAddress
         };
-        sockets.push(socket);
+        sockets.push(Arc::from(socket));
     }
 
     Gathered {
@@ -314,7 +314,7 @@ pub fn admit(ledger: &mut Ledger, gathered: &Gathered, now: MonotonicInstant) ->
 ///
 /// Returns how many probes were sent.
 pub async fn probe(
-    sockets: &[Box<dyn UdpSocket>],
+    sockets: &[Arc<dyn UdpSocket>],
     race: &Race,
     ledger: &mut Ledger,
     peer: Option<Endpoint>,

@@ -130,6 +130,20 @@ impl Enforcement {
     pub const fn has_interface(&self) -> bool {
         self.handle.is_some()
     }
+
+    /// The overlay interface, once one has been created.
+    ///
+    /// **Read-only, and there is deliberately no setter.** The handle is
+    /// allocated by [`arm`] and cleared by [`teardown`], so those two are the
+    /// only places it can move; exposing it lets the packet path pump into the
+    /// interface this module created rather than creating a second one of its
+    /// own. A second interface would be a second `RULESET_PROTECTED` exception's
+    /// worth of divergence between what the contract permits and what carries
+    /// traffic, which is the shape §2.3 calls the leak window.
+    #[must_use]
+    pub const fn handle(&self) -> Option<TunnelHandle> {
+        self.handle
+    }
 }
 
 /// What arming produced.

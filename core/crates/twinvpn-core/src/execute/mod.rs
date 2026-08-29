@@ -21,6 +21,10 @@
 //!
 //! Inventing a message would have been the second contract OQ-2 excluded.
 
+pub(crate) mod carriage;
+pub(crate) mod establishment;
+pub(crate) mod handshake;
+
 use twinvpn_diag::Tier;
 use twinvpn_mgmt::{CoreCommand, Submission};
 use twinvpn_schema::v1;
@@ -209,17 +213,52 @@ fn connect(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnost
     let session_id = session_id_for(peer);
     let mut effects = 0u32;
 
-    // 1. Gather, on the platform. Real adapter calls: supported_families,
-    //    enumerate, and one bind_udp per family the host offers.
-    let gathered = core.block_on_adapter(|env, adapter| {
-        Box::pin(crate::establish::gather(env, adapter, session_id))
-    });
-    effects += 1;
+    // 1. Gather, on the platform — **once per `Session`**. Real adapter calls:
+    //    supported_families, enumerate, and one bind_udp per family the host
+    //    offers.
+    //
+    //    A `Session` that already holds sockets keeps them. §11.9 marks this
+    //    operation `nat`, and re-binding on an absorbed second request would
+    //    hand the peer a *different source port* than the first attempt just
+    //    advertised — discarding whatever NAT mapping that attempt created and
+    //    making the second connect actively undo the first's work. It would
+    //    also move the endpoint out from under a handshake already in flight.
+    //    Idempotent has to mean "the second call changes nothing", not "the
+    //    second call redoes everything".
+    let previously_gathered = {
+        let sessions = core.sessions();
+        sessions
+            .get(&session_id)
+            .is_some_and(|entry| !entry.sockets.is_empty())
+    };
+    let gathered = if previously_gathered {
+        None
+    } else {
+        let gathered = core.block_on_adapter(|env, adapter| {
+            Box::pin(crate::establish::gather(env, adapter, session_id))
+        });
+        effects += 1;
+        Some(gathered)
+    };
 
     // Read the facts off `gathered` before its sockets move into the session
-    // entry: the guards and T03/T04's selector both need them.
-    let usable_candidate = gathered.usable_candidate();
-    let no_candidate_either_family = gathered.no_candidate_either_family();
+    // entry: the guards and T03/T04's selector both need them. On a re-entered
+    // `Session` they come from the ledger instead — the same facts, recorded by
+    // the gather that did run, rather than re-derived from a gather that did
+    // not.
+    let (usable_candidate, no_candidate_either_family) = match gathered.as_ref() {
+        Some(gathered) => (
+            gathered.usable_candidate(),
+            gathered.no_candidate_either_family(),
+        ),
+        None => {
+            let sessions = core.sessions();
+            let rows = sessions
+                .get(&session_id)
+                .map_or(0, |entry| entry.ledger.rows().len());
+            (rows > 0, rows == 0)
+        }
+    };
 
     // 2. T01's two trust guards, READ rather than asserted.
     //
@@ -256,11 +295,15 @@ fn connect(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnost
     }
 
     // 3. Admit the candidates and schedule the race — `twinvpn-path`'s ledger
-    //    and `Race`, driven here.
+    //    and `Race`, driven here. Skipped where step 1 was: the ledger already
+    //    holds these rows and re-recording them would double-count the
+    //    connectivity report ADR-0015 §11.8 item 4 renders from it.
     let now = core.env().now_monotonic();
-    entry.race = Some(crate::establish::admit(&mut entry.ledger, &gathered, now));
-    entry.sockets = gathered.sockets;
-    effects += 1;
+    if let Some(gathered) = gathered {
+        entry.race = Some(crate::establish::admit(&mut entry.ledger, &gathered, now));
+        entry.sockets = gathered.sockets;
+        effects += 1;
+    }
 
     // 4. `EV_CANDIDATES_READY` fires on the FIRST USABLE candidate (§4.3), or
     //    `EV_CANDIDATE_TIMEOUT`'s guard is what T04 reads. Both are real
@@ -294,7 +337,26 @@ fn connect(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnost
         effects += u32::try_from(sockets).unwrap_or(u32::MAX);
     }
 
-    // 6. The durable half (S-12). Queued here; `Core::flush` makes it durable.
+    // 6. **The handshake.** NEGOTIATING → CONNECTING → a steady state, and only
+    //    on a `Noise_IKpsk2` that actually completed.
+    //
+    //    Until this call existed, `session.connect` stopped at NEGOTIATING and
+    //    `ownership.md` §8 recorded the consequence at the item it half-closed:
+    //    "**Still open:** there is no handshake and no key exchange."
+    //    `twinvpn_tunnel::bind` had shipped the whole of `Noise_IKpsk2` and
+    //    nothing in the composed core called any of it.
+    //
+    //    The lock is released first. The handshake waits on a peer for up to
+    //    `T_CONNECT`, and holding the session table across that would make one
+    //    peer's silence every other `Session`'s stall.
+    drop(sessions);
+    effects = effects.saturating_add(establishment::carry(core, session_id, submission));
+    let mut sessions = core.sessions();
+    let Some(entry) = sessions.get_mut(&session_id) else {
+        return Err(Box::new(reject(codes::NET_SESSION_CLOSED_BY_USER)));
+    };
+
+    // 7. The durable half (S-12). Queued here; `Core::flush` makes it durable.
     let state = entry.runtime.machine().state();
     let record = DurableSession {
         session_id,
@@ -306,7 +368,7 @@ fn connect(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnost
         effects += 1;
     }
 
-    // 7. The §4.4 local event. `NAT.SINGLE_FAMILY_CANDIDATES` is what
+    // 8. The §4.4 local event. `NAT.SINGLE_FAMILY_CANDIDATES` is what
     //    `protocol.md` §4.1 requires to be flagged, and `single_family` is the
     //    fact it turns on.
     let context = core.emitter().context(
@@ -393,6 +455,25 @@ fn net_up(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnosti
     // reported as the operation's outcome and not swallowed.
     let armed = crate::enforce::arm(core)?;
     effects = effects.saturating_add(1);
+
+    // **The pump, now that there is an interface to pump into.**
+    //
+    // A `session.connect` that establishes before any arming has a live tunnel
+    // and no `TunnelHandle` — ADR-0012 §11.8 computes the contract from the
+    // peers that actually came up, so connecting first and arming second is the
+    // order. This is the second half of `carriage::start`, and it is idempotent:
+    // a `Session` whose pump is already running keeps it.
+    let established: Vec<SessionId> = core
+        .sessions()
+        .iter()
+        .filter(|(_, e)| e.established.is_some())
+        .map(|(id, _)| *id)
+        .collect();
+    for id in established {
+        if carriage::start(core, id) {
+            effects = effects.saturating_add(1);
+        }
+    }
     tracing::info!(
         target: "twinvpn.core.enforce",
         generation = armed.generation.0,
@@ -426,6 +507,13 @@ fn net_down(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnos
     // interface up with no contract on it — which is what this used to do,
     // because nothing here reached the adapter at all — is the state that
     // *would* have leaked.
+    // Every carriage stops before the interface it wrote into is destroyed. A
+    // pump still holding a `TunnelHandle` the adapter has torn down would write
+    // into a handle that no longer names anything, and the adapter's refusal
+    // would arrive as a `Fault` on a session the user simply turned off.
+    carriage::stop_all(core);
+    effects = effects.saturating_add(1);
+
     crate::enforce::teardown(core);
     effects = effects.saturating_add(1);
     Ok(Outcome::new(Vec::new(), effects.max(1)))
@@ -437,6 +525,11 @@ fn close_one(core: &Core, session_id: SessionId, submission: &Submission) -> u32
     let Some(entry) = sessions.get_mut(&session_id) else {
         return 0;
     };
+    // **The pump stops here**, before the transition is published, so a caller
+    // that observes DISCONNECTED cannot then observe a packet. The keys go with
+    // it — §7.2's "keys are unusable and are zeroed" — and the order inside
+    // `tear_down` is what keeps a live step from meeting a zeroed key.
+    entry.tear_down();
     let outcome = entry.runtime.apply(
         Trigger::Event(Event::DisconnectRequested),
         Guards::default(),

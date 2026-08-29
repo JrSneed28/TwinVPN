@@ -145,6 +145,17 @@ pub struct Core {
     /// production caller anywhere in the tree.
     #[cfg(feature = "full")]
     enforcement: Mutex<crate::enforce::Enforcement>,
+    /// The bound L-CONTROL transport (ADR-0002 §11.2 rung 1).
+    ///
+    /// `None` until a host calls [`Core::bind_control_transport`]. Held **here**
+    /// rather than in a shell because CD-I5 makes this the only crate that may
+    /// name both planes: a shell holding the transport is a shell holding a
+    /// control-plane object beside a data-plane one, and the core could not
+    /// reach it to attach. The data plane never sees this field — nothing below
+    /// `crate::planes::DataPlaneView` can name it — which is CD-I5's second
+    /// arrow kept intact.
+    #[cfg(feature = "full")]
+    control: Mutex<Option<crate::cp_binding::ControlTransportBinding>>,
 }
 
 /// Whether the durable store has been opened.
@@ -255,6 +266,13 @@ impl Core {
             // force.
             #[cfg(feature = "full")]
             enforcement: Mutex::new(crate::enforce::Enforcement::default()),
+            // No transport, and the core says so rather than assuming one. A
+            // device that cannot reach UDP:443 has no control channel at all on
+            // this build — rungs 2 to 4 of ADR-0002 §11.2's ladder exist
+            // nowhere in the workspace — and `has_control_transport` is how a
+            // caller tells that from an outage.
+            #[cfg(feature = "full")]
+            control: Mutex::new(None),
             bridge: Mutex::new(None),
             #[cfg(feature = "full")]
             journal: CoreSessionJournal::new(Arc::clone(&shared), Vec::new()),
@@ -552,7 +570,15 @@ impl Core {
     /// Two things happen, in order:
     ///
     /// 1. every timer whose deadline has passed fires its §4.5 transition;
-    /// 2. every candidate whose first probe is now due is probed.
+    /// 2. every candidate whose first probe is now due is probed;
+    /// 3. **every carrying `Session` moves whatever packets are waiting.**
+    ///
+    /// Step 3 is a no-op on a runtime that spawned the pump, which is every
+    /// production binding: `crate::execute::carriage::step` returns immediately
+    /// for a `Session` whose directions are already running, so a daemon's tick
+    /// does not become a second reader on the same socket. It does the work on
+    /// the virtual-time binding, whose `spawn` runs a future inline — see that
+    /// module for why that is a scheduler fact rather than a missing capability.
     ///
     /// Returns `(transitions, probes)`. Nothing here reads the wall clock or
     /// sleeps: the deadline comparison is against the injected `MonotonicClock`,
@@ -619,7 +645,148 @@ impl Core {
             };
             probes += sent;
         }
+
+        // The packet path. Direct and relayed are the two carriages a `Session`
+        // can be on, and a `Session` on neither costs one map lookup.
+        let carrying: Vec<twinvpn_types::SessionId> = self
+            .sessions()
+            .iter()
+            .filter(|(_, e)| e.established.is_some())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in carrying {
+            crate::execute::carriage::step(self, id);
+            crate::execute::carriage::relay_step(self, id);
+        }
         (transitions, probes)
+    }
+
+    /// Installs one peer's L-DATA key material.
+    ///
+    /// **The seam the handshake was missing.** `session.connect` runs
+    /// `Noise_IKpsk2` through `twinvpn_tunnel::bind`, and every input that
+    /// handshake needs beyond what this crate holds arrives here: the local
+    /// static, the peer's verified tunnel key, the `TwinNetPSK` and the two
+    /// bindings the §7.3.1 prologue covers. See
+    /// [`crate::session_table::TunnelKeying`] for why each one has to be
+    /// injected rather than derived.
+    ///
+    /// A real entry point rather than a test hook, in the same sense
+    /// [`Core::set_peer_endpoint`] is: the pairing ceremony and the control
+    /// plane are what will call it, and until one of them exists **no
+    /// `Session` on this build can complete a handshake** — which is why
+    /// `session.connect` refuses by name instead of reaching CONNECTED.
+    ///
+    /// Creates the `Session` if it does not exist, because key material can
+    /// legitimately arrive before the local user asks to connect.
+    #[cfg(feature = "full")]
+    pub fn install_tunnel_keying(
+        &self,
+        peer: twinvpn_types::DeviceId,
+        keying: crate::session_table::TunnelKeying,
+    ) {
+        let session_id = crate::session_table::session_id_for(peer);
+        let mut sessions = self.sessions();
+        sessions
+            .entry(session_id)
+            .or_insert_with(|| SessionEntry::new(self.env.clone(), session_id, peer))
+            .keying = Some(keying);
+    }
+
+    /// Installs the credentials one `Session` presents to a relay.
+    ///
+    /// The same shape as [`Core::install_tunnel_keying`] and, today, the same
+    /// emptiness: a verified `RelayMap`, an `RLK` and a `RelayCapabilityToken`
+    /// have no production source anywhere in the workspace, and
+    /// [`crate::session_table::RelayAccess`] records exactly which crate would
+    /// have to supply each. With nothing installed the relay fallback refuses
+    /// with `RELAY.NONE_REACHABLE`, which is the truth: this device knows of no
+    /// relay at all.
+    #[cfg(feature = "full")]
+    pub fn install_relay_access(
+        &self,
+        peer: twinvpn_types::DeviceId,
+        access: crate::session_table::RelayAccess,
+    ) {
+        let session_id = crate::session_table::session_id_for(peer);
+        let mut sessions = self.sessions();
+        sessions
+            .entry(session_id)
+            .or_insert_with(|| SessionEntry::new(self.env.clone(), session_id, peer))
+            .relay_access = Some(access);
+    }
+
+    /// Binds the L-CONTROL transport this core will use.
+    ///
+    /// **Held here so the core can use it**, which is the whole point:
+    /// [`crate::cp_binding::ControlTransportBinding`] was constructible and had
+    /// nowhere to live, so a shell that built one had to keep it and the core
+    /// could not reach it. `attach` is `async` and the binding is built by a
+    /// shell that has resolved endpoints and holds an element-backed signer, so
+    /// this is a second step rather than part of `create` — the same reason
+    /// [`Core::open_store`] is.
+    ///
+    /// A second call **replaces** the binding. Re-binding is what a device does
+    /// when its enrolment record changes, and refusing it would leave a core
+    /// pinned to a server key set its owner has rotated away from.
+    #[cfg(feature = "full")]
+    pub fn bind_control_transport(&self, binding: crate::cp_binding::ControlTransportBinding) {
+        *self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(binding);
+    }
+
+    /// Whether an L-CONTROL transport is bound.
+    ///
+    /// Reported rather than inferred, for the reason [`Core::vault_state`] is:
+    /// the difference between "we have a control channel" and "we have not been
+    /// given one" is the difference between `CONTROL.UNREACHABLE` and a
+    /// misconfiguration, and ADR-0002's ladder makes an operator act
+    /// differently on each.
+    #[cfg(feature = "full")]
+    #[must_use]
+    pub fn has_control_transport(&self) -> bool {
+        self.control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// Attaches one control connection carrying both C1 and C2 (ADR-0002 N-1).
+    ///
+    /// # Errors
+    ///
+    /// `CONTROL.UNREACHABLE` when no transport has been bound — which is the
+    /// honest code for a device that cannot reach a control plane, and is kept
+    /// apart from `AUTH.KEY_UNAVAILABLE` for the reason
+    /// [`crate::cp_binding`] gives: a single "could not connect" makes a locked
+    /// keychain look like an outage. Otherwise, whatever rung 1 reported.
+    #[cfg(feature = "full")]
+    pub async fn attach_control(
+        &self,
+        mobile_background: bool,
+    ) -> Result<Box<dyn twinvpn_cp_client::transport::ControlConnection>, Box<Diagnostic>> {
+        // The transport is an `Arc<dyn ControlTransport>` behind the binding, so
+        // the config and the handle are taken out under the lock and the attach
+        // itself happens without it — a `std` guard held across an `.await`
+        // makes the future non-`Send`, and this one has to be spawnable.
+        let attach = {
+            let guard = self
+                .control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(binding) = guard.as_ref() else {
+                return Err(Box::new(
+                    Diagnostic::builder(codes::CONTROL_UNREACHABLE, Component::ControlPlaneClient)
+                        .build(),
+                ));
+            };
+            (binding.transport(), binding.attach_config(mobile_background))
+        };
+        attach.0.attach(&attach.1).await.map_err(|e| {
+            Box::new(twinvpn_cp_client::CpError::from(e).diagnostic())
+        })
     }
 
     /// Records the endpoint a peer is reachable at.
@@ -684,7 +851,7 @@ impl Core {
     #[cfg(feature = "full")]
     pub(crate) fn block_on_probe(
         &self,
-        sockets: &[Box<dyn twinvpn_platform::socket::UdpSocket>],
+        sockets: &[Arc<dyn twinvpn_platform::socket::UdpSocket>],
         race: &twinvpn_path::race::Race,
         ledger: &mut twinvpn_path::ledger::Ledger,
         peer: Option<twinvpn_types::Endpoint>,
@@ -858,6 +1025,17 @@ impl Core {
     /// adapter **does not** remove the installed ruleset, because CB-6 puts it in
     /// the OS's custody so that the core going away cannot drop protection.
     pub fn begin_shutdown(&self) {
+        // The packet path first, and before the runtime stops accepting work: a
+        // pump is spawned work, and a runtime that has already refused new
+        // spawns cannot be asked to finish the step in flight. Every direction
+        // shares its `Session`'s one `Cancel`, so this is one act per session
+        // rather than two, and the tunnel's keys are erased with it.
+        //
+        // The installed rule set is deliberately **not** touched. CB-6 puts it
+        // in the OS's custody precisely so the tunnel going away cannot drop
+        // protection, and stopping a pump is the tunnel going away.
+        #[cfg(feature = "full")]
+        crate::execute::carriage::stop_all(self);
         self.events.close();
         self.adapter.begin_shutdown();
         self.env.begin_shutdown();

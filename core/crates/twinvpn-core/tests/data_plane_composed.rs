@@ -355,10 +355,19 @@ fn the_composition_root_names_every_data_plane_crate_it_declares() {
             .join(name);
         std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
     };
+    // `execute` and `session_table` are directories now, not files: the
+    // establishment chain grew a handshake, a carriage and the key material
+    // those need, and `CLAUDE.md` caps a file at 500 lines. The scan follows
+    // them rather than being narrowed, so a crate that stops being named in any
+    // of the composition's parts still fails this test.
     let composed = format!(
-        "{}{}{}{}",
+        "{}{}{}{}{}{}{}{}",
         src("enforce.rs"),
-        src("execute.rs"),
+        src("execute/mod.rs"),
+        src("execute/establishment.rs"),
+        src("execute/handshake.rs"),
+        src("execute/carriage.rs"),
+        src("session_table/mod.rs"),
         src("establish.rs"),
         src("gateway.rs")
     );
@@ -367,6 +376,11 @@ fn the_composition_root_names_every_data_plane_crate_it_declares() {
         "twinvpn_dns",
         "twinvpn_enforce",
         "twinvpn_platform",
+        // Added by the establishment chain: the L-DATA engine and the relay
+        // leg were both declared dependencies that the composition root named
+        // nowhere, which is R-2's shape one layer in from where R-2 found it.
+        "twinvpn_tunnel",
+        "twinvpn_relay_client",
     ] {
         assert!(
             composed.contains(crate_name),
