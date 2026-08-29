@@ -5436,7 +5436,7 @@
         "platform"
       ],
       "owning_document": "ADR-0023",
-      "condition": "The terminal is smaller than 71\u00d737, so the QR form is unavailable. Next: enlarge the terminal, or use --text.",
+      "condition": "The terminal is smaller than 79\u00d741, so the QR form is unavailable. Next: enlarge the terminal, or use --text.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.platform_embedded_enrolment_terminal_too_small.next_action"

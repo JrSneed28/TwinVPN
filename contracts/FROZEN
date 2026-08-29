@@ -1,4 +1,4 @@
-83bb2b924b1cceb0b0f6f4879d51381cef7ef25c72345fe25b81fcc6089c6917
+06f0464b5c961bb904834afe57caa08cb9bbfcaa01fd7873fef61d63435c8184
 
 TwinVPN Phase 2 contract freeze — re-declared 2026-08-28.
 AMENDMENT 1 to the freeze of 2026-08-27 (digest 2f5323cf3351a757...).
@@ -404,3 +404,63 @@ What it does NOT authorize: any further change to contracts/. In particular it
 does NOT authorize implementing the offer — §7 of the proposal lists what lands
 outside contracts/ next, and the order is not negotiable: the contract lands
 first.
+
+================================================================================
+AMENDMENT 5 to the freeze — 2026-08-29. Digest on line 1 is this amendment's.
+Amendment 4's digest was 83bb2b924b1cceb0...
+================================================================================
+
+WHAT CHANGED, and nothing else changed:
+  registry/reason_codes.json      ONE `condition` string.
+                                  PLATFORM.EMBEDDED.ENROLMENT_TERMINAL_TOO_SMALL
+                                  read "The terminal is smaller than 71×37";
+                                  it now reads 79×41.
+
+  NO registry_version moved -- see below, it is a deliberate choice and not an
+  omission. NO code added, removed, renamed, retired or reclassified. NO
+  evidence_fields moved. NO .proto, NO .cddl. contracts/gen/** BYTE-IDENTICAL.
+  The other three registries untouched.
+
+WHY IT IS A DEFECT AND NOT AN INCONVENIENCE (§3 step 1):
+  ADR-0023 EM-22a (2026-08-29) pinned E1's QR symbol -- version 13, EC level L,
+  a 4-module quiet zone, the half-block rendering model -- and DERIVED the
+  terminal geometry from them: 79 columns x 41 rows. The registry's condition
+  text names the OLD threshold, so the one code whose entire job is to tell an
+  operator "your terminal is too small for the QR" would have named a size at
+  which the renderer no longer emits one. An operator resizing to 71x37 on that
+  advice would get the same refusal again, with the same text.
+
+  This is finding F-1's residue, recorded under ownership.md §11 G-9.
+
+WHY NO registry_version BUMP, STATED SO IT IS NOT READ AS AN OVERSIGHT:
+  ADR-0015 §11.2 rule 4: the code is the contract and the human text is not --
+  "the strings those keys resolve to, and the keys themselves, may be reworded".
+  `condition` is prose for a human reader; it is not among
+  check_registry_append_only.py's FROZEN_REASON_ATTRS, no consumer validates
+  against it, and nothing machine-readable moved. Amendment 2's own rule applies
+  in the other direction here: bumping an unchanged registry "would claim a
+  change a reader could not find". A reader diffing registry_version 4 against 5
+  would go looking for a semantic move and find a sentence.
+
+  The schema_digest DOES move, and that is the honest signal: the bytes changed,
+  the meaning did not.
+
+WHY IT IS COMPATIBLE (§3 step 5):
+  A reworded human string on one ACTIVE code. No field number, no enum value, no
+  wire format, no evidence key, no classification. `twinvpn-diag`'s catalogue
+  derives its neutral text from this field at build time, so the diagnostic a
+  user sees follows automatically with no hand edit -- which is also why leaving
+  it stale would have shipped the wrong number to the one person it is for.
+
+APPROVED BY (§3 step 6): the repository owner, explicitly, on 2026-08-29, on the
+ask recorded in ownership.md §11 G-9 and in the EM-22a commit message.
+
+Evidence at re-declaration, against the digest on line 1:
+  20 .proto files compile and lint clean, UNCHANGED
+  649 generated files across rust, swift, kotlin, csharp — BYTE-IDENTICAL
+  44785 contract checks, 0 failures
+  455 reason codes across 16 domains; 28 capabilities; 12 canonical states
+  3 .cddl files, unchanged since Amendment 4
+
+What this file authorizes: unchanged from the 2026-08-27 declaration.
+What it does NOT authorize: any further change to contracts/.
