@@ -17,6 +17,21 @@ license.workspace      = true
 repository.workspace   = true
 description = "the Android implementation of the twinvpn-platform trait (CB-3 permits cfg here)"
 
+# ADR-0018 §11.9 row 3: the shipped artifact for this target is a CDYLIB, and
+# `NativeBridge`'s `System.loadLibrary("twinvpn_platform_android")` is what loads
+# it. Without this line cargo produced an `rlib` only, so
+# `libtwinvpn_platform_android.so` did not exist -- the file
+# `shells/android/README.md` §3.2 tells a builder to copy, and the first library
+# the app loads at startup. A missing ABI is ADR-0018 VR-4's packaging defect;
+# a missing LIBRARY was the same defect one level up, and it was invisible
+# because nothing on the host ever asked for the artifact.
+#
+# `rlib` is kept beside it: `twinvpn-platform-android`'s own tests and the four
+# crates that name it by path need one, and dropping it would turn a
+# type-checkable dependency into a linkage.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 twinvpn-types    = { workspace = true }
 twinvpn-env      = { workspace = true }
