@@ -1,0 +1,160 @@
+; TwinVPN PairingOffer — the C-B ceremony payload, deterministic CBOR.
+;
+; Authority: ADR-0007 §7.4 (the ceremony, and this structure's seven fields),
+; ADR-0023 §11.6 EM-22..EM-26 (the four enrolment channels that carry it, and
+; the handling rules), ADR-0017 §11.3 (carriage through MI as opaque bytes),
+; docs/architecture.md S-67 (HeadlessEnrolmentOffer, the in-flight state),
+; contracts/registry/limits.json `pairing` (every bound below).
+;
+; =============================================================================
+; WHAT THIS IS, AND WHY IT IS NOT IN THE FILES NEXT TO IT
+; =============================================================================
+; This payload crosses an OUT-OF-BAND, CONFIDENTIAL CHANNEL: a QR photographed
+; off a screen, a Crockford-base32 block pasted between terminals, a 0600 file,
+; a serial console, a ubus event (ADR-0023 EM-22 E1..E4). It is the ONE dCBOR
+; payload in this contract set that is NOT a signed statement.
+;
+; NOT IN signed_statements.cddl. Every member of that file is COSE_Sign1-wrapped
+; and VERIFIED. This payload cannot be: the joining device is BY DEFINITION not
+; yet enrolled, holds no OwnerTrustAnchor and no TrustedPeer, and therefore has
+; no key to verify a signature against. C-B's channel authentication IS the
+; optical confidentiality (256 bits), not a signature. A COSE_Sign1 nobody can
+; check would be bytes shaped like a proof, verified by no one. Its closed
+; inventory of seventeen statements is also not the place to spend a slot
+; against ADR-0003 §14 revisit trigger 7.
+;
+; NOT IN pairing.proto, AND THAT FILE SAYS SO. Its header states the
+; SECRET-FIELD PROHIBITION: "pairing_secret, the SPAKE2 password, K_pair, and
+; PairSecret NEVER appear in this schema and MUST NOT be added". Field 1 below
+; IS pairing_secret. pairing.proto's messages are C1/C2 WIRE messages, and the
+; entire security argument of C-B is that pairing_secret NEVER TRANSITS THE
+; NETWORK — ADR-0007 §7.4: "MITM at the rendezvous is defeated by construction:
+; the adversary never sees pairing_secret". A protobuf definition invites
+; exactly one mistake, embedding this in a PairingRequest, and that mistake
+; hands the rendezvous the one value it must never see.
+;
+; =============================================================================
+; SECRET HANDLING — NORMATIVE. ADR-0023 EM-24, ADR-0015 §11.4.
+; =============================================================================
+; The whole payload is classified SECRET. There is NO RENDERING PATH into the
+; diagnostic ledger, syslog, a Tier-1 bundle, or ANY log level, at any severity,
+; in any build profile.
+;
+;   - `pairing_id` (= SHA-256(pairing_secret)[0..15]) is PUBLIC and MAY be
+;     logged. `pairing_secret` MUST NOT be, ever, including inside a parse
+;     error, a hex dump, a Debug rendering, or an Evidence attachment.
+;   - A decode failure is reported as a bare registered reason_code with NO
+;     evidence drawn from the input. "The offer did not parse" is the whole of
+;     what may be said about it.
+;   - The decoded value is zeroized on consumption or at expiry, whichever is
+;     first (ADR-0023 EM-24, architecture.md S-67: "non-durable BY REQUIREMENT
+;     — it MUST NOT survive process restart").
+;
+; =============================================================================
+; ENCODING RULES — NORMATIVE
+; =============================================================================
+;   1. RFC 8949 §4.2.1 CORE DETERMINISTIC ENCODING, exactly as
+;      signed_statements.cddl rule 1 requires of a signed statement. Two
+;      conforming producers MUST emit byte-identical output for the same
+;      logical value, because ADR-0023 E2 renders THESE BYTES as Crockford
+;      base32 for a human to copy and E1 renders THESE BYTES as a QR.
+;      Non-canonical input MUST BE REJECTED with PROTO.NON_CANONICAL_CBOR,
+;      NEVER NORMALIZED.
+;
+;   2. THE TOTAL ENCODED LENGTH IS CHECKED FIRST, BEFORE ANY FIELD IS PARSED,
+;      against `pairing.max_offer_bytes`. Over-length is PROTO.SIZE_EXCEEDED.
+;      This ordering is the reason the per-field bounds below can never
+;      disagree with the payload bound in the direction that matters: their sum
+;      (493) is at or below the payload cap (512), and a receiver that enforces
+;      the payload cap first can meet no field it has not already budgeted for.
+;
+;   3. UNKNOWN KEYS ARE REJECTED. There is no wildcard entry in the map below
+;      and none may be added. Unlike an unsigned transport message, nothing
+;      here is forwarded, so a preserved-but-uninterpreted field would be a
+;      place to smuggle bytes past a human who is about to photograph them.
+;      ADR-0003 §7's asymmetry, applied to a payload with no verifier at all.
+;
+;   4. NO FLOAT appears in this schema. Depth is 2 (the map, and the array
+;      inside the embedded COSE_Sign1's own encoding, which is opaque here).
+;      Nesting beyond the parser's limit is PROTO.DEPTH_EXCEEDED.
+;
+;   5. `not_after_ms` is MANDATORY and is evaluated against LOCAL time. A
+;      receiver MUST refuse an offer whose window exceeds
+;      `pairing.ceremony_expiry_ms` beyond its own clock: ADR-0007 §7.4 fixes
+;      the expiry at 120 s "enforced INDEPENDENTLY by both devices and the
+;      rendezvous", and an offer that names its own longer window is a producer
+;      trying to widen a bound the receiver owns.
+; =============================================================================
+
+; --- Primitives ---------------------------------------------------------------
+; Deliberately spelled here rather than imported: CDDL has no include, and
+; signed_statements.cddl's copies carry rules (crit-set, mandatory COSE
+; wrapping) that do not apply to this file. Where a name is shared, the
+; definition is character-identical, and contracts/tests asserts it.
+
+epoch-ms   = uint            ; UTC milliseconds
+cose-key   = bstr .size (1..80)
+                             ; COSE_Key, deterministic CBOR, carried as an
+                             ; embedded bstr for the same reason
+                             ; signed_statements.cddl carries one: the inner
+                             ; encoding is verified as received, never
+                             ; re-serialized. `pairing.max_offer_cose_key_bytes`.
+                             ; A P-256 compressed EC2 key measures 43 bytes; the
+                             ; bound admits the uncompressed form so a producer
+                             ; that ignores §7.4's "compressed point" is refused
+                             ; by THIS FILE'S words rather than by a length
+                             ; accident.
+
+; --- PairingOffer -------------------------------------------------------------
+; ADR-0007 §7.4, C-B (the QR path, primary). The joining device generates
+; `pairing_secret` and displays / emits this.
+;
+; pairing_id = SHA-256(pairing_secret)[0..15] is the PUBLIC rendezvous handle
+; and is NOT a field here — it is DERIVED, and carrying it would create a second
+; place for it to disagree with the secret it names.
+;
+; K_pair = HKDF-SHA-256(salt = pairing_id, ikm = pairing_secret,
+;                       info = "TwinVPN/Pair/v1")
+; wraps every subsequent ceremony message. Neither K_pair nor any value derived
+; from it appears in this schema and neither MUST BE ADDED.
+
+pairing-offer = {
+  1: bstr .size 32,          ; pairing_secret. THE SECRET. 32 random bytes
+                             ; (ADR-0007 §7.4). `pairing.secret_bytes`.
+                             ; Optical-confidential; NEVER transits the network.
+  2: cose-key,               ; ik_pub. ES256 / P-256, compressed point.
+  3: bstr .size 32,          ; tk_pub. X25519, raw.
+                             ; NOTE, and it is a finding rather than a choice:
+                             ; signed_statements.cddl's tunnel-key-binding
+                             ; carries tk_pub as `cose-key`, so the corpus
+                             ; spells one key two ways. §7.4's `bstr(32)` is
+                             ; followed here because this file's authority is
+                             ; §7.4; ownership.md §11 G-9 carries the divergence.
+  4: bstr .size (1..256),    ; binding. COSE_Sign1(IK) over the TunnelKeyBinding
+                             ; of signed_statements.cddl §2, carried as opaque
+                             ; octets and VERIFIED OVER THE RECEIVED OCTETS.
+                             ; ADR-0007 N-4: the receiver MUST verify this
+                             ; BEFORE writing TK into TrustedPeer, and the check
+                             ; MUST NOT be skippable by configuration — a
+                             ; skipped check is a full authentication bypass.
+                             ; `pairing.max_offer_binding_bytes`. Measured: 216.
+  5: null,                   ; attestation. ADR-0007 §7.4 writes `bstr / null`.
+                             ; `pairing.max_offer_attestation_bytes` is 0, so
+                             ; `null` is the only admissible value on this
+                             ; payload, AND THAT IS A NARROWING OF §7.4 THAT
+                             ; NEEDS THE ADR'S OWNER: the channel cannot carry a
+                             ; platform attestation blob. The measured offer
+                             ; with attestation ABSENT is 377 bytes; ADR-0023
+                             ; E1's declared 71-column terminal admits a QR of
+                             ; at most 61 modules with a conforming 4-module
+                             ; quiet zone, which is version 11, which holds 321
+                             ; bytes at EC level L. The offer is ALREADY 56
+                             ; bytes over its own primary channel with this
+                             ; field empty. See ownership.md §11 G-9, finding F-1.
+  6: tstr .size (0..64),     ; rendezvous_hint. `pairing.max_offer_hint_bytes`.
+                             ; Tighter than pairing.proto's peer_hint (256) on
+                             ; purpose: that one travels a 64 KiB C1 envelope,
+                             ; this one has to survive being photographed.
+  7: epoch-ms,               ; not_after_ms. issued + pairing.ceremony_expiry_ms.
+                             ; Rule 5 above: the RECEIVER owns the window.
+}

@@ -1,4 +1,4 @@
-97b0959caa9fcd03c95b200bdf94789d0afd09defcb4461de036800f550ccb57
+83bb2b924b1cceb0b0f6f4879d51381cef7ef25c72345fe25b81fcc6089c6917
 
 TwinVPN Phase 2 contract freeze — re-declared 2026-08-28.
 AMENDMENT 1 to the freeze of 2026-08-27 (digest 2f5323cf3351a757...).
@@ -274,3 +274,133 @@ Evidence at re-declaration, against the digest on line 1:
 
 What this file authorizes: unchanged from the 2026-08-27 declaration.
 What it does NOT authorize: any further change to contracts/.
+
+================================================================================
+AMENDMENT 4 to the freeze — 2026-08-29. Digest on line 1 is this amendment's.
+Amendment 3's digest was 97b0959caa9fcd03...
+================================================================================
+
+WHAT CHANGED, and nothing else changed:
+  cddl/twinvpn/v1/pairing_offer.cddl   NEW — ADR-0007 §7.4's PairingOffer, the
+                                  C-B ceremony payload. The FIRST .cddl added
+                                  since the freeze, and the only dCBOR payload
+                                  in this contract set that is not a signed
+                                  statement.
+  registry/limits.json            registry_version 2 -> 3; six NEW keys under
+                                  the existing `pairing` object — secret_bytes,
+                                  max_offer_bytes, max_offer_cose_key_bytes,
+                                  max_offer_binding_bytes,
+                                  max_offer_attestation_bytes,
+                                  max_offer_hint_bytes — plus an _offer_note.
+                                  Also F-3: capability._max_name_bytes_note
+                                  still claimed a workaround was "live in
+                                  production code" three amendments after it was
+                                  removed. §4.3 ruled that not worth an
+                                  amendment of its own but to be corrected by
+                                  the next one opening contracts/ for a real
+                                  reason. This is that one.
+  tests/test_registries.py        asserts limits registry_version 3, the six
+                                  bounds, the per-field/payload arithmetic, and
+                                  a tripwire that pairing.proto declares no
+                                  secret field
+
+  NO .proto changed. NO existing .cddl changed. NO reason code added, renamed or
+  reclassified. The other THREE registries are untouched: reason_codes stays at
+  4, capabilities and encrypted_resolvers stay at 2. contracts/gen/** is
+  BYTE-IDENTICAL — a .cddl generates no binding.
+
+WHY IT IS A DEFECT AND NOT AN INCONVENIENCE (§3 step 1):
+  This is W-21, open since wave 1. `PairingOffer` is named normatively by
+  architecture.md S-67, ADR-0007 §7.4, ADR-0017 §11.3 and §11.9, ADR-0020 S-67
+  and ADR-0023 §7.6 / EM-21..EM-26 — and it exists in the corpus ONLY as a
+  ten-line pseudo-CDDL block inside ADR-0007 §7.4. No .cddl, no .proto, no
+  registry entry, no Rust type, and not one bound in limits.json that fits any
+  of its seven fields.
+
+  The consequence is not cosmetic and it is not deferrable: C-B is the channel
+  authenticator for EVERY enrolment path. ADR-0023 EM-21 records that headless
+  and cameraless devices use C-B too rather than falling back to C-A's ~2^29.9,
+  and W-22 records that C-A is unimplementable — no audited RFC 9382 P-256 Rust
+  implementation exists. So with C-B uncontracted, NEITHER channel authenticator
+  is complete, and enrolment — the operation every other operation depends on —
+  cannot be implemented against a contract because there is no contract.
+
+WHY IT IS A .cddl AND NOT A .proto (§3 step 4):
+  pairing.proto's own header states the SECRET-FIELD PROHIBITION: "pairing_secret,
+  the SPAKE2 password, K_pair, and PairSecret NEVER appear in this schema and
+  MUST NOT be added". Field 1 of this payload IS pairing_secret. That file's
+  messages are C1/C2 WIRE messages, and the whole security argument of C-B is
+  that pairing_secret NEVER TRANSITS THE NETWORK (§7.4: "MITM at the rendezvous
+  is defeated by construction: the adversary never sees pairing_secret"). A
+  protobuf definition invites exactly one mistake — embedding it in a
+  PairingRequest — and that mistake hands the rendezvous the one value it must
+  never see.
+
+  Nor signed_statements.cddl: every member of that file is COSE_Sign1-wrapped
+  and VERIFIED, and the joining device is by definition not yet enrolled, holds
+  no OwnerTrustAnchor and no TrustedPeer, and has no key to verify against. A
+  COSE_Sign1 nobody can check is bytes shaped like a proof. Its inventory is
+  also at 17 of the ~20 that fire ADR-0003 §14 revisit trigger 7.
+
+WHY IT IS COMPATIBLE (§3 step 5):
+  Additive in the strongest sense available: a NEW file that no existing
+  producer or consumer reads, and six NEW keys in an object that already exists.
+  No field number, no enum value, no wire format, no reason code and no existing
+  bound moved. No generated binding regenerates, because CDDL has no codegen in
+  this repository. The one wire-visible consequence is
+  SchemaDescriptor.schema_digest, which moves exactly as it did for Amendments
+  1, 2 and 3 — that is what the field is for.
+
+THE BOUNDS ARE MEASURED, NOT ESTIMATED (§3 step 2):
+  A minimal RFC 8949 §4.2.1 encoder was used on a representative offer: a COSE_Key
+  EC2 P-256 compressed key (43 B), a tunnel-key-binding built exactly as
+  signed_statements.cddl §2 declares it (142 B) inside a COSE_Sign1 (216 B), and
+  a 27-character hint. Total 377 bytes. The per-field bounds sum to 493 at their
+  maxima, at or below max_offer_bytes = 512, and the payload cap is checked
+  BEFORE any field is parsed so the two cannot disagree in the dangerous
+  direction. That relation is asserted by a contract test rather than hoped for —
+  Amendment 1's recorded cost was exactly a per-field cap exceeding its envelope
+  cap and passing because nothing compared them.
+
+WHAT THIS AMENDMENT NARROWS, STATED PLAINLY:
+  ADR-0007 §7.4 writes `attestation : bstr / null`. max_offer_attestation_bytes
+  is 0, so `null` is the only admissible value, and THAT IS A NARROWING OF THE
+  ADR. The reason is measured and is finding F-1: the offer is already 377 bytes
+  with attestation absent, and ADR-0023 EM-22 E1's declared 71-column terminal
+  admits a QR of at most 61 modules with a conforming 4-module quiet zone —
+  version 11, 321 bytes at EC level L. The product's DEFAULT enrolment channel
+  is 56 bytes too small for its own payload before any attestation blob, at the
+  weakest error-correction level, for a symbol to be photographed off a glowing
+  screen. No document in the corpus fixes the QR version, the error-correction
+  level or the quiet zone.
+
+  THIS AMENDMENT DOES NOT RESOLVE F-1 AND MUST NOT BE READ AS RESOLVING IT.
+  Both exits belong to an ADR owner: ADR-0023 EM-22's geometry grows to 77x39,
+  or ADR-0007 §7.4's `binding` field — 219 of the 377 bytes — carries the
+  TunnelKeyBinding by reference instead of by value. W-23 is the wave's standing
+  lesson that a specified derivation is not an implementation agent's to
+  improve. Until one of those lands, the contract is nameable and the default
+  channel still does not fit it.
+
+APPROVED BY (§3 step 6): the repository owner, explicitly, on 2026-08-29, on the
+proposal at docs/implementation/w21-pairing-offer-amendment.md, which carries
+steps 1-5 in full.
+
+CORRECTED WHILE APPLYING IT: the proposal's pairing.proto tripwire searched the
+file's raw text, and the prohibition is STATED IN PROSE THAT NAMES WHAT IT
+FORBIDS -- so the test failed on the very sentence that makes the rule. It now
+cuts comments and inspects declarations. A tripwire that cannot tell a rule from
+its violation is not a tripwire.
+
+Evidence at re-declaration, against the digest on line 1:
+  20 .proto files compile and lint clean, UNCHANGED
+  649 generated files across rust, swift, kotlin, csharp — BYTE-IDENTICAL
+  44785 contract checks, 0 failures
+  455 reason codes across 16 domains; 28 capabilities; 12 canonical states
+  3 .cddl files (capabilities, signed_statements, pairing_offer)
+
+What this file authorizes: unchanged from the 2026-08-27 declaration.
+What it does NOT authorize: any further change to contracts/. In particular it
+does NOT authorize implementing the offer — §7 of the proposal lists what lands
+outside contracts/ next, and the order is not negotiable: the contract lands
+first.

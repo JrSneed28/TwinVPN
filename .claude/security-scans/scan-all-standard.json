@@ -1,0 +1,255 @@
+{
+  "timestamp": "2026-08-29T06:56:40.660Z",
+  "target": ".",
+  "depth": "standard",
+  "type": "all",
+  "summary": {
+    "critical": 1,
+    "high": 12,
+    "medium": 27,
+    "low": 0,
+    "total": 40
+  },
+  "findings": [
+    {
+      "severity": "HIGH",
+      "type": "Dependency CVE",
+      "location": "package.json:@claude-flow/cli",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@claude-flow/memory",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@claude-flow/neural",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "HIGH",
+      "type": "Dependency CVE",
+      "location": "package.json:@huggingface/transformers",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/configuration",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/core",
+      "description": "OpenTelemetry Core: Unbounded memor"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/exporter-logs-otlp-grpc",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/exporter-logs-otlp-http",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/exporter-logs-otlp-proto",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/exporter-metrics-otlp-grpc",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/exporter-metrics-otlp-http",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/exporter-metrics-otlp-proto",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/exporter-prometheus",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/exporter-trace-otlp-grpc",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/exporter-trace-otlp-http",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/exporter-trace-otlp-proto",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/exporter-zipkin",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/otlp-exporter-base",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/otlp-grpc-exporter-base",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/otlp-transformer",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/propagator-b3",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "HIGH",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/propagator-jaeger",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/resources",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/sdk-logs",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/sdk-metrics",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "HIGH",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/sdk-node",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/sdk-trace-base",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:@opentelemetry/sdk-trace-node",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "HIGH",
+      "type": "Dependency CVE",
+      "location": "package.json:@xenova/transformers",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "HIGH",
+      "type": "Dependency CVE",
+      "location": "package.json:adm-zip",
+      "description": "adm-zip: Crafted ZIP file triggers "
+    },
+    {
+      "severity": "HIGH",
+      "type": "Dependency CVE",
+      "location": "package.json:agentdb",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "HIGH",
+      "type": "Dependency CVE",
+      "location": "package.json:agentic-flow",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "HIGH",
+      "type": "Dependency CVE",
+      "location": "package.json:onnx-proto",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "HIGH",
+      "type": "Dependency CVE",
+      "location": "package.json:onnxruntime-node",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "HIGH",
+      "type": "Dependency CVE",
+      "location": "package.json:onnxruntime-web",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "CRITICAL",
+      "type": "Dependency CVE",
+      "location": "package.json:protobufjs",
+      "description": "Arbitrary code execution in protobu"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:ruflo",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:ruv-swarm",
+      "description": "Vulnerability"
+    },
+    {
+      "severity": "HIGH",
+      "type": "Dependency CVE",
+      "location": "package.json:sharp",
+      "description": "sharp inherited vulnerabilities in "
+    },
+    {
+      "severity": "MEDIUM",
+      "type": "Dependency CVE",
+      "location": "package.json:uuid",
+      "description": "uuid: Missing buffer bounds check i"
+    }
+  ]
+}

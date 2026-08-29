@@ -385,7 +385,76 @@ def run():
     # parity was Amendment 1's convenience, not a rule, and bumping an unchanged
     # registry would claim a change a reader could not find.
     check_eq(caps["registry_version"], 2, "capability registry version")
-    check_eq(lim["registry_version"], 2, "limits registry version")
+    # Amendment 4 (2026-08-29) added the six PairingOffer bounds and bumped ONLY
+    # this registry, for Amendment 2's reason.
+    check_eq(lim["registry_version"], 3, "limits registry version")
+
+    case("the limits registry declares the PairingOffer bounds")
+    pairing = lim["pairing"]
+    for key, value in {
+        "secret_bytes": 32,
+        "max_offer_bytes": 512,
+        "max_offer_cose_key_bytes": 80,
+        "max_offer_binding_bytes": 256,
+        "max_offer_attestation_bytes": 0,
+        "max_offer_hint_bytes": 64,
+    }.items():
+        check_eq(pairing[key], value, f"pairing.{key}")
+
+    case("the PairingOffer per-field bounds fit inside the payload bound")
+    # Amendment 1's recorded cost was a per-field cap that exceeded its envelope
+    # cap and passed because nothing compared them. This compares them, and it
+    # computes the CBOR head length rather than hardcoding one: a bound crossing
+    # 24, 256 or 65536 grows its own header, which is exactly the arithmetic a
+    # reader would get wrong by hand.
+    def head_len(n):
+        """Bytes in an RFC 8949 shortest-form head for argument `n`."""
+        return 1 if n < 24 else 2 if n < 0x100 else 3 if n < 0x10000 else 5
+
+    def field(payload_len):
+        """One map entry: a 1-byte integer key, a head, and the payload."""
+        return 1 + head_len(payload_len) + payload_len
+
+    worst = (
+        field(pairing["secret_bytes"])                 # 1 pairing_secret
+        + field(pairing["max_offer_cose_key_bytes"])   # 2 ik_pub
+        + field(32)                                    # 3 tk_pub, X25519, fixed
+        + field(pairing["max_offer_binding_bytes"])    # 4 binding
+        + 1 + 1                                        # 5 attestation = null
+        + field(pairing["max_offer_hint_bytes"])       # 6 rendezvous_hint
+        + 1 + 9                                        # 7 not_after_ms, uint64 head
+        + 1                                            # the map head, 7 entries
+    )
+    check_eq(worst, 493, "the offer's worst-case encoded length")
+    check(
+        worst <= pairing["max_offer_bytes"],
+        f"the offer's field bounds sum to {worst}, over max_offer_bytes",
+    )
+    check_eq(
+        pairing["max_offer_attestation_bytes"],
+        0,
+        "attestation is null-only on this payload; see ownership.md F-1",
+    )
+
+    case("pairing.proto still carries no secret field")
+    # The SECRET-FIELD PROHIBITION in pairing.proto's header is the reason the
+    # offer is CDDL. A tripwire, so adding the message to the proto fails here.
+    #
+    # DECLARATIONS ONLY, and the reason is the file itself: the prohibition is
+    # STATED IN PROSE that necessarily names what it forbids -- "`pairing_secret`
+    # ... MUST NOT be added" -- and line 65 explains `pairing_id` as
+    # "SHA-256(pairing_secret)[0..15]". A raw substring search fails on the very
+    # sentence that makes the rule, which is a tripwire that cannot distinguish
+    # the rule from its violation. Comments are cut before the check.
+    src = (ROOT / "proto" / "twinvpn" / "v1" / "pairing.proto").read_text()
+    declarations = "\n".join(line.split("//", 1)[0] for line in src.splitlines())
+    for forbidden in ("pairing_secret", "PairingOffer", "k_pair", "pair_secret"):
+        check(
+            forbidden not in declarations,
+            f"pairing.proto DECLARES {forbidden}; its own header forbids it, and "
+            f"the C-B security argument is that pairing_secret never transits the "
+            f"network",
+        )
 
     # ---- Known-encrypted-resolver endpoints (ADR-0011 §11.9) ---------------
     # This artifact exists because §11.9 requires all three desktop enforcement
