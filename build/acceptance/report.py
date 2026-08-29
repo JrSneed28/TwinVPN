@@ -247,16 +247,34 @@ def build_rows(run: bool):
     add("F-2", "production enrolment installation", v, d)
     v, d = probe_command("core", "cargo test -q -p twinvpn-core --test pairing", run)
     add("F-2", "pair.begin production path", v, d)
+    # These three run against the SHIPPED COMPOSITION -- real
+    # LinuxPlatformAdapter, real Core, real enrol_at_startup, real MI
+    # boundary. `twinvpnd`'s pairing suite is the evidence, not the core's:
+    # F-2C's whole point is that a test calling `install_pairing_enrolment`
+    # directly proves nothing about the composition that ships.
     v, d = probe_command(
-        "core", "cargo test -q -p twinvpn-core --test pairing_production", run)
+        "shells/linux",
+        "cargo test -q -p twinvpnd --test pairing "
+        "a_provisioned_host_begins_a_ceremony_and_answers_with_the_offer", run)
     add("F-2", "complete MI-P1 PairingOffer returned", v, d)
     v, d = probe_command(
-        "core", "cargo test -q -p twinvpn-crypto --test pairing_offer", run)
+        "shells/linux",
+        "cargo test -q -p twinvpnd --test pairing "
+        "a_shell_renders_the_qr_payload_and_the_e2_text_from_the_response", run)
     add("F-2", "QR/text carriage available", v, d)
-    v, d = probe_command("shells/linux", "cargo test -q --workspace", run)
+    v, d = probe_command("shells/linux", "cargo test -q -p twinvpnd --test pairing", run)
     add("F-2", "C-B integration flow", v, d)
+    # MI-P1 rule 1 is the one a refactor breaks silently: the offer is SECRET
+    # and must leave only inside a pair.begin response, never on the event
+    # stream that every subscriber reads.
     v, d = probe_command(
-        "core", "cargo test -q -p twinvpn-core --test pairing_refusals", run)
+        "shells/linux",
+        "cargo test -q -p twinvpnd --test pairing "
+        "the_offer_reaches_the_caller_and_never_the_event_stream", run)
+    add("F-2", "MI-P1 rule 1: offer never on the event stream", v, d)
+    v, d = probe_command(
+        "shells/linux",
+        "cargo test -q -p twinvpnd --test pairing a_host_with_no_element_refuses_to_begin_a_pairing", run)
     add("F-2", "missing identity reason (AUTH.IDENTITY_MISSING)", v, d)
 
     # -- F-5 ---------------------------------------------------------------

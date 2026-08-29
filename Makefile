@@ -873,6 +873,7 @@ test-pairing-integration:
 	  $(CARGO) test --locked -p twinvpn-core --test pairing_refusals && \
 	  $(CARGO) test --locked -p twinvpn-core --test pairing_production
 	@source build/toolchain/env.sh && cd shells/linux && \
+	  $(CARGO) test --locked -p twinvpnd --test pairing && \
 	  $(CARGO) test --locked --workspace
 
 # F-5. The mutation gate. It fails if any required obligation is missing, any

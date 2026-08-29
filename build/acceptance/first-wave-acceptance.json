@@ -1,113 +1,120 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-08-29T23:26:20.306451+00:00",
-  "commit": "aaabcce82b985cd05d2f37ebc26954988212ccad",
+  "generated_at": "2026-08-29T23:28:28.407709+00:00",
+  "commit": "6f1eb01bf68e2b04b46f1bb0a148428dcbd3a312",
   "worktree_dirty": true,
-  "probes_executed": false,
+  "probes_executed": true,
   "rows": [
     {
       "section": "F-1",
       "criterion": "crypto producer wired",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "every entry point has a non-test caller: arm_resumption",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "crypto consumer wired",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "FAIL",
+      "detail": "no non-test caller for: resume_on_wire",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "real datagram roundtrip",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpn-core --test crypto_carriage",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "handshake secret type safety",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "core/crates/twinvpn-core/src/resume/driver.rs no longer contains `handshake_secret: &[u8]`",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "local role type/state safety",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "core/crates/twinvpn-core/src/resume/driver.rs no longer contains `local_role: Role`",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "replay commit-last regression",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -p twinvpn-crypto --lib replay::tests",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "reflection rejection",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpn-core --test resume reflected",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "handshake/role API shape asserted",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpn-core --test resume_api_shape",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "RS-6 regression",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpn-core --test resume_lifecycle",
       "required": true
     },
     {
       "section": "F-2",
       "criterion": "production enrolment installation",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "every entry point has a non-test caller: install_pairing_enrolment",
       "required": true
     },
     {
       "section": "F-2",
       "criterion": "pair.begin production path",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpn-core --test pairing",
       "required": true
     },
     {
       "section": "F-2",
       "criterion": "complete MI-P1 PairingOffer returned",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpnd --test pairing a_provisioned_host_begins_a_ceremony_and_answers_with_the_offer",
       "required": true
     },
     {
       "section": "F-2",
       "criterion": "QR/text carriage available",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpnd --test pairing a_shell_renders_the_qr_payload_and_the_e2_text_from_the_response",
       "required": true
     },
     {
       "section": "F-2",
       "criterion": "C-B integration flow",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpnd --test pairing",
+      "required": true
+    },
+    {
+      "section": "F-2",
+      "criterion": "MI-P1 rule 1: offer never on the event stream",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpnd --test pairing the_offer_reaches_the_caller_and_never_the_event_stream",
       "required": true
     },
     {
       "section": "F-2",
       "criterion": "missing identity reason (AUTH.IDENTITY_MISSING)",
-      "verdict": "NOT-EXECUTED",
-      "detail": "not run (pass --run)",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpnd --test pairing a_host_with_no_element_refuses_to_begin_a_pairing",
       "required": true
     },
     {
@@ -200,7 +207,7 @@
       "evidence": {}
     }
   ],
-  "required_total": 25,
-  "required_pass": 0,
+  "required_total": 26,
+  "required_pass": 15,
   "phase_5_eligibility": "FAIL"
 }
