@@ -226,7 +226,7 @@
     "platform": {
       "os": "linux",
       "arch": "x64",
-      "shell": "bash"
+      "shell": "/bin/bash"
     },
     "modelPreferences": {
       "default": "claude-opus-5",
@@ -238,6 +238,15 @@
       "taskListEnabled": true,
       "mailboxEnabled": true,
       "coordination": {
+        "mode": "hub-spoke",
+        "maxRetries": 5,
+        "retryDelay": 10000,
+        "circuitBreaker": {
+          "enabled": true,
+          "threshold": 5,
+          "timeout": 60000,
+          "resetTimeout": 300000
+        },
         "autoAssignOnIdle": true,
         "trainPatternsOnComplete": true,
         "notifyLeadOnComplete": true,
@@ -257,12 +266,39 @@
       }
     },
     "swarm": {
-      "topology": "hierarchical-mesh",
-      "maxAgents": 15
+      "topology": "hierarchical",
+      "maxAgents": 15,
+      "strategy": "specialized",
+      "heartbeatInterval": 5000,
+      "taskQueueSize": 100
+    },
+    "orchestrator": {
+      "timeout": 120000,
+      "retryAttempts": 3,
+      "retryDelay": 5000
+    },
+    "terminal": {
+      "emulateEnvironment": true,
+      "defaultShell": "/bin/bash",
+      "workingDirectory": "./",
+      "maxOutputLength": 10000,
+      "timeout": 60000
     },
     "memory": {
-      "backend": "hybrid",
+      "type": "hybrid",
       "enableHNSW": true,
+      "path": "./data",
+      "maxEntries": 10000,
+      "ttl": 86400,
+      "hnsw": {
+        "m": 16,
+        "ef": 200,
+        "efConstruction": 200
+      },
+      "encryption": {
+        "enabled": false,
+        "algorithm": "aes-256-gcm"
+      },
       "learningBridge": {
         "enabled": true
       },
@@ -273,8 +309,31 @@
         "enabled": true
       }
     },
+    "logging": {
+      "level": "info",
+      "format": "json",
+      "destination": "console",
+      "filePath": "./logs/ruflo.log",
+      "maxFileSize": "100MB",
+      "maxFiles": 10
+    },
+    "monitoring": {
+      "enabled": true,
+      "metricsInterval": 60000,
+      "alertThresholds": {
+        "errorRate": 0.05,
+        "responseTime": 5000,
+        "memoryUsage": 0.9
+      }
+    },
     "neural": {
-      "enabled": true
+      "enabled": true,
+      "sona": true,
+      "ewc": true,
+      "moe": {
+        "experts": 8,
+        "topK": 2
+      }
     },
     "daemon": {
       "autoStart": true,
@@ -349,6 +408,13 @@
       "directory": "/docs/ddd"
     },
     "security": {
+      "mode": "strict",
+      "inputValidation": true,
+      "pathValidation": true,
+      "authentication": {
+        "required": false,
+        "method": "jwt"
+      },
       "autoScan": true,
       "scanOnEdit": true,
       "cveCheck": true,
