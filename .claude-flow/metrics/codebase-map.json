@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-29T07:07:05.457Z",
+  "timestamp": "2026-08-29T08:01:39.894Z",
   "projectRoot": "/home/bayba/TwinVPN",
   "structure": {
     "hasPackageJson": true,
@@ -7,5 +7,5 @@
     "hasClaudeConfig": true,
     "hasClaudeFlow": true
   },
-  "scannedAt": 1787987225457
+  "scannedAt": 1787990499894
 }

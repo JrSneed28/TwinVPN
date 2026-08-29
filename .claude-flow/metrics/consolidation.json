@@ -1,19 +1,22 @@
 {
-  "timestamp": "2026-08-29T06:58:26.860Z",
+  "timestamp": "2026-08-29T08:08:21.294Z",
   "distillationEnabled": true,
-  "patternsConsolidated": 0,
-  "memoryCleaned": 0,
+  "patternsConsolidated": 1,
+  "memoryCleaned": 1,
   "duplicatesRemoved": 0,
-  "episodes": 0,
-  "episodeEmbeddings": 0,
-  "patternEmbeddings": 0,
+  "episodes": 1,
+  "episodeEmbeddings": 1,
+  "patternEmbeddings": 1,
   "causalEdges": 0,
   "promoted": 0,
-  "byProvenance": {},
+  "byProvenance": {
+    "proxy:structural": 1
+  },
   "namespaces": [
     "patterns",
     "project",
-    "decisions"
+    "decisions",
+    "health-check"
   ],
   "dryRun": false,
   "corrupt": false
