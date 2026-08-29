@@ -1,0 +1,41 @@
+Mutant:      M-P18-9
+Proof:       P18
+Spec:        docs/adr/ADR-0019 §11.13 P18 mutant table; ADR-0019 LT-3b
+Description: resolves an empty platform_ctx to the HOST's platform variant instead of to the neutral one
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-diag lt_3b_an_empty_platform_context_never_falls_back_to_a_host_platform
+Fails:       lt_3b_an_empty_platform_context_never_falls_back_to_a_host_platform
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-diag/src/resolve.rs b/core/crates/twinvpn-diag/src/resolve.rs
+index 7b9f937..2c3d29f 100644
+--- a/core/crates/twinvpn-diag/src/resolve.rs
++++ b/core/crates/twinvpn-diag/src/resolve.rs
+@@ -333,11 +333,19 @@ pub fn render(
+ /// A shell choosing among returned keys is what CB-2 forbids and what would let
+ /// a GUI and a CLI **on the same host** diverge.
+ fn select_variant(entry: &'static CatalogueEntry, platform: &PlatformContext) -> &'static str {
+-    let Some(tag) = platform.platform else {
+-        // LT-3b, in one line: no platform means the neutral variant, and never
+-        // the host's own.
+-        return entry.neutral;
++    // MUTANT M-P18-9: an empty `platform_ctx` falls back to the HOST's
++    // platform instead of to the neutral variant, so a render on a Linux
++    // runner returns the Linux variant where the neutral one is required.
++    let host = if cfg!(target_os = "linux") {
++        "LINUX"
++    } else if cfg!(target_os = "macos") {
++        "MACOS"
++    } else if cfg!(target_os = "windows") {
++        "WINDOWS"
++    } else {
++        "LINUX"
+     };
++    let tag = platform.platform.unwrap_or(host);
+     entry
+         .variants
+         .iter()

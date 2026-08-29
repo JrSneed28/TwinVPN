@@ -1,0 +1,33 @@
+Mutant:      M-P19-5
+Proof:       P19
+Spec:        docs/adr/ADR-0020 §11.17 P19 mutant table; ADR-0020 ST-24
+Description: classifies and emits the rollback but never sets granted_authority_suspended, so the detection is reported and not acted on
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-store --test ladder a_restored_older_vault_cannot_lower_the_trust_epoch
+Fails:       granted authority must be suspended after a rollback
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-store/src/anchor.rs b/core/crates/twinvpn-store/src/anchor.rs
+index 42091e0..c37fee5 100644
+--- a/core/crates/twinvpn-store/src/anchor.rs
++++ b/core/crates/twinvpn-store/src/anchor.rs
+@@ -401,11 +401,12 @@ impl AnchorState {
+     /// session (ST-35, I5, R-11).
+     #[must_use]
+     pub const fn suspends_granted_authority(&self) -> bool {
++        // MUTANT M-P19-5: `STORE.ROLLBACK_DETECTED` is still classified and
++        // emitted, but a detected rollback no longer suspends granted
++        // authority — the detection is reported and not acted on.
+         matches!(
+             self,
+-            AnchorState::VaultRolledBack { .. }
+-                | AnchorState::AnchorMissingIdentityPresent
+-                | AnchorState::Forked { .. }
++            AnchorState::AnchorMissingIdentityPresent | AnchorState::Forked { .. }
+         )
+     }
+ }

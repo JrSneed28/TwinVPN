@@ -1,0 +1,6 @@
+# mutation-gate.sh's outputs. They are EVIDENCE OF ONE RUN, bound to one commit
+# by the `commit` field inside them, so committing them would freeze a verdict
+# that the next run is entitled to change. CI uploads them as artifacts instead;
+# .github/workflows/t3-proof.yml is where that upload belongs.
+mutation-report.json
+mutation-report-summary.txt

@@ -1,0 +1,31 @@
+Mutant:      M-P04-4
+Proof:       P04
+Spec:        docs/testing-strategy.md §4 P04 mutant table; docs/reliability.md §4.5, A-16
+Description: enters RECONNECTING with no Diagnostic — the state change is published, the A-16 evidence record is not
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-session --test no_silent_failure no_reachable_move_is_silent_and_every_record_is_well_formed
+Fails:       no_reachable_move_is_silent_and_every_record_is_well_formed
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-session/src/machine.rs b/core/crates/twinvpn-session/src/machine.rs
+index 58e148e..1e74d11 100644
+--- a/core/crates/twinvpn-session/src/machine.rs
++++ b/core/crates/twinvpn-session/src/machine.rs
+@@ -210,6 +210,13 @@ impl SessionMachine {
+         let occurred_at_micros = self.env.now_monotonic().as_micros();
+         let path_id = if to.has_path() { self.path_id } else { None };
+ 
++        // MUTANT M-P04-4: entering RECONNECTING emits no `Diagnostic` — the
++        // state change is published, the A-16 evidence record is not.
++        let reason = if matches!(to, SessionState::Reconnecting { .. }) {
++            None
++        } else {
++            reason
++        };
+         let diagnostic = reason.map(|code| {
+             Diagnostic::builder(code, Component::TunnelEngine)
+                 .transition(from.connection_state(), to.connection_state())

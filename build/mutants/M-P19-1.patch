@@ -1,0 +1,30 @@
+Mutant:      M-P19-1
+Proof:       P19
+Spec:        docs/adr/ADR-0020 §11.17 P19 mutant table; ADR-0020 ST-22/ST-24
+Description: keeps the floor set in the vault alone (M1 without the Tier-1 anchor), so a restored older vault decides the floors
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-store --test ladder a_restored_older_vault_cannot_lower_the_trust_epoch
+Fails:       a_restored_older_vault_cannot_lower_the_trust_epoch
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-store/src/lib.rs b/core/crates/twinvpn-store/src/lib.rs
+index f29524a..84563d9 100644
+--- a/core/crates/twinvpn-store/src/lib.rs
++++ b/core/crates/twinvpn-store/src/lib.rs
+@@ -302,7 +302,11 @@ impl Store {
+         // than being dropped, so that the arithmetic is already correct when the
+         // mirror lands: taking the *minimum* would silently lower a floor, which
+         // is the rollback the anchor exists to prevent.
+-        let floors = anchor_floors.merge_max(&vault_floors(&vault_image));
++        // MUTANT M-P19-1: the floor set is kept in the vault alone (M1 without
++        // the Tier-1 anchor). The anchor's floors are no longer consulted at
++        // open, so a restored older vault decides the floors.
++        let _ = &anchor_floors;
++        let floors = vault_floors(&vault_image);
+ 
+         let rung = match &state {
+             AnchorState::VaultRolledBack { .. } => Rung::L5,

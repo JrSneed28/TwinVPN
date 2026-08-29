@@ -1,0 +1,32 @@
+Mutant:      M-P07-5
+Proof:       P07
+Spec:        docs/testing-strategy.md §4 P07 mutant table; ADR-0012 §11.4 rule KS-8, protocol.md A13
+Description: treats an ABSENT per-family exit grant as a permission rather than a denial, so the ungranted family egresses locally
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-route --test both_families a_one_family_exit_grant_blocks_the_other_family_rather_than_leaking_it
+Fails:       the ungranted family MUST be blocked, not left to egress locally
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-route/src/program.rs b/core/crates/twinvpn-route/src/program.rs
+index 3b94892..cbc6897 100644
+--- a/core/crates/twinvpn-route/src/program.rs
++++ b/core/crates/twinvpn-route/src/program.rs
+@@ -326,10 +326,11 @@ pub fn compute(
+     let mut blocked = PerFamily::new(false, false);
+     let mut single_family_grant: Option<AddressFamily> = None;
+     if inputs.mode == RoutingMode::FullTunnel {
++        // MUTANT M-P07-5: an ABSENT per-family exit grant is treated as a
++        // PERMISSION rather than a denial (ADR-0012 KS-8 inverted), so the
++        // ungranted family is left to egress locally instead of being blocked.
+         for family in [AddressFamily::V4, AddressFamily::V6] {
+-            if !*inputs.exit_grant.get(family) {
+-                *blocked.get_mut(family) = true;
+-            }
++            let _ = family;
+         }
+         let granted_v4 = *inputs.exit_grant.get(AddressFamily::V4);
+         let granted_v6 = *inputs.exit_grant.get(AddressFamily::V6);
