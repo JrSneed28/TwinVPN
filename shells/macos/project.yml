@@ -1,0 +1,178 @@
+# XcodeGen spec for `shells/macos` — the containing app, the NetworkExtension
+# SYSTEM extension, and the bridge test bundle.
+#
+# ===========================================================================
+# WHY THIS FILE NOW EXISTS, HAVING BEEN ARGUED AGAINST
+# ===========================================================================
+# `README.md` §7 gap 45 said: "No Xcode project and no `Package.swift`: SwiftPM
+# cannot produce a `.systemextension` bundle, and a manifest that can never
+# build the product would be noise."
+#
+# The first half of that is still true and is why there is still no
+# `Package.swift` here. The second half has stopped being true: `build/ci/
+# ci-macos.sh` runs on a `macos-26` runner with a real Xcode, so a manifest here
+# CAN build the product, and the thing that was noise has become the only way to
+# discover that (for example) `TwinVPNApp/` had no entry point and
+# `TwinVPNTunnel/` had no bridging header. Both were found by writing this file.
+#
+# A SPEC AND NOT A `.xcodeproj`, for the reason `shells/ios/project.yml` gives
+# at length: a `project.pbxproj` is generated 96-bit identifiers that a reviewer
+# cannot check and a host with no Xcode cannot produce. `xcodegen generate`
+# makes the project on a Darwin builder; `.gitignore` keeps the output out.
+#
+# ===========================================================================
+# STATUS
+# ===========================================================================
+# WRITTEN, NOT GENERATED. There is no Xcode, no Darwin SDK and no XcodeGen on
+# the development host, so nothing below has been fed to `xcodegen` even once.
+# The first Darwin run should expect to correct it, and `ci-macos.sh` reports
+# what it actually managed rather than assuming this is right.
+
+name: TwinVPN
+options:
+  bundleIdPrefix: com.twinvpn
+  # ADR-0018 §11.9 row 5 and ADR-0016 §11.2: macOS 11 is the floor, because
+  # §11.2 names SMJobBless as the `ksd` install route on 11-12 and SMAppService
+  # on 13+, so 11.0 is the earliest release the component set is defined for.
+  deploymentTarget:
+    macOS: "11.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # The pinned Swift language mode. `build/toolchain/env.sh` pins the COMPILER
+    # at 6.1.2 (asserted by `build/ci/ci-common-apple.sh`); this is the language
+    # mode the sources are written in, and it matches `shells/ios/project.yml`
+    # so the two shells cannot drift into different dialects.
+    SWIFT_VERSION: "5.9"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    # ADR-0018 §11.3: `panic = "unwind"` in EVERY shipped profile, because F-7's
+    # containment requires `catch_unwind` at the FFI boundary. Nothing in this
+    # project may build the staticlib with `panic = "abort"`.
+    OTHER_LDFLAGS: "-ObjC"
+    # ADR-0018 §11.9 row 5: universal 2. `Scripts/build-bridge.sh` produces both
+    # slices and `lipo`s them, so the Swift side must be built for both too — an
+    # arm64-only app that linked a universal archive would ship half a product.
+    ARCHS: "arm64 x86_64"
+    ONLY_ACTIVE_ARCH: NO
+
+targets:
+  # -------------------------------------------------------------------------
+  # The containing app. ADR-0016 §11.2: "UI, the VPN profile, the sysext
+  # activation | no authority, no key, no recovery path".
+  #
+  # IT LINKS NO CORE, on purpose — see `TwinVPNApp/main.swift`'s header. Row 5
+  # puts the staticlib in the SYSTEM EXTENSION, and a change that linked it here
+  # would be a topology change needing the ADR amended first.
+  # -------------------------------------------------------------------------
+  TwinVPN:
+    type: application
+    platform: macOS
+    sources:
+      - path: TwinVPNApp
+    dependencies:
+      - target: TwinVPNTunnel
+        embed: true
+        # A SYSTEM extension is embedded at
+        # `Contents/Library/SystemExtensions/`, NOT at `Contents/PlugIns/` where
+        # an app extension goes. ADR-0016 §12.6 rejects the app-extension form
+        # on a security ground, and the destination is where that choice becomes
+        # a fact about the bundle rather than a sentence in a document.
+        copy:
+          destination: productsDirectory
+          subpath: Contents/Library/SystemExtensions
+      - sdk: SystemExtensions.framework
+      - sdk: AppKit.framework
+    settings:
+      base:
+        INFOPLIST_FILE: packaging/TwinVPNApp.Info.plist
+        CODE_SIGN_ENTITLEMENTS: packaging/TwinVPNApp.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: com.twinvpn.app
+
+  # -------------------------------------------------------------------------
+  # The NetworkExtension SYSTEM extension — THE AUTHORITY (PS-22).
+  #
+  # This is the target that links the shared core: `libtwinvpn_bridge.a` hosts
+  # the `Core`, the platform adapter, the key handle, the datapath and the
+  # management interface, all in this process.
+  # -------------------------------------------------------------------------
+  TwinVPNTunnel:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: TwinVPNTunnel
+    dependencies:
+      - sdk: NetworkExtension.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    settings:
+      base:
+        INFOPLIST_FILE: packaging/TwinVPNTunnel.Info.plist
+        CODE_SIGN_ENTITLEMENTS: packaging/TwinVPNTunnel.entitlements
+        # `SystemExtensionInstaller.extensionIdentifier` is this string, and a
+        # system extension's identifier MUST be prefixed by its containing
+        # app's. The divergence from ADR-0016 §11.2's literal
+        # `com.twinvpn.sysext` is reported in `TwinVPNTunnel.Info.plist`.
+        PRODUCT_BUNDLE_IDENTIFIER: com.twinvpn.app.sysext
+        # README §7 gap 45: "There is also no bridging header, which
+        # TwinVPNXPCShim.h needs to be in." This is it. Without it,
+        # `CoreBridge.swift` sees no `tvb_*` symbol at all.
+        SWIFT_OBJC_BRIDGING_HEADER: TwinVPNTunnel/TwinVPNTunnel-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(inherited) $(SRCROOT)/twinvpn-bridge/include $(SRCROOT)/TwinVPNTunnel
+        LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/Frameworks
+        # The Rust archive, plus what its dependency graph needs from the system.
+        # `security-framework-sys` and the Darwin `libc` bindings resolve
+        # against these; `libresolv` is `twinvpn-dns`'s. Named explicitly rather
+        # than discovered, so a link failure says which framework is missing
+        # instead of listing symbols.
+        OTHER_LDFLAGS: $(inherited) -ltwinvpn_bridge -lresolv -framework CoreFoundation
+
+  # -------------------------------------------------------------------------
+  # The link/run suite. Runs on macOS itself (not a simulator — macOS has none).
+  #
+  # STANDALONE — no host application. The extension links the same archive, and
+  # hosting the tests inside it is not possible for a system extension anyway:
+  # the OS starts those, `xctest` does not.
+  #
+  # WHAT IT IS NOT: a NetworkExtension activation test. On a hosted runner
+  # `tvb_ext_start` refuses at ADR-0016 §11.6's `privilege_posture` step and the
+  # suite asserts the REFUSAL. The activation claim belongs to
+  # `build/ci/jobs/macos-privileged-lifecycle.yml` and to nothing else.
+  # -------------------------------------------------------------------------
+  TwinVPNBridgeTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: TwinVPNBridgeTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.twinvpn.app.bridgetests
+        SWIFT_OBJC_BRIDGING_HEADER: TwinVPNBridgeTests/TwinVPNBridgeTests-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(inherited) $(SRCROOT)/twinvpn-bridge/include
+        LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/Frameworks
+        OTHER_LDFLAGS: $(inherited) -ltwinvpn_bridge -lresolv -framework CoreFoundation -framework Security -framework SystemConfiguration
+        # No host application, so no signing identity is needed to run it.
+        # Stated rather than left to a default: "it happened to work unsigned" is
+        # not a property to rely on.
+        CODE_SIGNING_ALLOWED: NO
+
+schemes:
+  # The shipping scheme: the app and the system extension it embeds.
+  TwinVPN:
+    build:
+      targets:
+        TwinVPN: all
+        TwinVPNTunnel: all
+
+  # The link/run scheme `build/ci/ci-macos.sh` drives. It BUILDS the production
+  # targets — so the shared core is linked into a genuine system extension on
+  # every run — and TESTS the bridge suite.
+  TwinVPNBridge:
+    build:
+      targets:
+        TwinVPN: all
+        TwinVPNTunnel: all
+        TwinVPNBridgeTests: [test]
+    test:
+      targets:
+        - TwinVPNBridgeTests

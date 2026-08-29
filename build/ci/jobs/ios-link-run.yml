@@ -1,0 +1,134 @@
+# build/ci/jobs/ios-link-run.yml
+#
+# A JOB BODY, not a workflow. Paste it under a workflow's `jobs:` key at this
+# indentation.
+#
+# ===========================================================================
+# WHAT THIS JOB CLAIMS, AND WHAT IT EXPLICITLY DOES NOT
+# ===========================================================================
+# CLAIMS: the shared core compiles for `aarch64-apple-ios` AND
+# `aarch64-apple-ios-sim`, in BOTH profiles (`full` for the extension,
+# `core-lite` for the app, ADR-0018 §11.12); the REAL application target and the
+# REAL packet-tunnel NetworkExtension target build against the DEVICE SDK with
+# the approved archives linked into them; a simulator boots; the real XCTest
+# integration target runs on it, crosses `tw_core_create` — the ABI OF RECORD —
+# submits the four ADR-0018 §11.16 (e) lifecycle phases, and reads each
+# completion back off `tw_core_next_event`.
+#
+# DOES NOT CLAIM anything about a physical device.
+# `shells/ios/TwinVPNTests/LifecycleTests.swift` says why in its own header:
+# "The simulator has no Secure Enclave, no jetsam, and no real
+# `includeAllNetworks`, so every assertion here is vacuous on it." So the
+# NetworkExtension is BUILT and LINKED here and never ACTIVATED, and the
+# evidence carries `privileged: false`.
+#
+# **SIMULATOR EVIDENCE IS NOT DEVICE EVIDENCE.** The two jobs write different
+# files (`build/ci/evidence/ios.json` vs `ios-device.json`), run different
+# suites (`TwinVPNIntegrationTests` vs `TwinVPNTests`), and carry different
+# `privileged` values. `build/ci/jobs/ios-device-lifecycle.yml` is the other
+# one, and neither may be read as the other.
+#
+# ===========================================================================
+# THE XCODE PIN
+# ===========================================================================
+# Resolved by `build/ci/ci-ios.sh --print-xcode-path`, so the version lives in
+# ONE place — `build/ci/ci-common-apple.sh`'s `TWINVPN_XCODE_VERSION`, currently
+# 16.4.
+#
+# Authority: ADR-0018 §11.3 ("one exact toolchain version pinned … advanced only
+# by a reviewed commit that re-runs the full §11.9 matrix") applied to Swift by
+# `build/toolchain/env.sh:10` — `TWINVPN_SWIFT_VERSION=6.1.2`. Xcode 16.4 is the
+# release that ships Swift 6.1.2. `apple_require_pinned_swift` asserts the pair
+# at run time, so a runner-image update that moved Swift fails the job rather
+# than silently changing the binary.
+#
+# `shells/ios/README.md:79` documents a separate FLOOR ("Xcode 15+"). A floor is
+# not a pin.
+#
+# ===========================================================================
+# WHAT IS UPLOADED, AND WHAT MUST NEVER BE
+# ===========================================================================
+# Uploaded on failure: the `.xcresult`, the xcodebuild logs (which carry the
+# linker diagnostics), the simulator inventory, and the simulator's own crash
+# reports for our two bundle identifiers.
+#
+# NEVER uploaded: provisioning profiles, signing identities or private keys,
+# pairing secrets, authentication tokens, tunnel plaintext, or unredacted packet
+# captures. The simulator's whole `~/Library/Developer/CoreSimulator` tree is
+# NOT uploaded — it contains the app's App Group container, which ADR-0020 §11.9
+# puts the vault in. Only `DiagnosticReports` is copied out, and only for our
+# own bundles.
+
+  ios-link-run:
+    name: ios-link-run
+    # PINNED. Not `macos-latest`.
+    runs-on: macos-26
+    # Four cargo builds (two triples x two profiles) with `ring` compiled from
+    # C, an xcodegen run, a device-SDK build, a simulator boot and a test run.
+    # 90 minutes is the hard fail, not a target (rule C-1).
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # The FALLBACK, if the pinned Xcode is not side-by-side on the image.
+      # Keep the version in step with build/ci/ci-common-apple.sh.
+      # - uses: maxim-lobanov/setup-xcode@v1
+      #   with:
+      #     xcode-version: '16.4'
+
+      - name: select the pinned Xcode and print every toolchain version
+        run: |
+          sudo xcode-select -s "$(build/ci/ci-ios.sh --print-xcode-path)"
+          xcodebuild -version
+          swift --version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphonesimulator --show-sdk-version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun simctl list runtimes
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          sw_vers
+
+      - name: install xcodegen
+        run: brew install --quiet xcodegen
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: make ci-ios
+        run: make ci-ios
+
+      - name: collect simulator crash reports
+        if: failure()
+        # Only OUR bundles, and only the crash reports. The rest of the
+        # CoreSimulator tree holds the App Group container the vault lives in
+        # (ADR-0020 §11.9), and it is never copied out.
+        run: |
+          mkdir -p build/ci/logs/ios/crashes
+          find ~/Library/Logs/DiagnosticReports \
+               ~/Library/Developer/CoreSimulator/Devices/*/data/Library/Logs/DiagnosticReports \
+               -name '*TwinVPN*' -type f -exec cp {} build/ci/logs/ios/crashes/ \; 2>/dev/null \
+            || echo "no crash reports"
+
+      - name: shut the simulator down
+        if: always()
+        # A booted simulator left behind is state the next run inherits, and
+        # rule C-5 binds a verdict to a snapshot rather than to whatever the
+        # previous job left running. `--cleanup` is idempotent and succeeds with
+        # nothing booted.
+        run: build/ci/ci-ios.sh --cleanup
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-ios
+          # ENUMERATED, never `path: .`. See the header.
+          path: |
+            build/ci/evidence/ios.json
+            build/ci/logs/ios/**
+          if-no-files-found: error
+          retention-days: 14

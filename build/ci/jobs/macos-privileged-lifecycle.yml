@@ -1,0 +1,139 @@
+# build/ci/jobs/macos-privileged-lifecycle.yml
+#
+# A JOB BODY, not a workflow. Paste it under a workflow's `jobs:` key.
+#
+# ===========================================================================
+# THIS IS THE ONLY JOB THAT MAY CLAIM A NETWORKEXTENSION LIFECYCLE PASS
+# ===========================================================================
+# `macos-link-run` runs on a GitHub-hosted `macos-26` runner, which has no
+# Developer ID, no `com.apple.developer.system-extension.install` entitlement
+# and no root. On such a host `tvb_ext_start` refuses at ADR-0016 §11.6's
+# `privilege_posture` step, and PS-18 says it MUST: an extension that started
+# without arming enforcement "would report itself as running while protecting
+# nothing". That job therefore writes `privileged: false` and proves linking and
+# execution — NOT activation.
+#
+# **A mocked hosted test is not a NetworkExtension lifecycle pass, and no
+# amount of green from `macos-link-run` becomes one.** This job is the other
+# claim: a self-hosted, signed, root-privileged Mac where
+# `OSSystemExtensionRequest` can actually be approved and `pf` can actually be
+# programmed. It writes `build/ci/evidence/macos-privileged.json` with
+# `privileged: true`, a SEPARATE file, so the two can never be read as one.
+#
+# ===========================================================================
+# WHAT THE RUNNER MUST BE
+# ===========================================================================
+# Labelled `[self-hosted, macOS, twinvpn-vpn-lifecycle]`, and it must satisfy
+# every one of these. None is checked by this file; the job fails at the step
+# that needs it, which is the honest failure.
+#
+#   1. Xcode pinned to `TWINVPN_XCODE_VERSION` (build/ci/ci-common-apple.sh),
+#      installed where `--print-xcode-path` can find it.
+#   2. A Developer ID Application certificate and private key in a keychain the
+#      runner user can unlock WITHOUT an interactive prompt, plus a
+#      provisioning profile carrying the system-extension entitlement
+#      (packaging/SIGNING.md is the documented procedure).
+#   3. `sudo` without a password for the runner user, because `pf` programming
+#      and `systemextensionsctl` need root.
+#   4. `systemextensionsctl developer on`, and SIP configured to permit an
+#      unnotarized system extension — otherwise activation is refused before any
+#      TwinVPN code runs. This is a MACHINE configuration, made once and
+#      recorded, not something a CI job may do to a host.
+#   5. A machine that is DISPOSABLE OR SNAPSHOTTED. This job programs the host
+#      firewall and installs a system extension; a shared developer Mac is not
+#      an acceptable runner for it.
+#   6. NO production credentials of any kind. The identity this job signs with
+#      is a CI identity, and its revocation is a routine event.
+#
+# ===========================================================================
+# SECRETS
+# ===========================================================================
+# Nothing here echoes a signing identity, a keychain password, a team
+# identifier or a provisioning profile. `ci-macos.sh` never interpolates them
+# into a printed string or into the evidence file, and no step below adds
+# `-showBuildSettings` or `--verbose`, either of which would dump the build
+# environment wholesale. `set -x` is likewise absent on purpose.
+
+  macos-privileged-lifecycle:
+    name: macos-privileged-lifecycle
+    runs-on: [self-hosted, macOS, twinvpn-vpn-lifecycle]
+    # A privileged run programs the host firewall and activates a system
+    # extension. If it has not finished in 60 minutes something is wedged, and a
+    # wedged privileged job holding a machine's firewall is worse than a failed
+    # one.
+    timeout-minutes: 60
+    # Never two of these on one machine at once: ADR-0016 PS-1 admits exactly one
+    # authority per host, and a second would be refused mid-run in a way that
+    # looks like a product defect.
+    concurrency:
+      group: twinvpn-macos-privileged-lifecycle
+      cancel-in-progress: false
+    steps:
+      # `clean: true` matters more here than on a hosted runner: a self-hosted
+      # workspace persists, and rule C-5 binds a verdict to an exact commit
+      # rather than to a commit plus whatever the last run left in the tree.
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - name: select the pinned Xcode and print every toolchain version
+        run: |
+          sudo xcode-select -s "$(build/ci/ci-macos.sh --print-xcode-path)"
+          xcodebuild -version
+          swift --version
+          xcrun --sdk macosx --show-sdk-version
+          rustc --version
+          sw_vers
+          # The machine preconditions this job cannot create for itself, printed
+          # so a failure report says which one was missing.
+          systemextensionsctl list || true
+          sudo -n pfctl -s info >/dev/null && echo "pfctl: reachable"
+
+      - name: reset to a known-clean state
+        # BEFORE anything is built. Removes a stale generated project, stale
+        # staged archives, a stale evidence file, a leftover system extension,
+        # an owner-tagged pf anchor and a leftover utun. A privileged run that
+        # started from the previous run's firewall would be measuring the
+        # previous run.
+        run: build/ci/ci-macos.sh --reset
+
+      - name: privileged lifecycle
+        run: build/ci/ci-macos.sh --privileged
+
+      - name: collect crash reports and firewall state
+        if: failure()
+        # The three things that explain a privileged failure and none of which
+        # survives the cleanup step below. `pfctl -sr` prints the RULES, which
+        # are our own rendered ruleset and carry no secret; it does NOT print
+        # packets, and no capture is taken anywhere in this job.
+        run: |
+          mkdir -p build/ci/logs/macos/crashes
+          cp -R ~/Library/Logs/DiagnosticReports/* build/ci/logs/macos/crashes/ 2>/dev/null \
+            || echo "no crash reports"
+          sudo -n pfctl -sr    > build/ci/logs/macos/pf-rules.txt   2>&1 || true
+          sudo -n pfctl -s Anchors > build/ci/logs/macos/pf-anchors.txt 2>&1 || true
+          systemextensionsctl list > build/ci/logs/macos/sysext.txt 2>&1 || true
+          netstat -rn              > build/ci/logs/macos/routes.txt 2>&1 || true
+
+      - name: return the machine to a known state
+        if: always()
+        # UNCONDITIONAL. A self-hosted Mac left with our system extension
+        # active and an owner-tagged pf anchor installed is a machine whose next
+        # job — and whose owner — inherits our firewall. `--cleanup` removes the
+        # anchor through `twinvpn-unblock`, which is KS-20a's sanctioned removal
+        # path, so the teardown and the supported recovery are the same code.
+        run: build/ci/ci-macos.sh --cleanup
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diagnostics-macos-privileged
+          # ENUMERATED. NEVER a signing identity, a keychain, a provisioning
+          # profile, a pairing secret, an authentication token, tunnel plaintext
+          # or a packet capture — this job takes no capture at all, precisely so
+          # there is none to leak.
+          path: |
+            build/ci/evidence/macos-privileged.json
+            build/ci/logs/macos/**
+          if-no-files-found: error
+          retention-days: 14

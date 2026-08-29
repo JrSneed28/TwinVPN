@@ -49,16 +49,26 @@ targets:
     dependencies:
       - target: TwinVPNProvider
         embed: true
-      # `core-lite` — ADR-0018 §11.12's feature profile: twinvpn-schema,
-      # twinvpn-crypto (VERIFICATION ONLY), twinvpn-store, twinvpn-trust and
-      # twinvpn-diag, and NO data-plane crate. Built by `Scripts/build-core.sh`.
-      - framework: Frameworks/libtwinvpn_core_lite.a
-        embed: false
     settings:
       base:
         INFOPLIST_FILE: Resources/App-Info.plist
         CODE_SIGN_ENTITLEMENTS: Resources/TwinVPN.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: net.twinvpn.client
+        # `core-lite` — ADR-0018 §11.12's feature profile: twinvpn-schema,
+        # twinvpn-crypto (VERIFICATION ONLY), twinvpn-store, twinvpn-trust and
+        # twinvpn-diag, and NO data-plane crate. Built by `Scripts/build-core.sh`.
+        #
+        # A LIBRARY SEARCH PATH AND `-l`, NOT A `framework:` DEPENDENCY, because
+        # the device and the simulator need DIFFERENT archives and a single
+        # committed path can only name one of them. `$(PLATFORM_NAME)` is
+        # `iphoneos` or `iphonesimulator`, which is exactly how
+        # `Scripts/build-core.sh` keys its output directory — so one project
+        # builds for both and neither can silently link the other's slice.
+        LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/Frameworks/$(PLATFORM_NAME)
+        OTHER_LDFLAGS: $(inherited) -ltwinvpn_core_lite
+        # The module map over the staged `twinvpn.h` and the committed internal
+        # bridge header. `Scripts/stage-headers.sh` puts `twinvpn.h` there.
+        SWIFT_INCLUDE_PATHS: $(inherited) $(SRCROOT)/Sources/TwinVPNBridge/include
         # ADR-0020 §11.9's iPadOS note: "The store MUST NOT be placed anywhere
         # reachable by the Files app: `UIFileSharingEnabled` and
         # `LSSupportsOpeningDocumentsInPlace` MUST be false, or the store MUST
@@ -81,11 +91,6 @@ targets:
       - path: Sources/TwinVPNProvider
       - path: Sources/TwinVPNBridge
     dependencies:
-      # The FULL core, as a staticlib. ADR-0018 §11.9 row 1: "<= 12 MB on disk;
-      # core RSS <= 9 MB inside ADR-0022's 12 MB provider budget (PB-6)".
-      # `Scripts/check-budget.sh` is what makes that a gate rather than a hope.
-      - framework: Frameworks/libtwinvpn_core.a
-        embed: false
       - sdk: NetworkExtension.framework
       - sdk: Security.framework
       - sdk: Network.framework
@@ -94,10 +99,18 @@ targets:
         INFOPLIST_FILE: Resources/Provider-Info.plist
         CODE_SIGN_ENTITLEMENTS: Resources/TwinVPNProvider.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: net.twinvpn.client.provider
+        # The FULL core, as a staticlib. ADR-0018 §11.9 row 1: "<= 12 MB on disk;
+        # core RSS <= 9 MB inside ADR-0022's 12 MB provider budget (PB-6)".
+        # `Scripts/check-budget.sh` is what makes that a gate rather than a hope.
+        # Per-platform search path — see the app target for why.
+        LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/Frameworks/$(PLATFORM_NAME)
+        OTHER_LDFLAGS: $(inherited) -ltwinvpn_core
+        SWIFT_INCLUDE_PATHS: $(inherited) $(SRCROOT)/Sources/TwinVPNBridge/include
 
   # -------------------------------------------------------------------------
   # The device-bound suite. WRITTEN, NOT EXECUTED — see the headers in
-  # TwinVPNTests/. A green build of this target proves nothing about them.
+  # TwinVPNTests/. A green build of this target proves nothing about them, and
+  # every case in it skips itself on the simulator.
   # -------------------------------------------------------------------------
   TwinVPNTests:
     type: bundle.unit-test
@@ -107,7 +120,41 @@ targets:
     dependencies:
       - target: TwinVPN
 
+  # -------------------------------------------------------------------------
+  # The SIMULATOR-runnable integration suite. This is the one that produces the
+  # `build/ci/evidence/ios.json` link/run evidence.
+  #
+  # STANDALONE — no `target: TwinVPN` host application, on purpose. The app links
+  # `core-lite` and this bundle links the FULL core; both export the same
+  # `twinvpn.h` symbols, so hosting one inside the other would be a duplicate-
+  # symbol link or, worse, a run in which the test exercised the app's profile
+  # while claiming to exercise the extension's.
+  #
+  # IT IS NOT `TwinVPNTests` AND DOES NOT REPLACE IT. This suite proves link,
+  # load, invoke, receive and lifecycle transitions on a simulator. The
+  # NetworkExtension-activation, jetsam and leak-capture rows need a provisioned
+  # physical device and stay in `TwinVPNTests`, run by
+  # `build/ci/jobs/ios-device-lifecycle.yml` and by nothing else.
+  # -------------------------------------------------------------------------
+  TwinVPNIntegrationTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: TwinVPNIntegrationTests
+      - path: Sources/TwinVPNBridge
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.twinvpn.client.integrationtests
+        LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/Frameworks/$(PLATFORM_NAME)
+        OTHER_LDFLAGS: $(inherited) -ltwinvpn_core
+        SWIFT_INCLUDE_PATHS: $(inherited) $(SRCROOT)/Sources/TwinVPNBridge/include
+        # No host application, so no signing identity is needed to run it on a
+        # simulator. Stated as a setting rather than left to a default, because
+        # "it happened to work unsigned" is not a property to rely on.
+        CODE_SIGNING_ALLOWED: NO
+
 schemes:
+  # The shipping scheme: app + extension, and the DEVICE-BOUND suite.
   TwinVPN:
     build:
       targets:
@@ -116,3 +163,16 @@ schemes:
     test:
       targets:
         - TwinVPNTests
+
+  # The link/run scheme `build/ci/ci-ios.sh` drives. It BUILDS the production
+  # targets — so the shared core is linked into a genuine app and a genuine
+  # NetworkExtension on every run — and TESTS the simulator suite.
+  TwinVPNIntegration:
+    build:
+      targets:
+        TwinVPN: all
+        TwinVPNProvider: all
+        TwinVPNIntegrationTests: [test]
+    test:
+      targets:
+        - TwinVPNIntegrationTests

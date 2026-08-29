@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Info.plist for `net.twinvpn.client` — the iOS/iPadOS containing app.
+
+  Authority: ADR-0018 §11.9 row 1 and row 2 (iOS 15 minimum, iPadOS a distinct
+  farm entry on the SAME binary); ADR-0019 §11.7 and §11.8 (UI lives in the app
+  and only in the app; iPadOS is not iOS scaled up); ADR-0020 §11.9's iPadOS
+  note; ADR-0022 §11.4's iOS rows.
+
+  ===========================================================================
+  WHY THIS FILE DID NOT EXIST UNTIL THE LINK/RUN JOB NEEDED IT
+  ===========================================================================
+  `project.yml` has named `Resources/App-Info.plist` since it was written, and
+  the file was absent. Nothing noticed, because nothing on the build host could
+  run `xcodegen generate`, let alone `xcodebuild` — which is the whole defect
+  class `build/ci/ci-ios.sh` exists to close: a project spec that references a
+  file that does not exist is indistinguishable from a correct one until
+  something builds it.
+
+  ===========================================================================
+  THE TWO KEYS THAT ARE SECURITY CONTROLS, NOT PREFERENCES
+  ===========================================================================
+  ADR-0020 §11.9's iPadOS note is normative: "The store MUST NOT be placed
+  anywhere reachable by the Files app: `UIFileSharingEnabled` and
+  `LSSupportsOpeningDocumentsInPlace` MUST be false, or the store MUST NOT be in
+  `Documents/`." Both are false here AND the store lives in the App Group
+  container, so the rule holds twice over. `project.yml` also sets them through
+  `INFOPLIST_KEY_*` build settings; the duplication is deliberate — whichever
+  path a future build system takes, the answer is the same, and a key that is a
+  security control should not be reachable only through a build setting someone
+  can drop.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <!--
+      ADR-0018 §11.12's three-number table keeps the ABI version, the protocol
+      version and the PRODUCT version separate. These two are the product
+      version. They are NOT `abi_major`/`abi_minor` and MUST NOT be compared
+      against them (VR-2). The literals are placeholders a packaging step
+      replaces; no build has ever produced them.
+    -->
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!-- ADR-0018 §11.9 row 1, docs/networking.md §5.2's iOS row and ADR-0019's
+         iOS row all fix the minimum at iOS 15. -->
+    <key>MinimumOSVersion</key>
+    <string>15.0</string>
+
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+
+    <!-- ADR-0020 §11.9's iPadOS note. Both MUST be false. See the header. -->
+    <key>UIFileSharingEnabled</key>
+    <false/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <false/>
+
+    <!-- SwiftUI's `App` lifecycle. `TwinVPNApp.swift` is `@main`, so there is no
+         UIApplicationDelegate and no storyboard; declaring an empty scene
+         manifest is what tells UIKit that. -->
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <false/>
+    </dict>
+
+    <!-- iPhone and iPad, one binary. ADR-0019 §11.8: iPadOS is "not iOS scaled
+         up" but it IS the same binary with a distinct adaptive layout. -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <!--
+      ADR-0018 §11.2 row 2.7 leaves this shell "camera, QR render, display" for
+      the pairing ceremony and nothing else, so the camera purpose string is the
+      one privacy string this bundle needs.
+
+      CB-4 puts every USER-FACING string in the core's catalogue. A purpose
+      string is not one: iOS renders it itself, before any TwinVPN code runs, and
+      it cannot be fetched from a catalogue at that moment. Stated here so the
+      exception is visible rather than looking like a CB-4 violation.
+    -->
+    <key>NSCameraUsageDescription</key>
+    <string>TwinVPN uses the camera only to scan a pairing code shown by another
+        of your devices.</string>
+
+    <!--
+      Deliberately absent:
+
+      - UIBackgroundModes. `ownership.md` §10.2 forbids a background task
+        assertion and a keep-alive timer on this platform; the tunnel's
+        background execution is the NetworkExtension's, granted by the
+        packet-tunnel-provider entitlement, and NOT by a background mode the app
+        declares.
+      - NSAppTransportSecurity. README §5: the EXTENSION holds the exempted
+        socket and fetches; neither process reaches the network through
+        URLSession, so ATS never sees a TwinVPN request and an exception here
+        would be a permission granted to nothing.
+    -->
+</dict>
+</plist>

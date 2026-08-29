@@ -26,12 +26,48 @@ Darwin SDK, no JDK/Android SDK/NDK on this host. ownership.md 9.2.
 ```
 
 Nothing in this directory has been type-checked, built, signed, run, or seen by a
-device. Treat a review of it as a review of *design*, not of *behaviour*.
+device **on the development host**. Treat a review of it as a review of *design*,
+not of *behaviour*.
 
 What **is** verified — and it is deliberately most of the interesting part — lives
 in `core/crates/twinvpn-platform-ios`, which is Rust, is checked for
 `aarch64-apple-ios` with `-D warnings`, and whose 210 tests execute on the Linux
-build host. See that crate's README for the split.
+build host. See that crate's README for the split. It also type-checks clean for
+`aarch64-apple-ios-sim`, which is the triple the simulator suite below runs on.
+
+### 1.1 What changed: there is now a CI job that WILL compile it
+
+`build/ci/ci-ios.sh` and `build/ci/jobs/ios-link-run.yml` run on a pinned
+`macos-26` runner. That job builds the real app target and the real packet-tunnel
+NetworkExtension target against the **device** SDK, links the approved shared
+core into both, boots a simulator and runs `TwinVPNIntegrationTests` across
+`twinvpn.h`. It has **not been run yet** — it was written on the Linux host and
+every `xcodebuild` line in it is unexecuted — but the table above stops being a
+permanent condition the moment it does.
+
+Writing it already found three defects that "written, not compiled" was hiding,
+and all three are exactly the kind only a link-and-run finds:
+
+1. **`project.yml` named two files that did not exist** —
+   `Resources/App-Info.plist` and `Resources/Provider-Info.plist`. A project spec
+   that references a missing file is indistinguishable from a correct one until
+   something generates the project.
+2. **Every `host.lifecycle` submission this shell made was refused.**
+   `CoreProtocol.swift` sent `Data("background".utf8)`; the core's
+   `dispatch::Lifecycle::from_params` reads a ONE-BYTE selector (1 = SUSPEND,
+   2 = RESUME, 3 = BACKGROUND, 4 = FOREGROUND) and anything else is
+   `PROTO.MALFORMED_MESSAGE`. So sleep, wake, the stop reason and the memory
+   reading all bounced. Sleep and wake are **fixed**; the other two have no
+   carriage on this ABI at all and are recorded as findings in the source and in
+   §8 below.
+3. **`CoreInstance.create()` can never succeed.** It passes `nil` for
+   `tw_core_create`'s host vtable, and `twinvpn-ffi` refuses a null vtable with
+   `PLATFORM.ADAPTER_UNAVAILABLE` — its own
+   `create_refuses_a_null_vtable_by_name` asserts it. The comment there is right
+   about the INTERNAL bridge (`twinvpn_ios_bridge_register`) and wrong about
+   `tw_core_create`, which has no such path. **Not fixed here**: binding F-9 to
+   `twinvpn-platform-ios` is a design change for `mobile-ios` and
+   `core-composition` together. It is §8's first row.
 
 ---
 
@@ -57,8 +93,16 @@ shells/ios/
       ManagementClient.swift        ADR-0017's iOS subset channel
       ContractCourier.swift         the corrected fetch split (§5)
       Views/                        Status, Pairing, Diagnostics
-  TwinVPNTests/                     device-bound. WRITTEN, NOT EXECUTED
+  TwinVPNTests/                     device-bound. WRITTEN, NOT EXECUTED, and
+                                    every case skips itself on the simulator
+  TwinVPNIntegrationTests/          SIMULATOR-runnable. Crosses twinvpn.h,
+                                    drives the four §11.16 (e) lifecycle phases
+  Scripts/                          build-core.sh, stage-headers.sh,
+                                    check-budget.sh — written, NOT YET RUN
   Resources/                        Info.plists and entitlements
+  Frameworks/<platform>/            git-ignored. The staged staticlibs, keyed by
+                                    Xcode's PLATFORM_NAME so a simulator build
+                                    cannot link the device slice
 ```
 
 There is **no `Cargo.toml` here.** The Rust for this platform is
@@ -76,7 +120,14 @@ Nothing below has been run. It is written from the ADRs and from Apple's
 documented toolchain, and the first person with a Mac should expect to correct it.
 
 ```bash
-# 0. Prerequisites: Xcode 15+, the pinned Rust toolchain, xcodegen.
+# 0. Prerequisites: the PINNED Xcode, the pinned Rust toolchain, xcodegen.
+#
+#    Xcode 15 is the FLOOR — what these sources need. It is not the pin.
+#    ADR-0018 §11.3 requires one exact toolchain version, and
+#    `build/toolchain/env.sh` fixes TWINVPN_SWIFT_VERSION=6.1.2; Xcode 16.4 is
+#    the release that ships that Swift, so 16.4 is what CI selects.
+#    `build/ci/ci-common-apple.sh` holds the pin and asserts the pair, and
+#    `build/ci/ci-ios.sh --print-xcode-path` is how a runner resolves it.
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
 # 1. Build the two staticlibs. The FULL core for the provider; `core-lite` for
@@ -97,9 +148,22 @@ xcodegen generate
 ./Scripts/check-budget.sh
 ```
 
-`Scripts/` does not exist yet. It is the first thing a Darwin builder needs and
-it is named in §8's debt list rather than stubbed here, because a script that has
-never run is worth less than an accurate note that it is missing.
+**`Scripts/` now exists**, and so does the CI job that runs it —
+`build/ci/ci-ios.sh`, wired as `make ci-ios`. All four scripts were written on a
+Linux host and **none has been executed**: `bash -n` is the whole of what has
+been checked. That is a weaker claim than "it works" and a much stronger one than
+the note this paragraph used to carry ("`Scripts/` does not exist yet").
+
+Two things the layout does that the snippet above does not show:
+
+- The archives are staged **per platform** —
+  `Frameworks/iphoneos/` and `Frameworks/iphonesimulator/` — and `project.yml`
+  links them through `LIBRARY_SEARCH_PATHS = $(SRCROOT)/Frameworks/$(PLATFORM_NAME)`.
+  A single flat directory can hold only one of the two slices, and the failure
+  it invites is a simulator build silently linking the device archive.
+- `Frameworks/` and the staged `twinvpn.h` are **git-ignored** (`.gitignore`).
+  A committed copy of an ABI of record is a second thing that can drift from it,
+  which is the same argument §4 makes about `.xcodeproj`.
 
 ---
 
@@ -199,5 +263,21 @@ Plus, to run any of them: a physical iPhone **and** a physical iPad (ADR-0018
 entitlements in `Resources/`, a **supervised** device for the always-on rows, a
 second peer, and a capture point on the far side of the uplink.
 
-And, before any of that: `Scripts/build-core.sh`, `Scripts/stage-headers.sh` and
-`Scripts/check-budget.sh`, which are named in §3 and do not exist.
+`build/ci/jobs/ios-device-lifecycle.yml` is the job that runs them, targeting
+`[self-hosted, macOS, twinvpn-ios-device]`. **The simulator job is not it.**
+`build/ci/jobs/ios-link-run.yml` boots a simulator and runs
+`TwinVPNIntegrationTests`; every case in `TwinVPNTests` skips itself there, by
+its own `XCTSkipUnless(DeviceCapabilities.isPhysicalDevice)`. The two write
+different evidence files (`build/ci/evidence/ios.json`, `privileged: false`, and
+`ios-device.json`, `privileged: true`) so they cannot be conflated in a summary.
+
+The three scripts §3 names now exist. What does not:
+
+### 8.1 Open findings against this shell
+
+| Finding | Where | Status |
+|---|---|---|
+| `CoreInstance.create()` passes `nil` for `tw_core_create`'s host vtable, which is refused with `PLATFORM.ADAPTER_UNAVAILABLE`. The production provider cannot create a core. | `Sources/TwinVPNProvider/CoreInstance.swift` | **OPEN.** Needs F-9 bound to `twinvpn-platform-ios` — a design change for `mobile-ios` + `core-composition`. `TwinVPNIntegrationTests` supplies a test host binding so the boundary can be exercised meanwhile. |
+| `host.lifecycle` has no parameter that can carry an `NEProviderStopReason`, and none that can carry a resident-byte reading. Both submissions were being refused as malformed. | `Sources/TwinVPNProvider/CoreProtocol.swift` | **OPEN**, reported rather than re-encoded: inventing a params shape here would be the second vocabulary MI-20 forbids. Needs an ADR-0017 §11.9 row. |
+| The three documents describing the fetch/verify split still disagree (§5). | `ContractCourier.swift` | **OPEN**, unchanged. |
+| No UI catalogue plumbing, so nothing here can render a core-supplied string. | `Views/` | **OPEN**, unchanged. |

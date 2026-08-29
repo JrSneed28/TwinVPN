@@ -35,6 +35,30 @@ what it does not mean, is the whole of §7 — and the short version is:
 A green `make cross-check` is a **compile proof and never a behaviour proof**, and
 it must not be reported as one.
 
+**What is now WRITTEN to change that, and has itself never run.** `project.yml`
+(new), `Scripts/build-bridge.sh`, `Scripts/check-budget.sh`,
+`TwinVPNApp/main.swift`, `TwinVPNTunnel/TwinVPNTunnel-Bridging-Header.h` and
+`TwinVPNBridgeTests/` exist so that `build/ci/ci-macos.sh` — wired as
+`make ci-macos`, run by `build/ci/jobs/macos-link-run.yml` on a pinned `macos-26`
+runner — can compile the bridge for both arches, link it into a real
+`.systemextension`, and cross `twinvpn_bridge.h` from Swift. **Every line of that
+was written on the Linux host and none of it has been executed.** `bash -n`, the
+YAML, `swiftc -parse` and one native `cargo test` are the whole of what has been
+checked; see §7's toolchain rows.
+
+Writing it found two defects that "not compiled" was hiding, and both are the
+kind only a build finds: `TwinVPNApp/` had **no entry point at all** (so no app
+target could ever have linked), and `TwinVPNTunnel/` had **no bridging header**
+(so `CoreBridge.swift` could not see a single `tvb_*` symbol). §7 gap 45 had
+recorded the second; the first was unrecorded.
+
+**The hosted job is not an activation claim.** On a GitHub runner
+`tvb_ext_start` refuses at ADR-0016 §11.6's `privilege_posture` step — not root,
+so `pf` cannot be programmed, and PS-18 says it MUST refuse rather than start.
+The signed, root-privileged, NetworkExtension-activating claim lives in
+`build/ci/jobs/macos-privileged-lifecycle.yml`, on a self-hosted Mac, and writes
+a separate evidence file.
+
 **What changed in wave 3.** `ownership.md` §9.6 **X-7** closed a defect against
 this shell: ADR-0016 §11.2 says the NE system extension is the authority, and
 wave 2 put the core, the keys and the management interface in a `LaunchDaemon`
@@ -56,8 +80,12 @@ anchor. §7's gap list is rewritten accordingly.
 | `twinvpnctl/` | the unprivileged CLI |
 | `ksd/` | the `LaunchDaemon`, narrowed to the KS-19 boot anchor: apply, read back, exit |
 | `twinvpn-unblock/` | KS-20a's offline recovery command — package-owned, privileged, and dependent on nothing that can fail to start |
-| `TwinVPNTunnel/` | the `NEPacketTunnelProvider` system extension and the XPC management listener, in Swift |
-| `TwinVPNApp/` | the host app's system-extension installer, in Swift |
+| `TwinVPNTunnel/` | the `NEPacketTunnelProvider` system extension and the XPC management listener, in Swift, plus the bridging header that lets either see a C symbol |
+| `TwinVPNApp/` | the host app: its system-extension installer, and the `main.swift` that makes it an application at all. **No UI** — see that file's header |
+| `TwinVPNBridgeTests/` | the XCTest bundle that links `libtwinvpn_bridge.a` and crosses `twinvpn_bridge.h`. Written, **never run** |
+| `project.yml` | the XcodeGen spec for the three targets above. Written, **never generated** |
+| `Scripts/` | `build-bridge.sh` (universal 2 staticlib), `check-budget.sh` (§11.9 row 5's ≤ 10 MB per arch). Written, **never run** |
+| `Frameworks/` | git-ignored. Where `build-bridge.sh` stages the archive and its two per-arch slices |
 | `packaging/pf.anchor` | the **KS-19 boot artifact**: the fail-closed ruleset in force before the authority runs |
 | `packaging/pf.conf.include` | the lines a package adds to `/etc/pf.conf` |
 | `packaging/com.twinvpn.ksd.plist` | the **only** `LaunchDaemon`. It applies the boot anchor at `RunAtLoad` and exits — **package-owned** (PS-7) |
@@ -696,11 +724,32 @@ not preserved.
 
 ### Packaging
 
-45. **Nothing is signed, notarized or stapled.** `SIGNING.md` is procedure. No
-    Xcode project and no `Package.swift`: SwiftPM cannot produce a
-    `.systemextension` bundle, and a manifest that can never build the product
-    would be noise. There is also **no bridging header**, which
-    `TwinVPNXPCShim.h` needs to be in.
+45. **Nothing is signed, notarized or stapled.** `SIGNING.md` is still procedure
+    that has never been run, and a hosted CI runner cannot change that: it has
+    no Developer ID and no system-extension entitlement, which is why
+    `macos-link-run` builds unsigned and `macos-privileged-lifecycle` is a
+    separate job on a self-hosted Mac.
+
+    **The other two halves of this gap are closed.** There is now a `project.yml`
+    (XcodeGen, not a committed `.xcodeproj` — its header gives the argument) and
+    a bridging header at
+    `TwinVPNTunnel/TwinVPNTunnel-Bridging-Header.h` carrying `twinvpn_bridge.h`
+    and `TwinVPNXPCShim.h`. Both were written on a host that cannot generate or
+    compile them, so "closed" means WRITTEN, not VERIFIED — `build/ci/ci-macos.sh`
+    is what will verify them, and it has not run either.
+
+    Still no `Package.swift`, and for the unchanged reason: SwiftPM cannot
+    produce a `.systemextension` bundle, so a manifest that can never build the
+    product would be noise.
+
+45a. **`TwinVPNApp/` had no entry point**, which nothing had noticed because
+    nothing had ever tried to link an app target. `TwinVPNApp/main.swift` is the
+    minimum one: it activates the system extension and exits. It has **no UI** —
+    ADR-0016 §11.2 gives this component "UI, the VPN profile, the sysext
+    activation" and only the third is written, because CB-4 puts every rendered
+    string in the core's catalogue and this shell has no catalogue plumbing.
+    That is why the app's Info.plist sets `LSUIElement`, and both facts go
+    together when the UI lands.
 
 46. **`NEMachServiceName` on a packet-tunnel system extension is unconfirmed**,
     and so is whether a client that is not the containing app can reach a service

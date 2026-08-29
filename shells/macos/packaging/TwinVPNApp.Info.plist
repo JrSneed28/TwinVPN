@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Info.plist for `com.twinvpn.app` — the containing application.
+
+  Authority: ADR-0016 §11.2's macOS component row ("`TwinVPN.app` (per-user,
+  sandboxed) | UI, the VPN profile, the sysext activation | no authority, no
+  key, no recovery path"), §11.5, §12.6 / MX-1; ADR-0018 §11.9 row 5 (macOS 11
+  minimum); ADR-0021 (Developer ID, notarized, stapled).
+
+  ===========================================================================
+  WHY THE APP EXISTS AT ALL
+  ===========================================================================
+  A `.systemextension` bundle can only be delivered inside an application
+  bundle, and `OSSystemExtensionRequest` can only be submitted by an
+  application. So this target is not a convenience — it is the only route by
+  which the authority can reach a Mac. `packaging/install.sh` says the same
+  thing from the other end: the `.pkg` installs `ksd`, the anchor,
+  `twinvpn-unblock` and the CLI, and **cannot make the authority exist**.
+
+  ===========================================================================
+  `LSUIElement`, AND WHY IT IS TRUE TODAY
+  ===========================================================================
+  `TwinVPNApp/main.swift` has no window: ADR-0016 §11.2 gives this component
+  "UI, the VPN profile, the sysext activation" and only the third is written,
+  because CB-4 puts every rendered string in the core's catalogue and this shell
+  has no catalogue plumbing yet (README §7). An app with no window that is not
+  `LSUIElement` shows a Dock icon that does nothing, which is worse than
+  honest. When the UI lands, this key goes and the gap closes together.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+
+    <!-- `SystemExtensionInstaller.extensionIdentifier` is
+         `com.twinvpn.app.sysext`, and a system extension's identifier MUST be
+         prefixed by its containing app's. So this is `com.twinvpn.app`, and the
+         divergence from ADR-0016 §11.2's literal `com.twinvpn.sysext` is the one
+         `TwinVPNTunnel.Info.plist` already reports. -->
+    <key>CFBundleIdentifier</key>
+    <string>com.twinvpn.app</string>
+
+    <key>CFBundleName</key>
+    <string>TwinVPN</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <!-- The PRODUCT version (ADR-0018 §11.12's three-number table). NOT
+         `abi_major`/`abi_minor`, and VR-2 forbids comparing it against them.
+         A packaging step stamps both from one source; the literals are
+         placeholders no build has produced. -->
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!-- ADR-0018 §11.9 row 5 and ADR-0016 §11.2: macOS 11 is the floor, because
+         §11.2 names SMJobBless as the `ksd` install route on 11-12 and
+         SMAppService on 13+, so 11.0 is the earliest release the component set
+         is defined for. -->
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+
+    <!-- No window yet — see the header. -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <!--
+      Deliberately absent:
+
+      - `NSPrincipalClass`. `main.swift` builds the `NSApplication` itself, so
+        there is no nib and no principal class to name.
+      - `NSAppTransportSecurity`. This process makes no network requests at all:
+        ADR-0016 §11.2 gives it "no authority, no key, no recovery path", and the
+        signed-contract fetch is the extension's.
+      - `NEMachServiceName` and any `NetworkExtension` dictionary. Those belong
+        to `TwinVPNTunnel.Info.plist`. An app that declared them would be
+        claiming to BE the provider.
+    -->
+</dict>
+</plist>
