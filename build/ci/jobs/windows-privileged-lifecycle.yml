@@ -1,0 +1,128 @@
+# build/ci/jobs/windows-privileged-lifecycle.yml
+#
+# The privileged Windows lifecycle job, as a fragment: paste it under `jobs:` in
+# a workflow, at this indentation, unchanged.
+#
+# WHY IT EXISTS AS A SEPARATE JOB
+# ==============================
+# `windows-link-run` runs on a hosted runner that is not LocalSystem, has no
+# `wintun.dll` and cannot open the Base Filtering Engine for write. It therefore
+# binds the MOCK platform adapter under a REAL core and its evidence says
+# `privileged: false`. That is honest and it is not the whole criterion: ADR-0016
+# §11.6 steps 4, 4b and 5 -- the capability probe, the KS-19 boot-artifact check
+# and the owner-tagged ruleset reclaim with its read-back -- are exactly the
+# steps a hosted runner cannot take, and ADR-0012 §8's "arming must never fail
+# open" is only testable where arming is possible.
+#
+# So this job runs the SAME `windows_link_run` test with TWINVPN_WINDOWS_TEST=1,
+# which switches on the real `WindowsPlatformAdapter` path, plus
+# `twinvpn-platform-windows`' own `tests/windows_host.rs` -- the suite that
+# installs filters, programs routes and rewrites the NRPT, and whose header says
+# in terms that none of it has ever executed.
+#
+# A hosted PASS must never be read as this job's PASS. They write different
+# `privileged` values into the same schema for exactly that reason.
+#
+# THE RUNNER THIS NEEDS
+# =====================
+# Labels `[self-hosted, Windows, twinvpn-vpn-lifecycle]`, and the label is a
+# promise about the machine:
+#
+#   * it is RESETTABLE -- a VM snapshot or a reimage between runs. This is not a
+#     convenience. ADR-0018 CB-6 and ADR-0022 §11.4's Windows row require
+#     persistent WFP filters to SURVIVE the process ("shutdown MUST NOT remove
+#     enforcement"), so there is no supported in-process remover and there must
+#     not be one. `--cleanup` removes the service and the overlay adapter; the
+#     filters are removed by restoring the snapshot, and by nothing else.
+#   * it is DISPOSABLE -- this job installs a kernel-mode filter set and may
+#     leave the host's networking in a blocked posture if it fails mid-way. That
+#     is the fail-closed direction and it is correct; it also means the machine
+#     must not be someone's desktop.
+#   * `wintun.dll` is installed beside the build, and the runner service account
+#     can open the filtering engine for write.
+#
+# It carries NO signing secret. Authenticode signing is ADR-0021's and belongs
+# to the release pipeline, not to a lifecycle test; nothing below reads a
+# certificate, a password or a token, and nothing below echoes one.
+
+  windows-privileged-lifecycle:
+    name: windows-privileged-lifecycle
+    runs-on: [self-hosted, Windows, twinvpn-vpn-lifecycle]
+    # Shorter than the hosted job on purpose: the rig keeps a warm cargo cache,
+    # and a privileged run that hangs is a runner left with filters installed.
+    # Timing out is how it gets to `--cleanup`.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    # A fork's pull request must never reach a self-hosted runner: the job would
+    # execute unreviewed code as a privileged account on a machine inside the
+    # network. This is the standard guard and it is not optional here.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+          rustc -vV | grep '^host:'
+          cmd //c ver
+          sc.exe query state= all | grep -i twinvpn || echo "no TwinVPN service registered"
+
+      # A privileged run that starts dirty proves nothing: filters left by the
+      # previous run would make "the ruleset was reclaimed" true for the wrong
+      # reason. `--reset` FAILS rather than cleaning, because a rig that needs
+      # cleaning at the start was not restored and its state is unknown.
+      - name: reset to a known-clean state
+        run: build/ci/ci-windows.sh --reset
+
+      - name: privileged WFP, driver and service lifecycle
+        run: build/ci/ci-windows.sh --privileged
+
+      # EVERY exit path, including a timeout and a cancelled run. A failed
+      # lifecycle test must not leave the runner's networking stack blocked for
+      # the next workflow. `--cleanup` never fails the job, so it cannot mask
+      # the real failure above it.
+      - name: tear down tunnel, routes and firewall state
+        if: always()
+        run: build/ci/ci-windows.sh --cleanup
+
+      # DIAGNOSTICS ON FAILURE ONLY, and enumerated rather than globbed.
+      #
+      # `wfp-state-after.xml` is `netsh wfp show state`: filter and provider
+      # definitions plus the host's own addresses. It carries NO private device
+      # key, NO pairing secret, NO authentication token, NO tunnel plaintext and
+      # NO packet capture -- this job captures no traffic and establishes no
+      # session. The evidence file is deliberately NOT uploaded under an
+      # `evidence-*` name: `build/acceptance/report.py` reads exactly
+      # `build/ci/evidence/windows.json`, and two jobs uploading that name would
+      # let whichever finished last decide what the report says.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-windows-privileged
+          path: |
+            build/ci/logs/windows/lifecycle.log
+            build/ci/logs/windows/windows-host.log
+            build/ci/logs/windows/wfp-state-after.xml
+          if-no-files-found: ignore
+
+      # The privileged evidence, under its own name so it can be read beside the
+      # hosted file without replacing it.
+      - name: publish the privileged evidence under its own name
+        if: always()
+        run: |
+          if [ -f build/ci/evidence/windows.json ]; then
+            mv build/ci/evidence/windows.json build/ci/evidence/windows-privileged.json
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-windows-privileged
+          path: build/ci/evidence/windows-privileged.json
+          if-no-files-found: ignore

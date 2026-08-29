@@ -1,0 +1,143 @@
+# build/ci/jobs/android-device-lifecycle.yml
+#
+# The physical-device Android lifecycle job, as a fragment: paste it under
+# `jobs:` in a workflow, at this indentation, unchanged.
+#
+# WHY IT IS WARRANTED, stated rather than assumed
+# ===============================================
+# `android-link-run` boots an `x86_64` emulator. That is a real Android runtime
+# and it proves the boundary -- but it leaves four things that only silicon can
+# answer, and three of them are the ones users actually hit:
+#
+#   1. **`arm64-v8a` is packaged and never loaded.** The emulator runs the
+#      `x86_64` `.so`. `arm64-v8a` is what essentially every shipped device runs,
+#      and an `UnsatisfiedLinkError` there is ADR-0018 VR-4's packaging defect
+#      arriving on a user's phone rather than in CI.
+#   2. **C-12's 16 KiB `LOAD` alignment.** A 4 KiB-aligned `.so` refuses to load
+#      on a device with a 16 KiB page size, and the emulator image this repo
+#      pins has 4 KiB pages -- so the linker flag is applied here and TESTED
+#      nowhere until a 16 KiB device runs this job.
+#   3. **ADR-0020's assurance ladder.** `TwinKeystore.securityLevel()` reports
+#      StrongBox, TEE or software keymaster. An emulator reports the bottom
+#      rung, so "this build reaches hardware custody" is unproven without a
+#      device that has some.
+#   4. The `≤ 6 MB per ABI` budget is build-derived and is checked elsewhere;
+#      cold-start and throughput are silicon-derived (ADR-0018 BM-2b) and are
+#      not this job's.
+#
+# WHAT IT STILL DOES NOT PROVE: the device-farm rows. `LifecycleMatrixTest`,
+# `DozeAndRevocationTest` and `LeakMeasurementTest` are `TODO("device farm")`
+# throughout and are DELIBERATELY NOT RUN by `ci-android.sh` -- running them
+# would turn a truthful "not yet measured" into a red square people learn to
+# ignore. An LMK kill, a Doze controller, a second VPN app and a packet capture
+# remain owed; `shells/android/README.md` §7 is the list.
+#
+# THE RUNNER THIS NEEDS
+# =====================
+# Labels `[self-hosted, Linux, twinvpn-android-device]`, and the label is a
+# promise about the rig:
+#
+#   * a physical Android device is attached over ADB with USB debugging
+#     authorised, and `ANDROID_SERIAL` names it in the runner's environment.
+#     Prefer an `arm64-v8a` device on Android 15+ with a 16 KiB page size, so
+#     that points 1 and 2 above are genuinely exercised.
+#   * the device is RESETTABLE -- `--reset` uninstalls both packages, and the rig
+#     is expected to be able to factory-reset or re-flash between runs. Unlike
+#     Windows there is no persistent OS-level claim to undo: on Android the
+#     `VpnService` claim dies with the process, which is why
+#     `EnforcementView::custody` reports `survives_core_exit: false` unless
+#     lockdown is CONFIRMED. Uninstalling the package IS the teardown.
+#   * the Android SDK, an NDK r27+, and JDK 21 are installed on the HOST.
+#
+# It carries NO signing secret. The APK under test is the debug build, signed
+# with the debug keystore; release signing is ADR-0021's and belongs to the
+# release pipeline. Nothing below reads a keystore password or a token, and
+# nothing below echoes one.
+
+  android-device-lifecycle:
+    name: android-device-lifecycle
+    runs-on: [self-hosted, Linux, twinvpn-android-device]
+    # The rig keeps warm cargo and Gradle caches and boots no emulator, so this
+    # is shorter than the hosted job. Timing out is how a wedged `adb` reaches
+    # the cleanup step instead of leaving the device with a test package on it.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    # A fork's pull request must never reach a self-hosted runner attached to a
+    # real device: the job would install and execute unreviewed code on it.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+          java -version
+          gradle --version | sed -n '1,8p'
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -1
+          # The device this evidence is about. Named in the log before anything
+          # is installed, so a reader can tell which silicon answered.
+          if [ -z "${ANDROID_SERIAL:-}" ]; then
+            echo "::error::ANDROID_SERIAL is unset; the rig must name the attached device"
+            exit 1
+          fi
+          adb devices -l
+          adb shell getprop ro.product.model
+          adb shell getprop ro.build.version.release
+          adb shell getprop ro.product.cpu.abi
+          echo "page size: $(adb shell getconf PAGE_SIZE | tr -d '\r')"
+
+      # A device carrying the previous run's install would let a stale APK
+      # answer. `--reset` removes both packages and clears the local evidence
+      # and logs.
+      - name: reset to a known-clean state
+        run: build/ci/ci-android.sh --reset --privileged
+
+      - name: on-device native bridge and application lifecycle
+        run: build/ci/ci-android.sh --privileged
+
+      # EVERY exit path, including a timeout and a cancelled run. A device left
+      # with the test package installed and the service running is a device the
+      # next run cannot trust.
+      - name: uninstall the packages and release the device
+        if: always()
+        run: build/ci/ci-android.sh --cleanup --privileged
+
+      # DIAGNOSTICS ON FAILURE ONLY, and enumerated rather than globbed.
+      #
+      # `logcat.txt` carries reason codes, package names and stack traces from a
+      # REAL user device. It carries NO private device key, NO pairing secret,
+      # NO authentication token, NO tunnel plaintext and NO packet capture:
+      # `NativeLinkRunTest` never calls `VpnService.establish()`, the identity
+      # key never leaves the Keystore (ADR-0018 §11.16 (c)), and ADR-0015 §11.4
+      # classes an address SENSITIVE so nothing in this shell logs one.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-android-device
+          path: |
+            build/ci/logs/android/instrumentation.log
+            build/ci/logs/android/logcat.txt
+          if-no-files-found: ignore
+
+      # The device evidence, under its own name. `build/acceptance/report.py`
+      # reads exactly `build/ci/evidence/android.json`, so uploading this as
+      # `evidence-android` would let whichever job finished last decide what the
+      # report says -- and a hosted emulator PASS must never be readable as a
+      # physical-device PASS, nor the reverse.
+      - name: publish the device evidence under its own name
+        if: always()
+        run: |
+          if [ -f build/ci/evidence/android.json ]; then
+            mv build/ci/evidence/android.json build/ci/evidence/android-device.json
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-android-device
+          path: build/ci/evidence/android-device.json
+          if-no-files-found: ignore

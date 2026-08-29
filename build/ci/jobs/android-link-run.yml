@@ -1,0 +1,127 @@
+# build/ci/jobs/android-link-run.yml
+#
+# The Android hosted emulator link/run job, as a fragment: paste it under
+# `jobs:` in a workflow, at this indentation, unchanged.
+#
+# WHAT IT PROVES, at exactly its strength:
+#   build the CDYLIB for ALL FOUR ADR-0018 §11.9 row-3 ABIs against a real NDK,
+#   link `libtwinvpn_android_jni.so` against the real shared core, package both
+#   `.so`s into the APK, boot a pinned emulator, install the app and the test
+#   package, and run `NativeLinkRunTest` -- which LOADS both libraries through
+#   `System.loadLibrary`, INVOKES `tw_core_create`/`tw_core_submit` across the
+#   production JNI bridge, RECEIVES an F-4 envelope and an event frame back,
+#   drives the real `TwinVpnService` through create/start/destroy, and asserts
+#   the packaged ABI set.
+#
+# JVM AND ROBOLECTRIC TESTS ARE NOT SUFFICIENT and `make ci-android` cannot
+# degrade to them: the transitions come out of logcat produced by an
+# instrumentation run on a device, and an empty transition list fails the gate.
+#
+# WHAT IT DOES NOT PROVE: anything that needs real silicon. The emulator is
+# `x86_64`, so the `arm64-v8a` library is BUILT and PACKAGED here and LOADED
+# nowhere; a StrongBox/TEE Keystore, Doze, an LMK kill, a second VPN app and a
+# packet capture are all absent. Those are `android-device-lifecycle`'s and the
+# device farm's -- `shells/android/README.md` §7 lists what a farm is owed.
+
+  android-link-run:
+    name: android-link-run
+    # PINNED. The emulator needs KVM, which the hosted `ubuntu-24.04` image
+    # provides and `ubuntu-latest` may not once it moves.
+    runs-on: ubuntu-24.04
+    # Four ABIs of `ring` + `quinn` from cold, a Gradle assemble of debug,
+    # androidTest and release, an emulator boot and an instrumentation run.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # Without this the emulator falls back to software rendering AND software
+      # CPU, and the boot exceeds any sane timeout. The rule makes /dev/kvm
+      # world-accessible to the runner user.
+      - name: enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      # JDK 21, matching `build/toolchain/env.sh`'s TWINVPN_JDK_VERSION=21.0.5
+      # and `shells/android/gradle/libs.versions.toml`'s header. NOT optional:
+      # `app/build.gradle.kts` sets `jvmTarget = JVM_21`, and the runner image's
+      # default JAVA_HOME is older -- a Gradle run under it fails with an
+      # unsupported-target error that reads as a Kotlin problem.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+          java -version
+          gradle --version | sed -n '1,8p'
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "ANDROID_NDK_LATEST_HOME=$ANDROID_NDK_LATEST_HOME"
+          "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -1
+
+      # `ci-android.sh` reads ANDROID_NDK_HOME first. The runner image sets both
+      # it and ANDROID_NDK_LATEST_HOME, and they can differ: pinning the script
+      # to the LATEST one here makes the r27+ that C-12's 16 KiB alignment wants
+      # the version that is actually used, rather than whichever the image
+      # happened to make default.
+      - name: pin the NDK
+        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            build/ci/android-target
+          key: fwg-android-${{ hashFiles('rust-toolchain.toml', 'core/Cargo.lock', 'shells/android/jni/Cargo.lock', 'shells/android/**/*.gradle.kts', 'shells/android/gradle/libs.versions.toml', 'build/ci/ci-android.sh') }}
+
+      - name: make ci-android
+        run: make ci-android
+
+      # ARTIFACTS, and what may never be in them.
+      #
+      # `logcat.txt` is a device log: reason codes, package names, stack traces.
+      # It carries NO private device key, NO pairing secret, NO authentication
+      # token, NO tunnel plaintext and NO packet capture. `NativeLinkRunTest`
+      # never calls `VpnService.establish()`, so no tunnel exists to capture,
+      # and ADR-0015 §11.4 classes an address SENSITIVE so nothing in this shell
+      # logs one. It is uploaded on FAILURE only; a green run uploads the
+      # evidence file and the normalised transition list and nothing else.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-android
+          path: |
+            build/ci/evidence/android.json
+            build/ci/logs/android/lifecycle.log
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-android-link-run
+          path: |
+            build/ci/logs/android/instrumentation.log
+            build/ci/logs/android/logcat.txt
+            build/ci/logs/android/emulator.log
+          if-no-files-found: ignore
+
+      # The emulator is a background process this job started. Killing it on
+      # every path keeps a self-hosted runner usable for the next workflow and
+      # costs nothing on a hosted one.
+      - name: stop the emulator and remove the packages
+        if: always()
+        run: build/ci/ci-android.sh --cleanup
