@@ -175,5 +175,6 @@ fn observed_code_accepts_a_code_at_exactly_the_64_byte_cap() {
 /// case nobody can answer.
 #[test]
 fn registry_version_is_embedded() {
-    assert_eq!(twinvpn_types::REASON_REGISTRY_VERSION, 3);
+    // 4 since Amendment 3, which corrected nine STORE `evidence_fields` lists.
+    assert_eq!(twinvpn_types::REASON_REGISTRY_VERSION, 4);
 }

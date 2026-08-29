@@ -141,6 +141,18 @@ def run():
             )
 
     case("evidence field names are declared and well-formed")
+    # lower_snake_case is not enough on its own: every token below passed it.
+    # These are the words Amendment 3 removed - English function words, the
+    # word "bool", and enum VALUES that belong to a field rather than being
+    # one (`locking` is a value of `missing_capability`, `pre_first_unlock` of
+    # `lock_reason`, `cloud` of `scope`). `local` is deliberately absent: it is
+    # a real field on PROTO.CAPABILITY_PARAM_INCOMPATIBLE.
+    PROSE_DEBRIS = {
+        "the", "and", "are", "itself", "themselves", "only", "never", "names",
+        "values", "raw", "status", "bool", "coarse", "category",
+        "pseudonymized", "host", "identifiers", "path", "cloud", "locking",
+        "pre_first_unlock",
+    }
     maxk = lim["diagnostics"]["max_evidence_key_bytes"]
     for e in codes:
         for f in e["evidence_fields"]:
@@ -149,6 +161,18 @@ def run():
                 f"{e['reason_code']} evidence field {f!r} must be lower_snake_case",
             )
             check(len(f) <= maxk, f"{e['reason_code']} evidence field {f!r} too long")
+            check(
+                f not in PROSE_DEBRIS,
+                f"{e['reason_code']} evidence field {f!r} is prose, not a field. "
+                f"Amendment 3 removed nine such lists: Amendment 1 built "
+                f"evidence_fields by splitting the ADR's evidence column on "
+                f"whitespace, so a parenthetical became field names and the real "
+                f"trailing fields were cut at eight. Two of them were security "
+                f"defects and not only noise - ADR-0020 SS11.12 says the path of "
+                f"STORE.READONLY_FILESYSTEM and the host identifiers of "
+                f"STORE.RESTORED_FOREIGN_HOST are SENSITIVE and MUST NOT be "
+                f"attached, and the declared-set filter was admitting both",
+            )
 
     case("codes cited in the schema exist in the registry")
     # Any DOMAIN.CONDITION string appearing in a proto comment is a promise that
@@ -353,7 +377,9 @@ def run():
     # Bumped 1 -> 2 by the first amendment under ownership.md §3 (2026-08-28).
     # The three registries ship as ONE versioned set, which is what this case
     # asserts; reason_codes and limits both changed, so all three move together.
-    check_eq(reasons["registry_version"], 3, "reason registry version")
+    # Amendment 3 (2026-08-28) corrected nine STORE evidence_fields lists and
+    # bumped ONLY this registry, for Amendment 2's reason.
+    check_eq(reasons["registry_version"], 4, "reason registry version")
     # Amendment 2 (2026-08-28) added PLATFORM.ADAPTER_BUSY and bumped ONLY this
     # registry. The other three stay at 2 because nothing in them moved: version
     # parity was Amendment 1's convenience, not a rule, and bumping an unchanged

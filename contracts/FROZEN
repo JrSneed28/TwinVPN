@@ -1,4 +1,4 @@
-318a787f30d24f29a27f81327194d1d0d9c94f09eaeec67cdc263ba518f9e214
+97b0959caa9fcd03c95b200bdf94789d0afd09defcb4461de036800f550ccb57
 
 TwinVPN Phase 2 contract freeze — re-declared 2026-08-28.
 AMENDMENT 1 to the freeze of 2026-08-27 (digest 2f5323cf3351a757...).
@@ -172,3 +172,105 @@ STILL OPEN after this amendment: the twinvpn-platform mapping itself. Registerin
 the code does not remap PlatformError::Transient onto it; that is a code change
 in the five adapters and their tripwire tests, and W-40 closes only when both
 halves have landed.
+
+================================================================================
+AMENDMENT 3 to the freeze — 2026-08-28. Digest on line 1 is this amendment's.
+Amendment 2's digest was 318a787f30d24f29...
+================================================================================
+
+WHAT CHANGED, and nothing else changed:
+  registry/reason_codes.json      registry_version 3 -> 4
+                                  NO code added, removed, renamed or
+                                  reclassified. evidence_fields CORRECTED on
+                                  NINE STORE.* entries, all introduced by
+                                  Amendment 1:
+                                    BACKUP_EXCLUSION_FAILED  drop 'cloud'
+                                    KEYSTORE_LOCKED          drop 'pre_first_unlock'
+                                    KEYSTORE_UNAVAILABLE     drop 'coarse','category',
+                                                             'never','the','raw','status';
+                                                             restore errno/syscall/
+                                                             os_error_code/platform
+                                    KEY_INVALIDATED          drop 'coarse'
+                                    LOCK_CONTENDED           drop 'bool'
+                                    PATH_UNSUITABLE          drop 'locking'
+                                    READONLY_FILESYSTEM      drop 'the','path','itself',
+                                                             'and','pseudonymized';
+                                                             restore syscall/
+                                                             os_error_code/platform
+                                    RESTORED_FOREIGN_HOST    drop 'bool','only','the',
+                                                             'host','identifiers',
+                                                             'themselves','are'
+                                    WIPE_INCOMPLETE          drop 'names','only','never',
+                                                             'values'; restore
+                                                             os_error_code/platform
+  tests/test_registries.py        asserts reason registry_version 4, and adds a
+                                  PROSE_DEBRIS tripwire so the generation bug
+                                  cannot return silently
+
+  NO .proto changed. NO .cddl changed. contracts/gen/** is byte-identical.
+  The OTHER THREE registries are untouched and stay at registry_version 2.
+
+WHY IT IS A DEFECT AND NOT AN INCONVENIENCE (§3 step 1):
+  Amendment 1 built these nine lists by splitting ADR-0020 §11.12's evidence
+  COLUMN on whitespace. That column is prose with parentheticals, so a
+  parenthetical became field names and an enum VALUE became a field: `locking`
+  is a value of `missing_capability`, `pre_first_unlock` of `lock_reason`,
+  `cloud` of `scope`. Every damaged list is exactly EIGHT entries long, and the
+  real trailing fields — the errno/syscall/os_error_code/platform set W-6 put on
+  OS-facing codes — were cut off past that bound.
+
+  TWO OF THEM ARE SECURITY DEFECTS, not noise. The declared-set filter is the
+  MECHANISM behind "no secrets in telemetry": twinvpn_types::Evidence::new
+  refuses a key a code does not declare, which is why the rule is enforced
+  rather than reviewed. And for these two codes it was admitting exactly the
+  field the ADR forbids:
+    - STORE.READONLY_FILESYSTEM declared 'path', while §11.12 says "the path
+      itself is SENSITIVE and pseudonymized".
+    - STORE.RESTORED_FOREIGN_HOST declared 'host' and 'identifiers', while
+      §11.12 says "the host identifiers themselves are SENSITIVE and MUST NOT be
+      attached".
+  No emitter in the tree attaches any of the debris, so the exposure was latent.
+  A latent hole in the mechanism that enforces a MUST NOT is still the mechanism
+  not working.
+
+WHY IT IS COMPATIBLE (§3 step 5):
+  evidence_fields is NOT among check_registry_append_only.py's
+  FROZEN_REASON_ATTRS — domain, class, severity, terminal, user_actionable,
+  remediation_class, scope — and none of those moved on any code. ADR-0015 §11.2
+  rule 1 ("a code MUST NOT be renamed, and its semantics MUST NOT change once
+  ACTIVE") is therefore satisfied: no code's identity or classification changed.
+  No field number, no enum value, no wire format, and no generated binding moved;
+  contracts/gen/** is byte-identical. On the wire the only consequence is
+  SchemaDescriptor's reason_registry_version 3 -> 4, which is what that field is
+  for. A receiver that met one of the removed keys would have dropped it as
+  undeclared under the OLD registry too — nothing could legitimately have been
+  emitting them.
+
+SCOPE, MEASURED RATHER THAN ASSUMED (§3 step 4):
+  All 254 codes Amendment 1 introduced were re-read against their owning
+  document's §11 table; 120 declare evidence and 119 of those rows were located.
+  The damage is confined to ADR-0020, because it is the only §11.12 table whose
+  evidence column carries parentheticals of that shape. ROUTE.FAMILY_ASYMMETRY
+  and NET.PATH.DEAD_NO_ALTERNATE were flagged by the sweep and checked by hand:
+  both are correct, and the flag was the sweep matching the wrong table row.
+
+WHAT IS NOT CLAIMED:
+  STORE.RESTORED_FOREIGN_HOST is left with `binding_mismatch` alone. The other
+  eight regained the OS-error set because their own truncated lists still
+  carried part of it, so the intent is in the data; this one was cut before
+  reaching it and its condition is a binding comparison rather than a failed
+  syscall, so the fields are not invented back. If an emitter later needs them,
+  that is an append under the ordinary rule.
+
+APPROVED BY (§3 step 6): the repository owner, explicitly, on 2026-08-28, on
+being shown that the declared-set filter was admitting two fields ADR-0020
+§11.12 marks SENSITIVE and forbids attaching.
+
+Evidence at re-declaration, against the digest on line 1:
+  20 .proto files compile and lint clean, unchanged
+  649 generated files across rust, swift, kotlin, csharp — BYTE-IDENTICAL
+  44772 contract checks, 0 failures
+  455 reason codes across 16 domains; 28 capabilities; 12 canonical states
+
+What this file authorizes: unchanged from the 2026-08-27 declaration.
+What it does NOT authorize: any further change to contracts/.

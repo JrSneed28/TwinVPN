@@ -1,5 +1,5 @@
 {
-  "registry_version": 3,
+  "registry_version": 4,
   "format": "DOMAIN.CONDITION or DOMAIN.SUBDOMAIN.CONDITION; uppercase, dot-separated, ASCII, <=64 bytes, two or three segments",
   "carried_on_wire_as": "string, never an enum",
   "closed_domain_set": [
@@ -8224,7 +8224,6 @@
       "evidence_fields": [
         "platform_mechanism",
         "scope",
-        "cloud",
         "errno",
         "syscall",
         "os_error_code",
@@ -8250,7 +8249,6 @@
       "evidence_fields": [
         "backend",
         "lock_reason",
-        "pre_first_unlock",
         "errno",
         "syscall",
         "os_error_code",
@@ -8276,12 +8274,10 @@
       "evidence_fields": [
         "backend",
         "platform_status",
-        "coarse",
-        "category",
-        "never",
-        "the",
-        "raw",
-        "status"
+        "errno",
+        "syscall",
+        "os_error_code",
+        "platform"
       ],
       "owning_document": "ADR-0020",
       "condition": "The secure-storage backend is not responding",
@@ -8302,7 +8298,6 @@
       "evidence_fields": [
         "backend",
         "invalidation_cause",
-        "coarse",
         "errno",
         "syscall",
         "os_error_code",
@@ -8329,7 +8324,6 @@
         "holder_pid",
         "holder_start_time",
         "same_boot",
-        "bool",
         "errno",
         "syscall",
         "os_error_code",
@@ -8405,7 +8399,6 @@
       "evidence_fields": [
         "fs_type",
         "missing_capability",
-        "locking",
         "errno",
         "syscall",
         "os_error_code",
@@ -8431,12 +8424,10 @@
       "evidence_fields": [
         "fs_type",
         "mount_flags",
-        "the",
-        "path",
-        "itself",
-        "and",
-        "pseudonymized",
-        "errno"
+        "errno",
+        "syscall",
+        "os_error_code",
+        "platform"
       ],
       "owning_document": "ADR-0020",
       "condition": "The store location is not writable; running without durable local state",
@@ -8481,14 +8472,7 @@
       "summary_key": "reason.store_restored_foreign_host.summary",
       "doc_anchor": "adr-0020#store_restored_foreign_host",
       "evidence_fields": [
-        "binding_mismatch",
-        "bool",
-        "only",
-        "the",
-        "host",
-        "identifiers",
-        "themselves",
-        "are"
+        "binding_mismatch"
       ],
       "owning_document": "ADR-0020",
       "condition": "The store was restored onto different hardware or a different install",
@@ -8509,13 +8493,11 @@
       "doc_anchor": "adr-0020#store_wipe_incomplete",
       "evidence_fields": [
         "assets_remaining",
-        "names",
-        "only",
-        "never",
-        "values",
         "backend",
         "errno",
-        "syscall"
+        "syscall",
+        "os_error_code",
+        "platform"
       ],
       "owning_document": "ADR-0020",
       "condition": "Crypto-erase could not remove a key handle",
