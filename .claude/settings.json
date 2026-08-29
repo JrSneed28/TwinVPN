@@ -1,4 +1,6 @@
 {
+  "skillListingBudgetFraction": 0.06,
+  "customInstructions": "Follow the project's CLAUDE.md guidelines. Use concurrent execution for all operations. Prioritize v3 implementation with security-first development, 15-agent swarm coordination, phased performance optimization, and cross-platform helper automation.",
   "hooks": {
     "PreToolUse": [
       {
@@ -181,20 +183,42 @@
       "Bash(npx @claude-flow*)",
       "Bash(npx claude-flow*)",
       "Bash(node .claude/*)",
-      "mcp__claude-flow__*"
+      "Bash(npm run:*)",
+      "Bash(npm test:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(git config:*)",
+      "Bash(git tag:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git stash:*)",
+      "Bash(jq:*)",
+      "Bash(node:*)",
+      "Bash(which:*)",
+      "Bash(pwd)",
+      "Bash(ls:*)",
+      "Bash(npx:*)",
+      "mcp__claude-flow__*",
+      "mcp__ruv-swarm__*",
+      "mcp__flow-nexus__*"
     ],
     "deny": [
       "Read(./.env)",
-      "Read(./.env.*)"
+      "Read(./.env.*)",
+      "Bash(rm -rf /)"
     ]
   },
   "model": "claude-opus-5",
-  "effortLevel": "high",
+  "effortLevel": "xhigh",
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "CLAUDE_FLOW_V3_ENABLED": "true",
     "CLAUDE_FLOW_HOOKS_ENABLED": "true",
-    "RUFLO_DAEMON_AUTOSTART": "0"
+    "RUFLO_DAEMON_AUTOSTART": "1"
   },
   "claudeFlow": {
     "version": "3.0.0",
@@ -214,7 +238,7 @@
       "taskListEnabled": true,
       "mailboxEnabled": true,
       "coordination": {
-        "autoAssignOnIdle": false,
+        "autoAssignOnIdle": true,
         "trainPatternsOnComplete": true,
         "notifyLeadOnComplete": true,
         "sharedMemoryNamespace": "agent-teams"
@@ -222,7 +246,7 @@
       "hooks": {
         "teammateIdle": {
           "enabled": true,
-          "autoAssign": false,
+          "autoAssign": true,
           "checkTaskList": true
         },
         "taskCompleted": {
@@ -253,22 +277,53 @@
       "enabled": true
     },
     "daemon": {
-      "autoStart": false,
+      "autoStart": true,
       "workers": [
         "map",
         "audit",
-        "optimize"
+        "optimize",
+        "consolidate",
+        "testgaps",
+        "ultralearn",
+        "deepdive",
+        "document",
+        "refactor",
+        "benchmark"
       ],
       "schedules": {
         "audit": {
-          "interval": "4h",
+          "interval": "1h",
           "priority": "critical"
         },
         "optimize": {
-          "interval": "2h",
+          "interval": "30m",
           "priority": "high"
+        },
+        "consolidate": {
+          "interval": "2h",
+          "priority": "low"
+        },
+        "document": {
+          "interval": "1h",
+          "priority": "normal"
+        },
+        "deepdive": {
+          "interval": "4h",
+          "priority": "normal"
+        },
+        "ultralearn": {
+          "interval": "1h",
+          "priority": "normal"
         }
       }
+    },
+    "agents": {
+      "source": ".claude/agents",
+      "customAgents": []
+    },
+    "skills": {
+      "source": ".claude/commands",
+      "enabled": true
     },
     "learning": {
       "enabled": true,
