@@ -110,12 +110,30 @@ impl ServerContext {
 ///
 /// **Translate, marshal, schedule and render — never decide.** Every branch here
 /// is on a fact the core or the OS supplied.
-pub(super) async fn dispatch(
+///
+/// # Why this is `pub` and not `pub(super)`
+///
+/// It is the **application boundary** of the MI — everything above it is
+/// framing — and one class of operation cannot be reached through the framing
+/// by any test this repository can run. `mgmt.admin` is granted at attach "only
+/// to root" (`super::peer::Principal::scopes`), the credential comes from
+/// `SO_PEERCRED`, and a test runner is unprivileged, so no `ADMINISTER`
+/// operation — `pair.begin` among them — is reachable over a real socket
+/// without running the suite as root.
+///
+/// `tests/pairing.rs` therefore calls this directly with the [`Principal`] the
+/// kernel would have reported for a root caller. That is **one** substitution,
+/// at the same place `tests/mi_roundtrip.rs` makes its one: everything below —
+/// the catalogue scope check, the §11.14 ceremony, the idempotency
+/// precondition, `Core::submit`, the completion correlation and the MI-P1
+/// response path — is the production code, unchanged.
+pub async fn dispatch(
     context: &ServerContext,
     principal: &Principal,
     granted: &Scopes,
     subscription: Option<u64>,
     call: &Request,
+    idempotency_key: &[u8],
 ) -> Response {
     // MI-21's four, which have no core counterpart because each is about THE
     // CONNECTION. They are answered here and never submitted.
@@ -158,7 +176,13 @@ pub(super) async fn dispatch(
     let submission = Submission {
         op,
         params: call.params.clone(),
-        idempotency_key: None,
+        // **The envelope's, forwarded verbatim.** An empty field is `None` and
+        // not an empty key: ADR-0008 N-4 requires a client-generated value of at
+        // least 128 bits, and forwarding a zero-length one would hand the core a
+        // "key" every caller shares. `Core::submit` then refuses the
+        // `CEREMONY`-class operations that need one — which is CB-2's third
+        // branch, answered by the core and not approximated here.
+        idempotency_key: (!idempotency_key.is_empty()).then(|| idempotency_key.to_vec()),
         if_version: call.if_version,
         // **MI-18 / PS-13.** The acting principal travels with the command and
         // reaches every event it produces.
@@ -211,6 +235,34 @@ pub(super) async fn dispatch(
     } else {
         context.fanout.cancel_completion(pending);
         Vec::new()
+    };
+
+    // **MI-P1: the one `SECRET` that crosses MI — finding F-2B.**
+    //
+    // §11.9's `pair.begin` row states the return value as "the `PairingOffer`
+    // material to render — QR payload or 9-digit SPAKE2 code", and §11.17 as
+    // "`pair.begin` returns the QR payload; the CLI renders it as terminal-drawn
+    // QR". The body above is the 16-byte `pairing_id` and nothing else, because
+    // it came off the **event stream**, which fans out to every subscriber —
+    // and MI-P1 rule 1 permits the offer "only inside a `pair.begin` response".
+    //
+    // So the offer is fetched here, on the response path, for this connection
+    // only. `Core::render_pairing_offer` is the only function that copies it out
+    // of the core and this is its only caller; the value is not logged, is not
+    // published, and lives exactly as long as the frame it goes into. `None`
+    // means the ceremony is no longer in flight — a replay after cancellation or
+    // expiry, whose recorded outcome (ADR-0008) is the `pairing_id` alone.
+    //
+    // This is **not** a branch on a TwinVPN domain fact (CB-2): the condition is
+    // "which operation was called", which the core's own vocabulary supplies.
+    let body = match (op, submitted.is_ok()) {
+        (CoreCommand::PairBegin, true) => {
+            <[u8; twinvpn_core::pairing::PAIRING_ID_BYTES]>::try_from(body.as_slice())
+                .ok()
+                .and_then(|id| context.core.render_pairing_offer(&id))
+                .unwrap_or(body)
+        }
+        _ => body,
     };
 
     match submitted {

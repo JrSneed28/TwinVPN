@@ -756,14 +756,54 @@ impl Core {
     /// check reads, so this device may begin a C-B pairing.
     ///
     /// A second step rather than part of `create`, for the reason
-    /// [`Core::bind_control_transport`] is: the Owner chain is restored from a
-    /// durable store the shell owns, and [`crate::pairing`] records why each of
-    /// its parts cannot be read by the core today. Until one is installed,
-    /// `pair.begin` refuses `AUTH.PAIRING_NOT_AUTHORIZED` — the fail-closed
-    /// direction, and the honest one.
+    /// [`Core::bind_control_transport`] is: the Owner material is restored from
+    /// a location the shell owns. Until one is installed, `pair.begin` refuses
+    /// `AUTH.IDENTITY_MISSING` — the fail-closed direction, and the honest one:
+    /// a device with no enrolment record has not been told who it is.
+    ///
+    /// **Prefer [`Core::enrol_for_pairing`]**, which builds the record from
+    /// octets and proves this device's key under ADR-0007 N-2. This entry point
+    /// stays for a caller that already holds the typed parts.
     #[cfg(feature = "full")]
     pub fn install_pairing_enrolment(&self, enrolment: crate::pairing::PairingEnrolment) {
         self.pairing().install(enrolment);
+    }
+
+    /// **The composition root's pairing step — F-2A.**
+    ///
+    /// Reads this device's public identity from the element, proves its
+    /// `COSE_Key` under ADR-0007 N-2, verifies the Owner material, and installs
+    /// the record `pair.begin` reads. See [`crate::pairing::enrol`] for every
+    /// check and for what each refusal means.
+    ///
+    /// A shell calls this once, at startup, after the store is open and before
+    /// the management endpoint accepts connections — so no `pair.begin` can
+    /// observe a half-enrolled core.
+    ///
+    /// # The revocation set is empty, and that is not a shortcut
+    ///
+    /// N-25(1)'s set arrives over C2 and the control-plane client has no
+    /// transport (W-12), so there is nothing for a caller to pass and no
+    /// parameter to pass it through. `ops::begin` still performs the check —
+    /// against an empty set — which is the honest state rather than the
+    /// permissive one: the check is present and will bite the moment the set
+    /// has a source. A shell that wanted to inject one would be inventing a
+    /// second, unsigned revocation channel, which is the thing N-25(1) exists
+    /// to prevent.
+    ///
+    /// # Errors
+    ///
+    /// `AUTH.KEY_UNAVAILABLE` where the element reports no public identity —
+    /// ADR-0018 §11.16 (l)'s specified answer on a host with no element, and
+    /// the reason a Linux host running `AbsentElement` installs nothing.
+    /// `AUTH.IDENTITY_MISSING` where it reports one whose key cannot be proved.
+    /// `PROTO.SIZE_EXCEEDED` for an over-long `rendezvous_hint`.
+    #[cfg(feature = "full")]
+    pub fn enrol_for_pairing(
+        &self,
+        material: crate::pairing::enrol::OwnerMaterial,
+    ) -> Result<crate::pairing::enrol::MaterialReport, Box<Diagnostic>> {
+        crate::pairing::enrol::enrol(self, material)
     }
 
     /// Borrows one in-flight `PairingOffer`, under the lock, for exactly as long
@@ -785,6 +825,56 @@ impl Core {
         f: impl FnOnce(&twinvpn_crypto::pairing_offer::PairingOffer) -> R,
     ) -> Option<R> {
         self.pairing().offer(pairing_id).map(f)
+    }
+
+    /// The `pair.begin` **response** body — ADR-0017 §11.9 and **MI-P1**.
+    ///
+    /// > "The `PairingOffer` material to render — QR payload or 9-digit SPAKE2
+    /// > code. **The one `SECRET` that crosses MI**; see MI-P1."
+    ///
+    /// Returns `pairing_id ‖ dCBOR(offer)`: the 16-byte PUBLIC handle every
+    /// subsequent `pair.cancel` / `pair.status` names, followed by the exact
+    /// octets ADR-0023 **E1** renders as a QR and **E2** renders as Crockford
+    /// base32. One encoding, two views — `pairing_offer.cddl` encoding rule 1 is
+    /// what makes that true, and it is why nothing here renders: a shell calls
+    /// `twinvpn_crypto::pairing_offer::decode` and then `::render_text` or its
+    /// own QR encoder over the same bytes.
+    ///
+    /// # MI-P1's three rules, and where each is held
+    ///
+    /// 1. **Only inside a `pair.begin` response, only over the MI channel.**
+    ///    This is the only function in the workspace that copies the offer out
+    ///    of the core, and its one caller is the MI server's `pair.begin`
+    ///    response path. `pair.begin`'s `Outcome::result` — which becomes a
+    ///    `CommandCompleted` event broadcast to **every** subscriber — carries
+    ///    the `pairing_id` and nothing else, which is why the offer is *not*
+    ///    returned through [`Core::submit`].
+    /// 2. **Never logged, never in `diag.log.tail`, never in a Tier-1 bundle,
+    ///    dropped at `not_after_ms`.** The first three hold because the value
+    ///    never enters the event stream, the diagnostic ledger or a
+    ///    `Diagnostic`: there is no path from here to any of them. The client's
+    ///    deadline is served by field 7, which the returned bytes carry; the
+    ///    agent's own copy is freed by
+    ///    `crate::pairing::PairingCeremonies::drop_expired`.
+    /// 3. **Not persisted by either side.** The offer lives in a `BTreeMap`
+    ///    behind this core's mutex and is written to no store
+    ///    (`architecture.md` S-67: "non-durable BY REQUIREMENT"). Dropping it
+    ///    zeroizes.
+    ///
+    /// `None` when no ceremony with that `pairing_id` is in flight — a replay
+    /// after cancellation or expiry, where ADR-0008's recorded outcome is the
+    /// `pairing_id` alone and there is no longer an offer to render.
+    #[cfg(feature = "full")]
+    #[must_use]
+    pub fn render_pairing_offer(
+        &self,
+        pairing_id: &[u8; crate::pairing::PAIRING_ID_BYTES],
+    ) -> Option<Vec<u8>> {
+        self.with_pairing_offer(pairing_id, |offer| {
+            let mut body = pairing_id.to_vec();
+            body.extend_from_slice(&twinvpn_crypto::pairing_offer::encode(offer).ok()?);
+            Some(body)
+        })?
     }
 
     /// Binds the L-CONTROL transport this core will use.

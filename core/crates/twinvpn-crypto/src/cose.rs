@@ -616,6 +616,50 @@ pub fn es256_cose_key_from_verifying_key(key: &p256::ecdsa::VerifyingKey) -> Vec
     es256_cose_key(&x, &y)
 }
 
+/// [`es256_cose_key_from_verifying_key`] for a key still in its
+/// `SubjectPublicKeyInfo` wrapper.
+///
+/// **The last step of the sentence above.**
+/// [`es256_cose_key_from_verifying_key`] documents the device's own IK path as
+/// "`IdentityCustody::identity_public` vends an SPKI, which parses to a
+/// `VerifyingKey`, which this encodes into the octets N-2 hashes", and the
+/// *parse* half of that sentence had no entry point — so a composition root
+/// holding an element's `IdentityPublic::public_key` could not reach the
+/// encoder at all. `ownership.md` §11.2 **G-21** and
+/// `cp_binding::transport`'s "the seam owes a declared encoding" are that gap;
+/// this closes the crypto half of it.
+///
+/// # This is not a second copy of the encoding (RZ-8)
+///
+/// The COSE_Key map is still assembled in exactly one place,
+/// [`es256_cose_key`], which this reaches through
+/// [`es256_cose_key_from_verifying_key`]. The DER is parsed by [`p256`]'s own
+/// `pkcs8` decoder rather than by a byte matcher, which is the difference from
+/// `twinvpn-service-common`'s `spki_to_es256_cose_key`: that one reads an
+/// **attacker-presented** TLS channel identity and is deliberately a fixed-byte
+/// comparison with no parser to get wrong, and this one reads **this device's
+/// own element** and wants the curve implementation's opinion on the point.
+/// Neither encodes a COSE_Key of its own.
+///
+/// # A caller must still prove the result is this device's name
+///
+/// `IdentityPublic::public_key` is documented as carrying "the public key
+/// bytes, **in the element's own encoding**" — an SPKI is the *expected*
+/// encoding and not a *declared* one. So `Some(..)` here means "these bytes
+/// parsed as a P-256 SPKI", never "this is the key that names this device".
+/// ADR-0007 N-2 is the only thing that can say the latter, and
+/// `twinvpn_core::pairing::enrol` checks it: `SHA-256` over the returned octets
+/// must equal the `identity_id` the element reports.
+///
+/// `None` where the input is not a P-256 `SubjectPublicKeyInfo`, carrying
+/// nothing drawn from it.
+#[must_use]
+pub fn es256_cose_key_from_spki(spki: &[u8]) -> Option<Vec<u8>> {
+    use p256::pkcs8::DecodePublicKey as _;
+    let key = p256::ecdsa::VerifyingKey::from_public_key_der(spki).ok()?;
+    Some(es256_cose_key_from_verifying_key(&key))
+}
+
 /// Parses an OKP/X25519 COSE_Key and returns the 32-byte public value.
 ///
 /// Separate from [`PublicVerifyingKey::from_cose_key`] **on purpose**: an

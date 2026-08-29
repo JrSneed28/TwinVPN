@@ -24,8 +24,8 @@ mod harness;
 use std::time::Duration;
 
 use harness::{
-    begin, body_from_events, enrolled, named, pairing_id_from_events, status_of, ABORTED, PENDING,
-    WALL_MS,
+    begin, body_from_events, enrolled, named, pairing_id_from_events, status_of, ABORTED, EXPIRED,
+    PENDING, WALL_MS,
 };
 use twinvpn_core::pairing::PAIRING_ID_BYTES;
 use twinvpn_mgmt::CoreCommand;
@@ -225,5 +225,78 @@ fn eight_concurrent_begins_produce_one_ceremony() {
         h.adapter.identity_mock().sign_calls(),
         1,
         "exactly one ceremony was opened, so the element signed exactly once"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The offer's lifetime — S-67 and ADR-0017 MI-P1 rule 2
+// ---------------------------------------------------------------------------
+
+/// **The agent frees the secret when the window passes.**
+///
+/// `architecture.md` S-67 makes the in-flight offer "non-durable BY
+/// REQUIREMENT" and zeroized "on consumption or at expiry, whichever is first",
+/// and ADR-0017 MI-P1 rule 2 puts the same 120-second deadline on the client.
+/// Nothing enforced the agent's half: an expired ceremony's `pairing_secret`
+/// stayed in the map for the life of the process.
+///
+/// The sweep runs on the next operation that **acts**, which is `pair.begin` —
+/// `pair.status` is `Idempotency::ReadOnly` and burning is an act.
+#[test]
+fn an_expired_offer_is_freed_rather_than_held_for_the_life_of_the_process() {
+    let h = enrolled();
+    h.core.submit(&begin(b"key-first")).expect("pair.begin");
+    let first = pairing_id_from_events(&h.core);
+    assert!(
+        h.core.with_pairing_offer(&first, |_| ()).is_some(),
+        "the offer is in flight"
+    );
+
+    // Past N-17's window, and then an operation that acts.
+    h.time.advance(Duration::from_secs(121));
+    h.core.submit(&begin(b"key-second")).expect("pair.begin");
+    let second = pairing_id_from_events(&h.core);
+
+    assert!(
+        h.core.with_pairing_offer(&first, |_| ()).is_none(),
+        "the expired offer must be dropped, which zeroizes its pairing_secret"
+    );
+    assert!(
+        h.core.with_pairing_offer(&second, |_| ()).is_some(),
+        "the sweep must not take the ceremony that is still in flight"
+    );
+    // And the sweep burned the id rather than leaving it Pending, so the ledger
+    // and the offer map agree about what happened.
+    assert_eq!(status_of(&h.core, &first), EXPIRED);
+}
+
+/// **`Core::render_pairing_offer` is the offer's only exit, and it stops when
+/// the ceremony does.**
+///
+/// The function the MI server calls for the `pair.begin` response body. It
+/// answers `pairing_id ‖ dCBOR(offer)` while the ceremony is in flight and
+/// `None` afterwards, which is what makes the response shrink to ADR-0008's
+/// recorded outcome rather than carrying a secret nothing can still use.
+#[test]
+fn the_response_body_carries_the_offer_only_while_the_ceremony_is_in_flight() {
+    let h = enrolled();
+    h.core.submit(&begin(b"key-render")).expect("pair.begin");
+    let pairing_id = pairing_id_from_events(&h.core);
+
+    let body = h
+        .core
+        .render_pairing_offer(&pairing_id)
+        .expect("a live ceremony renders");
+    assert_eq!(&body[..PAIRING_ID_BYTES], pairing_id);
+    let offer = twinvpn_crypto::pairing_offer::decode(&body[PAIRING_ID_BYTES..])
+        .expect("the response body carries a decodable offer");
+    assert_eq!(offer.pairing_id(), pairing_id);
+
+    h.core
+        .submit(&named(CoreCommand::PairCancel, &pairing_id))
+        .expect("pair.cancel");
+    assert!(
+        h.core.render_pairing_offer(&pairing_id).is_none(),
+        "a cancelled ceremony has no offer to render"
     );
 }

@@ -124,6 +124,20 @@ impl FixtureIdentity {
         self.sign_prepared(&unsigned)
     }
 
+    /// Signs raw octets, returning the 64-byte `r ‖ s` an element returns.
+    ///
+    /// The fixture's stand-in for `IdentityCustody::identity_sign` at the
+    /// **vtable** shape rather than at the statement shape: an element is handed
+    /// `StatementToSign::to_be_signed()` and hands back bytes, and a shell test
+    /// that binds a `SigningElement` needs exactly that signature and not a
+    /// re-assembled COSE_Sign1. [`Self::sign_prepared`] is the same operation
+    /// with the assembly done here instead of by the caller.
+    #[must_use]
+    pub fn sign_bytes(&self, message: &[u8]) -> Vec<u8> {
+        let sig: p256::ecdsa::Signature = self.signing.sign(message);
+        sig.to_bytes().to_vec()
+    }
+
     /// Signs a [`StatementToSign`] a production emitter already built.
     ///
     /// The fixture's stand-in for `IdentityCustody::identity_sign`: it is the
