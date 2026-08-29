@@ -1,0 +1,32 @@
+Mutant:      M-P01-1
+Proof:       P01
+Spec:        docs/testing-strategy.md §4 P01 mutant table; ADR-0004 §11.6(b),(d)
+Description: Relay candidate gathered only after the direct-path timeout, so the candidate ledger shows serial rather than parallel gathering.
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-path --test ladder gathering_starts_both_families_and_the_relay_at_the_same_instant
+Fails:       gathering_starts_both_families_and_the_relay_at_the_same_instant
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-path/src/candidate.rs b/core/crates/twinvpn-path/src/candidate.rs
+index c6f6cfc..8e20d9a 100644
+--- a/core/crates/twinvpn-path/src/candidate.rs
++++ b/core/crates/twinvpn-path/src/candidate.rs
+@@ -183,10 +183,12 @@ pub struct GatherPlan {
+ impl GatherPlan {
+     /// Starts a round. Both families and the relay begin at the same instant.
+     #[must_use]
+-    pub const fn new(now: MonotonicInstant) -> Self {
++    pub fn new(now: MonotonicInstant) -> Self {
+         Self {
+             started_at: now,
+-            relay_gathered_at: now,
++            // MUTANT M-P01-1: the relay candidate is gathered only after the
++            // direct-path attempt has had its full budget, instead of from t=0.
++            relay_gathered_at: now.saturating_add(GATHER_DEADLINE),
+             v4_started: true,
+             v6_started: true,
+         }

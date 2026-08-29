@@ -1,0 +1,466 @@
+name: T3 — proof tests
+
+# ===========================================================================
+# TIER MAPPING — docs/testing-strategy.md §6.1 and §6.2.
+# ===========================================================================
+# T3: "Nightly against `main`, and on every release-candidate tag. <= 8 h.
+# Blocks the nightly gate; TWO CONSECUTIVE RED NIGHTS BLOCK RELEASE-BRANCH
+# CREATION. Runs on a dedicated TwinLab + VM fleet + device farm."
+#
+# §6.2's T3 contents are: everything in T2, plus ALL TWENTY-TWO PROOF TESTS
+# P01-P22 WITH THEIR FULL MUTANT SETS (§4 and §4.3), levels 8 (platform, incl.
+# the physical device farm), 10-full (the whole NAT class matrix at the §3.6 run
+# counts), 13 (fuzz, fixed CPU budget against changed targets), 14-deep
+# (property, <= 2 h), 15 (chaos), 16-trend (performance trend on pinned rigs),
+# 19 partial (capability probes + E2E smoke per supported target), and the §4.2
+# consistency checks C-1...C-4 against a real multi-replica control plane.
+#
+# RULE C-3 IS WHY THIS WORKFLOW EXISTS SEPARATELY FROM t2-post-merge.yml: "the
+# proof tests are a T3 gate and a T4 gate. A subset runs in T2 for fast
+# feedback, but a T2 pass is never evidence for a release. The MUTANT SETS RUN
+# ONLY IN T3 AND T4, because a proof test without its mutants is not known to
+# test anything (V2, PT-1)."
+#
+# ===========================================================================
+# WHAT THIS WORKFLOW HONESTLY IS
+# ===========================================================================
+# A dedicated TwinLab, a VM fleet and a device farm do not exist. Most of the
+# twenty-two procedures need one of them, so most of §4 cannot run here and
+# saying otherwise would be the exact defect this tier is supposed to catch.
+#
+# So this workflow does three things, and claims only those three:
+#
+#   1. It RUNS the mutant mechanism for real (rule PT-1) against the mutants
+#      that exist, and blocks on any mutant that is unbuildable or uncaught.
+#      This is the half of §4 that a plain runner CAN do, because a mutant is a
+#      patch and an oracle is a cargo test.
+#
+#   2. It RUNS the subset of each proof test's oracle that is asserted by a
+#      cargo test in this repository today, and blocks if any of it goes red.
+#
+#   3. It PUBLISHES the register — build/proof/register.tsv, checked by
+#      build/proof/status.sh — which enumerates all twenty-two, says per row
+#      exactly what is asserted and what is not, and names the infrastructure
+#      each unrunnable row is waiting on. §4: "The count is load-bearing."
+#
+# WHAT IT DOES NOT DO, STATED SO IT CANNOT BE MISREAD: it does not discharge
+# release blocker B-1. Not one of the twenty-two rows currently has both halves
+# of PT-1 (a full oracle AND a fully caught mutant set), so a green run of this
+# workflow is evidence that what exists works, and is not evidence that the
+# acceptance criteria are met. The `verdict` job prints that sentence on every
+# run rather than leaving it to be inferred from a green tick.
+#
+# ===========================================================================
+# WHAT IS NOT HERE, AND WHY
+# ===========================================================================
+# - "Everything in T2" (§6.2) is NOT re-run here. t2-post-merge.yml already
+#   runs it against every commit on `main`, which is the same commit this
+#   workflow's nightly run tests, and duplicating a 60-minute gate inside an
+#   8-hour budget spends the budget on a verdict that already exists. The
+#   composition is currently by convention rather than by mechanism: making it
+#   mechanical needs a `workflow_call` trigger on t2-post-merge.yml, which is
+#   the integration owner's file. Recorded here as an owed change rather than
+#   made silently.
+# - Level 8 (platform), 10-full (the NAT class matrix at §3.6 run counts),
+#   16-trend (pinned rigs), 19 (capability probes per supported target) and the
+#   §4.2 consistency checks C-1...C-4 need a lab, VMs, a device farm, pinned
+#   hardware and a multi-replica control plane. The `lab-realizability` job
+#   probes for them and reports what this host can and cannot produce, so their
+#   absence is a printed fact rather than a silent omission.
+#
+# RULE C-1 IS BINDING: "when a tier exceeds its budget, the response is to move
+# work down a tier or to parallelize it - NEVER to raise the budget silently."
+# The jobs below run in parallel and each carries its own timeout; the tier
+# budget is the longest path, not the sum.
+
+on:
+  schedule:
+    # Nightly against the default branch, per §6.1's T3 trigger.
+    - cron: '0 3 * * *'
+  push:
+    tags:
+      # "every release-candidate tag" (§6.1).
+      - 'v*-rc*'
+  workflow_dispatch:
+  # T4 composes this workflow rather than restating it, so that "everything in
+  # T3" (§6.2's T4 row) is a mechanism and not a promise.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t3-proof-${{ github.ref }}
+  cancel-in-progress: false     # a nightly verdict on main is not disposable
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+
+  # =========================================================================
+  # The register's shape, checked before anything expensive runs.
+  #
+  # This is the cheapest job and it gates nothing else on purpose: if the
+  # register has drifted from build/mutants/ we want to know that in the first
+  # minute, but a drifted register must not stop the mutant run from producing
+  # its own evidence.
+  # =========================================================================
+  register:
+    name: P01–P22 register
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: t3-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      # Shape only. The evidence commands themselves run in `proof-oracles`,
+      # where their cost is visible against that job's own budget rather than
+      # hidden inside a check that is supposed to take a minute.
+      - name: the count is load-bearing
+        run: build/proof/status.sh
+
+      # Every scenario id the register cites must exist in lab/'s catalogue.
+      # A register that can name a scenario nobody has defined is a register
+      # that can claim coverage nobody has built.
+      - name: scenario ids resolve against lab/'s catalogue
+        run: |
+          source build/toolchain/env.sh
+          build/proof/status.sh --with-catalogue
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proof-register
+          path: build/proof/register.tsv
+
+  # =========================================================================
+  # RULE PT-1, EXECUTED.
+  #
+  # "Each mutant is a real, buildable, version-controlled patch against the
+  # release commit. The mutant run is part of the test, not a thought
+  # experiment: P0N is PASS only if the clean build passes AND every mutant in
+  # its set fails, each with the expected oracle. A mutant that unexpectedly
+  # passes is a defect in the test, filed at the same severity as a product
+  # defect."
+  #
+  # This is the load-bearing job in the workflow. Rule C-3 places the mutant
+  # sets at T3 and T4 and nowhere else, so this is the earliest tier at which
+  # V2 is discharged for any proof test at all.
+  #
+  # It is BLOCKING. An uncaught mutant is a defect in a test, and a test that
+  # has stopped testing is worse than a missing one, because it reads as
+  # coverage in every report that counts tests.
+  # =========================================================================
+  mutants:
+    name: PT-1 — clean plus mutant, per proof test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The driver builds its rig with `git worktree add` at an explicit
+          # revision, so the full history must be present. C-5: "release
+          # evidence is bound to an exact commit or immutable snapshot."
+          fetch-depth: 0
+
+      - name: install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: t3-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: every mutant must be buildable and caught
+        run: build/proof/run-mutants.sh
+
+  # =========================================================================
+  # The part of each proof test's oracle that a cargo test asserts today.
+  #
+  # This is NOT the proof test. Every row of build/proof/register.tsv carries a
+  # NEEDS column naming what the difference is, and the register is uploaded
+  # beside this job's log so the two are read together.
+  # =========================================================================
+  proof-oracles:
+    name: proof-test oracles — the runnable subset
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: t3-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: run what the register names
+        run: |
+          source build/toolchain/env.sh
+          build/proof/status.sh --run
+
+  # =========================================================================
+  # Level 14-deep — property-based, <= 2 h (§2.0, §6.2).
+  #
+  # T1 runs the same properties at proptest's default case count (level
+  # 14-short, <= 4 min). The only difference here is PROPTEST_CASES, which is
+  # what "deep" means for a proptest suite: the same invariants, far more
+  # generated state sequences.
+  #
+  # B-12 makes an unpromoted counterexample a release blocker, so the failure
+  # artifact below is not a convenience: proptest writes .proptest-regressions
+  # next to the crate, and losing it loses the shrunk counterexample that §2.11
+  # requires be promoted to a permanent regression test.
+  # =========================================================================
+  property-deep:
+    name: level 14-deep — property
+    runs-on: ubuntu-latest
+    timeout-minutes: 120          # §2.0's <= 2 h budget for 14-deep
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: t3-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: proptest, deep
+        env:
+          # 4096 against proptest's default 256. The number is a budget
+          # decision, not a magic constant: it is the largest case count that
+          # keeps this job inside its 2 h slot on a 2-core hosted runner, and
+          # C-1 says a budget is changed by review, not on the day.
+          PROPTEST_CASES: "4096"
+        run: |
+          source build/toolchain/env.sh
+          cd core && cargo test --workspace --all-features
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: proptest-regressions
+          path: '**/*.proptest-regressions'
+
+  # =========================================================================
+  # Level 13 — fuzz, and an honest note about its budget.
+  #
+  # §2.0 gives level 13 "8 CPU-h/night, continuous fleet" and §6.2 places a
+  # timeboxed run in T3 "against changed targets". The targets here are the
+  # four cargo test binaries under tests/fuzz/, driven by the deterministic
+  # in-process engine in tests/system/src/fuzz.rs rather than by cargo-fuzz.
+  #
+  # THE BUDGET IS NOT MET AND THE JOB SAYS SO. The engine's iteration count is
+  # a compile-time argument at each call site, so there is no knob that turns
+  # 8 CPU-hours into more inputs; this job runs the fixed corpus, which takes
+  # minutes. Under C-1 the honest response is to record the shortfall, not to
+  # relabel a short run as the nightly budget. B-3 - any new unique crash,
+  # hang, OOM or sanitizer report - still blocks on whatever this does cover.
+  # =========================================================================
+  fuzz-timeboxed:
+    name: level 13 — fuzz (fixed corpus, budget unmet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: t3-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: the four fuzz target binaries
+        run: |
+          source build/toolchain/env.sh
+          cd tests
+          for t in fuzz_wire_decoders fuzz_statement_decoders \
+                   fuzz_persistence_decoders fuzz_handshake_and_platform_decoders; do
+            echo "::group::$t"
+            cargo test -q -p twinvpn-system-tests --test "$t"
+            echo "::endgroup::"
+          done
+
+      - name: the level-13 budget this job does not meet
+        run: |
+          echo "::warning::Level 13's tier budget is 8 CPU-h/night against a persistent"
+          echo "::warning::deduplicated corpus (§2.0, C-4). This job ran the fixed in-repo"
+          echo "::warning::corpus, which is minutes. Five of the twelve parser families in"
+          echo "::warning::ADR-0003 §11.7's closed inventory have no target at all, and no"
+          echo "::warning::sanitizer build exists. NOT VERIFIED: the level-13 T3 budget."
+
+  # =========================================================================
+  # Level 15 — chaos (§2.13, <= 60 min).
+  # =========================================================================
+  chaos:
+    name: level 15 — chaos
+    runs-on: ubuntu-latest
+    timeout-minutes: 60           # §2.0's level-15 budget
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: t3-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: the chaos targets
+        run: |
+          source build/toolchain/env.sh
+          cd tests
+          for t in chaos_outage_and_failover chaos_journal_write_behind chaos_store_outage; do
+            echo "::group::$t"
+            cargo test -q -p twinvpn-system-tests --test "$t"
+            echo "::endgroup::"
+          done
+
+  # =========================================================================
+  # What this runner can actually realize — the honesty artifact.
+  #
+  # §3.1's realization principle is that every condition TwinLab reproduces must
+  # be produced by a real mechanism. The corollary, which lab/twinlab-scenarios
+  # already implements in its five-way verdict vocabulary, is that a facility
+  # the host does not have yields UNAVAILABLE and never a green line.
+  #
+  # This job probes the runner and prints the answer. It is NOT allowed to fail
+  # the workflow on UNAVAILABLE, because an absence of evidence is neither a
+  # pass nor a failure - but it IS allowed to fail on a conformance FAIL, which
+  # is rule L-1: no traversal, leak or relay test may run against a NAT
+  # personality that has not passed §3.4.2's suite in the same lab instantiation
+  # on the same day, and V10/B-15 makes a simulator conformance failure void the
+  # results rather than merely cast doubt on them.
+  # =========================================================================
+  lab-realizability:
+    name: what this runner can realize
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: t3-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: host capabilities, probed rather than assumed
+        run: |
+          source build/toolchain/env.sh
+          cd lab && cargo run -q -p twinlab-scenarios -- capabilities
+
+      # L-1 / V10 / B-15. A personality that fails its own conformance suite
+      # makes every result produced against it void, so this one blocks.
+      - name: §3.4.2 simulator conformance (rule L-1)
+        run: |
+          source build/toolchain/env.sh
+          cd lab
+          set +e
+          cargo run -q -p twinlab-scenarios -- conformance
+          rc=$?
+          set -e
+          # Exit 3 is twinnet's "this host cannot produce the condition", which
+          # is UNAVAILABLE and therefore not a failure. Any other non-zero code
+          # is a real conformance failure and voids results under B-15.
+          if [ "$rc" -eq 3 ]; then
+            echo "::warning::Some NAT personalities are UNAVAILABLE on this runner."
+            echo "::warning::Rule L-1 forbids a traversal, leak or relay test against them."
+            echo "::warning::This is an absence of evidence, not a pass and not a failure."
+            exit 0
+          fi
+          exit "$rc"
+
+      - name: the plan for every scenario a proof test cites
+        run: |
+          source build/toolchain/env.sh
+          cd lab
+          # `plan` is the honest half of `run`: it says what a scenario needs and
+          # whether this host has it, without ever printing a green line for a
+          # facility that is absent.
+          cut -f6 ../build/proof/register.tsv | grep -v '^#' | tr ',' '\n' \
+            | sed 's/^ *//; s/ *$//' | grep '^S-' | sort -u \
+            | while read -r sid; do
+                cargo run -q -p twinlab-scenarios -- plan "$sid"
+              done
+
+      - name: the lab this tier is specified against
+        run: |
+          echo "::warning::§6.1 places T3 on a 'dedicated TwinLab + VM fleet + device farm'."
+          echo "::warning::A GitHub hosted runner is none of those. Level 8 (platform),"
+          echo "::warning::10-full (the NAT matrix at §3.6 run counts), 16-trend (pinned"
+          echo "::warning::rigs), 19 (per-target capability probes) and the §4.2 checks"
+          echo "::warning::C-1..C-4 (multi-replica control plane) DID NOT RUN."
+
+  # =========================================================================
+  # The verdict, stated in terms this tier is entitled to.
+  #
+  # It runs on success and on failure, because the sentence it prints is true
+  # either way and is most likely to be misread after a green run.
+  # =========================================================================
+  verdict:
+    name: T3 verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [register, mutants, proof-oracles, property-deep, fuzz-timeboxed, chaos, lab-realizability]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: what a green tick on this workflow does and does not mean
+        run: |
+          {
+            echo "## T3 verdict"
+            echo
+            echo "A green run of this workflow means: the mutants in \`build/mutants/\` are"
+            echo "each buildable and each caught by their named oracle; the subset of the"
+            echo "twenty-two proof-test oracles that this repository asserts today ran"
+            echo "green; and the register's shape reconciles with what is on disk."
+            echo
+            echo "It does **not** mean release blocker **B-1** is discharged. B-1 requires"
+            echo "all twenty-two of P01–P22 passing under PT-1 — a full oracle *and* a fully"
+            echo "caught mutant set — and no row of \`build/proof/register.tsv\` currently"
+            echo "carries both halves. §6.5 also makes a *skipped* procedure a failure, so"
+            echo "the rows this runner cannot execute are outstanding, not waived."
+            echo
+            echo "The register, uploaded by the \`register\` job, is the per-row detail."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: fail if any gating job failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "::error::T3 is red. Two consecutive red nights block release-branch creation (§6.1)."
+          exit 1

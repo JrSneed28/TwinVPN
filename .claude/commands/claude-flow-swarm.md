@@ -3,203 +3,154 @@ name: claude-flow-swarm
 description: Coordinate multi-agent swarms for complex tasks
 ---
 
-# 🐝 Claude-Flow Swarm Coordination
+# 🐝 Ruflo Swarm Coordination
 
-Advanced multi-agent coordination system with timeout-free execution, distributed memory sharing, and intelligent load balancing.
+Multi-agent coordination with distributed memory sharing and adaptive
+scheduling. Every command runs through `npx ruflo@latest`.
+
+Swarm coordination is a ledger and policy layer: it routes and records. Claude
+Code and its subagents still perform the actual work.
 
 ## Basic Usage
 ```bash
-./claude-flow swarm "your complex task" --strategy <type> [options]
+# Initialize the swarm, then start it against an objective
+npx ruflo@latest swarm init --topology hierarchical-mesh --max-agents 15 --strategy specialized
+npx ruflo@latest swarm start -o "your complex task" -s development
 ```
 
-## 🎯 Swarm Strategies
-- **auto** - Automatic strategy selection based on task analysis
-- **development** - Code implementation with review and testing
-- **research** - Information gathering and synthesis
-- **analysis** - Data processing and pattern identification
-- **testing** - Comprehensive quality assurance
-- **optimization** - Performance tuning and refactoring
-- **maintenance** - System updates and bug fixes
+`swarm start` takes the objective as `-o`, not as a positional argument.
+
+## Subcommands
+| Subcommand | Purpose |
+|------------|---------|
+| `init` | Initialize a new swarm |
+| `start` | Start swarm execution |
+| `status` | Show swarm status |
+| `stop` | Stop swarm execution |
+| `scale` | Scale agent count |
+| `coordinate` | Run V3 15-agent hierarchical mesh coordination |
+| `pheromone` | Inspect or update pheromone-adaptive scheduling state (ADR-330) |
+
+## ⚙️ Options
+
+### `swarm init`
+- `-t, --topology <type>` — topology (default `hierarchical`)
+- `-m, --max-agents <n>` — maximum agents (default 15)
+- `-s, --strategy <type>` — coordination strategy
+- `--auto-scale` — automatic scaling (default on)
+- `--v3-mode` — V3 15-agent hierarchical mesh mode
+- `--with-permissions <preset>` — workspace-scoped permission manifest
+  (`strict`, `standard`, `permissive`)
+- `--apsc-*` — adaptive agent suspension tuning; calibration-only dry run
+  unless `--apsc-live` is passed
+
+### `swarm start`
+- `-o, --objective <text>` — objective (required)
+- `-s, --strategy <type>` — execution strategy
+- `-p, --parallel` — parallel execution (default on)
+- `--monitor` — real-time monitoring (default on)
+
+### `swarm scale`
+- `-a, --agents <n>` — target agent count (required)
+- `-t, --type <type>` — agent type to scale
+
+## 🎯 Strategies
+- **auto** — automatic selection based on task analysis
+- **development** — implementation with review and testing
+- **research** — information gathering and synthesis
+- **analysis** — data processing and pattern identification
+- **testing** — quality assurance
+- **optimization** — performance tuning and refactoring
+- **maintenance** — updates and bug fixes
+- **specialized** — the strategy this project's config uses
 
 ## 🤖 Agent Types
-- **coordinator** - Plans and delegates tasks to other agents
-- **developer** - Writes code and implements solutions
-- **researcher** - Gathers and analyzes information
-- **analyzer** - Identifies patterns and generates insights
-- **tester** - Creates and runs tests for quality assurance
-- **reviewer** - Performs code and design reviews
-- **documenter** - Creates documentation and guides
-- **monitor** - Tracks performance and system health
-- **specialist** - Domain-specific expert agents
+- **coordinator** — plans and delegates to other agents
+- **developer** / **coder** — writes code
+- **researcher** — gathers and analyzes information
+- **analyzer** — identifies patterns and generates insights
+- **tester** — creates and runs tests
+- **reviewer** — code and design review
+- **documenter** — documentation and guides
+- **specialist** — domain-specific expert agents
 
-## 🔄 Coordination Modes
-- **centralized** - Single coordinator manages all agents (default)
-- **distributed** - Multiple coordinators share management
-- **hierarchical** - Tree structure with nested coordination
-- **mesh** - Peer-to-peer agent collaboration
-- **hybrid** - Mixed coordination strategies
-
-## ⚙️ Common Options
-- `--strategy <type>` - Execution strategy
-- `--mode <type>` - Coordination mode
-- `--max-agents <n>` - Maximum concurrent agents (default: 5)
-- `--timeout <minutes>` - Timeout in minutes (default: 60)
-- `--background` - Run in background for tasks > 30 minutes
-- `--monitor` - Enable real-time monitoring
-- `--ui` - Launch terminal UI interface
-- `--parallel` - Enable parallel execution
-- `--distributed` - Enable distributed coordination
-- `--review` - Enable peer review process
-- `--testing` - Include automated testing
-- `--encryption` - Enable data encryption
-- `--verbose` - Detailed logging output
-- `--dry-run` - Show configuration without executing
+## 🔄 Topologies
+- **hierarchical** — tree structure with nested coordination (default)
+- **hierarchical-mesh** — this project's configured anti-drift topology
+- **mesh** — peer-to-peer agent collaboration
+- **centralized** — one coordinator manages all agents
+- **distributed** — multiple coordinators share management
 
 ## 🌟 Examples
 
-### Development Swarm with Review
+### Development swarm
 ```bash
-./claude-flow swarm "Build e-commerce REST API" \
-  --strategy development \
-  --monitor \
-  --review \
-  --testing
+npx ruflo@latest swarm init --topology hierarchical-mesh --max-agents 8 --strategy specialized
+npx ruflo@latest swarm start -o "Build e-commerce REST API" -s development
 ```
 
-### Long-Running Research Swarm
+### Research swarm
 ```bash
-./claude-flow swarm "Analyze AI market trends 2024-2025" \
-  --strategy research \
-  --background \
-  --distributed \
-  --max-agents 8
+npx ruflo@latest swarm init --max-agents 8
+npx ruflo@latest swarm start -o "Analyze AI market trends" -s research --parallel
 ```
 
-### Performance Optimization Swarm
+### V3 hierarchical mesh coordination
 ```bash
-./claude-flow swarm "Optimize database queries and API performance" \
-  --strategy optimization \
-  --testing \
-  --parallel \
-  --monitor
+npx ruflo@latest swarm coordinate --agents 15
+npx ruflo@latest swarm coordinate --agents 15 --domains security,core,integration
 ```
 
-### Enterprise Development Swarm
+### Optimization swarm
 ```bash
-./claude-flow swarm "Implement secure payment processing system" \
-  --strategy development \
-  --mode distributed \
-  --max-agents 10 \
-  --parallel \
-  --monitor \
-  --review \
-  --testing \
-  --encryption \
-  --verbose
-```
-
-### Testing and QA Swarm
-```bash
-./claude-flow swarm "Comprehensive security audit and testing" \
-  --strategy testing \
-  --review \
-  --verbose \
-  --max-agents 6
+npx ruflo@latest swarm start -o "Optimize database queries and API performance" -s optimization
 ```
 
 ## 📊 Monitoring and Control
 
-### Real-time monitoring:
 ```bash
-# Monitor swarm activity
-./claude-flow monitor
+# Swarm status
+npx ruflo@latest swarm status
 
-# Monitor specific component
-./claude-flow monitor --focus swarm
-```
-
-### Check swarm status:
-```bash
 # Overall system status
-./claude-flow status
+npx ruflo@latest status
 
-# Detailed swarm status
-./claude-flow status --verbose
+# Agents
+npx ruflo@latest agent list
+npx ruflo@latest agent status <agent-id>
+npx ruflo@latest agent health
+npx ruflo@latest agent logs <agent-id>
+
+# Scheduling state
+npx ruflo@latest swarm pheromone
 ```
 
-### View agent activity:
-```bash
-# List all agents
-./claude-flow agent list
-
-# Agent details
-./claude-flow agent info <agent-id>
-```
+There is no top-level `monitor` command in v3 — use `swarm status`, `status`,
+and `agent health`.
 
 ## 💾 Memory Integration
 
-Swarms automatically use distributed memory for collaboration:
+Swarms share state through the memory system:
 
 ```bash
-# Store swarm objectives
-./claude-flow memory store "swarm_objective" "Build scalable API" --namespace swarm
-
-# Query swarm progress
-./claude-flow memory query "swarm_progress" --namespace swarm
-
-# Export swarm memory
-./claude-flow memory export swarm-results.json --namespace swarm
+npx ruflo@latest memory store -k "swarm_objective" --value "Build scalable API" --namespace swarm
+npx ruflo@latest memory search -q "swarm progress" --namespace swarm --threshold 0.3
+npx ruflo@latest memory export -o swarm-results.json --namespace swarm
 ```
 
-## 🎯 Key Features
+## 🔧 Concurrency Rules
 
-### Timeout-Free Execution
-- Background mode for long-running tasks
-- State persistence across sessions
-- Automatic checkpoint recovery
+- Never put two writing agents in one worktree. Each writing agent gets an
+  isolated worktree and explicit file ownership.
+- Read-only research agents may run concurrently and report to the owner.
+- Only the integration owner edits shared manifests and lockfiles.
+- A child agent may drop capabilities but cannot add tools, network, secrets,
+  spend, concurrency, namespaces, or delegation depth.
+- A lease or claim coordinates ownership; it does not authorize a side effect.
 
-### Work Stealing & Load Balancing
-- Dynamic task redistribution
-- Automatic agent scaling
-- Resource-aware scheduling
+## When to Swarm
+- **Yes** — 3+ files, new features, cross-module refactoring, API changes,
+  security work, performance work
+- **No** — single-file edits, one- or two-line fixes, docs, config, questions
 
-### Circuit Breakers & Fault Tolerance
-- Automatic retry with exponential backoff
-- Graceful degradation
-- Health monitoring and recovery
-
-### Real-Time Collaboration
-- Cross-agent communication
-- Shared memory access
-- Event-driven coordination
-
-### Enterprise Security
-- Role-based access control
-- Audit logging
-- Data encryption
-- Input validation
-
-## 🔧 Advanced Configuration
-
-### Dry run to preview:
-```bash
-./claude-flow swarm "Test task" --dry-run --strategy development
-```
-
-### Custom quality thresholds:
-```bash
-./claude-flow swarm "High quality API" \
-  --strategy development \
-  --quality-threshold 0.95
-```
-
-### Scheduling algorithms:
-- FIFO (First In, First Out)
-- Priority-based
-- Deadline-driven
-- Shortest Job First
-- Critical Path
-- Resource-aware
-- Adaptive
-
-For detailed documentation, see: https://github.com/ruvnet/claude-code-flow/docs/swarm-system.md
+For the full command surface, run `npx ruflo@latest swarm --help`.

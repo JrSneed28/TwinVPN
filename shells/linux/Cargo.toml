@@ -25,13 +25,21 @@ license      = "Apache-2.0"
 repository   = "https://github.com/twinvpn/twinvpn"
 
 [workspace.dependencies]
-twinvpn-core           = { path = "../../core/crates/twinvpn-core" }
-twinvpn-types          = { path = "../../core/crates/twinvpn-types" }
-twinvpn-env            = { path = "../../core/crates/twinvpn-env" }
-twinvpn-platform       = { path = "../../core/crates/twinvpn-platform" }
-twinvpn-platform-linux = { path = "../../core/crates/twinvpn-platform-linux" }
-twinvpn-mgmt           = { path = "../../core/crates/twinvpn-mgmt" }
-twinvpn-diag           = { path = "../../core/crates/twinvpn-diag" }
+# DP-1 -- "NO UNBOUNDED VERSION RANGES". The `version` next to every `path`
+# below is not redundant. A path dependency with no `version` key is a `*`
+# requirement, and build/deny.toml mechanises DP-1 as `wildcards = "deny"`.
+# `allow-wildcard-paths` there does NOT exempt these: cargo-deny applies it only
+# to crates declared private, and these are not declared private. So the bound
+# is written on the edge itself, which is where DP-1 asks for it. The `path`
+# still wins for resolution; the `version` is what an auditor reads.
+twinvpn-core           = { version = "0.1.0", path = "../../core/crates/twinvpn-core" }
+twinvpn-types          = { version = "0.1.0", path = "../../core/crates/twinvpn-types" }
+twinvpn-env            = { version = "0.1.0", path = "../../core/crates/twinvpn-env" }
+twinvpn-platform       = { version = "0.1.0", path = "../../core/crates/twinvpn-platform" }
+twinvpn-platform-linux = { version = "0.1.0", path = "../../core/crates/twinvpn-platform-linux" }
+twinvpn-enforce        = { version = "0.1.0", path = "../../core/crates/twinvpn-enforce" }
+twinvpn-mgmt           = { version = "0.1.0", path = "../../core/crates/twinvpn-mgmt" }
+twinvpn-diag           = { version = "0.1.0", path = "../../core/crates/twinvpn-diag" }
 
 thiserror = "2.0"
 anyhow    = "1.0"

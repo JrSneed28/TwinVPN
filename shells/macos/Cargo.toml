@@ -40,13 +40,17 @@ repository   = "https://github.com/twinvpn/twinvpn"
 # own default feature, so a real build of this shell is byte-for-byte what it
 # was; what the line buys is a SECOND, reduced profile that `make cross-check`
 # can compile on a host with no Darwin C toolchain. `ownership.md` §11, G-4/G-6.
-twinvpn-core           = { path = "../../core/crates/twinvpn-core", default-features = false }
-twinvpn-types          = { path = "../../core/crates/twinvpn-types" }
-twinvpn-env            = { path = "../../core/crates/twinvpn-env" }
-twinvpn-platform       = { path = "../../core/crates/twinvpn-platform" }
-twinvpn-platform-macos = { path = "../../core/crates/twinvpn-platform-macos" }
-twinvpn-mgmt           = { path = "../../core/crates/twinvpn-mgmt" }
-twinvpn-diag           = { path = "../../core/crates/twinvpn-diag" }
+# The `version` next to every `path` is load-bearing: a versionless path
+# dependency is a `*` requirement and build/deny.toml sets `wildcards = "deny"`
+# for DP-1. See core/Cargo.toml for the full note.
+twinvpn-core           = { version = "0.1.0", path = "../../core/crates/twinvpn-core", default-features = false }
+twinvpn-types          = { version = "0.1.0", path = "../../core/crates/twinvpn-types" }
+twinvpn-env            = { version = "0.1.0", path = "../../core/crates/twinvpn-env" }
+twinvpn-platform       = { version = "0.1.0", path = "../../core/crates/twinvpn-platform" }
+twinvpn-platform-macos = { version = "0.1.0", path = "../../core/crates/twinvpn-platform-macos" }
+twinvpn-enforce        = { version = "0.1.0", path = "../../core/crates/twinvpn-enforce" }
+twinvpn-mgmt           = { version = "0.1.0", path = "../../core/crates/twinvpn-mgmt" }
+twinvpn-diag           = { version = "0.1.0", path = "../../core/crates/twinvpn-diag" }
 
 thiserror = "2.0"
 anyhow    = "1.0"

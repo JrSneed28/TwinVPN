@@ -1681,6 +1681,7 @@ name = "twinvpn-enforce"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "serde_json",
  "thiserror 2.0.20",
  "twinvpn-dns",
  "twinvpn-env",
@@ -1821,6 +1822,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "twinvpn-enforce",
  "twinvpn-env",
  "twinvpn-platform",
  "twinvpn-types",
@@ -1856,6 +1858,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "twinvpn-enforce",
  "twinvpn-env",
  "twinvpn-platform",
  "twinvpn-platform-windows",
@@ -1979,6 +1982,7 @@ dependencies = [
  "serde_json",
  "subtle",
  "thiserror 2.0.20",
+ "twinvpn-schema",
  "zeroize",
 ]
 

@@ -225,14 +225,47 @@ const UNREACHABLE_LUID: u64 = 0;
 ///
 /// ADR-0011 §11.9: "deny UDP/TCP 53, TCP 853, and known-DoH endpoints on every
 /// non-overlay interface **regardless of which process opened the socket**".
-/// The DoH endpoint list is a policy input this seam does not carry — see the
-/// module's own gap note in [`crate::dns`] — so what is installed here is the
-/// port half, which is the part that is a constant of the protocol.
-const DNS_PORTS: [(IpProtocol, u16); 3] = [
+/// This is the **port half**, the part that is a constant of the protocol; the
+/// endpoint half is [`super::EnforcementConfig::doh_endpoints`], denied on
+/// [`DOH_PORT`], and is emitted after these so that an empty endpoint list can
+/// never be the reason a port filter was not written.
+///
+/// # UDP 853 is DoQ, and Windows used to be the only platform that let it out
+///
+/// WFP needs one `(protocol, port)` filter per combination, so a port covered
+/// "for TCP" is genuinely not covered for UDP — unlike Linux, where
+/// `meta l4proto { tcp, udp } th dport { 53, 853 }` reaches both transports'
+/// port field in a single rule and picks DoQ up with DoT for free. This array
+/// carried only `(Tcp, 853)`, so a DNS-over-QUIC client on Windows reached
+/// 853/UDP off-overlay while the same client was denied on Linux.
+///
+/// `contracts/registry/encrypted_resolvers.json` names the port in its own
+/// `ports` object as `doq_udp: 853`, so this was a gap against the registry the
+/// rest of this module consumes, not a judgement call. The asymmetry is now
+/// closed and the four entries are exactly the registry's four listening
+/// transports: `do53_udp`, `do53_tcp`, `dot_tcp` and `doq_udp`.
+const DNS_PORTS: [(IpProtocol, u16); 4] = [
     (IpProtocol::Udp, 53),
     (IpProtocol::Tcp, 53),
     (IpProtocol::Tcp, 853),
+    (IpProtocol::Udp, 853),
 ];
+
+/// The port the endpoint half of class 6 denies.
+///
+/// `contracts/registry/encrypted_resolvers.json`'s own `ports.doh_tcp` (RFC
+/// 8484). It cannot be denied wholesale — it is the web — which is exactly why
+/// this half is destination-scoped, and why the registry describes itself as "a
+/// detection aid, never a guarantee".
+const DOH_PORT: u16 = 443;
+
+/// The ordinal at which the endpoint filters begin, per layer.
+///
+/// [`DNS_PORTS`] occupies `0..3` in both layers, so the endpoint filters start
+/// after it. A filter key is derived from `(class, layer, ordinal)` and nothing
+/// else, so this offset is what keeps a re-render converging on the same keys
+/// instead of colliding with the port filters (KS-20, KS-23).
+const DOH_ORDINAL_BASE: usize = DNS_PORTS.len();
 
 /// Renders the desired filter set.
 ///
@@ -446,6 +479,46 @@ pub fn render(
         }
     }
 
+    // ---- class 6, the endpoint half: TCP 443 to a known encrypted resolver --
+    // ADDITIVE to the three port filters above, and never a substitute for them
+    // — the registry's `consumer_rule`, which is normative. The port filters are
+    // already in `filters` by the time this loop runs, so an empty list here
+    // subtracts nothing.
+    //
+    // This is the half that matters in SPLIT tunnel. In full tunnel the Tier-1
+    // scope deny below already covers `1.1.1.1:443`, because the complement form
+    // protects everything; in split tunnel Tier 1 covers only the contract's own
+    // prefixes and these filters are the only thing between a browser with a
+    // pinned DoH resolver and an off-tunnel resolution.
+    //
+    // No app-id and no user-sid condition, for the same reason the port filters
+    // carry none: §11.9 says "regardless of which process opened the socket",
+    // and SMHNR's whole problem is that the process is `dnscache` and not the
+    // browser. The bootstrap permit above, which outweighs this class, is what
+    // keeps our own stub's upstream resolution working.
+    for (ordinal, prefix) in sorted(&config.doh_endpoints).into_iter().enumerate() {
+        let layer = Layer::for_family(prefix.family());
+        filters.push(FilterSpec {
+            key: filter_key(
+                TrafficClass::DnsContainment,
+                layer,
+                ordinal_of(DOH_ORDINAL_BASE + ordinal),
+            ),
+            name: "twinvpn-dns-containment-endpoint",
+            layer,
+            action: Action::Block,
+            weight: weight::DNS_CONTAINMENT,
+            conditions: vec![
+                Condition::Protocol(IpProtocol::Tcp),
+                Condition::RemotePort(DOH_PORT),
+                Condition::RemotePrefix(prefix),
+                Condition::NotLocalInterface(config.overlay_luid),
+            ],
+            class: TrafficClass::DnsContainment,
+            flags: persistent(),
+        });
+    }
+
     // ---- Tier 2: the overlay permit, and the ONLY difference between the two
     //      postures ---------------------------------------------------------
     if ruleset == Ruleset::Protected {
@@ -614,6 +687,13 @@ pub(crate) mod tests_support {
             updater_app_id: None,
             update_origins: Vec::new(),
             portal_grant: Vec::new(),
+            // Empty here ON PURPOSE. The sibling modules that share this fixture
+            // are checking the boot set, the read-back decoder and the canary,
+            // none of which are about class 6 -- and an empty list is also the
+            // shape that proves the port half stands on its own, which is what
+            // the registry's `consumer_rule` requires. `filters::tests` uses a
+            // populated one.
+            doh_endpoints: Vec::new(),
         }
     }
 
@@ -695,7 +775,41 @@ mod tests {
             updater_app_id: None,
             update_origins: Vec::new(),
             portal_grant: Vec::new(),
+            // THE REAL ARTIFACT, not a hand-written stand-in. A fixture list here
+            // would let `contracts/registry/encrypted_resolvers.json` gain a
+            // provider that no filter ever denies, and the test would still be
+            // green — which is the shape of the defect F-3 records.
+            doh_endpoints: registry().endpoints(),
         }
+    }
+
+    /// The product's own encrypted-resolver registry, parsed by the one shared
+    /// consumer every platform reads.
+    ///
+    /// `twinvpn-enforce` is a DEV-dependency of this crate and not a dependency:
+    /// the adapter takes the list injected (CD-2) and holds no copy of it, so the
+    /// production crate graph is unchanged. The test reaches for the consumer
+    /// because asserting against the registry's real contents is the only way to
+    /// prove that what is denied is what ships.
+    fn registry() -> twinvpn_enforce::doh::KnownResolvers {
+        twinvpn_enforce::doh::KnownResolvers::embedded().expect("the shipped registry parses")
+    }
+
+    /// A split-tunnel contract: Tier 1 covers the contract's own prefixes and
+    /// nothing else, which is the routing mode F-3 says was exposed.
+    fn split_tunnel_contract() -> NetworkContract {
+        contract(PerFamily::new(
+            vec![route(prefix([10, 0, 0, 0], 8))],
+            vec![route(v6_prefix(0x20, 0x01, 16))],
+        ))
+    }
+
+    /// The class-6 endpoint filters in a rendered set.
+    fn doh_filters(set: &FilterSet) -> Vec<&FilterSpec> {
+        set.filters
+            .iter()
+            .filter(|f| f.name == "twinvpn-dns-containment-endpoint")
+            .collect()
     }
 
     fn contract(routes: PerFamily<Vec<RouteEntry>>) -> NetworkContract {
@@ -916,8 +1030,17 @@ mod tests {
         ));
     }
 
+    /// The four `(protocol, port)` combinations the registry lists, in both
+    /// families.
+    ///
+    /// It was three until DoQ on UDP 853 was added: WFP needs one filter per
+    /// combination, so `(Tcp, 853)` did not cover `(Udp, 853)`, and Windows was
+    /// letting DNS-over-QUIC out where Linux denied it. The count is asserted
+    /// rather than derived from `DNS_PORTS.len()` on purpose — deriving it would
+    /// make the test agree with any future shortening of the array, which is the
+    /// regression it exists to catch.
     #[test]
-    fn dns_containment_covers_both_families_and_all_three_ports() {
+    fn dns_containment_covers_both_families_and_all_four_ports() {
         // ADR-0011 §11.9: containment, not configuration, is the guarantee, and
         // it applies "regardless of which process opened the socket" — so no
         // app-id condition appears on any of these.
@@ -925,9 +1048,26 @@ mod tests {
         let dns: Vec<_> = set
             .filters
             .iter()
-            .filter(|f| f.class == TrafficClass::DnsContainment)
+            .filter(|f| f.name == "twinvpn-dns-containment")
             .collect();
-        assert_eq!(dns.len(), 6, "three ports times two families");
+        assert_eq!(dns.len(), 8, "four ports times two families");
+        // Named explicitly, so "which four" is part of the assertion and not an
+        // arithmetic coincidence.
+        for (protocol, port) in [
+            (IpProtocol::Udp, 53u16),
+            (IpProtocol::Tcp, 53),
+            (IpProtocol::Tcp, 853),
+            (IpProtocol::Udp, 853),
+        ] {
+            for layer in [Layer::AleAuthConnectV4, Layer::AleAuthConnectV6] {
+                assert!(
+                    dns.iter().any(|f| f.layer == layer
+                        && f.conditions.contains(&Condition::Protocol(protocol))
+                        && f.conditions.contains(&Condition::RemotePort(port))),
+                    "no {protocol:?}/{port} filter at {layer:?}"
+                );
+            }
+        }
         for filter in dns {
             assert_eq!(filter.action, Action::Block);
             assert!(
@@ -942,6 +1082,152 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Condition::NotLocalInterface(_))));
         }
+    }
+
+    /// **F-3, the exposed case.** In SPLIT tunnel the Tier-1 scope deny covers
+    /// only the contract's own prefixes, so `1.1.1.1:443` off-overlay reaches the
+    /// wire unless class 6 names the endpoint. This asserts that it now does, in
+    /// BOTH ALE layers, against the shipped registry's real contents.
+    #[test]
+    fn split_tunnel_denies_the_known_doh_endpoints_in_both_ale_layers() {
+        for posture in [Ruleset::Blocked, Ruleset::Protected] {
+            let set = render(&split_tunnel_contract(), posture, &config());
+            set.validate()
+                .expect("a rendered set is always installable");
+
+            // The precondition that makes this test mean anything: Tier 1 here
+            // does not cover the public internet.
+            assert_eq!(scope_mode(&split_tunnel_contract()), ScopeMode::Bounded);
+            assert!(
+                !protected_scope(&split_tunnel_contract())
+                    .iter()
+                    .any(|p| p.contains(twinvpn_types::IpAddr::V4(
+                        twinvpn_types::V4Addr::from_octets([1, 1, 1, 1])
+                    ))),
+                "split tunnel must not already contain 1.1.1.1, or the test proves nothing"
+            );
+
+            let endpoints = doh_filters(&set);
+            let per_family = registry().per_family();
+            assert_eq!(
+                endpoints.len(),
+                per_family.v4.len() + per_family.v6.len(),
+                "one filter per registry endpoint"
+            );
+            assert_eq!(
+                endpoints
+                    .iter()
+                    .filter(|f| f.layer == Layer::AleAuthConnectV4)
+                    .count(),
+                per_family.v4.len(),
+                "ALE_AUTH_CONNECT_V4 carries every v4 endpoint"
+            );
+            assert_eq!(
+                endpoints
+                    .iter()
+                    .filter(|f| f.layer == Layer::AleAuthConnectV6)
+                    .count(),
+                per_family.v6.len(),
+                "ALE_AUTH_CONNECT_V6 carries every v6 endpoint"
+            );
+
+            for filter in &endpoints {
+                assert_eq!(filter.action, Action::Block);
+                assert_eq!(filter.class, TrafficClass::DnsContainment);
+                assert!(filter
+                    .conditions
+                    .contains(&Condition::Protocol(IpProtocol::Tcp)));
+                assert!(filter.conditions.contains(&Condition::RemotePort(443)));
+                assert!(filter
+                    .conditions
+                    .contains(&Condition::NotLocalInterface(config().overlay_luid)));
+                // §11.9: "regardless of which process opened the socket".
+                assert!(
+                    !filter
+                        .conditions
+                        .iter()
+                        .any(|c| matches!(c, Condition::AppId(_) | Condition::UserSid(_))),
+                    "containment must not depend on which process asked"
+                );
+            }
+
+            // Every endpoint the registry names appears as a `RemotePrefix`.
+            let denied: Vec<IpPrefix> = endpoints
+                .iter()
+                .filter_map(|f| {
+                    f.conditions.iter().find_map(|c| match c {
+                        Condition::RemotePrefix(p) => Some(*p),
+                        _ => None,
+                    })
+                })
+                .collect();
+            for prefix in per_family.v4.iter().chain(&per_family.v6) {
+                assert!(denied.contains(prefix), "{prefix:?} is not denied");
+            }
+        }
+    }
+
+    /// **F-3, the already-contained case, kept contained.** Full tunnel drops
+    /// everything at Tier 1 anyway; the endpoint filters are defence in depth and
+    /// must still be installed, because the difference between the two routing
+    /// modes is the contract's route set and never the containment class.
+    #[test]
+    fn full_tunnel_carries_the_same_doh_endpoint_filters() {
+        assert_eq!(scope_mode(&full_tunnel_contract()), ScopeMode::Complement);
+        let full = render(&full_tunnel_contract(), Ruleset::Protected, &config());
+        let split = render(&split_tunnel_contract(), Ruleset::Protected, &config());
+        assert_eq!(
+            doh_filters(&full),
+            doh_filters(&split),
+            "class 6 is identical in both routing modes; only Tier 1 differs"
+        );
+        assert!(!doh_filters(&full).is_empty());
+    }
+
+    /// The registry's `consumer_rule`: "ADDITIVE to the port-based denial, never
+    /// as a substitute for it. An empty or unparseable list MUST NOT weaken the
+    /// port rules, and MUST NOT be a reason to fail open."
+    #[test]
+    fn an_empty_doh_list_leaves_the_port_filters_and_tier_1_fully_intact() {
+        let empty = EnforcementConfig {
+            doh_endpoints: Vec::new(),
+            ..config()
+        };
+        let bare = render(&split_tunnel_contract(), Ruleset::Protected, &empty);
+        bare.validate().expect("still installable");
+        assert!(doh_filters(&bare).is_empty());
+
+        let ports: Vec<_> = bare
+            .filters
+            .iter()
+            .filter(|f| f.name == "twinvpn-dns-containment")
+            .collect();
+        assert_eq!(ports.len(), 8, "the port half is untouched");
+
+        // And the ONLY difference from the populated render is the endpoint
+        // filters: Tier 1, Tier 2, the exemptions and the marker are identical.
+        let populated = render(&split_tunnel_contract(), Ruleset::Protected, &config());
+        let stripped: Vec<&FilterSpec> = populated
+            .filters
+            .iter()
+            .filter(|f| f.name != "twinvpn-dns-containment-endpoint")
+            .collect();
+        assert_eq!(stripped, bare.filters.iter().collect::<Vec<_>>());
+    }
+
+    /// KS-20 / KS-23: a filter key is derived from `(class, layer, ordinal)`, so
+    /// the endpoint filters must not collide with the three port filters that
+    /// share their class — a collision would make a reclaim delete one of them.
+    #[test]
+    fn the_endpoint_filter_keys_are_distinct_and_stable_across_renders() {
+        let first = render(&split_tunnel_contract(), Ruleset::Protected, &config());
+        let second = render(&split_tunnel_contract(), Ruleset::Protected, &config());
+        assert_eq!(first.keys(), second.keys(), "re-rendering converges");
+
+        let mut keys = first.keys();
+        let total = first.filters.len();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "every filter key is distinct");
     }
 
     #[test]

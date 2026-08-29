@@ -598,6 +598,32 @@ pub struct EnforcementConfig {
     pub update_origins: Vec<IpPrefix>,
     /// A live captive-portal grant's permitted destinations (class 11), or empty.
     pub portal_grant: Vec<IpPrefix>,
+    /// ADR-0011 §11.9's "known-DoH endpoint list", which the class-6 containment
+    /// filters deny on TCP 443 off the overlay.
+    ///
+    /// **A reported gap, filled from the product's own registry.** ADR-0011
+    /// §11.9's Windows row requires the WFP `ALE_AUTH_CONNECT_V4`/`_V6` filters
+    /// to deny "UDP/TCP 53, TCP 853, and known-DoH endpoints on every non-overlay
+    /// interface **regardless of which process opened the socket**". Until this
+    /// field existed only the port half was installed, and
+    /// `filters::DNS_PORTS` said so in a note; that half of §11.9 is the defect
+    /// F-3 records. The list is injected, exactly as `on_link_prefixes` and
+    /// `update_origins` are, and comes from `twinvpn_enforce::doh`, which parses
+    /// `contracts/registry/encrypted_resolvers.json`. This adapter neither
+    /// chooses it nor holds a copy of it (CB-2).
+    ///
+    /// **Additive, never a substitute.** The registry's `consumer_rule` is
+    /// normative: "An enforcement layer MUST treat this list as ADDITIVE to the
+    /// port-based denial, never as a substitute for it. An empty or unparseable
+    /// list MUST NOT weaken the port rules, and MUST NOT be a reason to fail
+    /// open." [`filters::render`] writes the three port filters unconditionally
+    /// before it reads this field, so an empty vector costs the endpoint filters
+    /// and nothing else.
+    ///
+    /// **And it is not a guarantee.** "A resolver absent from this list is not
+    /// thereby permitted — it is merely not specifically denied, and the class-6
+    /// + Tier-2 default-deny is what actually contains it."
+    pub doh_endpoints: Vec<IpPrefix>,
 }
 
 impl EnforcementConfig {
@@ -787,6 +813,8 @@ mod tests {
             updater_app_id: None,
             update_origins: Vec::new(),
             portal_grant: Vec::new(),
+            // Not part of KS-9's predicate.
+            doh_endpoints: Vec::new(),
         };
         assert!(config.ks9_complete());
         config.service_sid = "";

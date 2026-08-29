@@ -211,6 +211,14 @@ pub const fn resolver_socket_port_permitted(port: u16) -> bool {
 /// The list itself is `twinvpn-enforce`'s and ships with the build (ADR-0011
 /// §11.9); this crate takes the membership answer rather than holding the list,
 /// because the same list is what the enforcement layer denies off-overlay.
+///
+/// `twinvpn_enforce::doh::KnownResolvers` is that list, parsed from
+/// `contracts/registry/encrypted_resolvers.json`, and
+/// `KnownResolvers::resolver_socket_permitted` is this function with the
+/// membership answer already supplied. It cannot be named as a link from here —
+/// the dependency runs the other way, which is the point — but it is the
+/// intended caller, and it is the same list the class-6 containment rule denies
+/// on every non-overlay interface.
 #[must_use]
 pub const fn resolver_socket_permitted(port: u16, destination_is_known_doh: bool) -> bool {
     match port {

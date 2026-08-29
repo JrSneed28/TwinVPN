@@ -347,6 +347,10 @@ mod tests {
             updater_app_id: None,
             update_origins: Vec::new(),
             portal_grant: Vec::new(),
+            // Empty: this module decodes filter KEYS, and the endpoint half of
+            // class 6 shares its class code with the port half, so the decode is
+            // the same question either way.
+            doh_endpoints: Vec::new(),
         }
     }
 

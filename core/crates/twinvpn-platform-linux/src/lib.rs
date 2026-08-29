@@ -318,6 +318,7 @@ mod tests {
                 cgroup_path: None,
                 local_network_access: true,
                 on_link_prefixes: Vec::new(),
+                doh_endpoints: Vec::new(),
             },
             store_root: std::env::temp_dir().join("twinvpn-adapter-test"),
             resolver_restore_point: std::env::temp_dir().join("twinvpn-adapter-test-restore"),

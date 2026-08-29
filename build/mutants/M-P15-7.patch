@@ -1,0 +1,27 @@
+Mutant:      M-P15-7
+Proof:       P15
+Spec:        docs/testing-strategy.md §6.2 T1 row and §6.5 B-19; ADR-0002 §11.8 step 3
+Description: A data-plane crate links the control-plane client, which is the edge the ADR-0002 §11.8 step-3 dependency-graph assertion denies. The mutant exists to prove that check is live (release blocker B-19).
+Workspace:   core
+Oracle:      cargo run -q -p xtask -- lint
+Fails:       CD-I5
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-path/Cargo.toml b/core/crates/twinvpn-path/Cargo.toml
+index 5387487..6515488 100644
+--- a/core/crates/twinvpn-path/Cargo.toml
++++ b/core/crates/twinvpn-path/Cargo.toml
+@@ -12,6 +12,9 @@ repository.workspace   = true
+ description = "candidate gathering, racing, path validation and the NAT-traversal ladder (ADR-0004)"
+ 
+ [dependencies]
++# MUTANT M-P15-7: a data-plane crate reaches the control-plane client
++# directly, which is the edge ADR-0002 §11.8 step 3 denies.
++twinvpn-cp-client = { workspace = true }
+ twinvpn-types         = { workspace = true }
+ twinvpn-env           = { workspace = true }
+ twinvpn-schema        = { workspace = true }

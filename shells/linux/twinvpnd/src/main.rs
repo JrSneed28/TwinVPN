@@ -395,6 +395,49 @@ fn arm_at_startup(
         })
 }
 
+/// ADR-0011 §11.9's known-encrypted-resolver endpoints, from the one shared
+/// consumer.
+///
+/// **Read here rather than in the adapter**, because the adapter takes the list
+/// injected (CD-2) exactly as it takes the `fwmark` and the cgroup path, and
+/// holds no copy of it. `twinvpn_enforce::doh` parses
+/// `contracts/registry/encrypted_resolvers.json`, which is embedded with
+/// `include_str!` — so a failure here is a **build** defect that
+/// `twinvpn-enforce`'s own tests catch before a package can ship, not something
+/// this host can encounter at runtime.
+///
+/// If it nevertheless fails, this returns an empty list and says so at `error`,
+/// loudly. That is the registry's `consumer_rule` followed exactly: "an empty or
+/// unparseable list MUST NOT weaken the port rules, and MUST NOT be a reason to
+/// fail open". Refusing to start would leave the host with no agent at all,
+/// which is the fail-open direction; starting with the port half of class 6 plus
+/// the whole of Tier 2 is strictly more containment than refusing.
+fn doh_endpoints() -> Vec<twinvpn_types::IpPrefix> {
+    match twinvpn_enforce::doh::KnownResolvers::embedded() {
+        Ok(registry) => {
+            tracing::info!(
+                target: "twinvpn.agent",
+                registry_version = registry.version(),
+                endpoints = registry.endpoints().len(),
+                "ADR-0011 §11.9's known-DoH endpoint list is installed alongside the \
+                 port-based denial; it is a detection aid and never a guarantee"
+            );
+            registry.endpoints()
+        }
+        Err(error) => {
+            tracing::error!(
+                target: "twinvpn.agent",
+                specified_code = "DNS.CONTAINMENT.REGISTRY_UNREADABLE",
+                reason_code = "PLATFORM.ADAPTER_UNAVAILABLE",
+                detail = %error,
+                "the encrypted-resolver registry could not be read: class 6 installs its \
+                 PORT half only, and Tier 2 is unaffected. This is a build defect"
+            );
+            Vec::new()
+        }
+    }
+}
+
 /// Builds the adapter from injected configuration. **Nothing is discovered.**
 fn build_adapter() -> twinvpn_platform_linux::LinuxPlatformAdapter {
     twinvpn_platform_linux::LinuxPlatformAdapter::new(twinvpn_platform_linux::LinuxAdapterParts {
@@ -407,6 +450,7 @@ fn build_adapter() -> twinvpn_platform_linux::LinuxPlatformAdapter {
             // through a later `apply`; this is the pre-arming value.
             local_network_access: true,
             on_link_prefixes: Vec::new(),
+            doh_endpoints: doh_endpoints(),
         },
         store_root: state_dir(),
         resolver_restore_point: state_dir().join("resolver.restore"),

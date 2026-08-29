@@ -131,10 +131,16 @@ impl ExtensionConfig {
             // at start because nothing has been enumerated yet, and KS-4's
             // permitted set being empty fails CLOSED.
             on_link_prefixes: Vec::new(),
-            // ADR-0011 §11.9's known-DoH list is an installation fact the seam
-            // does not carry. Empty until the packaging supplies one, which the
-            // README names as a gap.
-            doh_endpoints: Vec::new(),
+            // ADR-0011 §11.9's known-DoH list, from the one shared consumer.
+            //
+            // It was `Vec::new()` here, which is the second half of the defect
+            // F-3 records: the pf renderer has taken this list since it was
+            // written, and the only shell that supplies it supplied nothing — so
+            // `contracts/registry/encrypted_resolvers.json` was consumed by no
+            // code path at all. It is a **product** artifact and not an
+            // installation fact, so there was never any packaging for it to wait
+            // on; `twinvpn_enforce::doh` embeds it with `include_str!`.
+            doh_endpoints: doh_endpoints(),
         }
     }
 
@@ -219,6 +225,40 @@ pub fn extension_carriers(
         route_carrier: twinvpn_platform_macos::RouteCarrier::TunnelSettings,
         resolver_carrier: twinvpn_platform_macos::resolver::ResolverCarrier::TunnelSettings,
         service_id,
+    }
+}
+
+/// ADR-0011 §11.9's known-encrypted-resolver endpoints, from the one shared
+/// consumer.
+///
+/// **Read here rather than in the adapter**, because `pf::EnforcementConfig`
+/// takes the list injected (CD-2) exactly as it takes the exempt uid and the
+/// on-link prefixes, and holds no copy of it. `twinvpn_enforce::doh` parses
+/// `contracts/registry/encrypted_resolvers.json`, which is embedded with
+/// `include_str!` — so a failure here is a **build** defect that
+/// `twinvpn-enforce`'s own tests catch before a package can ship, not something
+/// this host can encounter at runtime.
+///
+/// If it nevertheless fails, this returns an empty list and says so at `error`,
+/// loudly. That is the registry's `consumer_rule` followed exactly: "an empty or
+/// unparseable list MUST NOT weaken the port rules, and MUST NOT be a reason to
+/// fail open". The anchor's `block drop out quick on ! <overlay> proto { tcp,
+/// udp } … port { 53, 853 }` rule is written without reference to this list, as
+/// is the whole of Tier 2.
+fn doh_endpoints() -> Vec<twinvpn_types::IpPrefix> {
+    match twinvpn_enforce::doh::KnownResolvers::embedded() {
+        Ok(registry) => registry.endpoints(),
+        Err(error) => {
+            tracing::error!(
+                target: "twinvpn.bridge",
+                specified_code = "DNS.CONTAINMENT.REGISTRY_UNREADABLE",
+                reason_code = "PLATFORM.ADAPTER_UNAVAILABLE",
+                detail = %error,
+                "the encrypted-resolver registry could not be read: class 6 installs its \
+                 PORT half only, and Tier 2 is unaffected. This is a build defect"
+            );
+            Vec::new()
+        }
     }
 }
 

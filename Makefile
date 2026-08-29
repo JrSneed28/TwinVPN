@@ -50,6 +50,7 @@ help:
 	@echo "  make freeze-scope     assert the contract freeze is declared and unbroken"
 	@echo "  make arch-lint        the ADR-0018 T1 architectural lints (CD-3, CD-I2, CD-I5, CB-3)"
 	@echo "  make cross-check      COMPILE-ONLY proof for the non-host targets (win/mac/ios/android)"
+	@echo "  make proof            the T3/T4 proof register, its oracles, and the PT-1 mutant run"
 	@echo ""
 	@echo "  make infra-check      compose topology + collector redaction invariants (no Docker needed)"
 	@echo "  make infra-up         bring the local plane up (dual stack); infra-up-v6 for IPv6-only"
@@ -794,3 +795,43 @@ freeze-scope:
 clean:
 	@rm -rf $(GEN_DIR)
 	@for w in $(WORKSPACES); do ( cd $$w && $(CARGO) clean ); done
+
+# ---------------------------------------------------------------------------
+# T3/T4 proof tests — docs/testing-strategy.md §4, §4.3 and §6.2.
+# ---------------------------------------------------------------------------
+# §4's twenty-two proof tests P01-P22 "are the acceptance criteria for the whole
+# architecture", and §4 adds that "the count is load-bearing". These four
+# targets are the local half of the T3/T4 workflows in
+# .github/workflows/t3-proof.yml and t4-release.yml.
+#
+# They are deliberately NOT wired into `test` or `gate`. Rule C-3 places the
+# mutant sets at T3 and T4 and nowhere else, and `gate` is a T1/T2 shape: adding
+# a several-minute mutant run to it would either blow the T1 budget (rule C-1
+# forbids raising it silently) or invite someone to shrink the mutant set to fit.
+.PHONY: proof proof-register proof-oracles proof-mutants
+
+# The register's shape: the count is 22, the ids are P01..P22, and every row's
+# mutant arithmetic matches the patches actually in build/mutants/. Then every
+# scenario id the register cites is resolved against lab/'s catalogue, so a
+# register cannot claim coverage from a scenario nobody has defined. The first
+# check is seconds; the second builds the lab workspace, which is why
+# `status.sh` keeps it behind a flag rather than doing it always.
+proof-register:
+	@build/proof/status.sh
+	@build/proof/status.sh --with-catalogue
+
+# Runs each row's evidence command and reports what happened. This is the
+# runnable SUBSET of each proof test's oracle, never the proof test: every row
+# carries a NEEDS column saying what the difference is.
+proof-oracles:
+	@build/proof/status.sh --run
+
+# Rule PT-1, executed: for every patch in build/mutants/, the clean build must
+# pass and the mutant must be buildable and caught by its named oracle. Builds
+# its rig with `git worktree add` at an explicit commit, so a dirty working tree
+# is reported rather than silently included (rule C-5).
+proof-mutants:
+	@build/proof/run-mutants.sh
+
+proof: proof-register proof-oracles proof-mutants
+	@echo "==> none of the above is a PT-1 PASS; see build/proof/register.tsv"

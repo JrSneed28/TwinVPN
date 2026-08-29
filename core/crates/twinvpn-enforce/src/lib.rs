@@ -50,6 +50,7 @@
 //! | [`portal`] | §11.7 | KS-14 … KS-16 |
 //! | [`contract`] | CB-6 | the one `NetworkContract`, and the arm/teardown orders |
 //! | [`codes`] | §11.9 | the registered codes, and the seventeen ADR-0012 names the frozen registry does not carry |
+//! | [`doh`] | ADR-0011 §11.9 | the known-encrypted-resolver registry, parsed once for every platform |
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -61,6 +62,7 @@
 pub mod canary;
 pub mod codes;
 pub mod contract;
+pub mod doh;
 pub mod exempt;
 pub mod latch;
 pub mod portal;
@@ -69,6 +71,7 @@ pub mod scope;
 
 pub use canary::{Canary, Verdict};
 pub use contract::{ContractError, ContractInputs};
+pub use doh::{KnownResolvers, RegistryError};
 pub use exempt::{BootstrapPredicate, Class, SocketClass, SocketRegistry};
 pub use latch::{ArmingPolicy, DisarmAuthority, Latch, ProtectedPreconditions};
 pub use portal::{PortalGrant, PortalPolicy, UserAction};

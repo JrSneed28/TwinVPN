@@ -31,7 +31,16 @@ required-features = ["agent"]
 [features]
 default = ["agent"]
 # The privileged half. Off for `twinvpnctl`, which needs only `mi`.
-agent = ["dep:twinvpn-core", "dep:twinvpn-platform", "dep:twinvpn-platform-linux", "dep:twinvpn-env", "dep:libc", "dep:tracing-subscriber", "dep:clap"]
+agent = [
+  "dep:twinvpn-core",
+  "dep:twinvpn-platform",
+  "dep:twinvpn-platform-linux",
+  "dep:twinvpn-enforce",
+  "dep:twinvpn-env",
+  "dep:libc",
+  "dep:tracing-subscriber",
+  "dep:clap",
+]
 
 [dependencies]
 twinvpn-mgmt  = { workspace = true }
@@ -46,6 +55,9 @@ serde_json    = { workspace = true }
 twinvpn-core           = { workspace = true, optional = true }
 twinvpn-platform       = { workspace = true, optional = true }
 twinvpn-platform-linux = { workspace = true, optional = true }
+# ADR-0011 §11.9's known-encrypted-resolver registry. The adapter takes the list
+# injected (CD-2); this shell reads it from the one shared consumer.
+twinvpn-enforce        = { workspace = true, optional = true }
 twinvpn-env            = { workspace = true, optional = true }
 libc                   = { workspace = true, optional = true }
 tracing-subscriber     = { workspace = true, optional = true }

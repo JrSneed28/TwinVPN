@@ -9,6 +9,20 @@
 //! transition, and the predicates below restate only what `connection.proto`'s
 //! own normative comments say about each state — they are not a second authority.
 //!
+//! # The discriminants here are checked, not trusted (F-6)
+//!
+//! Every enum in this module restates a frozen `twinvpn.v1` enum by hand,
+//! because ADR-0018 §11.7 puts this crate at the root of the dependency arrows
+//! and the generated bindings are `include!`d by `twinvpn-schema`, which depends
+//! on this crate — so the mirror cannot be replaced by a `use`.
+//!
+//! `tests/contract_enum_equivalence.rs` is the link that makes the mirror safe.
+//! It dev-depends on `twinvpn-schema` and asserts, for this module's four enums
+//! and the seven others in this crate, that every discriminant matches
+//! `contracts/gen` and that neither side carries a variant the other does not.
+//! Renumbering a contract value fails that test; adding or removing one fails to
+//! compile. Do not edit a discriminant below without expecting to hear about it.
+//!
 //! `ConnectionState` is instantiated **per `Session`** — once per `TrustedPeer`
 //! relationship. A device in a `TwinNet` with six peers runs six instances, and
 //! the `TwinNet`-scope state a UI calls "the connection" is *derived* by

@@ -156,6 +156,7 @@ fn harness() -> (Harness, Arc<server::ServerContext>) {
                 cgroup_path: None,
                 local_network_access: true,
                 on_link_prefixes: Vec::new(),
+                doh_endpoints: Vec::new(),
             },
             store_root: dir.join("store"),
             resolver_restore_point: dir.join("resolver.restore"),
@@ -471,22 +472,78 @@ async fn mi6_applies_to_c1_mapping_operations_and_session_connect_is_not_one() {
     assert_eq!(response.committed_at_net_seq, None);
 }
 
-/// The five operations MI-6 **does** apply to, and why none can produce a
-/// cursor in this build.
+/// The five operations in [`server::C1_MAPPING`], and why none of them reports
+/// a cursor it has not earned.
+///
+/// # F-2 split this assertion, and the split is the point
+///
+/// This test used to assert that **no** member of `C1_MAPPING` executes: while
+/// every `pair.*` operation was refused for want of a control-plane transport,
+/// "cannot execute" and "commits nothing to C1" were the same sentence, and one
+/// assertion covered both.
+///
+/// F-2 wired the ceremony's local half, so they are now different sentences and
+/// the test has to say which one it means. ADR-0017 §11.9's catalogue is what
+/// decides it, per row rather than per family:
+///
+/// * `pair.confirm` — "Completion; **carries `committed_at_net_seq`** (MI-6)".
+/// * `device.revoke` — "Initiates the `Owner`-signed `RevocationRecord`
+///   ceremony; **carries `committed_at_net_seq`**".
+/// * `key.rotate` — ADR-0007 succession, a control-plane fact.
+/// * `pair.begin` — the result column is "the `PairingOffer` material to
+///   render". **No cursor is named**, because opening a ceremony commits
+///   nothing: the ledger entry and the offer are local (ADR-0007 §7.4), and the
+///   C1 request the ceremony eventually makes is `pair.confirm`'s.
+/// * `pair.cancel` — likewise local; the catalogue gives it `nat` and no cursor.
+///
+/// So membership in `C1_MAPPING` is about **MI-8** — "where an MI ceremony
+/// triggers a control-plane ceremony, the agent MUST derive the C1
+/// `idempotency_key` deterministically from the MI key and the calling
+/// principal" — which binds the whole ceremony including its opening step. MI-6
+/// is the narrower obligation and applies only to the steps that actually
+/// commit. Conflating the two is what would make a locally-executing
+/// `pair.begin` look like an MI-6 violation when it is not one.
 #[test]
 fn every_c1_mapping_operation_needs_a_cursor_this_build_cannot_produce() {
-    for op in server::C1_MAPPING {
+    // The steps that commit to C1. Each is still refused for want of the
+    // transport (W-12), so the absent cursor is never observed by a client as a
+    // missing guarantee — the operation is refused by name first.
+    for op in [
+        twinvpn_mgmt::CoreCommand::PairConfirm,
+        twinvpn_mgmt::CoreCommand::DeviceRevoke,
+        twinvpn_mgmt::CoreCommand::KeyRotate,
+    ] {
         assert!(server::maps_to_mutating_c1(op), "{}", op.name());
-        // Every one is refused before it reaches a response, because each needs
-        // a control-plane transport this build does not have (W-12). So the
-        // absent cursor is never observed by a client as a missing guarantee —
-        // the operation is refused by name first.
         assert!(
             !twinvpn_core::core::executes(op),
             "{} executes but has no C2 log to report a cursor from",
             op.name()
         );
     }
+
+    // The ceremony steps that are local. These DO execute after F-2, and they
+    // owe no cursor — asserting the absence is what stops a later change from
+    // inventing one and making a local mutation look control-plane-durable.
+    for op in [
+        twinvpn_mgmt::CoreCommand::PairBegin,
+        twinvpn_mgmt::CoreCommand::PairCancel,
+    ] {
+        assert!(
+            server::maps_to_mutating_c1(op),
+            "{} stays in C1_MAPPING for MI-8's idempotency-key derivation",
+            op.name()
+        );
+        assert!(
+            twinvpn_core::core::executes(op),
+            "{} is F-2's local ceremony half and must execute",
+            op.name()
+        );
+    }
+
+    // Every member of the mapping is accounted for by exactly one of the two
+    // loops above, so a command added to C1_MAPPING upstream fails here rather
+    // than being silently unclassified.
+    assert_eq!(server::C1_MAPPING.len(), 5);
     // And the local mutations are NOT in the set.
     for op in [
         twinvpn_mgmt::CoreCommand::SessionConnect,
@@ -621,7 +678,10 @@ async fn the_catalogue_the_agent_serves_says_which_operations_this_build_execute
         unimplemented.len(),
         twinvpn_core::core::unimplemented().len()
     );
-    assert!(unimplemented.contains(&"pair.begin"));
+    // `pair.begin` moved out of this list when F-2 wired the ceremony's local
+    // half; `pair.confirm` is the `pair.*` operation still waiting on a
+    // transport, so it is what keeps this assertion honest.
+    assert!(unimplemented.contains(&"pair.confirm"));
     assert!(unimplemented.contains(&"exitnode.select"));
     assert!(unimplemented.contains(&"killswitch.disarm.begin"));
 }

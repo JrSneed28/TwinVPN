@@ -262,7 +262,9 @@ echo "==> development relay credentials"
 if command -v cargo >/dev/null 2>&1; then
   repo="$(cd "${here}/../.." && pwd)"
   ( cd "${repo}/lab" && cargo build --quiet -p twinsim )
-  sim="${repo}/lab/target/debug/twinsim"
+  # Cargo honours CARGO_TARGET_DIR, which redirects every workspace's artifacts
+  # into one shared directory and leaves the per-workspace `target/` absent.
+  sim="${CARGO_TARGET_DIR:-${repo}/lab/target}/debug/twinsim"
 
   # Idempotent: an existing seed is reused and never rotated. Rotating would
   # invalidate every token a running relay holds, and the symptom — binds

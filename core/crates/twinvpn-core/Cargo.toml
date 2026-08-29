@@ -87,7 +87,7 @@ prost                 = { workspace = true }
 [dev-dependencies]
 # The crate's own dev-dependency on itself, so `testing` is reachable from an
 # integration test as well as from a unit test (`core/README.md` §3).
-twinvpn-core          = { path = ".", features = ["test-support"] }
+twinvpn-core          = { version = "0.1.0", path = ".", features = ["test-support"] }
 proptest              = { workspace = true }
 # Deterministic ES256 fixture material — `FixtureIdentity::pkcs8_der()` and
 # `::spki_der()`. CD-I2 covers dev-dependencies, so the one keypair these tests

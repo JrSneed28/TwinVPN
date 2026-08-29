@@ -91,6 +91,14 @@ pub(crate) fn execute(core: &Core, submission: &Submission) -> Result<Outcome, B
             &core.gateway(),
         ))),
 
+        // ADR-0007 §7.4's C-B ceremony (F-2). Every decision is
+        // `crate::pairing`'s — the ledger's single-use rule, the C-D
+        // authorization, N-25(1)'s revocation check and the offer's three
+        // producers — and none of it is restated here.
+        C::PairBegin => crate::pairing::ops::begin(core, submission),
+        C::PairCancel => crate::pairing::ops::cancel(core, submission),
+        C::PairStatus => crate::pairing::ops::status(core, submission),
+
         // Everything below is `NotWired` in `dispatch::disposition`, which
         // `Core::submit` consults BEFORE calling this function. Reaching one of
         // these arms means the two matches disagree, which is a defect in this
@@ -107,10 +115,7 @@ pub(crate) fn execute(core: &Core, submission: &Submission) -> Result<Outcome, B
         | C::DiagBundleCreate
         | C::DiagLogTail
         | C::DiagCaptureSet
-        | C::PairBegin
         | C::PairConfirm
-        | C::PairCancel
-        | C::PairStatus
         | C::DeviceRevoke
         | C::KeyRotate
         | C::KillswitchModeSet

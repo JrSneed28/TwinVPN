@@ -79,8 +79,9 @@ core-lite = ["twinvpn-core/core-lite"]
 twinvpn-core           = { workspace = true }
 twinvpn-diag           = { workspace = true }
 twinvpn-mgmt           = { workspace = true }
-twinvpn-mi             = { path = "../twinvpn-mi" }
+twinvpn-mi             = { version = "0.1.0", path = "../twinvpn-mi" }
 twinvpn-platform-macos = { workspace = true }
+twinvpn-enforce        = { workspace = true }
 twinvpn-platform       = { workspace = true }
 twinvpn-types          = { workspace = true }
 twinvpn-env            = { workspace = true }

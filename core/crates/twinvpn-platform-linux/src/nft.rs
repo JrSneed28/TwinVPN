@@ -149,6 +149,32 @@ pub struct EnforcementConfig {
     /// network-change event, and never includes a destination reachable only via
     /// a router."
     pub on_link_prefixes: Vec<IpPrefix>,
+    /// ADR-0011 §11.9's "known-DoH endpoint list", which the class-6 containment
+    /// rule denies on TCP 443 off the overlay.
+    ///
+    /// **A reported gap, filled from the product's own registry.** The seam's
+    /// [`twinvpn_platform::DnsConfig`] carries resolvers, search domains and
+    /// split domains, and nothing that names the encrypted-resolver endpoints a
+    /// build should deny — so this is injected, exactly as `on_link_prefixes` is,
+    /// and exactly as the macOS adapter's field of the same name already was.
+    /// The value the shell injects comes from `twinvpn_enforce::doh`, which
+    /// parses `contracts/registry/encrypted_resolvers.json`; this adapter does
+    /// not choose the list and does not hold a copy of it (CB-2).
+    ///
+    /// **Additive, never a substitute.** The registry's own `consumer_rule` is
+    /// normative: "An enforcement layer MUST treat this list as ADDITIVE to the
+    /// port-based denial, never as a substitute for it. An empty or unparseable
+    /// list MUST NOT weaken the port rules, and MUST NOT be a reason to fail
+    /// open." [`render`] honours that structurally — the 53/853 rule is written
+    /// unconditionally, before this field is read at all, so an empty vector
+    /// costs the endpoint rules and nothing else.
+    ///
+    /// **And it is not a guarantee.** The registry states it: "a resolver absent
+    /// from this list is not thereby permitted — it is merely not specifically
+    /// denied, and the class-6 + Tier-2 default-deny is what actually contains
+    /// it." ADR-0011 §11.9 residual 5 is unchanged: "a novel embedded resolver
+    /// speaking HTTPS to an arbitrary host is not detectable at this layer."
+    pub doh_endpoints: Vec<IpPrefix>,
 }
 
 /// The prefix of the scope-cardinality counters: `scope_v4_<n>`, `scope_v6_<n>`.
@@ -298,6 +324,16 @@ pub fn render(contract: &NetworkContract, ruleset: Ruleset, config: &Enforcement
             AddressFamily::V6 => on_link_v6.insert(prefix_text(*prefix)),
         };
     }
+    // The known-DoH endpoints, split per family, sorted and de-duplicated for the
+    // same determinism reason the scope sets are.
+    let mut doh_v4: BTreeSet<String> = BTreeSet::new();
+    let mut doh_v6: BTreeSet<String> = BTreeSet::new();
+    for prefix in &config.doh_endpoints {
+        match prefix.family() {
+            AddressFamily::V4 => doh_v4.insert(prefix_text(*prefix)),
+            AddressFamily::V6 => doh_v6.insert(prefix_text(*prefix)),
+        };
+    }
 
     let mut s = String::with_capacity(4096);
 
@@ -443,11 +479,68 @@ pub fn render(contract: &NetworkContract, ruleset: Ruleset, config: &Enforcement
     // object denying UDP/TCP 53, TCP 853, and the known-DoH endpoint list on
     // every non-overlay interface". The stub's own outbound sockets carry the
     // mark and were accepted above, so this denies everything else.
+    //
+    // TWO halves, and the ORDER of the two statements below is the registry's
+    // `consumer_rule`, not a stylistic choice:
+    //
+    //   1. The PORT half, written unconditionally. UDP/TCP 53 and TCP/UDP 853
+    //      (`th dport` reaches both transports' port field, so DoQ on 853 is
+    //      covered with DoT). This is the half that is a constant of the
+    //      protocol, and nothing about `config.doh_endpoints` can suppress it —
+    //      "an empty or unparseable list MUST NOT weaken the port rules, and
+    //      MUST NOT be a reason to fail open."
+    //   2. The ENDPOINT half, ADDITIVE to it: TCP 443 to the known-encrypted-
+    //      resolver endpoints of `contracts/registry/encrypted_resolvers.json`.
+    //      443 cannot be denied wholesale — it is the web — so this half is
+    //      necessarily destination-scoped and necessarily incomplete.
+    //
+    // Until this rule existed, this adapter emitted the port half alone under a
+    // comment that named all three, which is the defect F-3 records. The
+    // endpoint half is now real, and the comment says only what is installed.
+    //
+    // **What this does NOT claim.** The registry is "a detection aid, never a
+    // guarantee": a resolver it does not name is not permitted, it is merely not
+    // specifically denied, and what actually contains such a resolver is class 6
+    // plus the Tier-2 default-deny below. ADR-0011 §11.9 residual 5 stands
+    // unchanged. This matters most in SPLIT tunnel, where Tier 1 covers only the
+    // contract's own routes; in full tunnel the complement-form scope already
+    // drops it and the endpoint half is defence in depth.
+    //
+    // **And a second, narrower limit, stated because it is easy to misread the
+    // paragraph above as denying it: the endpoint half is TCP 443 ONLY, so DoH
+    // over HTTP/3 — the same endpoints on UDP 443 — is NOT denied by this rule.**
+    // The registry's `ports` object names `doh_tcp: 443` and no UDP counterpart,
+    // and this renderer deliberately does not invent one: the list and its ports
+    // are the contract's, not this adapter's (CB-2). Firefox and Chrome both
+    // negotiate HTTP/3 for DoH against endpoints on this list, so in SPLIT tunnel
+    // that path is contained by nothing here. Closing it is a change to
+    // `contracts/registry/encrypted_resolvers.json` and therefore an ADR-0011
+    // owner's, not a line to add here quietly.
     let _ = writeln!(
         s,
         "    oifname != \"{overlay}\" meta l4proto {{ tcp, udp }} th dport {{ 53, 853 }} \
          counter name \"{DNS_DENY_COUNTER}\" drop"
     );
+    // Both families or neither: `twinvpn_enforce::doh` refuses a registry that
+    // covers only one, so a config carrying a v4 endpoint and no v6 one is not a
+    // shape the supported path can produce — KS-5 held by the producer rather
+    // than re-checked here. The port `443` is the registry's own `ports.doh_tcp`.
+    if !doh_v4.is_empty() {
+        let _ = writeln!(
+            s,
+            "    oifname != \"{overlay}\" ip daddr {{ {} }} tcp dport 443 \
+             counter name \"{DNS_DENY_COUNTER}\" drop",
+            doh_v4.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    if !doh_v6.is_empty() {
+        let _ = writeln!(
+            s,
+            "    oifname != \"{overlay}\" ip6 daddr {{ {} }} tcp dport 443 \
+             counter name \"{DNS_DENY_COUNTER}\" drop",
+            doh_v6.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
 
     match ruleset {
         Ruleset::Blocked => {
@@ -717,7 +810,24 @@ mod tests {
             // recorded at `iface::a_link_local_prefix_is_unrepresentable`. The
             // class-9 link-local allowance is emitted as a literal instead.
             on_link_prefixes: vec![v4([192, 168, 1, 0], 24), v6(0xfd, 0x00, 8)],
+            // THE REAL ARTIFACT, not a hand-written stand-in. A fixture list
+            // here would let `contracts/registry/encrypted_resolvers.json` gain
+            // a provider that no rule ever denies, and the test would still be
+            // green -- which is the shape of the defect F-3 records.
+            doh_endpoints: registry().endpoints(),
         }
+    }
+
+    /// The product's own encrypted-resolver registry, parsed by the one shared
+    /// consumer every platform reads.
+    ///
+    /// `twinvpn-enforce` is a DEV-dependency of this crate and not a dependency:
+    /// the adapter takes the list injected (CD-2) and holds no copy of it, so the
+    /// production crate graph is unchanged. The test reaches for the consumer
+    /// because asserting against the registry's real contents is the only way to
+    /// prove that what is denied is what ships.
+    fn registry() -> twinvpn_enforce::doh::KnownResolvers {
+        twinvpn_enforce::doh::KnownResolvers::embedded().expect("the shipped registry parses")
     }
 
     #[test]
@@ -855,6 +965,210 @@ mod tests {
         // Its own counter, so the per-family canary counters stay symmetric.
         assert!(script.contains("counter name \"deny_dns\" drop"));
         assert!(script.contains("counter deny_dns { }"));
+    }
+
+    /// A split-tunnel contract: only the TwinNet's own prefixes are protected.
+    ///
+    /// The default fixture already is one; naming it makes the DoH tests below
+    /// say which routing mode they are about, which is the whole distinction
+    /// F-3 turns on.
+    fn split_tunnel(generation: u64, ruleset: Ruleset) -> NetworkContract {
+        contract(generation, ruleset)
+    }
+
+    /// A full-tunnel contract: ADR-0012 §11.1's complement form, which reaches
+    /// this adapter as `docs/networking.md` §7.2's four `/1` routes.
+    fn full_tunnel(generation: u64, ruleset: Ruleset) -> NetworkContract {
+        let route = |destination| RouteEntry {
+            destination,
+            via: None,
+            interface: twinvpn_platform::InterfaceIndex(9),
+            metric: None,
+        };
+        NetworkContract {
+            routes: PerFamily::new(
+                vec![route(v4([0, 0, 0, 0], 1)), route(v4([128, 0, 0, 0], 1))],
+                vec![route(v6(0x00, 0x00, 1)), route(v6(0x80, 0x00, 1))],
+            ),
+            ..contract(generation, ruleset)
+        }
+    }
+
+    /// The rendered class-6 endpoint rules, v4 and v6.
+    fn doh_rules(script: &str) -> (Vec<&str>, Vec<&str>) {
+        let v4_rules = script
+            .lines()
+            .filter(|l| l.contains(" ip daddr ") && l.contains("tcp dport 443"))
+            .collect();
+        let v6_rules = script
+            .lines()
+            .filter(|l| l.contains(" ip6 daddr ") && l.contains("tcp dport 443"))
+            .collect();
+        (v4_rules, v6_rules)
+    }
+
+    /// **F-3, the exposed case.** In SPLIT tunnel Tier 1 protects only the
+    /// contract's own prefixes, so a browser with a pinned DoH resolver reaches
+    /// `1.1.1.1:443` off-overlay with nothing in its way — unless class 6 denies
+    /// the endpoint. This asserts that it now does, in BOTH families, against the
+    /// shipped registry's real contents rather than a fixture that could drift
+    /// from it.
+    #[test]
+    fn split_tunnel_denies_the_known_doh_endpoints_in_both_families() {
+        for ruleset in [Ruleset::Blocked, Ruleset::Protected] {
+            let script = render(&split_tunnel(1, ruleset), ruleset, &config());
+
+            // The precondition that makes this test mean anything: Tier 1 here
+            // does NOT cover the public internet, so the endpoint rule is the
+            // only thing between this host and an off-tunnel DoH resolution.
+            assert!(
+                !script.contains("ip daddr 0.0.0.0/1"),
+                "this fixture must be split tunnel, or the test proves nothing"
+            );
+
+            let (v4_rules, v6_rules) = doh_rules(&script);
+            assert_eq!(v4_rules.len(), 1, "one dual-family pair, v4 half");
+            assert_eq!(v6_rules.len(), 1, "one dual-family pair, v6 half");
+            for rule in v4_rules.iter().chain(&v6_rules) {
+                assert!(rule.starts_with("    oifname != \"twin0\" "), "{rule}");
+                assert!(rule.ends_with("counter name \"deny_dns\" drop"), "{rule}");
+            }
+            // Every endpoint the shipped registry names, in the family it names
+            // it in. A provider added to the artifact and not to the rule fails
+            // here rather than shipping as a silent hole.
+            let per_family = registry().per_family();
+            for prefix in &per_family.v4 {
+                assert!(
+                    v4_rules[0].contains(&prefix_text(*prefix)),
+                    "{} is missing from the v4 endpoint rule",
+                    prefix_text(*prefix)
+                );
+            }
+            for prefix in &per_family.v6 {
+                assert!(
+                    v6_rules[0].contains(&prefix_text(*prefix)),
+                    "{} is missing from the v6 endpoint rule",
+                    prefix_text(*prefix)
+                );
+            }
+            // Two named providers, spelled out, so the test reads as a claim
+            // about behaviour and not only as a loop over an artifact.
+            assert!(v4_rules[0].contains("1.1.1.1/32"));
+            assert!(v6_rules[0].contains("2606:4700:4700::1111/128"));
+        }
+    }
+
+    /// **F-3, the already-contained case, kept contained.** Full tunnel drops
+    /// everything at Tier 1 anyway; the endpoint rules are defence in depth and
+    /// must still be installed, because the difference between the two routing
+    /// modes is the contract's route set and never the containment object.
+    #[test]
+    fn full_tunnel_carries_the_same_doh_endpoint_rules() {
+        let script = render(
+            &full_tunnel(2, Ruleset::Protected),
+            Ruleset::Protected,
+            &config(),
+        );
+        // Tier 1 here really is the complement form, in both families.
+        assert!(script.contains("ip daddr 0.0.0.0/1 counter name \"deny_v4\" drop"));
+        assert!(script.contains("ip6 daddr ::/1 counter name \"deny_v6\" drop"));
+
+        let (v4_rules, v6_rules) = doh_rules(&script);
+        assert_eq!(v4_rules.len(), 1);
+        assert_eq!(v6_rules.len(), 1);
+        assert!(v4_rules[0].contains("1.1.1.1/32"));
+        assert!(v6_rules[0].contains("2606:4700:4700::1111/128"));
+
+        // And the two modes render the SAME class-6 object, which is what makes
+        // "split tunnel was the exposed case" a statement about Tier 1 and not
+        // about DNS containment.
+        let split = render(
+            &split_tunnel(2, Ruleset::Protected),
+            Ruleset::Protected,
+            &config(),
+        );
+        assert_eq!(doh_rules(&split), (v4_rules, v6_rules));
+    }
+
+    /// The registry's `consumer_rule`, verbatim: "ADDITIVE to the port-based
+    /// denial, never as a substitute for it."
+    #[test]
+    fn the_doh_rules_are_additive_to_the_port_rule_and_never_replace_it() {
+        let script = render(
+            &split_tunnel(1, Ruleset::Protected),
+            Ruleset::Protected,
+            &config(),
+        );
+        let port_rule = script
+            .lines()
+            .position(|l| l.contains("th dport { 53, 853 }"))
+            .expect("the port half is written unconditionally");
+        let first_endpoint_rule = script
+            .lines()
+            .position(|l| l.contains("tcp dport 443"))
+            .expect("the endpoint half is written too");
+        assert!(
+            port_rule < first_endpoint_rule,
+            "the port denial is the base; the endpoint denial is added on top"
+        );
+    }
+
+    /// "An empty or unparseable list MUST NOT weaken the port rules, and MUST
+    /// NOT be a reason to fail open."
+    ///
+    /// An empty list cannot arise from `twinvpn_enforce::doh`, which refuses
+    /// one — but the field is a plain `Vec`, so what the renderer does with an
+    /// empty one is asserted rather than assumed.
+    #[test]
+    fn an_empty_doh_list_leaves_the_port_rule_and_tier_2_fully_intact() {
+        let empty = EnforcementConfig {
+            doh_endpoints: Vec::new(),
+            ..config()
+        };
+        let script = render(
+            &split_tunnel(1, Ruleset::Protected),
+            Ruleset::Protected,
+            &empty,
+        );
+        assert!(
+            script.contains(
+                "oifname != \"twin0\" meta l4proto { tcp, udp } th dport { 53, 853 } \
+                 counter name \"deny_dns\" drop"
+            ),
+            "the port half is untouched by an empty endpoint list"
+        );
+        assert!(script.contains("counter deny_dns { }"));
+        assert_eq!(doh_rules(&script), (Vec::new(), Vec::new()));
+        // Tier 2 is likewise untouched: an absent list is never a fail-open.
+        assert!(script.contains("ip daddr 100.64.0.0/12 counter name \"deny_v4\" drop"));
+        assert!(script.contains("ip6 daddr fd7c::/48 counter name \"deny_v6\" drop"));
+
+        // And the ONLY difference between the two renders is the endpoint rules.
+        let populated = render(
+            &split_tunnel(1, Ruleset::Protected),
+            Ruleset::Protected,
+            &config(),
+        );
+        let stripped: Vec<&str> = populated
+            .lines()
+            .filter(|l| !l.contains("tcp dport 443"))
+            .collect();
+        assert_eq!(stripped, script.lines().collect::<Vec<_>>());
+    }
+
+    /// KS-5 over the endpoint half: a v4 rule with no v6 counterpart is
+    /// non-conformance, not degradation.
+    #[test]
+    fn ks5_the_doh_endpoint_rules_are_emitted_as_a_pair() {
+        for ruleset in [Ruleset::Blocked, Ruleset::Protected] {
+            let script = render(&split_tunnel(1, ruleset), ruleset, &config());
+            let (v4_rules, v6_rules) = doh_rules(&script);
+            assert_eq!(
+                v4_rules.len(),
+                v6_rules.len(),
+                "a v4 endpoint rule with no v6 counterpart is KS-5 non-conformance"
+            );
+        }
     }
 
     #[test]

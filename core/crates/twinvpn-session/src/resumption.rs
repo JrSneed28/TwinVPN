@@ -120,6 +120,26 @@ pub const fn fate(item: Item, disruption: Disruption) -> Fate {
     }
 }
 
+/// Whether ADR-0001 §7.3.2's resumption material survives `disruption`.
+///
+/// **Derived from the table above rather than restated.** The `resumption_secret`
+/// and `resumption_id` are keyed off the same completed handshake as the
+/// transport keys and are held under the same rule — RS-1 and S-13: "in memory
+/// only, for the life of the `Session`". So wherever §6.5 says
+/// [`Item::TransportKeys`] are [`Fate::Lost`], the resumption material is gone
+/// too and a wire-level resume is **inadmissible**: the recovery path is a full
+/// handshake from cached `TrustedPeer` state, which is still control-plane-free.
+///
+/// This is the function that makes `docs/protocol.md` §12.1's "**Not** process
+/// restart" a property of the survival contract instead of a sentence someone
+/// has to remember. A `ProcessRestart` or a `SuspendPastRekey` answers `false`
+/// here for the same reason the keys are lost, and nothing has to agree with
+/// this file by hand.
+#[must_use]
+pub const fn wire_resume_admissible(disruption: Disruption) -> bool {
+    matches!(fate(Item::TransportKeys, disruption), Fate::Survives)
+}
+
 /// §6.2's recovery ladder, "the cheapest recovery that could work", specialised
 /// for wake by §11.3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

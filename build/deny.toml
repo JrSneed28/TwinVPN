@@ -44,6 +44,39 @@ ignore = [
   #
   # Format:
   #   { id = "RUSTSEC-YYYY-NNNN", reason = "why it does not apply | reviewer | re-review date" }
+
+  # -----------------------------------------------------------------------
+  # RUSTSEC-2025-0134 - rustls-pemfile is unmaintained.
+  # -----------------------------------------------------------------------
+  # WHAT IT IS. An `unmaintained` advisory, not a vulnerability: the repository
+  # was archived in August 2025 and the advisory itself records "no safe upgrade
+  # is available" because there is nothing to upgrade TO - the guidance is to
+  # migrate to `rustls-pki-types`' `PemObject` trait, which is the same parsing
+  # code rustls-pemfile 2.x already wraps.
+  #
+  # WHY IT DOES NOT APPLY TODAY. No CVE, no advertised memory-safety or parsing
+  # defect. The code reached is the code in `rustls-pki-types` >= 1.9, which is
+  # maintained, is already a direct dependency of `services/` at 1.15, and is
+  # already in the graph independently. The exposure is one call site --
+  # `services/twinvpn-service-common/src/tls/mod.rs::load_private_key` -- reading
+  # a private-key PEM from a local operator-supplied path at process start. It
+  # parses no attacker-controlled input, and it is not reachable from the shipped
+  # client core at all: the crate appears only in the `services` and `tests`
+  # workspaces.
+  #
+  # THIS IS A DEFERRAL, NOT A DISMISSAL. The fix is a one-line source change
+  # (`PrivateKeyDer::from_pem_slice`) plus dropping the dependency, and it is
+  # SERVICES-DOMAIN source, which the T1 gate's owner does not own. Ignoring it
+  # here buys the time to make that change under review instead of making the
+  # supply-chain gate the thing that blocks every unrelated merge.
+  #
+  # DECIDED BY: infrastructure lead, as the T1 supply-chain gate owner, 2026-08-29,
+  # recorded here rather than in a commit message. Requires services-domain
+  # sign-off on the migration; this entry does not grant it.
+  # RE-REVIEW: 2026-11-29, or immediately if the advisory is ever re-classified
+  # from `unmaintained` to a vulnerability - whichever comes first. If the
+  # migration has landed by then this entry is DELETED, not renewed.
+  { id = "RUSTSEC-2025-0134", reason = "unmaintained-only advisory, no CVE; the parsing code is rustls-pki-types >= 1.9 which is maintained and already a direct dependency; one call site, local operator-supplied key file, server artifacts only, never linked into the shipped core. Deferral pending a one-line migration to PrivateKeyDer::from_pem_slice, which is services-domain source. | infrastructure lead (T1 gate owner), 2026-08-29 | re-review 2026-11-29" },
 ]
 
 # ===========================================================================
@@ -77,6 +110,28 @@ allow = [
 confidence-threshold = 0.93
 exceptions = []
 
+# ---------------------------------------------------------------------------
+# CDLA-Permissive-2.0 IS DELIBERATELY ABSENT. Recorded because "we considered it
+# and said no" is not visible in a list of things that are not there.
+# ---------------------------------------------------------------------------
+# It arrived on `webpki-root-certs`, reached only through
+# `rustls-platform-verifier` <- `quinn-proto` <- `quinn`, and only in the
+# `services` and `tests` workspaces, because `services/Cargo.toml` took quinn
+# with its DEFAULT features while `core/Cargo.toml` had already turned them off.
+# It is a data licence for the Mozilla CA root bundle, not a code licence.
+#
+# The dependency was REMOVED rather than the licence allowed: quinn's
+# `platform-verifier` feature verifies a server certificate against the host OS
+# trust store, which is a client concern, and nothing under `services/` or
+# `tests/` references it. See the note beside `quinn` in `services/Cargo.toml`.
+#
+# Widening the allowlist would have been the worse trade even though the licence
+# is genuinely permissive, because the entry would then sit here permanently to
+# admit a dependency nobody wanted, and every later reader would have to
+# re-derive why. If a future dependency needs CDLA-Permissive-2.0 for a reason
+# that cannot be designed away, that is a new infrastructure-lead decision to
+# record in this file with its own rationale - not a precedent set here.
+
 # ===========================================================================
 # BANS — duplicate versions, DP-6's third check.
 # ===========================================================================
@@ -94,7 +149,26 @@ exceptions = []
 # would be this file inventing one.
 multiple-versions = "warn"
 wildcards = "deny"          # DP-1's "no unbounded version ranges", mechanised
-allow-wildcard-paths = true # path deps inside the workspace are not a range
+
+# `allow-wildcard-paths` DOES NOT DO WHAT THIS FILE ONCE ASSUMED IT DID, and the
+# setting is kept only because leaving it out would change nothing either.
+#
+# The old comment here read "path deps inside the workspace are not a range".
+# That is the right intent and the wrong mechanism: cargo-deny applies this
+# exemption only to crates it considers PRIVATE, and it says so in the error --
+# "allow-wildcard-paths is enabled, but does not apply to public crates as
+# crates.io disallows path dependencies". None of the twinvpn crates declare
+# `publish = false`, so every one of them is `public` by cargo-deny's reckoning
+# and the exemption never fired. That is why `wildcards = "deny"` was reporting
+# ~250 violations across the five workspaces on internal path dependencies.
+#
+# The fix was NOT to relax `wildcards` to "warn". It was to write the bound on
+# the edge: every internal `{ path = ... }` in every workspace manifest now also
+# carries `version = "0.1.0"`. That is DP-1 satisfied literally rather than
+# waived - the path still decides resolution, and the version is the requirement
+# an auditor reads. `publish = false` would have silenced the check equally, but
+# it silences rather than states, and DP-1 asks for a stated bound.
+allow-wildcard-paths = true
 highlight = "all"
 
 deny = [

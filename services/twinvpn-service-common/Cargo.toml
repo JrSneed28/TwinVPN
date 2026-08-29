@@ -85,4 +85,4 @@ tokio = { workspace = true, features = ["test-util"] }
 # it rather than agreeing by construction.
 twinvpn-crypto = { workspace = true }
 # The crate's own authentication tests need its own test kit.
-twinvpn-service-common = { path = ".", features = ["test-support"] }
+twinvpn-service-common = { version = "0.1.0", path = ".", features = ["test-support"] }

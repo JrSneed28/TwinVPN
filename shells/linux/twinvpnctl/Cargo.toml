@@ -26,7 +26,7 @@ publish = false
 # The MI contract, from the ONE place it is declared (MI-20). `default-features
 # = false` excludes the whole `agent` feature, so this unprivileged binary links
 # no tun, no nftables, no netlink and no core-hosting code.
-twinvpnd      = { path = "../twinvpnd", default-features = false }
+twinvpnd      = { version = "0.1.0", path = "../twinvpnd", default-features = false }
 twinvpn-mgmt  = { workspace = true }
 twinvpn-types = { workspace = true }
 twinvpn-diag  = { workspace = true }

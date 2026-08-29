@@ -1,25 +1,39 @@
 #!/usr/bin/env bash
 # Make the npx-launched MCP servers resolve ruflo's optional packages.
 #
-# .mcp.json deliberately launches ruflo via `npx -y ruflo@latest`, so the server
-# runs out of ~/.npm/_npx/<hash>/. Two packages ruflo imports by bare specifier
-# are optional and declared nowhere in its dependency graph, so npx never
-# installs them:
+# .mcp.json launches ruflo via `npx -y ruflo@latest`, exactly as the upstream
+# docs prescribe, so the server runs out of ~/.npm/_npx/<hash>/. Three packages
+# ruflo imports by bare specifier are unusable from there:
 #
-#   @claude-flow/aidefence     -> without it every aidefence_* MCP tool returns
+#   @claude-flow/aidefence     -> optional and declared nowhere in ruflo's
+#                                 dependency graph, so npx never installs it.
+#                                 Without it every aidefence_* MCP tool returns
 #                                 "AIDefence package not available"
-#   @huggingface/transformers  -> without it generateEmbedding() silently falls
-#                                 back to a hash stub; memory_bridge_status then
-#                                 reports backend "sql.js + MOCK (hash fallback)"
-#                                 and semantic recall is meaningless
+#   @huggingface/transformers  -> same, and without it generateEmbedding()
+#                                 silently falls back to a hash stub;
+#                                 memory_bridge_status then reports backend
+#                                 "sql.js + MOCK (hash fallback)" and semantic
+#                                 recall is meaningless
+#   @xenova/transformers       -> npx DOES install this one, but with install
+#                                 scripts skipped, so its nested `sharp` has no
+#                                 native binary and importing it throws
+#                                 "Cannot find module
+#                                 '../build/Release/sharp-linux-x64.node'".
+#                                 That per-tree copy SHADOWS the link below, so
+#                                 the link only helps a tree that lacks its own
+#                                 copy — ruflo's BGE embedder and cross-encoder
+#                                 rerank stay degraded on the MCP surface, and
+#                                 they degrade gracefully (import ... catch).
+#                                 The check below therefore does not cover it.
 #
-# Both failures are silent, and `ruflo doctor` cannot see either: doctor runs
-# from the project's local install, which has both packages.
+# All three failures are silent, and `ruflo doctor` cannot see any of them.
 #
-# Fix: link them into ~/.npm/_npx/node_modules, the parent of every hashed npx
-# tree. Node's bare-specifier resolution walks up from the importing module, so
-# every npx tree picks them up, and npx never manages that directory. Linking
-# rather than installing keeps the MCP server on the same versions as the CLI.
+# Fix: link the project's copies into ~/.npm/_npx/node_modules, the parent of
+# every hashed npx tree. Node's bare-specifier resolution walks up from the
+# importing module, so every npx tree picks them up, and npx never manages that
+# directory. The project carries all three as declared dependencies (directly,
+# or via agentic-flow) and builds their native bindings, which is the whole
+# reason the links point there.
 #
 # Also clears partial installs: on 2026-08-29 the tree held a
 # @huggingface/transformers with src/ and dist/ but no package.json, which

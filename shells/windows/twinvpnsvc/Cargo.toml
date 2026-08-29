@@ -54,6 +54,7 @@ default = ["service", "core-host"]
 service = [
   "dep:twinvpn-platform",
   "dep:twinvpn-platform-windows",
+  "dep:twinvpn-enforce",
   "dep:twinvpn-env",
   "dep:tracing-subscriber",
   "dep:clap",
@@ -76,6 +77,9 @@ serde_json    = { workspace = true }
 twinvpn-core             = { workspace = true, optional = true }
 twinvpn-platform         = { workspace = true, optional = true }
 twinvpn-platform-windows = { workspace = true, optional = true }
+# ADR-0011 §11.9's known-encrypted-resolver registry. The adapter takes the list
+# injected (CD-2); this shell reads it from the one shared consumer.
+twinvpn-enforce          = { workspace = true, optional = true }
 twinvpn-env              = { workspace = true, optional = true }
 tracing-subscriber       = { workspace = true, optional = true }
 clap                     = { workspace = true, optional = true }

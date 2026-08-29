@@ -28,4 +28,4 @@ test-support = ["twinvpn-crypto/test-support"]
 
 [dev-dependencies]
 proptest              = { workspace = true }
-twinvpn-trust         = { path = ".", features = ["test-support"] }
+twinvpn-trust         = { version = "0.1.0", path = ".", features = ["test-support"] }

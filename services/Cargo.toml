@@ -40,13 +40,20 @@ license      = "Apache-2.0"
 repository   = "https://github.com/twinvpn/twinvpn"
 
 [workspace.dependencies]
-twinvpn-service-common = { path = "twinvpn-service-common" }
+# DP-1 -- "NO UNBOUNDED VERSION RANGES". The `version` next to every `path`
+# below is not redundant. A path dependency with no `version` key is a `*`
+# requirement, and build/deny.toml mechanises DP-1 as `wildcards = "deny"`.
+# `allow-wildcard-paths` there does NOT exempt these: cargo-deny applies it only
+# to crates declared private, and these are not declared private. So the bound
+# is written on the edge itself, which is where DP-1 asks for it. The `path`
+# still wins for resolution; the `version` is what an auditor reads.
+twinvpn-service-common = { version = "0.1.0", path = "twinvpn-service-common" }
 
 # The permitted edges into /core. ADR-0018 §11.2: the server side is a different
 # artifact that SHARES `twinvpn-schema` -- and, for the relay, the framing crate
 # (row 2.11). It does not link the core.
-twinvpn-schema = { path = "../core/crates/twinvpn-schema" }
-twinvpn-types  = { path = "../core/crates/twinvpn-types" }
+twinvpn-schema = { version = "0.1.0", path = "../core/crates/twinvpn-schema" }
+twinvpn-types  = { version = "0.1.0", path = "../core/crates/twinvpn-types" }
 
 # Added by the integration lead, resolving relay-plane's finding F-1.
 #
@@ -64,7 +71,7 @@ twinvpn-types  = { path = "../core/crates/twinvpn-types" }
 # CD-I2 exists to keep auditable. Depending on `twinvpn-crypto` is not itself a
 # cryptographic dependency: it is the crate that encapsulates them, so the
 # server artifacts inherit the audited implementation rather than a parallel one.
-twinvpn-crypto = { path = "../core/crates/twinvpn-crypto" }
+twinvpn-crypto = { version = "0.1.0", path = "../core/crates/twinvpn-crypto" }
 
 thiserror   = "2.0"
 anyhow      = "1.0"
@@ -84,7 +91,24 @@ hyper       = "1.11"
 hyper-util  = "0.1"
 tower       = "0.5"
 tower-http  = { version = "0.6", features = ["trace", "timeout"] }
-quinn       = "0.11"
+# `default-features = false` is a SUPPLY-CHAIN decision, not a size one, and it
+# mirrors what core/Cargo.toml already does for the same crate.
+#
+# quinn 0.11's default feature set is ["log", "platform-verifier",
+# "runtime-tokio", "rustls-ring", "bloom"]. `platform-verifier` pulls
+# `rustls-platform-verifier`, which pulls `webpki-root-certs`, which is
+# CDLA-Permissive-2.0 -- a licence build/deny.toml's allowlist does not carry.
+#
+# It is also dead weight here: `platform-verifier` verifies a SERVER's
+# certificate against the host OS trust store, which is a client concern. These
+# are the server artifacts; nothing under services/ or tests/ references
+# `platform_verifier` in any form. The other four features are kept verbatim, so
+# the only thing that leaves the graph is the unused verifier and its root-certs
+# bundle -- which is why DP-6's licence check is satisfied by REMOVING the
+# dependency rather than by widening the allowlist to admit its licence.
+quinn       = { version = "0.11", default-features = false, features = [
+  "log", "runtime-tokio", "rustls-ring", "bloom",
+] }
 rustls      = "0.23"
 
 # TLS termination for the server artifacts.

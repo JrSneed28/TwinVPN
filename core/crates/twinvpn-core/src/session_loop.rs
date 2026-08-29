@@ -42,6 +42,8 @@ use twinvpn_session::state::SessionState;
 use twinvpn_session::timers::{self, ClockClass, TimerConstant};
 use twinvpn_session::{Context, Guards, Outcome, SessionMachine};
 
+use crate::resume::ResumeState;
+
 /// The deadlines one `Session` currently has armed.
 ///
 /// A map rather than a list of futures: `docs/reliability.md` §5 registers each
@@ -209,7 +211,20 @@ pub fn timers_for(state: SessionState) -> &'static [(TimerId, TimerConstant)] {
 pub struct SessionRuntime {
     machine: SessionMachine,
     timers: Timers,
-    env: Env,
+    /// `pub(crate)` for [`crate::resume::driver`], which is the rest of this
+    /// type's `impl` and needs the injected clock (CD-2) to date a resume.
+    pub(crate) env: Env,
+    /// ADR-0001 §7.3.2's resumption material, for as long as it is admissible.
+    ///
+    /// **`None` is the honest default and it is RS-1.** The secrets are derived
+    /// at handshake completion and held in memory only (S-13), so a runtime
+    /// restored from the journal has none and
+    /// [`SessionRuntime::accept_resume_offer`] refuses with
+    /// `ResumeRefusal::NotArmed` rather than inventing one. It lives here
+    /// rather than beside the tunnel because this is the object that already
+    /// owns the `Session`'s clock and its transitions, and a resume is exactly a
+    /// clocked decision that ends in a transition.
+    pub(crate) resume: Option<ResumeState>,
 }
 
 impl SessionRuntime {
@@ -223,6 +238,7 @@ impl SessionRuntime {
             machine,
             timers: Timers::new(),
             env,
+            resume: None,
         }
     }
 

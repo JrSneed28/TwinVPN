@@ -54,6 +54,14 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# TEST-ONLY, and deliberately not a dependency. This adapter takes ADR-0011
+# §11.9's known-DoH endpoint list INJECTED (CD-2) and holds no copy of it, so the
+# production crate graph is unchanged. `wfp::filters`' tests reach for
+# `twinvpn_enforce::doh` because asserting the rendered filters against the
+# registry's REAL contents -- rather than a fixture that can drift from
+# `contracts/registry/encrypted_resolvers.json` -- is the only version of the
+# test that would have failed on the defect F-3 records.
+twinvpn-enforce = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "io-util", "macros"] }
 # Integration-lead correction. `tests/enforcement.rs` is `#![cfg(feature =
 # "test-support")]`, and the feature is off by default -- correctly, since it
@@ -64,4 +72,4 @@ tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", 
 # targets and for nothing else: production builds and every dependent still see
 # it off. Same reasoning as CD-3's: a test that is never seen to run is not a
 # mechanism.
-twinvpn-platform-windows = { path = ".", features = ["test-support"] }
+twinvpn-platform-windows = { version = "0.1.0", path = ".", features = ["test-support"] }

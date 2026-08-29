@@ -114,7 +114,22 @@ pub fn nat_class_pair_matrix() -> Vec<Scenario> {
                         _ => vec![Tier::T2, Tier::T3],
                     },
                     assumptions: vec!["A-01", "A-02", "A-14", "A-17"],
-                    proves: vec!["P02"],
+                    // The proof test a cell contributes to is decided by its
+                    // OUTCOME CLASS, not by the family it belongs to.
+                    //
+                    // This block used to tag every cell `P02`, which is the tag
+                    // §3.6's worked example carries — but that example is
+                    // `S-NAT-APDM-APDM-V4-01`, a RELAY_EXPECTED pair, and P02 is
+                    // "relays are selected automatically WHEN REQUIRED". A
+                    // DIRECT_EXPECTED cell is P01's evidence ("direct tunnels
+                    // work when the network permits"), and tagging it P02 pointed
+                    // the acceptance register at the wrong proof test for the
+                    // large majority of the matrix. Found by the P01-P22 register
+                    // cross-check in build/proof/.
+                    proves: match expect {
+                        twinlab::OutcomeClass::RelayExpected => vec!["P02"],
+                        _ => vec!["P01"],
+                    },
                     sites: vec![
                         Site {
                             id: "a",
@@ -310,7 +325,14 @@ pub fn relay_family() -> Vec<Scenario> {
             determinism: Class::Statistical,
             tiers: vec![Tier::T2, Tier::T3],
             assumptions: vec!["A-01", "A-02", "A-14"],
-            proves: vec!["P05"],
+            // This family's own doc comment says "relay selection, failover and
+            // the whole-region case", which is P02 and P03. It was tagged `P05`,
+            // and P05 is path migration — a different proof test with a different
+            // injection and a different oracle. The two are easy to confuse
+            // because A-01 makes both of them transit `MIGRATING`, but §2.13 maps
+            // "kill the in-use relay process" to P03 and nothing here roams a
+            // path. Found by the P01-P22 register cross-check in build/proof/.
+            proves: vec!["P02", "P03"],
             sites: vec![
                 Site {
                     id: "a",

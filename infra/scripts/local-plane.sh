@@ -62,17 +62,23 @@ seed="$issuer_dir/seed.bin"
 # than hidden: THIS SCRIPT DOES NOT EXERCISE THE 443 CARRIAGES. `docker
 # compose` does, because a container has its own port namespace.
 # ---------------------------------------------------------------------------
-V4_HOST=127.0.0.1
-V6_HOST='[::1]'
-RELAY_A_UDP=41641
-RELAY_B_UDP=41642
-RELAY_A_ADMIN=19090
-RELAY_B_ADMIN=19091
-ALICE_ADMIN=19190
-BOB_ADMIN=19191
-CP_QUIC=14430
-CP_TCP=14431
-CP_ADMIN=19095
+#
+# Every number below is overridable from the environment, because a port is a
+# property of the HOST and not of the design: 41641 is also Tailscale's default,
+# and on a machine already running one -- or on WSL2, where a Windows-side
+# listener occupies the same number -- the relay's first bind fails EADDRINUSE
+# with nothing visible holding it. Overriding beats editing the script.
+V4_HOST=${V4_HOST:-127.0.0.1}
+V6_HOST=${V6_HOST:-'[::1]'}
+RELAY_A_UDP=${RELAY_A_UDP:-41641}
+RELAY_B_UDP=${RELAY_B_UDP:-41642}
+RELAY_A_ADMIN=${RELAY_A_ADMIN:-19090}
+RELAY_B_ADMIN=${RELAY_B_ADMIN:-19091}
+ALICE_ADMIN=${ALICE_ADMIN:-19190}
+BOB_ADMIN=${BOB_ADMIN:-19191}
+CP_QUIC=${CP_QUIC:-14430}
+CP_TCP=${CP_TCP:-14431}
+CP_ADMIN=${CP_ADMIN:-19095}
 
 family=v4
 host=$V4_HOST
@@ -106,6 +112,11 @@ cargo_bin() {
   command -v cargo >/dev/null 2>&1 || die "cargo is not on PATH; run 'make toolchains' first"
 }
 
+# Where a workspace's binaries land. Cargo honours CARGO_TARGET_DIR, which
+# redirects every workspace's artifacts into one shared directory and leaves the
+# per-workspace `target/` absent -- so the path is asked for, never assumed.
+bin_dir() { echo "${CARGO_TARGET_DIR:-$repo/$1/target}/debug"; }
+
 build() {
   cargo_bin
   log "==> building the relay and the simulator"
@@ -113,7 +124,7 @@ build() {
   ( cd lab && cargo build --quiet -p twinsim )
 }
 
-sim() { "$repo/lab/target/debug/twinsim" "$@"; }
+sim() { "$(bin_dir lab)/twinsim" "$@"; }
 
 # ---------------------------------------------------------------------------
 # Process control by PID FILE, never by name.
@@ -181,12 +192,12 @@ start_relay() {
   TWINVPN_SERVICE_NAME=relay \
   TWINVPN_LIMITS_PATH="$repo/contracts/registry/limits.json" \
   TWINVPN_REASON_CODES_PATH="$repo/contracts/registry/reason_codes.json" \
-  start "$name" "$repo/services/target/debug/twinvpn-relay"
+  start "$name" "$(bin_dir services)/twinvpn-relay"
 }
 
 start_peer() {
   local name=$1 admin=$2 pairs=${3:-1}
-  start "$name" "$repo/lab/target/debug/twinsim" peer \
+  start "$name" "$(bin_dir lab)/twinsim" peer \
     --relay-id "$RELAY_A_ID" \
     --map "$issuer_dir/relay-map.json" \
     --seed "$seed" \
@@ -284,13 +295,13 @@ start_control_plane() {
   # serving process: `services/control-plane/src/main.rs` explains that a
   # service which migrated on boot would mutate a schema from every replica at
   # once with no operator present. `migrate` is idempotent and safe to re-run.
-  env "${CP_ENV[@]}" "$repo/services/target/debug/twinvpn-control-plane" migrate     || die "the control-plane schema could not be migrated"
+  env "${CP_ENV[@]}" "$(bin_dir services)/twinvpn-control-plane" migrate     || die "the control-plane schema could not be migrated"
   # Exported rather than passed through `env`, because `start` is a shell
   # function and `env` can only invoke a program. The subshell keeps them off
   # every later command in this script.
   (
     for kv in "${CP_ENV[@]}"; do export "${kv?}"; done
-    start control-plane "$repo/services/target/debug/twinvpn-control-plane"
+    start control-plane "$(bin_dir services)/twinvpn-control-plane"
   )
 }
 

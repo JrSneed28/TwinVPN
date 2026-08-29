@@ -28,5 +28,5 @@ test-support = ["twinvpn-env/test-support", "twinvpn-platform/mock"]
 
 [dev-dependencies]
 proptest              = { workspace = true }
-twinvpn-store         = { path = ".", features = ["test-support"] }
+twinvpn-store         = { version = "0.1.0", path = ".", features = ["test-support"] }
 futures-core          = { workspace = true }

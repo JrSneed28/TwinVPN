@@ -1,0 +1,29 @@
+Mutant:      M-P07-1
+Proof:       P07
+Spec:        docs/testing-strategy.md §4 P07 mutant table; ADR-0012 §11.1 KS-5, §11.9
+Description: The Tier-2 enforcement object omits the IPv6 filter, so one object no longer covers both families.
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-enforce --test fail_closed tier_2_permits_only_the_overlay_interface_and_names_no_prefix
+Fails:       tier_2_permits_only_the_overlay_interface_and_names_no_prefix
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-enforce/src/scope.rs b/core/crates/twinvpn-enforce/src/scope.rs
+index 986ce02..0557317 100644
+--- a/core/crates/twinvpn-enforce/src/scope.rs
++++ b/core/crates/twinvpn-enforce/src/scope.rs
+@@ -138,8 +138,9 @@ impl Tier2 {
+     /// Both families are covered by construction; this exists so the property
+     /// can be asserted rather than assumed (KS-5).
+     #[must_use]
+-    pub const fn covers(self, _family: AddressFamily) -> bool {
+-        true
++    pub const fn covers(self, family: AddressFamily) -> bool {
++        // MUTANT M-P07-1: the Tier-2 object carries a v4 filter only.
++        matches!(family, AddressFamily::V4)
+     }
+ }
+ 

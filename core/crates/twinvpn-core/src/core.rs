@@ -167,6 +167,15 @@ pub struct Core {
     /// arrow kept intact.
     #[cfg(feature = "full")]
     control: Mutex<Option<crate::cp_binding::ControlTransportBinding>>,
+    /// **F-2.** The pairing ledger, the dedup log and the offers in flight.
+    ///
+    /// Held here for the reason `enforcement` and `gateway` are: `twinvpn-trust`
+    /// holds the ceremony and `twinvpn-crypto` holds the offer's producers, and
+    /// this is the only crate that may hold either beside a `PlatformAdapter`.
+    /// One mutex, so ADR-0008's `CEREMONY` idempotency holds under concurrency
+    /// rather than by convention — see [`crate::pairing`].
+    #[cfg(feature = "full")]
+    pairing: Mutex<crate::pairing::PairingCeremonies>,
 }
 
 /// Whether the durable store has been opened.
@@ -293,6 +302,11 @@ impl Core {
             // cause more work, never less protection.
             #[cfg(feature = "full")]
             lifecycle: Mutex::new(Lifecycle::Foreground),
+            // Empty, and `pair.begin` refuses until a shell installs an
+            // enrolment record: ADR-0007 §7.4 makes authorization "always
+            // required", and a core with no Owner chain has no way to check it.
+            #[cfg(feature = "full")]
+            pairing: Mutex::new(crate::pairing::PairingCeremonies::new()),
         })
     }
 
@@ -380,7 +394,7 @@ impl Core {
     /// [`crate::execute`]. An operation this build does not perform is
     /// **refused by name** — never a false success.
     ///
-    /// **16 of the 47 catalogue operations execute; 31 are refused**, each with
+    /// **22 of the 51 catalogue operations execute; 29 are refused**, each with
     /// a registered code and a stated reason ([`unimplemented()`]). An operation
     /// that reports success with zero observable effects is itself reported as
     /// `INTERNAL.INVARIANT_VIOLATED`.
@@ -726,6 +740,51 @@ impl Core {
             .entry(session_id)
             .or_insert_with(|| SessionEntry::new(self.env.clone(), session_id, peer))
             .relay_access = Some(access);
+    }
+
+    // -- F-2: pairing (three methods, one block, see `crate::pairing`) -------
+
+    /// The pairing ledger, the dedup log and the offers in flight.
+    #[cfg(feature = "full")]
+    pub(crate) fn pairing(&self) -> MutexGuard<'_, crate::pairing::PairingCeremonies> {
+        self.pairing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Installs the record ADR-0007 §7.4's "always required" authorization
+    /// check reads, so this device may begin a C-B pairing.
+    ///
+    /// A second step rather than part of `create`, for the reason
+    /// [`Core::bind_control_transport`] is: the Owner chain is restored from a
+    /// durable store the shell owns, and [`crate::pairing`] records why each of
+    /// its parts cannot be read by the core today. Until one is installed,
+    /// `pair.begin` refuses `AUTH.PAIRING_NOT_AUTHORIZED` — the fail-closed
+    /// direction, and the honest one.
+    #[cfg(feature = "full")]
+    pub fn install_pairing_enrolment(&self, enrolment: crate::pairing::PairingEnrolment) {
+        self.pairing().install(enrolment);
+    }
+
+    /// Borrows one in-flight `PairingOffer`, under the lock, for exactly as long
+    /// as `f` runs.
+    ///
+    /// **This is the offer's only exit from the core, and it is not a copy.**
+    /// `pairing_offer.cddl` classifies the payload SECRET with no rendering path
+    /// into any log at any level, so it must not travel as an `Outcome::result`
+    /// — which would put it on the event stream — and must not outlive the
+    /// mutex. A shell renders ADR-0023's E1 QR or E2 text from inside `f`
+    /// (`twinvpn_crypto::pairing_offer::encode` and `::render_text`) and keeps
+    /// nothing.
+    ///
+    /// `None` when no ceremony with that `pairing_id` is in flight.
+    #[cfg(feature = "full")]
+    pub fn with_pairing_offer<R>(
+        &self,
+        pairing_id: &[u8; crate::pairing::PAIRING_ID_BYTES],
+        f: impl FnOnce(&twinvpn_crypto::pairing_offer::PairingOffer) -> R,
+    ) -> Option<R> {
+        self.pairing().offer(pairing_id).map(f)
     }
 
     /// Binds the L-CONTROL transport this core will use.

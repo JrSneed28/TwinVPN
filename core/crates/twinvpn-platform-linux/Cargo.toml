@@ -29,4 +29,12 @@ serde_json            = { workspace = true }
 zeroize               = { workspace = true }
 
 [dev-dependencies]
+# TEST-ONLY, and deliberately not a dependency. This adapter takes ADR-0011
+# §11.9's known-DoH endpoint list INJECTED (CD-2) and holds no copy of it, so the
+# production crate graph is unchanged and the arrow still points one way. The
+# nft.rs tests reach for `twinvpn_enforce::doh` because asserting the rendered
+# rules against the registry's REAL contents -- rather than a fixture that can
+# drift from `contracts/registry/encrypted_resolvers.json` -- is the only version
+# of the test that would have failed on the defect F-3 records.
+twinvpn-enforce       = { workspace = true }
 tokio                 = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "io-util", "macros"] }

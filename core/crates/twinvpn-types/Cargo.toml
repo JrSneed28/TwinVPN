@@ -36,5 +36,24 @@ subtle                = { workspace = true }
 [build-dependencies]
 serde_json            = { workspace = true }
 
+# `twinvpn-schema` here is a DEV-dependency and nothing else — F-6.
+#
+# Eleven enums in this crate mirror a frozen `twinvpn.v1` enum by hand, and until
+# `tests/contract_enum_equivalence.rs` existed nothing linked them to
+# `contracts/gen`. The generated bindings are not a crate of their own: they are
+# `include!`d by `twinvpn-schema`, which depends on this crate, so a normal
+# dependency in the other direction is a cycle Cargo will not build — which is
+# exactly why the enums were mirrored by hand in the first place.
+#
+# The dev edge is the exception the workspace has already ruled on.
+# `xtask::manifest::Package::non_dev_dependencies` computes CD-I5 over non-dev
+# edges only, because "a dev-dependency is not a path between the planes in any
+# shipped artifact — it exists only while a test binary is being built", and
+# `ownership.md` §10.8 M-5 records that counting dev edges made the
+# architecture's own falsification tests unwritable by the crates that had to
+# write them. The §11.7 arrow is unchanged: this crate's SHIPPED dependency set
+# is still thiserror + zeroize + subtle, and `cargo tree -e normal` shows no
+# workspace crate.
 [dev-dependencies]
 proptest              = { workspace = true }
+twinvpn-schema        = { workspace = true }

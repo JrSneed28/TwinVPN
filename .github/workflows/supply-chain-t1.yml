@@ -50,7 +50,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        workspace: [core, services, shells/linux, lab]
+        # All EIGHT cargo workspaces in the tree, not the five the Makefile's
+        # `WORKSPACES` names. Two separate omissions were corrected here:
+        #
+        # `tests` was missing and that was an oversight, not a policy — `lab` is
+        # in the list and is just as unshipped, so "never ships" was not the
+        # criterion being applied, and `tests` had two real findings of its own
+        # the first time it was run through this gate.
+        #
+        # `shells/windows`, `shells/macos` and `shells/android/jni` are missing
+        # from `WORKSPACES` for a good reason that does NOT apply here:
+        # `ownership.md` §1 excludes them because neither compiles for
+        # `x86_64-unknown-linux-gnu`, and that variable drives the host build,
+        # test and clippy passes. **cargo-deny compiles nothing** — it reads the
+        # manifests and the lockfile — so the reason to exclude them from the
+        # host gate is not a reason to exclude them from the supply-chain gate.
+        # They carry their own third-party graphs and their own lockfiles, and
+        # leaving them out meant advisory, licence and wildcard drift in three
+        # shipped artifacts with no CI signal at all. All three pass today.
+        workspace:
+          - core
+          - services
+          - shells/linux
+          - shells/windows
+          - shells/macos
+          - shells/android/jni
+          - lab
+          - tests
     steps:
       - uses: actions/checkout@v4
 
@@ -60,16 +86,35 @@ jobs:
       # Pinned. An unpinned auditing tool is an auditing tool whose behaviour
       # can change without a diff - the same argument DP-2 makes about
       # source-vendoring, applied to the auditor itself.
+      #
+      # 0.16.4 -> 0.20.2, and the version is repeated in the cache key on
+      # purpose: a stale cache that serves the OLD binary under a NEW pin is an
+      # auditor that lies about which auditor it is.
+      #
+      # WHY 0.20.2. 0.16.4 emitted `bug[unresolved-workspace-dependency]` on
+      # seven of `twinvpn-ffi`'s `{ workspace = true }` dependencies - a
+      # cargo-deny defect, self-labelled `bug`, meaning those edges were never
+      # actually audited. 0.20.2 resolves all of them. It also parses the
+      # current advisory database, including the ~59 entries now carrying
+      # CVSS 4.0 vectors, which is the property this pin has to keep having:
+      # the advisory DB moves whether or not this repository does, so the
+      # auditor pin is the one pin that has to be advanced deliberately rather
+      # than left alone. MSRV 1.88 < the 1.90.0 in rust-toolchain.toml.
+      #
+      # The `[advisories] version`/`[licenses] version` = 2 schema in
+      # build/deny.toml is unchanged and is still what 0.20.2 wants; the run
+      # produces no deprecation diagnostics. Note that `--config` is a GLOBAL
+      # option: it goes before `check`, not after it.
       - name: cache cargo-deny
         id: cache-deny
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-deny
-          key: cargo-deny-0.16.4-${{ runner.os }}-${{ runner.arch }}
+          key: cargo-deny-0.20.2-${{ runner.os }}-${{ runner.arch }}
 
       - name: install cargo-deny
         if: steps.cache-deny.outputs.cache-hit != 'true'
-        run: cargo install cargo-deny --locked --version 0.16.4
+        run: cargo install cargo-deny --locked --version 0.20.2
 
       - name: check
         working-directory: ${{ matrix.workspace }}

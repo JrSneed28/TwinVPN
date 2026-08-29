@@ -1,0 +1,234 @@
+name: T4 — release gate
+
+# ===========================================================================
+# TIER MAPPING — docs/testing-strategy.md §6.1 and §6.2.
+# ===========================================================================
+# T4: "Release candidate, and any change to a release branch. <= 96 h
+# (dominated by the 72 h soak). Blocks RELEASE. Runs on the full lab, pinned
+# performance rigs, real router hardware, physical device farm."
+#
+# §6.2's T4 contents are: everything in T3, plus levels 5-full (the whole
+# version matrix incl. `below-minimum`), 12-full (the complete adversarial
+# battery of §2.14), 16-gate (performance as a release gate against the noise
+# band), 17 (72 h soak), 18-full (rolling upgrade, downgrade, mixed fleet,
+# interrupted upgrade) and 19 (the full compatibility matrix on real hardware).
+#
+# ===========================================================================
+# WHAT THIS WORKFLOW HONESTLY IS
+# ===========================================================================
+# It is a RELEASE GATE THAT CURRENTLY REFUSES, and that is the correct
+# behaviour rather than a defect in the workflow.
+#
+# §6.5 lists twenty release blockers and says the list "is exhaustive; anything
+# not on it does not block, and anything on it is not waivable by schedule".
+# B-1 alone requires all twenty-two proof tests passing under PT-1, with a green
+# positive control in the same session. Rule C-6 adds that a release "MUST NOT
+# ship with a limitation that is only known because a test was disabled,
+# quarantined, or retried into green", and B-1's own text says that a procedure
+# which is "merely *skipped* is a failure".
+#
+# So this workflow:
+#
+#   1. composes T3 in full, by `workflow_call`, so "everything in T3" is a
+#      mechanism rather than a promise;
+#   2. runs the mutant gate again under T4's stricter rule — at T4 an
+#      INCOMPLETE mutant set is itself a failure, because PT-1 makes the whole
+#      set the gate and a partial set is not evidence about the rest;
+#   3. evaluates the §6.5 blocker list and FAILS, naming each blocker that is
+#      undischarged and the infrastructure it is waiting on.
+#
+# Nothing here fakes a soak, a pinned performance rig, a real router or a device
+# farm. §6.1 places T4 on "the full lab, pinned performance rigs, real router
+# hardware, physical device farm", a GitHub hosted runner is none of those, and
+# a hosted job caps at six hours against a 72-hour soak. The `not-verified` job
+# prints each absent level with the infrastructure it needs, so the gap is a
+# printed fact rather than an omission a reader has to notice.
+#
+# WHEN THE LAB EXISTS, the shape of the change is: give the soak, performance,
+# compatibility and interop jobs `runs-on: [self-hosted, twinlab]` labels and
+# replace their `not-verified` step with the real procedure. The blocker
+# evaluation below does not change - it reads the register, and the register is
+# what will go green.
+#
+# RULE C-1 IS BINDING: the 96 h budget is a property of the tier. It is not
+# raised here and it is not silently met by running less.
+
+on:
+  push:
+    branches:
+      # "any change to a release branch" (§6.1).
+      - 'release/**'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t4-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+
+  # =========================================================================
+  # "Everything in T3" (§6.2), composed rather than restated.
+  #
+  # A second copy of the T3 job list would drift from the first, and a release
+  # gate that runs a stale copy of the nightly gate is worse than one that runs
+  # nothing, because it reports on the wrong thing.
+  # =========================================================================
+  t3:
+    name: everything in T3
+    uses: ./.github/workflows/t3-proof.yml
+
+  # =========================================================================
+  # PT-1 at T4 strictness.
+  #
+  # T3 blocks when a mutant that EXISTS is uncaught. T4 additionally blocks when
+  # a mutant that the specification NAMES does not exist, because B-1's wording
+  # is "any of P01-P22 failing, OR passing while any mutant in its set also
+  # passes" - and a mutant that was never written has certainly not been shown
+  # to fail. PT-1 makes the whole set the gate; a partial set is evidence about
+  # itself and about nothing else.
+  # =========================================================================
+  mutants-complete:
+    name: PT-1 — the complete mutant set
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: t4-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: every mutant that exists must be buildable and caught
+        run: build/proof/run-mutants.sh
+
+      - name: every mutant the specification names must exist
+        run: |
+          set -uo pipefail
+          missing=0; have=0; want=0
+          while IFS=$'\t' read -r id _ _ impl spec _ _ _; do
+            case "$id" in P[0-9][0-9]) ;; *) continue ;; esac
+            have=$((have + impl)); want=$((want + spec))
+            if [ "$impl" -lt "$spec" ]; then
+              echo "::error::$id has $impl of $spec specified mutants. PT-1 makes the whole"
+              echo "::error::set the gate: the $((spec - impl)) that do not exist have not been"
+              echo "::error::shown to fail, so $id is not known to test what it claims."
+              missing=$((missing + 1))
+            fi
+          done < <(grep -v '^#' build/proof/register.tsv | grep -v '^[[:space:]]*$')
+          echo "$have of $want specified mutants exist across P01–P22."
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::$missing of 22 proof tests have an incomplete mutant set."
+            echo "::error::Release blocker B-1 is UNDISCHARGED and is not waivable by schedule (§6.5)."
+            exit 1
+          fi
+
+  # =========================================================================
+  # The §6.5 blocker list, evaluated.
+  #
+  # This job exists so that "why is the release blocked" has one answer with one
+  # owner per line, rather than being reconstructed from seven job logs. It
+  # reads the register, so it goes green exactly when the register does.
+  # =========================================================================
+  release-blockers:
+    name: §6.5 release blockers
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [mutants-complete]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: B-1 — the acceptance set
+        run: |
+          set -uo pipefail
+          {
+            echo "### §6.5 release blockers"
+            echo
+            echo "| Blocker | State | Waiting on |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          blocked=0
+          while IFS=$'\t' read -r id status _ impl spec _ evidence needs; do
+            case "$id" in P[0-9][0-9]) ;; *) continue ;; esac
+            if [ "$status" = "IMPLEMENTED" ] && [ "$impl" -eq "$spec" ]; then
+              printf '| B-1 (%s) | discharged | — |\n' "$id" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            blocked=$((blocked + 1))
+            printf '| B-1 (%s) | **UNDISCHARGED** — %s, %s/%s mutants | %s |\n' \
+              "$id" "$status" "$impl" "$spec" "${needs:0:220}" >> "$GITHUB_STEP_SUMMARY"
+          done < <(grep -v '^#' build/proof/register.tsv | grep -v '^[[:space:]]*$')
+
+          echo "::error::B-1 is undischarged for $blocked of 22 proof tests."
+          [ "$blocked" -eq 0 ]
+
+      # B-19 is the one release blocker in §6.5 that this repository CAN
+      # discharge on a plain runner, and it is worth stating separately for that
+      # reason: "the ADR-0002 §11.8 dependency-graph assertion absent or
+      # disabled. P15 passing at T3 does not substitute."
+      #
+      # The assertion is core/xtask's CD-I5 check; M-P15-7 in build/mutants/ is
+      # the proof that it is live rather than merely present. Running the lint
+      # here proves it is not disabled; the T3 mutant job proves it still fires.
+      - name: B-19 — the dependency-graph assertion is present and live
+        if: always()
+        run: |
+          source build/toolchain/env.sh
+          cd core && cargo run -q -p xtask -- lint
+          echo "CD-I5 ran. build/mutants/M-P15-7.patch is the evidence it still fires;"
+          echo "the T3 \`mutants\` job is where that is executed."
+
+  # =========================================================================
+  # The T4 levels that did not run, each with the infrastructure it needs.
+  #
+  # This job FAILS. §6.5 B-1: "a procedure that is merely *skipped* is a
+  # failure." A T4 that went green while five of its levels never executed would
+  # be the precise thing rule C-6 forbids - a limitation known only because a
+  # test was not run.
+  # =========================================================================
+  not-verified:
+    name: T4 levels that did not run
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: name every absent level and what it needs
+        run: |
+          {
+            echo "### T4 levels NOT VERIFIED"
+            echo
+            echo "| §6.2 level | Budget | Needs | State |"
+            echo "|---|---|---|---|"
+            echo "| 5-full — interoperability, whole version matrix incl. below-minimum | ≤ 40 min | real binaries of builds N-1, N and N+1, and a reference implementation | NOT VERIFIED |"
+            echo "| 12-full — the complete adversarial battery of §2.14 | ≤ 4 h | adversarial peers and relays, a malicious-relay rig, memory scanning over a relay address space | NOT VERIFIED |"
+            echo "| 16-gate — performance against the noise band | ≤ 90 min | pinned performance rigs and an established noise band on the same hardware (§6.4) | NOT VERIFIED |"
+            echo "| 17 — soak | 72 h | a long-running lab. A hosted runner job caps at 6 h, so this cannot run here at all | NOT VERIFIED |"
+            echo "| 18-full — rolling upgrade, downgrade, mixed fleet, interrupted upgrade | ≤ 50 min | a real multi-version deployment and a real installer | NOT VERIFIED |"
+            echo "| 19 — full compatibility matrix | ≤ 6 h | real OS images and real router hardware for every supported target | NOT VERIFIED |"
+            echo "| 8 — platform, incl. the physical device farm (inherited from T3) | ≤ 3 h | a VM fleet and a physical iOS/Android device farm | NOT VERIFIED |"
+            echo "| §4.2 C-1…C-4 — consistency checks (inherited from T3) | — | a real multi-replica control plane with an inducible leader failover | NOT VERIFIED |"
+            echo
+            echo "None of the above is skipped-and-waived. §6.5 B-1: \"a procedure that is"
+            echo "merely *skipped* is a failure\", and rule C-6 forbids shipping a limitation"
+            echo "that is known only because a test did not run. This job fails for that reason."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Eight T4/T3 levels did not run. See the job summary for what each needs."
+          exit 1

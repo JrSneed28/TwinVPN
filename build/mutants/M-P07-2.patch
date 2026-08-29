@@ -1,0 +1,51 @@
+Mutant:      M-P07-2
+Proof:       P07
+Spec:        docs/testing-strategy.md §4 P07 mutant table; ADR-0012 §11.1, §11.9
+Description: Tier 1 is prefix-enumerated rather than complement-form in full-tunnel mode, so a destination outside the enumeration leaks.
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-enforce --test fail_closed full_tunnel_tier_1_is_complement_form_and_never_prefix_enumerated
+Fails:       full_tunnel_tier_1_is_complement_form_and_never_prefix_enumerated
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-enforce/src/scope.rs b/core/crates/twinvpn-enforce/src/scope.rs
+index 986ce02..a9ff2f7 100644
+--- a/core/crates/twinvpn-enforce/src/scope.rs
++++ b/core/crates/twinvpn-enforce/src/scope.rs
+@@ -41,6 +41,18 @@ impl LocalNetworkAccess {
+     }
+ }
+ 
++/// MUTANT M-P07-2's enumeration: the two default routes, named as prefixes.
++fn default_routes() -> Vec<IpPrefix> {
++    vec![
++        IpPrefix::new(IpAddr::V4(twinvpn_types::V4Addr::from_octets([0, 0, 0, 0])), 0).unwrap(),
++        IpPrefix::new(
++            IpAddr::V6(twinvpn_types::V6Addr::new([0u8; 16], None).unwrap()),
++            0,
++        )
++        .unwrap(),
++    ]
++}
++
+ /// Tier 1: **which packets are in the protected scope**.
+ ///
+ /// Full tunnel is deliberately the **complement** form: §11.1 says it "MUST NOT
+@@ -74,7 +86,13 @@ impl Tier1 {
+         match mode {
+             RoutingMode::TwinnetOnly => Tier1::TwinnetOnly { overlay },
+             RoutingMode::SplitTunnel => Tier1::SplitTunnel { overlay, accepted },
+-            RoutingMode::FullTunnel => Tier1::FullTunnelComplement,
++            // MUTANT M-P07-2: full tunnel is expressed as an enumeration of
++            // protected prefixes (the default routes) instead of as the
++            // complement form ADR-0012 §11.1 requires.
++            RoutingMode::FullTunnel => Tier1::SplitTunnel {
++                overlay: overlay.clone(),
++                accepted: default_routes(),
++            },
+             RoutingMode::PerApp => Tier1::PerApp,
+         }
+     }

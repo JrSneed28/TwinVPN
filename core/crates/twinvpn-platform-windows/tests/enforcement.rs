@@ -133,7 +133,20 @@ fn enforcement() -> EnforcementConfig {
         updater_app_id: None,
         update_origins: Vec::new(),
         portal_grant: Vec::new(),
+        // ADR-0011 §11.9's known-DoH endpoint list, from the shared consumer that
+        // parses `contracts/registry/encrypted_resolvers.json` — the real
+        // artifact, so a provider added to the registry and not to the filters
+        // fails here rather than shipping as a silent hole.
+        doh_endpoints: registry().endpoints(),
     }
+}
+
+/// The product's own encrypted-resolver registry.
+///
+/// `twinvpn-enforce` is a dev-dependency of this crate; the adapter takes the
+/// list injected (CD-2) and holds no copy of it.
+fn registry() -> twinvpn_enforce::doh::KnownResolvers {
+    twinvpn_enforce::doh::KnownResolvers::embedded().expect("the shipped registry parses")
 }
 
 /// A full-tunnel contract: the four `/1` routes of `docs/networking.md` §7.2,
@@ -643,10 +656,22 @@ fn dns_is_contained_on_every_non_overlay_interface_in_every_state() {
             .iter()
             .filter(|f| f.class == TrafficClass::DnsContainment)
             .collect();
+        // The PORT half: four (protocol, port) combinations times two families,
+        // in every state, unconditionally. The registry's `consumer_rule` makes
+        // this the base that the endpoint half is added to and never a
+        // substitute for.
+        //
+        // Four, not three: WFP needs one filter per (protocol, port), so
+        // `(Tcp, 853)` never covered `(Udp, 853)`, and DoQ — which the registry
+        // names as `doq_udp` and Linux denies in the same rule as DoT — was
+        // leaving a Windows host off-overlay.
         assert_eq!(
-            containment.len(),
-            6,
-            "{name}/{posture:?}: three ports x two families"
+            containment
+                .iter()
+                .filter(|f| f.name == "twinvpn-dns-containment")
+                .count(),
+            8,
+            "{name}/{posture:?}: four ports x two families"
         );
         for filter in containment {
             assert_eq!(filter.action, Action::Block);
@@ -658,6 +683,85 @@ fn dns_is_contained_on_every_non_overlay_interface_in_every_state() {
                 .conditions
                 .iter()
                 .any(|c| matches!(c, Condition::NotLocalInterface(luid) if *luid == OVERLAY)));
+        }
+    }
+}
+
+/// **F-3.** The known-DoH endpoint half of ADR-0011 §11.9, in every routing mode
+/// and both postures, both ALE layers.
+///
+/// The `split` state is the one the finding names as exposed: there Tier 1
+/// covers only `10.0.0.0/8` and `2001::/16`, so nothing else in the set stands
+/// between a browser with a pinned DoH resolver and `1.1.1.1:443` off-overlay.
+/// The `full` state was already contained by the complement-form scope deny, and
+/// these filters are defence in depth there — which is why the assertion is that
+/// the endpoint half is IDENTICAL in every state.
+#[test]
+fn known_doh_endpoints_are_denied_off_overlay_in_every_state_and_both_families() {
+    let per_family = registry().per_family();
+    let mut reference: Option<Vec<IpPrefix>> = None;
+
+    for (name, contract, posture) in every_state() {
+        let set = wfp::filters::render(&contract, posture, &enforcement());
+        let endpoints: Vec<_> = set
+            .filters
+            .iter()
+            .filter(|f| f.name == "twinvpn-dns-containment-endpoint")
+            .collect();
+        assert_eq!(
+            endpoints.len(),
+            per_family.v4.len() + per_family.v6.len(),
+            "{name}/{posture:?}: one filter per registry endpoint"
+        );
+
+        let mut denied = Vec::new();
+        for filter in endpoints {
+            assert_eq!(filter.action, Action::Block);
+            assert!(
+                filter.conditions.contains(&Condition::RemotePort(443)),
+                "{name}/{posture:?}: the endpoint half is scoped to the registry's doh_tcp"
+            );
+            // "regardless of which process opened the socket" (§11.9).
+            assert!(!filter
+                .conditions
+                .iter()
+                .any(|c| matches!(c, Condition::AppId(_) | Condition::UserSid(_))));
+            // Off-overlay only: DoH THROUGH the tunnel is not a leak, and
+            // ADR-0011 DN-23 makes it a selectable upstream transport.
+            assert!(filter
+                .conditions
+                .iter()
+                .any(|c| matches!(c, Condition::NotLocalInterface(luid) if *luid == OVERLAY)));
+            let prefix = filter
+                .conditions
+                .iter()
+                .find_map(|c| match c {
+                    Condition::RemotePrefix(p) => Some(*p),
+                    _ => None,
+                })
+                .expect("an endpoint filter names a destination");
+            assert_eq!(
+                filter.layer,
+                wfp::Layer::for_family(prefix.family()),
+                "{name}/{posture:?}: an endpoint is denied in its own family's layer"
+            );
+            denied.push(prefix);
+        }
+
+        for prefix in per_family.v4.iter().chain(&per_family.v6) {
+            assert!(
+                denied.contains(prefix),
+                "{name}/{posture:?}: {prefix:?} is a registry endpoint and is not denied"
+            );
+        }
+        // The endpoint half does not vary with the routing mode or the posture.
+        denied.sort_unstable();
+        match &reference {
+            None => reference = Some(denied),
+            Some(first) => assert_eq!(
+                first, &denied,
+                "{name}/{posture:?}: class 6 must be the same object in every state"
+            ),
         }
     }
 }

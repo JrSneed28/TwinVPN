@@ -155,26 +155,31 @@ pub const fn disposition(op: CoreCommand) -> Disposition {
         // The four arms below therefore no longer share one cause and are no
         // longer merged: each now names what IT is waiting for, which is the
         // whole reason this function exists rather than a wildcard.
-        C::PairBegin => Disposition::NotWired {
-            code: codes::AUTH_PAIRING_NOT_AUTHORIZED,
-            why: "the composed core holds no PairingLedger to begin a ceremony in. That is \
-                  now the WHOLE of it: G-14 named three further producer gaps and all three \
-                  are closed — twinvpn_crypto::cose::es256_cose_key encodes field 2, \
-                  twinvpn_crypto::tk::TunnelStaticKey generates and unseals field 3 under \
-                  ownership.md §11.4 D-6, and binding::emit_tunnel_key_binding emits field 4. \
-                  Composition-root wiring, and this time the reason has been re-measured \
-                  rather than inherited — ownership.md G-14, G-17, G-21",
-        },
+        // `pair.begin`, `pair.cancel` and `pair.status` now EXECUTE. G-14's
+        // fourth and smallest gap — "the absent PairingLedger" — is closed:
+        // `Core` holds one, `crate::pairing` drives ADR-0007 §7.4's C-B
+        // ceremony through it, and the three producers G-21 and §11.4 D-6
+        // settled build the offer. A device with no enrolment record still gets
+        // `AUTH.PAIRING_NOT_AUTHORIZED`, and one with no element still gets
+        // `AUTH.KEY_UNAVAILABLE` under §11.16 (l) — but those are now *this
+        // device's* verdicts on a real ceremony rather than a dispatcher
+        // declining to have one.
+        C::PairBegin | C::PairCancel | C::PairStatus => Disposition::Executes,
+
+        // `pair.confirm` is the one that legitimately remains, and its reason is
+        // RE-MEASURED rather than inherited. It is no longer waiting on the
+        // ledger, and it never was waiting on SPAKE2 — G-17: "W-22 blocks C-A
+        // and nothing else". It is waiting on TWO attestations that this build
+        // can produce neither of.
         C::PairConfirm => Disposition::NotWired {
             code: codes::CONTROL_UNREACHABLE,
-            why: "N-18 requires BOTH PairingAttestations before a ceremony is confirmed, and \
-                  the peer's half crosses the rendezvous. Same C1 ceremony transport as \
-                  device.revoke and key.rotate",
-        },
-        C::PairCancel | C::PairStatus => Disposition::NotWired {
-            code: codes::AUTH_PAIRING_NOT_AUTHORIZED,
-            why: "both read the PairingLedger, and the composed core holds none. They are \
-                  local operations blocked only on that ledger, not on a peer",
+            why: "N-18 confirms a ceremony on both devices or on neither, so it needs BOTH \
+                  PairingAttestations, and this build can produce neither half. The peer's \
+                  crosses the rendezvous, which has no transport (W-12). This device's own \
+                  has no emitter at all: twinvpn_crypto::statements carries \
+                  decode_pairing_attestation and check_attestation_pair and NO \
+                  emit_pairing_attestation, so there is nothing to sign — a producer gap in \
+                  a crate the pairing wiring may not write to, reported rather than filled",
         },
         C::DeviceRevoke | C::KeyRotate => Disposition::NotWired {
             code: codes::CONTROL_UNREACHABLE,
@@ -394,6 +399,23 @@ pub fn missing_parameter(op: CoreCommand, submission: &Submission) -> Option<Rea
     }
     if matches!(op, CoreCommand::HostLifecycle)
         && Lifecycle::from_params(&submission.params).is_none()
+    {
+        return Some(codes::PROTO_MALFORMED_MESSAGE);
+    }
+    // `pair.begin` names WHICH ceremony (ADR-0007 §7.4 — "exactly one"), and
+    // N-16 makes that an audit fact rather than a default. An absent or
+    // unrecognised selector is refused here, before `crate::pairing` could pick
+    // one on the caller's behalf.
+    if matches!(op, CoreCommand::PairBegin)
+        && crate::pairing::Ceremony::from_params(&submission.params).is_none()
+    {
+        return Some(codes::PROTO_MALFORMED_MESSAGE);
+    }
+    // `pair.cancel` and `pair.status` name a `pairing_id`, which is the frozen
+    // 16-byte width from `limits.json`. Anything else is refused rather than
+    // truncated or padded (`ownership.md` §6 rule 9).
+    if matches!(op, CoreCommand::PairCancel | CoreCommand::PairStatus)
+        && submission.params.len() != crate::pairing::PAIRING_ID_BYTES
     {
         return Some(codes::PROTO_MALFORMED_MESSAGE);
     }

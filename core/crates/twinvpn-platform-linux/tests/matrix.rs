@@ -183,6 +183,7 @@ fn adapter() -> LinuxPlatformAdapter {
             cgroup_path: None,
             local_network_access: true,
             on_link_prefixes: Vec::new(),
+            doh_endpoints: Vec::new(),
         },
         store_root: dir.clone(),
         resolver_restore_point: dir.join("resolver.restore"),
@@ -720,6 +721,7 @@ async fn matrix_kill_switch_blocked_drops_both_families_and_arming_never_fails_o
         cgroup_path: None,
         local_network_access: true,
         on_link_prefixes: Vec::new(),
+        doh_endpoints: Vec::new(),
     };
     let blocked = nft::render(&contract(0, InterfaceIndex(1)), Ruleset::Blocked, &config);
     assert!(
@@ -765,12 +767,18 @@ async fn matrix_kill_switch_blocked_drops_both_families_and_arming_never_fails_o
 /// working IPv6 is a DNS leak wearing a v4 firewall.
 #[tokio::test]
 async fn matrix_dns_leak_the_class_6_denial_covers_both_families_on_every_path() {
+    // The known-encrypted-resolver endpoints, from the one shared consumer that
+    // parses `contracts/registry/encrypted_resolvers.json`. The real artifact,
+    // so a provider added to the registry and not to the rule fails here.
+    let registry = twinvpn_enforce::doh::KnownResolvers::embedded()
+        .expect("the shipped encrypted-resolver registry parses");
     let config = EnforcementConfig {
         overlay_interface: "twin0".to_owned(),
         firewall_mark: DEFAULT_FWMARK,
         cgroup_path: None,
         local_network_access: true,
         on_link_prefixes: Vec::new(),
+        doh_endpoints: registry.endpoints(),
     };
 
     // Containment, in BOTH postures. A host that denied off-overlay DNS only
@@ -798,7 +806,53 @@ async fn matrix_dns_leak_the_class_6_denial_covers_both_families_on_every_path()
             rendered.contains("meta nfproto") || rendered.contains("inet"),
             "{ruleset:?}: the denial must be dual-family in one inet table"
         );
+        // **F-3.** The known-DoH endpoint half of §11.9, ADDITIVE to the port
+        // half above and asserted separately from it. A browser with a pinned
+        // DoH resolver speaks TCP 443 and never touches 53 or 853, so the port
+        // assertions above say nothing about it.
+        let per_family = registry.per_family();
+        for prefix in &per_family.v4 {
+            let text = twinvpn_platform_linux::addr::prefix_text(*prefix);
+            assert!(
+                rendered.contains(&text),
+                "{ruleset:?}: {text} is a known encrypted resolver and is not denied"
+            );
+        }
+        for prefix in &per_family.v6 {
+            let text = twinvpn_platform_linux::addr::prefix_text(*prefix);
+            assert!(
+                rendered.contains(&text),
+                "{ruleset:?}: {text} is a known encrypted resolver and is not denied — \
+                 a v4-only DoH denial on a host with working IPv6 is a DNS leak \
+                 wearing a v4 firewall"
+            );
+        }
+        assert!(
+            rendered.contains("ip daddr { 1.0.0.1/32") && rendered.contains("tcp dport 443"),
+            "{ruleset:?}: the v4 endpoint rule is missing"
+        );
+        assert!(
+            rendered.contains("ip6 daddr { 2001:4860:4860::8844/128"),
+            "{ruleset:?}: the v6 endpoint rule is missing"
+        );
     }
+
+    // The registry's `consumer_rule`: an empty list costs the endpoint half and
+    // NOTHING else. Rendering with one proves the port half does not depend on
+    // it, which is the property that makes the endpoint list safe to ship as
+    // "explicitly incomplete".
+    let without = EnforcementConfig {
+        doh_endpoints: Vec::new(),
+        ..config.clone()
+    };
+    let bare = nft::render(
+        &contract(1, InterfaceIndex(1)),
+        Ruleset::Protected,
+        &without,
+    );
+    assert!(bare.contains(nft::DNS_DENY_COUNTER));
+    assert!(bare.contains("th dport { 53, 853 }"));
+    assert!(!bare.contains("tcp dport 443"));
 
     // Steering, which is the *second* line and never the first. Whichever of
     // DN-21's two Linux forms this host takes, both families are configured —

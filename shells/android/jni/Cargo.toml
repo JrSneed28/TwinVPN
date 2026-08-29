@@ -43,7 +43,10 @@ crate-type = ["cdylib"]
 # through their Rust declarations rather than through the C header, because it
 # is in the same address space and linking the header twice would give one
 # process two copies of the surface F-1 makes a permanent obligation.
-twinvpn-ffi = { path = "../../../core/crates/twinvpn-ffi", default-features = false }
+# The `version` next to every `path` is load-bearing: a versionless path
+# dependency is a `*` requirement and build/deny.toml sets `wildcards = "deny"`
+# for DP-1. See core/Cargo.toml for the full note.
+twinvpn-ffi = { version = "0.1.0", path = "../../../core/crates/twinvpn-ffi", default-features = false }
 
 jni = "0.21"
 

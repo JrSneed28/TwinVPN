@@ -18,9 +18,23 @@
 //!
 //! ```sh
 //! cd core
+//! cargo test -p twinvpn-platform-linux --test netns --no-run   # build OUTSIDE
 //! unshare --user --map-root-user --net -- \
-//!   env TWINVPN_NETNS_TEST=1 cargo test -p twinvpn-platform-linux --test netns
+//!   env TWINVPN_NETNS_TEST=1 RUSTC_WRAPPER= \
+//!   cargo test -p twinvpn-platform-linux --test netns
 //! ```
+//!
+//! The namespace has **no network**, which is the point of it and is also why
+//! the build has to happen first: a compiler cache that talks to a server over a
+//! socket (`sccache`, which `build/toolchain/env.sh` may set) fails inside with
+//! `Network unreachable`, and `RUSTC_WRAPPER=` disables it for the run. This is
+//! an artefact of the harness, not of the adapter.
+//!
+//! Each test that creates a real interface uses its **own** name — `twin0`,
+//! `twin1`, `twin2`. They share one namespace and `cargo test` runs them as
+//! parallel threads, so a single shared name made `TUNSETIFF` return `EBUSY` and
+//! the command above fail for two of the five. One name per test is the fix;
+//! nothing here needs `--test-threads=1`.
 //!
 //! Without `TWINVPN_NETNS_TEST=1` the privileged tests **assert the refusal
 //! instead**, so a plain `cargo test` still checks something real: that the
@@ -29,10 +43,18 @@
 //!
 //! # What is still not covered, on this host
 //!
-//! `nft(8)`, `conntrack` and `ip netns` are **not installed**. So the nftables
-//! *install* and *read-back* are unreachable even here; `src/nft.rs` tests the
-//! rendered script and the `--json` parser exhaustively instead, and that gap is
-//! reported rather than papered over.
+//! `conntrack` and `ip netns` are **not installed**, so the nftables *install*
+//! and *read-back* are unreachable here; `src/nft.rs` tests the rendered script
+//! and the `--json` parser exhaustively instead, and that gap is reported rather
+//! than papered over.
+//!
+//! **`nft(8)` itself IS present** (v1.1.6 on this host), and the earlier version
+//! of this note said it was not — which steered readers away from a check that
+//! works. `examples/dump_ruleset.rs` renders the ruleset and
+//! `nft -c -f -` parses it, which is stronger than any `String::contains`
+//! assertion: `-c` validates without committing, so it needs no kernel state.
+//! That is how the F-3 DoH containment rules were checked against a real parser
+//! rather than against the renderer's own idea of itself.
 
 use std::sync::Arc;
 
@@ -57,15 +79,24 @@ fn privileged() -> bool {
     std::env::var_os("TWINVPN_NETNS_TEST").is_some()
 }
 
-fn adapter() -> LinuxPlatformAdapter {
-    let dir = std::env::temp_dir().join(format!("twinvpn-netns-{}", std::process::id()));
+/// The adapter, bound to **this test's own** overlay interface.
+///
+/// The name is a parameter rather than a constant because every test in this
+/// file shares one network namespace and `cargo test` runs them as parallel
+/// threads. Two tests asking the kernel for the same tun name is `EBUSY` from
+/// `TUNSETIFF` — not a defect in the adapter, but a defect in the harness that
+/// made the module documentation's own command fail. One name per test is the
+/// whole fix; nothing here needs serialising.
+fn adapter(overlay: &str) -> LinuxPlatformAdapter {
+    let dir = std::env::temp_dir().join(format!("twinvpn-netns-{}-{overlay}", std::process::id()));
     LinuxPlatformAdapter::new(LinuxAdapterParts {
         enforcement: EnforcementConfig {
-            overlay_interface: "twin0".to_owned(),
+            overlay_interface: overlay.to_owned(),
             firewall_mark: DEFAULT_FWMARK,
             cgroup_path: None,
             local_network_access: true,
             on_link_prefixes: Vec::new(),
+            doh_endpoints: Vec::new(),
         },
         store_root: dir.clone(),
         resolver_restore_point: dir.join("resolver.restore"),
@@ -139,7 +170,7 @@ fn contract(generation: u64, interface: InterfaceIndex) -> NetworkContract {
 
 #[tokio::test]
 async fn a_tun_interface_is_created_down_and_destroyed_idempotently() {
-    let adapter = adapter();
+    let adapter = adapter("twin0");
     let name = InterfaceName::new("twin0").expect("valid");
 
     if !privileged() {
@@ -210,8 +241,8 @@ async fn both_families_are_programmed_in_one_transaction_and_fully_reverted() {
     //
     // ADR-0010 R5: "Route installation MUST be atomic per contract generation
     // and fully reversible."
-    let adapter = adapter();
-    let name = InterfaceName::new("twin0").expect("valid");
+    let adapter = adapter("twin1");
+    let name = InterfaceName::new("twin1").expect("valid");
 
     if !privileged() {
         // The write path is unreachable, so the assertion is that the FAILURE
@@ -261,7 +292,7 @@ async fn both_families_are_programmed_in_one_transaction_and_fully_reverted() {
     let facts = adapter.interfaces().enumerate().await.expect("enumerates");
     let overlay = facts
         .iter()
-        .find(|i| i.name.as_str() == "twin0")
+        .find(|i| i.name.as_str() == "twin1")
         .expect("exists");
     let families: Vec<AddressFamily> = overlay.addresses.iter().map(|p| p.family()).collect();
     assert!(
@@ -281,7 +312,7 @@ async fn both_families_are_programmed_in_one_transaction_and_fully_reverted() {
     let after = adapter.interfaces().enumerate().await.expect("enumerates");
     let overlay = after
         .iter()
-        .find(|i| i.name.as_str() == "twin0")
+        .find(|i| i.name.as_str() == "twin1")
         .expect("still exists");
     assert!(
         overlay.addresses.is_empty()
@@ -306,7 +337,7 @@ async fn the_change_stream_reports_a_real_interface_appearing_and_going_away() {
     // way to check that the RTNLGRP_* subscription actually delivers — and the
     // failure it guards against (a poll interval added to `T_FAILOVER_TARGET`)
     // is invisible to every other test.
-    let adapter = adapter();
+    let adapter = adapter("twin2");
     let mut stream = adapter.interfaces().subscribe().expect("subscribes");
 
     if !privileged() {
@@ -320,7 +351,7 @@ async fn the_change_stream_reports_a_real_interface_appearing_and_going_away() {
     use futures_core::Stream as _;
     let handle = adapter
         .tunnel()
-        .create_interface(&InterfaceName::new("twin0").expect("valid"), 1280)
+        .create_interface(&InterfaceName::new("twin2").expect("valid"), 1280)
         .await
         .expect("creates");
 
@@ -363,7 +394,7 @@ async fn an_mtu_below_the_ipv6_floor_is_refused_by_the_adapter_before_the_kernel
     // §6.2's floor is 1280 and §6.3 forbids accepting a PTB below it. The
     // adapter refuses before the syscall, so the refusal is the same whether or
     // not the caller is privileged — which is why this test needs no branch.
-    let adapter = adapter();
+    let adapter = adapter("twin3");
     let error = adapter
         .tunnel()
         .set_mtu(twinvpn_platform::TunnelHandle(1), 1279)
@@ -377,7 +408,7 @@ async fn sockets_and_enumeration_work_in_a_fresh_namespace_with_only_loopback() 
     // A namespace with one `lo` is the sparsest network a host can have, and is
     // the shape a container starts in. The adapter must report it truthfully
     // rather than assuming interfaces it cannot see.
-    let adapter = adapter();
+    let adapter = adapter("twin4");
     let facts = adapter.interfaces().enumerate().await.expect("enumerates");
     assert!(
         facts.iter().any(|i| i.name.as_str() == "lo"),

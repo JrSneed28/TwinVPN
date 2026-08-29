@@ -445,6 +445,51 @@ fn enforcement_config() -> twinvpn_platform_windows::wfp::EnforcementConfig {
         updater_app_id: None,
         update_origins: Vec::new(),
         portal_grant: Vec::new(),
+        doh_endpoints: doh_endpoints(),
+    }
+}
+
+/// ADR-0011 §11.9's known-encrypted-resolver endpoints, from the one shared
+/// consumer.
+///
+/// **Read here rather than in the adapter**, because the adapter takes the list
+/// injected (CD-2) exactly as it takes the service SID and the on-link prefixes,
+/// and holds no copy of it. `twinvpn_enforce::doh` parses
+/// `contracts/registry/encrypted_resolvers.json`, which is embedded with
+/// `include_str!` — so a failure here is a **build** defect that
+/// `twinvpn-enforce`'s own tests catch before a package can ship, not something
+/// this host can encounter at runtime.
+///
+/// If it nevertheless fails, this returns an empty list and says so at `error`,
+/// loudly. That is the registry's `consumer_rule` followed exactly: "an empty or
+/// unparseable list MUST NOT weaken the port rules, and MUST NOT be a reason to
+/// fail open". The three port filters of class 6 and the whole of Tier 2 are
+/// rendered without reference to this list, so what is lost is the endpoint half
+/// of §11.9 and nothing else.
+#[cfg(windows)]
+fn doh_endpoints() -> Vec<twinvpn_types::IpPrefix> {
+    match twinvpn_enforce::doh::KnownResolvers::embedded() {
+        Ok(registry) => {
+            tracing::info!(
+                target: "twinvpn.service",
+                registry_version = registry.version(),
+                endpoints = registry.endpoints().len(),
+                "ADR-0011 §11.9's known-DoH endpoint list is installed alongside the \
+                 port-based denial; it is a detection aid and never a guarantee"
+            );
+            registry.endpoints()
+        }
+        Err(error) => {
+            tracing::error!(
+                target: "twinvpn.service",
+                specified_code = "DNS.CONTAINMENT.REGISTRY_UNREADABLE",
+                reason_code = "PLATFORM.ADAPTER_UNAVAILABLE",
+                detail = %error,
+                "the encrypted-resolver registry could not be read: class 6 installs its \
+                 PORT half only, and Tier 2 is unaffected. This is a build defect"
+            );
+            Vec::new()
+        }
     }
 }
 

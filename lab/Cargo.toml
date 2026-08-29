@@ -19,24 +19,31 @@ license      = "Apache-2.0"
 repository   = "https://github.com/twinvpn/twinvpn"
 
 [workspace.dependencies]
-twinlab           = { path = "twinlab" }
-twinnet           = { path = "twinnet" }
-twinsim           = { path = "twinsim" }
-twinvpn-types     = { path = "../core/crates/twinvpn-types" }
-twinvpn-env       = { path = "../core/crates/twinvpn-env", features = ["test-support"] }
-twinvpn-schema    = { path = "../core/crates/twinvpn-schema" }
-twinvpn-core      = { path = "../core/crates/twinvpn-core" }
+# DP-1 -- "NO UNBOUNDED VERSION RANGES". The `version` next to every `path`
+# below is not redundant. A path dependency with no `version` key is a `*`
+# requirement, and build/deny.toml mechanises DP-1 as `wildcards = "deny"`.
+# `allow-wildcard-paths` there does NOT exempt these: cargo-deny applies it only
+# to crates declared private, and these are not declared private. So the bound
+# is written on the edge itself, which is where DP-1 asks for it. The `path`
+# still wins for resolution; the `version` is what an auditor reads.
+twinlab           = { version = "0.1.0", path = "twinlab" }
+twinnet           = { version = "0.1.0", path = "twinnet" }
+twinsim           = { version = "0.1.0", path = "twinsim" }
+twinvpn-types     = { version = "0.1.0", path = "../core/crates/twinvpn-types" }
+twinvpn-env       = { version = "0.1.0", path = "../core/crates/twinvpn-env", features = ["test-support"] }
+twinvpn-schema    = { version = "0.1.0", path = "../core/crates/twinvpn-schema" }
+twinvpn-core      = { version = "0.1.0", path = "../core/crates/twinvpn-core" }
 
 # Requested by test-engineering. The mock adapter and the virtual clock are
 # behind features because ADR-0018 CD-5 makes them the payoff of the CB-2 split:
 # binding the mock exercises 100% of the decision logic on a plain Linux runner.
-twinvpn-crypto    = { path = "../core/crates/twinvpn-crypto" }
-twinvpn-platform  = { path = "../core/crates/twinvpn-platform", features = ["mock"] }
-twinvpn-session   = { path = "../core/crates/twinvpn-session" }
+twinvpn-crypto    = { version = "0.1.0", path = "../core/crates/twinvpn-crypto" }
+twinvpn-platform  = { version = "0.1.0", path = "../core/crates/twinvpn-platform", features = ["mock"] }
+twinvpn-session   = { version = "0.1.0", path = "../core/crates/twinvpn-session" }
 # The control-plane client, for `twinsim`'s L-CONTROL binding. Named here rather
 # than by path in the member so that `lab/` has ONE place that says where a core
 # crate lives -- which is the property the workspace-dependency table exists for.
-twinvpn-cp-client = { path = "../core/crates/twinvpn-cp-client" }
+twinvpn-cp-client = { version = "0.1.0", path = "../core/crates/twinvpn-cp-client" }
 
 thiserror  = "2.0"
 anyhow     = "1.0"

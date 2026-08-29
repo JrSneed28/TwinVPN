@@ -12,6 +12,10 @@ repository.workspace   = true
 description = "kill-switch latch, reconciler and desired-ruleset computation (ADR-0012)"
 
 [dependencies]
+# The known-encrypted-resolver registry is embedded with `include_str!` and
+# parsed here (see `doh`). No file is read at runtime, so this does not give the
+# crate an I/O surface.
+serde_json            = { workspace = true }
 twinvpn-types         = { workspace = true }
 twinvpn-env           = { workspace = true }
 twinvpn-schema        = { workspace = true }

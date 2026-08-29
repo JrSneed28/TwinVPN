@@ -32,7 +32,7 @@ publish = false
 # and the exclusion is STRUCTURAL rather than a feature flag. `twinvpn-mi` links
 # no core, no platform adapter and no `pf`, so this binary is unprivileged by
 # its dependency graph and not merely by how it is run.
-twinvpn-mi    = { path = "../twinvpn-mi" }
+twinvpn-mi    = { version = "0.1.0", path = "../twinvpn-mi" }
 twinvpn-mgmt  = { workspace = true }
 twinvpn-types = { workspace = true }
 tokio         = { workspace = true }

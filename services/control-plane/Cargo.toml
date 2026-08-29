@@ -99,7 +99,7 @@ tokio = { workspace = true, features = ["test-util"] }
 twinvpn-service-common = { workspace = true, features = ["test-support"] }
 # Self-dependency so `cargo test` and the integration tests in `tests/` both see
 # `test-support`. The pattern `twinvpn-cp-client` uses for the same reason.
-twinvpn-control-plane = { path = ".", features = ["test-support"] }
+twinvpn-control-plane = { version = "0.1.0", path = ".", features = ["test-support"] }
 # Deterministic ES256 fixtures, so a signature in a test comes from the AUDITED
 # crate. CD-I2 covers dev-dependencies: naming `p256` here to sign a test vector
 # would be the second provider DP-8 bounds, arriving through a dev-dependency.

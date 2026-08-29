@@ -1,103 +1,138 @@
 ---
 name: claude-flow-help
-description: Show Claude-Flow commands and usage
+description: Show Ruflo commands and usage
 ---
 
-# Claude-Flow Commands
+# Ruflo Commands
 
-## 🌊 Claude-Flow: Agent Orchestration Platform
+Ruflo (the `ruflo` CLI, formerly claude-flow) is the agent orchestration
+platform this project coordinates through.
 
-Claude-Flow is the ultimate multi-terminal orchestration platform that revolutionizes how you work with Claude Code.
+## Entry point
 
-## Core Commands
+Always `npx ruflo@latest`, the entry point the upstream docs use
+(<https://github.com/ruvnet/ruflo>). Ruflo is not installed into this project
+and there is no `./claude-flow` binary or wrapper script here.
 
-### 🚀 System Management
-- `./claude-flow start` - Start orchestration system
-- `./claude-flow start --ui` - Start with interactive process management UI
-- `./claude-flow status` - Check system status
-- `./claude-flow monitor` - Real-time monitoring
-- `./claude-flow stop` - Stop orchestration
+Under npx the CLI runs out of `~/.npm/_npx/<hash>/`, whose tree lacks two
+packages ruflo imports by bare specifier — `./scripts/npx-mcp-deps` links them
+in, and must be re-run after `npm install` or a version bump.
 
-### 🤖 Agent Management
-- `./claude-flow agent spawn <type>` - Create new agent
-- `./claude-flow agent list` - List active agents
-- `./claude-flow agent info <id>` - Agent details
-- `./claude-flow agent terminate <id>` - Stop agent
-
-### 📋 Task Management
-- `./claude-flow task create <type> "description"` - Create task
-- `./claude-flow task list` - List all tasks
-- `./claude-flow task status <id>` - Task status
-- `./claude-flow task cancel <id>` - Cancel task
-- `./claude-flow task workflow <file>` - Execute workflow
-
-### 🧠 Memory Operations
-- `./claude-flow memory store "key" "value"` - Store data
-- `./claude-flow memory query "search"` - Search memory
-- `./claude-flow memory stats` - Memory statistics
-- `./claude-flow memory export <file>` - Export memory
-- `./claude-flow memory import <file>` - Import memory
-
-### ⚡ SPARC Development
-- `./claude-flow sparc "task"` - Run SPARC orchestrator
-- `./claude-flow sparc modes` - List all 17+ SPARC modes
-- `./claude-flow sparc run <mode> "task"` - Run specific mode
-- `./claude-flow sparc tdd "feature"` - TDD workflow
-- `./claude-flow sparc info <mode>` - Mode details
-
-### 🐝 Swarm Coordination
-- `./claude-flow swarm "task" --strategy <type>` - Start swarm
-- `./claude-flow swarm "task" --background` - Long-running swarm
-- `./claude-flow swarm "task" --monitor` - With monitoring
-- `./claude-flow swarm "task" --ui` - Interactive UI
-- `./claude-flow swarm "task" --distributed` - Distributed coordination
-
-### 🌍 MCP Integration
-- `./claude-flow mcp status` - MCP server status
-- `./claude-flow mcp tools` - List available tools
-- `./claude-flow mcp config` - Show configuration
-- `./claude-flow mcp logs` - View MCP logs
-
-### 🤖 Claude Integration
-- `./claude-flow claude spawn "task"` - Spawn Claude with enhanced guidance
-- `./claude-flow claude batch <file>` - Execute workflow configuration
-
-## 🌟 Quick Examples
-
-### Initialize with SPARC:
 ```bash
-npx -y claude-flow@latest init --sparc
+npx ruflo@latest --help              # top-level commands
+npx ruflo@latest <command> --help    # subcommands and flags
 ```
 
-### Start a development swarm:
+## Primary commands
+
+| Command | Purpose |
+|---------|---------|
+| `init` | Initialize Ruflo in the current directory |
+| `start` | Start the orchestration system |
+| `status` | Show system status |
+| `agent` | Agent management |
+| `swarm` | Swarm coordination |
+| `memory` | Memory management |
+| `task` | Task management |
+| `session` | Session management |
+| `mcp` | MCP server management |
+| `hooks` | Self-learning hooks and workflow automation |
+
+## Agent management
+
 ```bash
-./claude-flow swarm "Build REST API" --strategy development --monitor --review
+npx ruflo@latest agent spawn -t coder     # spawn an agent by type
+npx ruflo@latest agent list               # list active agents
+npx ruflo@latest agent status <id>        # agent details
+npx ruflo@latest agent stop <id>          # terminate an agent
+npx ruflo@latest agent health             # health and metrics
+npx ruflo@latest agent logs <id>          # activity logs
 ```
 
-### Run TDD workflow:
+## Task management
+
 ```bash
-./claude-flow sparc tdd "user authentication"
+npx ruflo@latest task create -t implementation -d "Add user auth"
+npx ruflo@latest task list                # pending/running; --all for every task
+npx ruflo@latest task status <id>
+npx ruflo@latest task assign <id> --agent coder-1
+npx ruflo@latest task retry <id>
+npx ruflo@latest task cancel <id>
 ```
 
-### Store project context:
+## Memory operations
+
+Memory takes flags, not positional arguments.
+
 ```bash
-./claude-flow memory store "project_requirements" "e-commerce platform specs" --namespace project
+npx ruflo@latest memory store -k "key" --value "value" --namespace patterns
+npx ruflo@latest memory search -q "auth patterns" --threshold 0.3 --build-hnsw
+npx ruflo@latest memory retrieve -k "key"
+npx ruflo@latest memory stats
+npx ruflo@latest memory export -o <file>
+npx ruflo@latest memory import -i <file>
 ```
 
-### Spawn specialized agents:
+`memory search` defaults to a 0.7 similarity threshold, which hides most real
+hits — pass `--threshold 0.3 --build-hnsw`. Writes fail while the background
+daemon holds the WAL sidecars; reads still work.
+
+## Swarm coordination
+
 ```bash
-./claude-flow agent spawn researcher --name "Senior Researcher" --priority 8
-./claude-flow agent spawn developer --name "Lead Developer" --priority 9
+npx ruflo@latest swarm init --topology hierarchical-mesh --max-agents 15 --strategy specialized
+npx ruflo@latest swarm start -o "Build REST API" -s development
+npx ruflo@latest swarm coordinate --agents 15   # V3 hierarchical mesh
+npx ruflo@latest swarm status
+npx ruflo@latest swarm scale --agents <n>
+npx ruflo@latest swarm stop
 ```
 
-## 🎯 Best Practices
-- Use `./claude-flow` instead of `npx @claude-flow/cli@latest` after initialization
-- Store important context in memory for cross-session persistence
-- Use swarm mode for complex tasks requiring multiple agents
-- Enable monitoring for real-time progress tracking
-- Use background mode for tasks > 30 minutes
+## MCP integration
 
-## 📚 Resources
-- Documentation: https://github.com/ruvnet/claude-code-flow/docs
-- Examples: https://github.com/ruvnet/claude-code-flow/examples
-- Issues: https://github.com/ruvnet/claude-code-flow/issues
+```bash
+npx ruflo@latest mcp status
+npx ruflo@latest mcp tools
+npx ruflo@latest mcp health
+npx ruflo@latest mcp logs
+```
+
+The MCP servers are launched by `.mcp.json` with the same
+`npx -y ruflo@latest mcp start` the docs prescribe. Run `./scripts/npx-mcp-deps`
+after any install or version bump — see `CLAUDE.md` for why.
+
+## Advanced and utility commands
+
+`neural`, `security`, `policy`, `performance`, `embeddings`, `hive-mind`,
+`guidance`, `autopilot`, `workflow`, `analyze`, `route`, `progress`, `claims`,
+`config`, `doctor`, `daemon`, `cleanup`.
+
+```bash
+npx ruflo@latest doctor              # diagnostics; --fix only prints suggestions
+npx ruflo@latest security scan
+npx ruflo@latest performance benchmark
+npx ruflo@latest hooks route --task "describe the task"
+```
+
+`doctor` reports the MCP-side dependency gaps as healthy even when they are
+broken. Verify the MCP surface with a direct JSON-RPC `tools/call`, not with
+`doctor`.
+
+## Not available in v3
+
+`sparc`, `monitor`, a top-level `stop`, and `claude spawn`/`claude batch` were
+v2 commands and no longer exist. Use `swarm`/`agent` for orchestration,
+`process` or `daemon` for lifecycle, and the Claude Code Agent tool for
+spawning agents.
+
+## Best practices
+
+- Store durable context in memory so it survives across sessions.
+- Use swarm mode for work spanning 3+ files; skip it for single-file edits.
+- The Agent tool executes (files, code, git); MCP tools coordinate (swarm,
+  memory, hooks); the CLI is the same surface via Bash.
+
+## Resources
+
+- Documentation: https://github.com/ruvnet/ruflo#readme
+- Issues: https://github.com/ruvnet/ruflo/issues

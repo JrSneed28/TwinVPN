@@ -1,0 +1,17 @@
+{
+  "entries": {
+    "routing-decision:twinvpn-wave1-gate-2026-08-29-pass5": {
+      "key": "routing-decision:twinvpn-wave1-gate-2026-08-29-pass5",
+      "value": "{\"task\":\"TwinVPN first implementation wave acceptance gate: re-run every check from clean, verify each clause, and correct what the tree overstates\",\"agent\":\"integration-lead\",\"success\":true,\"quality\":0.9,\"keywords\":[\"twinvpn\",\"first\",\"implementation\",\"wave\",\"acceptance\",\"gate\",\"re-run\",\"every\",\"check\",\"clean\",\"verify\",\"clause\",\"correct\",\"tree\",\"overstates\"]}",
+      "namespace": "patterns",
+      "createdAt": "2026-08-29T10:29:51.827Z",
+      "metadata": {
+        "type": "routing-decision",
+        "confidence": 0.9,
+        "agent": "integration-lead",
+        "success": true
+      }
+    }
+  },
+  "version": "3.0.0"
+}

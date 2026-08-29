@@ -59,37 +59,44 @@ repository = "https://github.com/twinvpn/twinvpn"
 # name them; `cargo xtask lint` fails the build if any other crate does.
 # ---------------------------------------------------------------------------
 [workspace.dependencies]
+# DP-1 -- "NO UNBOUNDED VERSION RANGES". The `version` next to every `path`
+# below is not redundant. A path dependency with no `version` key is a `*`
+# requirement, and build/deny.toml mechanises DP-1 as `wildcards = "deny"`.
+# `allow-wildcard-paths` there does NOT exempt these: cargo-deny applies it only
+# to crates declared private, and these are not declared private. So the bound
+# is written on the edge itself, which is where DP-1 asks for it. The `path`
+# still wins for resolution; the `version` is what an auditor reads.
 # -- intra-workspace --------------------------------------------------------
-twinvpn-types          = { path = "crates/twinvpn-types" }
-twinvpn-env            = { path = "crates/twinvpn-env" }
-twinvpn-schema         = { path = "crates/twinvpn-schema" }
-twinvpn-platform       = { path = "crates/twinvpn-platform" }
-twinvpn-crypto         = { path = "crates/twinvpn-crypto" }
-twinvpn-store          = { path = "crates/twinvpn-store" }
-twinvpn-trust          = { path = "crates/twinvpn-trust" }
-twinvpn-cp-client      = { path = "crates/twinvpn-cp-client" }
-twinvpn-tunnel         = { path = "crates/twinvpn-tunnel" }
-twinvpn-path           = { path = "crates/twinvpn-path" }
-twinvpn-relay-client   = { path = "crates/twinvpn-relay-client" }
-twinvpn-route          = { path = "crates/twinvpn-route" }
-twinvpn-dns            = { path = "crates/twinvpn-dns" }
-twinvpn-enforce        = { path = "crates/twinvpn-enforce" }
-twinvpn-gateway        = { path = "crates/twinvpn-gateway" }
-twinvpn-session        = { path = "crates/twinvpn-session" }
-twinvpn-diag           = { path = "crates/twinvpn-diag" }
-twinvpn-mgmt           = { path = "crates/twinvpn-mgmt" }
+twinvpn-types          = { version = "0.1.0", path = "crates/twinvpn-types" }
+twinvpn-env            = { version = "0.1.0", path = "crates/twinvpn-env" }
+twinvpn-schema         = { version = "0.1.0", path = "crates/twinvpn-schema" }
+twinvpn-platform       = { version = "0.1.0", path = "crates/twinvpn-platform" }
+twinvpn-crypto         = { version = "0.1.0", path = "crates/twinvpn-crypto" }
+twinvpn-store          = { version = "0.1.0", path = "crates/twinvpn-store" }
+twinvpn-trust          = { version = "0.1.0", path = "crates/twinvpn-trust" }
+twinvpn-cp-client      = { version = "0.1.0", path = "crates/twinvpn-cp-client" }
+twinvpn-tunnel         = { version = "0.1.0", path = "crates/twinvpn-tunnel" }
+twinvpn-path           = { version = "0.1.0", path = "crates/twinvpn-path" }
+twinvpn-relay-client   = { version = "0.1.0", path = "crates/twinvpn-relay-client" }
+twinvpn-route          = { version = "0.1.0", path = "crates/twinvpn-route" }
+twinvpn-dns            = { version = "0.1.0", path = "crates/twinvpn-dns" }
+twinvpn-enforce        = { version = "0.1.0", path = "crates/twinvpn-enforce" }
+twinvpn-gateway        = { version = "0.1.0", path = "crates/twinvpn-gateway" }
+twinvpn-session        = { version = "0.1.0", path = "crates/twinvpn-session" }
+twinvpn-diag           = { version = "0.1.0", path = "crates/twinvpn-diag" }
+twinvpn-mgmt           = { version = "0.1.0", path = "crates/twinvpn-mgmt" }
 # `default-features = false` so the one consumer in this workspace,
 # `twinvpn-ffi`, can forward the PROFILE rather than inherit it. `twinvpn-ffi`
 # re-enables `full` through its own default feature, so every build in this
 # workspace is what it was; the point is that a `core-lite` ABI becomes
 # buildable, which is the only way `shells/android/jni` gets compiled at all on
 # a host with no NDK. `ownership.md` §11, G-4/G-6.
-twinvpn-core           = { path = "crates/twinvpn-core", default-features = false }
-twinvpn-platform-linux = { path = "crates/twinvpn-platform-linux" }
-twinvpn-platform-windows = { path = "crates/twinvpn-platform-windows" }
-twinvpn-platform-macos = { path = "crates/twinvpn-platform-macos" }
-twinvpn-platform-ios   = { path = "crates/twinvpn-platform-ios" }
-twinvpn-platform-android = { path = "crates/twinvpn-platform-android" }
+twinvpn-core           = { version = "0.1.0", path = "crates/twinvpn-core", default-features = false }
+twinvpn-platform-linux = { version = "0.1.0", path = "crates/twinvpn-platform-linux" }
+twinvpn-platform-windows = { version = "0.1.0", path = "crates/twinvpn-platform-windows" }
+twinvpn-platform-macos = { version = "0.1.0", path = "crates/twinvpn-platform-macos" }
+twinvpn-platform-ios   = { version = "0.1.0", path = "crates/twinvpn-platform-ios" }
+twinvpn-platform-android = { version = "0.1.0", path = "crates/twinvpn-platform-android" }
 
 # -- general ----------------------------------------------------------------
 thiserror       = "2.0"

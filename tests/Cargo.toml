@@ -30,14 +30,21 @@ repository   = "https://github.com/twinvpn/twinvpn"
 # The core crates under test. Named by path because `tests/` is not a member of
 # the core workspace and must not become one: a test workspace that shared the
 # product's manifest could silently add a dependency to a shipped crate.
-twinvpn-types        = { path = "../core/crates/twinvpn-types" }
-twinvpn-env          = { path = "../core/crates/twinvpn-env", features = ["test-support"] }
-twinvpn-schema       = { path = "../core/crates/twinvpn-schema" }
-twinvpn-crypto       = { path = "../core/crates/twinvpn-crypto", features = ["test-support"] }
-twinvpn-platform     = { path = "../core/crates/twinvpn-platform", features = ["mock"] }
-twinvpn-store        = { path = "../core/crates/twinvpn-store" }
-twinvpn-trust        = { path = "../core/crates/twinvpn-trust" }
-twinvpn-session      = { path = "../core/crates/twinvpn-session" }
+# DP-1 -- "NO UNBOUNDED VERSION RANGES". The `version` next to every `path`
+# below is not redundant. A path dependency with no `version` key is a `*`
+# requirement, and build/deny.toml mechanises DP-1 as `wildcards = "deny"`.
+# `allow-wildcard-paths` there does NOT exempt these: cargo-deny applies it only
+# to crates declared private, and these are not declared private. So the bound
+# is written on the edge itself, which is where DP-1 asks for it. The `path`
+# still wins for resolution; the `version` is what an auditor reads.
+twinvpn-types        = { version = "0.1.0", path = "../core/crates/twinvpn-types" }
+twinvpn-env          = { version = "0.1.0", path = "../core/crates/twinvpn-env", features = ["test-support"] }
+twinvpn-schema       = { version = "0.1.0", path = "../core/crates/twinvpn-schema" }
+twinvpn-crypto       = { version = "0.1.0", path = "../core/crates/twinvpn-crypto", features = ["test-support"] }
+twinvpn-platform     = { version = "0.1.0", path = "../core/crates/twinvpn-platform", features = ["mock"] }
+twinvpn-store        = { version = "0.1.0", path = "../core/crates/twinvpn-store" }
+twinvpn-trust        = { version = "0.1.0", path = "../core/crates/twinvpn-trust" }
+twinvpn-session      = { version = "0.1.0", path = "../core/crates/twinvpn-session" }
 
 # ---------------------------------------------------------------------------
 # THE SERVER AND SHELL ARTIFACTS.
@@ -63,38 +70,38 @@ twinvpn-session      = { path = "../core/crates/twinvpn-session" }
 # The property that actually matters is untouched: no PRODUCTION crate gains
 # another domain's graph. Only the test crate -- test-engineering's own -- gains
 # the ability to see both sides of a wire it is supposed to be verifying.
-twinvpn-service-common = { path = "../services/twinvpn-service-common" }
-twinvpn-relay          = { path = "../services/relay" }
-twinvpn-relay-directory = { path = "../services/relay-directory" }
-twinvpn-relay-health   = { path = "../services/relay-health" }
-twinvpn-rendezvous     = { path = "../services/rendezvous" }
-twinvpn-presence       = { path = "../services/presence" }
+twinvpn-service-common = { version = "0.1.0", path = "../services/twinvpn-service-common" }
+twinvpn-relay          = { version = "0.1.0", path = "../services/relay" }
+twinvpn-relay-directory = { version = "0.1.0", path = "../services/relay-directory" }
+twinvpn-relay-health   = { version = "0.1.0", path = "../services/relay-health" }
+twinvpn-rendezvous     = { version = "0.1.0", path = "../services/rendezvous" }
+twinvpn-presence       = { version = "0.1.0", path = "../services/presence" }
 # `test-support` carries the scripted verifier. It is what lets this workspace
 # drive the control plane's REAL revoke path without a signing anchor this host
 # does not have -- and it is never shipped, exactly as `twinvpn-env`'s and
 # `twinvpn-cp-client`'s equivalents are not (ADR-0018 CD-5).
-twinvpn-control-plane  = { path = "../services/control-plane", features = ["test-support"] }
-twinvpn-platform-linux = { path = "../core/crates/twinvpn-platform-linux" }
-twinvpn-path         = { path = "../core/crates/twinvpn-path" }
-twinvpn-relay-client = { path = "../core/crates/twinvpn-relay-client" }
-twinvpn-tunnel       = { path = "../core/crates/twinvpn-tunnel" }
-twinvpn-route        = { path = "../core/crates/twinvpn-route" }
-twinvpn-dns          = { path = "../core/crates/twinvpn-dns" }
-twinvpn-enforce      = { path = "../core/crates/twinvpn-enforce" }
-twinvpn-gateway      = { path = "../core/crates/twinvpn-gateway" }
-twinvpn-cp-client    = { path = "../core/crates/twinvpn-cp-client" }
+twinvpn-control-plane  = { version = "0.1.0", path = "../services/control-plane", features = ["test-support"] }
+twinvpn-platform-linux = { version = "0.1.0", path = "../core/crates/twinvpn-platform-linux" }
+twinvpn-path         = { version = "0.1.0", path = "../core/crates/twinvpn-path" }
+twinvpn-relay-client = { version = "0.1.0", path = "../core/crates/twinvpn-relay-client" }
+twinvpn-tunnel       = { version = "0.1.0", path = "../core/crates/twinvpn-tunnel" }
+twinvpn-route        = { version = "0.1.0", path = "../core/crates/twinvpn-route" }
+twinvpn-dns          = { version = "0.1.0", path = "../core/crates/twinvpn-dns" }
+twinvpn-enforce      = { version = "0.1.0", path = "../core/crates/twinvpn-enforce" }
+twinvpn-gateway      = { version = "0.1.0", path = "../core/crates/twinvpn-gateway" }
+twinvpn-cp-client    = { version = "0.1.0", path = "../core/crates/twinvpn-cp-client" }
 # `test-support` is what makes `twinvpn_core::testing` exist and binds the mock
 # platform (CD-5). Never shipped; `lab/` and `tests/` are the never-shipped paths.
-twinvpn-core         = { path = "../core/crates/twinvpn-core", features = ["test-support"] }
-twinvpn-mgmt         = { path = "../core/crates/twinvpn-mgmt" }
-twinvpn-diag         = { path = "../core/crates/twinvpn-diag" }
+twinvpn-core         = { version = "0.1.0", path = "../core/crates/twinvpn-core", features = ["test-support"] }
+twinvpn-mgmt         = { version = "0.1.0", path = "../core/crates/twinvpn-mgmt" }
+twinvpn-diag         = { version = "0.1.0", path = "../core/crates/twinvpn-diag" }
 # The C ABI, so W-24 and W-25 can be asserted against the shipped vtable rather
 # than against the header text alone. `twinvpn-ffi` declares an `rlib` target
 # beside its `cdylib`/`staticlib`, so this links like any other crate.
-twinvpn-ffi          = { path = "../core/crates/twinvpn-ffi" }
+twinvpn-ffi          = { version = "0.1.0", path = "../core/crates/twinvpn-ffi" }
 
 # TwinLab, for the deterministic Env and the scenario catalogue.
-twinlab              = { path = "../lab/twinlab" }
+twinlab              = { version = "0.1.0", path = "../lab/twinlab" }
 
 serde_json = "1.0"
 # The wire runtime the shipped Rust bindings use. Pinned to the same major the

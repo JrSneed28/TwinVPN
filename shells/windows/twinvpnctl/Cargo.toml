@@ -28,7 +28,7 @@ publish = false
 # The MI contract, from the ONE place it is declared (MI-20). `default-features
 # = false` excludes the whole `service` feature, so this unprivileged binary
 # links no Wintun, no WFP, no IP Helper and no core-hosting code.
-twinvpnsvc    = { path = "../twinvpnsvc", default-features = false }
+twinvpnsvc    = { version = "0.1.0", path = "../twinvpnsvc", default-features = false }
 twinvpn-mgmt  = { workspace = true }
 twinvpn-types = { workspace = true }
 twinvpn-diag  = { workspace = true }

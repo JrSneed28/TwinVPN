@@ -32,4 +32,4 @@ futures-core          = { workspace = true }
 zeroize               = { workspace = true }
 
 [dev-dependencies]
-twinvpn-platform      = { path = ".", features = ["mock"] }
+twinvpn-platform      = { version = "0.1.0", path = ".", features = ["mock"] }

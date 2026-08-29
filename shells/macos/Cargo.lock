@@ -1533,6 +1533,7 @@ dependencies = [
  "tracing-subscriber",
  "twinvpn-core",
  "twinvpn-diag",
+ "twinvpn-enforce",
  "twinvpn-env",
  "twinvpn-mgmt",
  "twinvpn-mi",
@@ -1641,6 +1642,7 @@ dependencies = [
 name = "twinvpn-enforce"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "thiserror",
  "twinvpn-dns",
  "twinvpn-env",

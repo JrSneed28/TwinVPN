@@ -92,7 +92,11 @@ pub mod datapath;
 #[cfg(feature = "full")]
 pub mod journal;
 #[cfg(feature = "full")]
+pub mod pairing;
+#[cfg(feature = "full")]
 pub mod relay;
+#[cfg(feature = "full")]
+pub mod resume;
 #[cfg(feature = "full")]
 pub mod session_loop;
 

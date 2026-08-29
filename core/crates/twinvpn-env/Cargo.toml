@@ -39,4 +39,4 @@ tokio                 = { workspace = true, optional = true, features = ["rt", "
 
 [dev-dependencies]
 proptest              = { workspace = true }
-twinvpn-env           = { path = ".", features = ["test-support"] }
+twinvpn-env           = { version = "0.1.0", path = ".", features = ["test-support"] }

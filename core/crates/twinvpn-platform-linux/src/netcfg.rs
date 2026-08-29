@@ -638,6 +638,7 @@ mod tests {
             cgroup_path: None,
             local_network_access: true,
             on_link_prefixes: Vec::new(),
+            doh_endpoints: Vec::new(),
         }
     }
 
