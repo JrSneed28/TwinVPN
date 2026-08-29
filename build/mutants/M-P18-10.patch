@@ -1,0 +1,34 @@
+Mutant:      M-P18-10
+Proof:       P18
+Spec:        docs/adr/ADR-0019 §11.13 P18 mutant table; ADR-0019 LT-3c
+Description: drops one code's neutral next-action variant from the generated catalogue, leaving it with platform variants only
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-diag lt_3c_every_user_actionable_code_has_a_neutral_next_action
+Fails:       has an empty next action
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-diag/build.rs b/core/crates/twinvpn-diag/build.rs
+index 14f7e61..f342352 100644
+--- a/core/crates/twinvpn-diag/build.rs
++++ b/core/crates/twinvpn-diag/build.rs
+@@ -157,7 +157,15 @@ fn generate(registry: &serde_json::Value, overlay: &serde_json::Value) -> String
+         let _ = writeln!(out, "    CatalogueEntry {{");
+         let _ = writeln!(out, "        key: {key:?},");
+         let _ = writeln!(out, "        code: {code:?},");
+-        let _ = writeln!(out, "        neutral: {:?},", authored.text);
++        // MUTANT M-P18-10: one code's neutral next-action variant is dropped
++        // from the generated catalogue, leaving it with platform variants only.
++        let neutral: &str =
++            if key.as_str() == "reason.platform_vpn_permission_denied.next_action" {
++                ""
++            } else {
++                authored.text.as_str()
++            };
++        let _ = writeln!(out, "        neutral: {neutral:?},");
+         let _ = writeln!(out, "        authored: {},", authored.from_overlay);
+         let _ = writeln!(out, "        variants: &[");
+         for (platform, text) in &authored.variants {

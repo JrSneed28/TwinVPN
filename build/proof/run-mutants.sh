@@ -60,7 +60,23 @@
 # A clean run that fails blocks before any mutant is attempted: a mutant run
 # against a red baseline says nothing.
 #
+# A FOURTH OUTCOME, ADDED BECAUSE IT MUST BE COUNTED SEPARATELY
+#
+#   TIMEOUT      the oracle neither passed nor failed inside $MUTANT_TIMEOUT
+#                seconds (default 900). A hung oracle is NOT a caught mutant and
+#                must never be folded into one: the test said nothing at all.
+#                Blocks, like NOT-CAUGHT and UNBUILDABLE.
+#
+# MACHINE-READABLE OUTPUT
+#
+# Set MUTANT_VERDICTS to a path and this script also writes one TSV line per
+# mutant, `id<TAB>proof<TAB>verdict<TAB>detail`, so build/proof/mutation-gate.sh
+# reconciles against a parsed record rather than against this script's prose.
+#
 # Usage:  build/proof/run-mutants.sh [--rev <commit>] [--proof P07] [MUTANT_ID ...]
+#
+#   MUTANT_TIMEOUT=<seconds>   per-oracle wall clock, default 900
+#   MUTANT_VERDICTS=<path>     also write the verdicts as TSV
 
 set -uo pipefail
 
@@ -68,6 +84,9 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MUTANT_DIR="$REPO/build/mutants"
 REV="HEAD"
 WANT_PROOF=""
+MUTANT_TIMEOUT="${MUTANT_TIMEOUT:-900}"
+VERDICT_FILE="${MUTANT_VERDICTS:-}"
+[ -n "$VERDICT_FILE" ] && : > "$VERDICT_FILE"
 declare -a WANT_IDS=()
 
 while [ $# -gt 0 ]; do
@@ -163,8 +182,11 @@ for p in "${PATCHES[@]}"; do
   key="$ws|$oracle"
   [ -n "${CLEAN_SEEN[$key]+x}" ] && continue
   CLEAN_SEEN[$key]=1
-  out="$(cd "$RIG/rig/$ws" && eval "$oracle" 2>&1)"; rc=$?
-  if [ "$rc" -eq 0 ]; then
+  out="$(cd "$RIG/rig/$ws" && timeout "$MUTANT_TIMEOUT" bash -c "$oracle" 2>&1)"; rc=$?
+  if [ "$rc" -eq 124 ]; then
+    printf '  CLEAN-TIMEOUT %s\n' "$oracle"
+    clean_failures=$((clean_failures + 1))
+  elif [ "$rc" -eq 0 ]; then
     printf '  PASS         %s\n' "$oracle"
   else
     printf '  CLEAN-FAILED %s\n' "$oracle"
@@ -183,8 +205,15 @@ fi
 # ---------------------------------------------------------------------------
 # Step 2 — every mutant must be buildable AND caught.
 # ---------------------------------------------------------------------------
+# One TSV line per mutant, for mutation-gate.sh. A no-op unless the caller
+# asked for a file, so the human output is unchanged.
+record() {
+  [ -n "$VERDICT_FILE" ] || return 0
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$VERDICT_FILE"
+}
+
 echo "=== mutants ==="
-caught=0; not_caught=0; unbuildable=0
+caught=0; not_caught=0; unbuildable=0; timed_out=0
 declare -a VERDICTS=()
 
 for p in "${PATCHES[@]}"; do
@@ -195,13 +224,25 @@ for p in "${PATCHES[@]}"; do
   git -C "$RIG/rig" checkout --quiet -- .
   if ! git -C "$RIG/rig" apply "$p" 2>/dev/null; then
     printf '  %-10s %-5s UNBUILDABLE  the patch does not apply to %s\n' "$id" "$proof" "${COMMIT:0:12}"
+    record "$id" "$proof" UNVIABLE does-not-apply
     VERDICTS+=("$id UNBUILDABLE does-not-apply")
     unbuildable=$((unbuildable + 1))
     continue
   fi
 
-  out="$(cd "$RIG/rig/$ws" && eval "$oracle" 2>&1)"; rc=$?
+  out="$(cd "$RIG/rig/$ws" && timeout "$MUTANT_TIMEOUT" bash -c "$oracle" 2>&1)"; rc=$?
   git -C "$RIG/rig" checkout --quiet -- .
+
+  # A hung oracle is not a caught mutant. It is the test saying nothing, and
+  # PT-1's question - did the named oracle reject this build - has no answer.
+  if [ "$rc" -eq 124 ]; then
+    printf '  %-10s %-5s TIMEOUT      the oracle did not finish in %ss; it said nothing.\n' \
+      "$id" "$proof" "$MUTANT_TIMEOUT"
+    record "$id" "$proof" TIMEOUT "${MUTANT_TIMEOUT}s"
+    VERDICTS+=("$id TIMEOUT ${MUTANT_TIMEOUT}s")
+    timed_out=$((timed_out + 1))
+    continue
+  fi
 
   # A compile error is not a caught mutant. PT-1 asks for a BUILDABLE patch, so
   # a patch that does not compile is a defect in the mutant and must never be
@@ -216,6 +257,7 @@ for p in "${PATCHES[@]}"; do
   if grep -qE '^error\[E[0-9]+\]:|^error: could not compile|^error: aborting due to' <<<"$out"; then
     printf '  %-10s %-5s UNBUILDABLE  the patch does not compile\n' "$id" "$proof"
     grep -E '^error' <<<"$out" | head -3 | sed 's/^/               /'
+    record "$id" "$proof" UNVIABLE does-not-compile
     VERDICTS+=("$id UNBUILDABLE does-not-compile")
     unbuildable=$((unbuildable + 1))
     continue
@@ -224,6 +266,7 @@ for p in "${PATCHES[@]}"; do
   if [ "$rc" -eq 0 ]; then
     printf '  %-10s %-5s NOT-CAUGHT   the oracle passed against a build that %s\n' "$id" "$proof" "$desc"
     printf '               PT-1: this is a DEFECT IN THE TEST, at product severity.\n'
+    record "$id" "$proof" SURVIVED "$oracle"
     VERDICTS+=("$id NOT-CAUGHT $oracle")
     not_caught=$((not_caught + 1))
     continue
@@ -235,20 +278,22 @@ for p in "${PATCHES[@]}"; do
     # evidence the proof test claims, so it is reported rather than counted.
     printf '  %-10s %-5s NOT-CAUGHT   failed, but `%s` is absent from the output;\n' "$id" "$proof" "$fails"
     printf '               the expected oracle is not what rejected this build.\n'
+    record "$id" "$proof" SURVIVED wrong-oracle
     VERDICTS+=("$id NOT-CAUGHT wrong-oracle")
     not_caught=$((not_caught + 1))
     continue
   fi
 
   printf '  %-10s %-5s CAUGHT       %s\n' "$id" "$proof" "$fails"
+  record "$id" "$proof" KILLED "$fails"
   VERDICTS+=("$id CAUGHT $fails")
   caught=$((caught + 1))
 done
 
 echo
 echo "=== verdict ==="
-printf '  %d caught, %d not caught, %d unbuildable, out of %d\n' \
-  "$caught" "$not_caught" "$unbuildable" "${#PATCHES[@]}"
+printf '  %d caught, %d not caught, %d unbuildable, %d timed out, out of %d\n' \
+  "$caught" "$not_caught" "$unbuildable" "$timed_out" "${#PATCHES[@]}"
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
@@ -263,7 +308,7 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   } >> "$GITHUB_STEP_SUMMARY"
 fi
 
-if [ "$not_caught" -gt 0 ] || [ "$unbuildable" -gt 0 ]; then
+if [ "$not_caught" -gt 0 ] || [ "$unbuildable" -gt 0 ] || [ "$timed_out" -gt 0 ]; then
   echo "::error::PT-1 not satisfied. A proof test whose mutant set is not demonstrably"
   echo "caught is not known to test anything (V2), and release blocker B-1 applies."
   exit 1

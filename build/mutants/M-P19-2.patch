@@ -1,0 +1,32 @@
+Mutant:      M-P19-2
+Proof:       P19
+Spec:        docs/adr/ADR-0020 §11.17 P19 mutant table; ADR-0020 §11.11 rung L3
+Description: re-seeds the floors from the quarantined vault on L3 recovery instead of from the Tier-1 anchor, so the corruption chooses the floors
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-store --test ladder a_corrupt_vault_is_quarantined_and_the_floors_come_from_tier_1
+Fails:       a_corrupt_vault_is_quarantined_and_the_floors_come_from_tier_1
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-store/src/lib.rs b/core/crates/twinvpn-store/src/lib.rs
+index f29524a..2a31b69 100644
+--- a/core/crates/twinvpn-store/src/lib.rs
++++ b/core/crates/twinvpn-store/src/lib.rs
+@@ -302,6 +302,14 @@ impl Store {
+         // than being dropped, so that the arithmetic is already correct when the
+         // mirror lands: taking the *minimum* would silently lower a floor, which
+         // is the rollback the anchor exists to prevent.
++        // MUTANT M-P19-2: L3 corruption recovery re-seeds the floors from the
++        // quarantined vault instead of from the Tier-1 anchor, so an attacker
++        // who chooses the corruption chooses the floors.
++        let anchor_floors = if vault_rebuilt {
++            FloorSet::new()
++        } else {
++            anchor_floors
++        };
+         let floors = anchor_floors.merge_max(&vault_floors(&vault_image));
+ 
+         let rung = match &state {

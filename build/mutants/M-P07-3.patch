@@ -1,0 +1,30 @@
+Mutant:      M-P07-3
+Proof:       P07
+Spec:        docs/testing-strategy.md §4 P07 mutant table; ADR-0012 §11.9, ADR-0010 §11.5(2)
+Description: makes the Tier-2 rule a destination-prefix allow-list rather than interface-scoped, so the egress interface no longer decides
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-enforce --test fail_closed tier_2_permits_only_the_overlay_interface_and_names_no_prefix
+Fails:       assertion failed: !t2.permits(WIFI)
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-enforce/src/scope.rs b/core/crates/twinvpn-enforce/src/scope.rs
+index 986ce02..1a3f0a6 100644
+--- a/core/crates/twinvpn-enforce/src/scope.rs
++++ b/core/crates/twinvpn-enforce/src/scope.rs
+@@ -132,7 +132,11 @@ impl Tier2 {
+     /// correctness.
+     #[must_use]
+     pub fn permits(self, egress: InterfaceIndex) -> bool {
+-        egress == self.overlay_interface
++        // MUTANT M-P07-3: the rule is a destination-prefix ALLOW-LIST rather
++        // than interface-scoped, so the egress interface no longer decides and
++        // an interface that appears after the rules were written is permitted.
++        let _ = (egress, self.overlay_interface);
++        true
+     }
+ 
+     /// Both families are covered by construction; this exists so the property

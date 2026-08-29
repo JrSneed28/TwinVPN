@@ -1,0 +1,29 @@
+Mutant:      M-P17-13
+Proof:       P17
+Spec:        docs/adr/ADR-0017 §11.17 P17 mutant table; ADR-0017 MI-16
+Description: reads as_of_ms from CLOCK_MONOTONIC instead of CLOCK_BOOTTIME, so the reported age excludes any suspended interval
+Workspace:   shells/linux
+Oracle:      cargo test -q -p twinvpnd --test mi_roundtrip mi16_as_of_ms_is_the_agents_boot_time_reading_not_the_clients
+Fails:       the monotonic clock was substituted for the elapsed one
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/shells/linux/twinvpnd/src/agent/server.rs b/shells/linux/twinvpnd/src/agent/server.rs
+index 85345c2..d3fb3f9 100644
+--- a/shells/linux/twinvpnd/src/agent/server.rs
++++ b/shells/linux/twinvpnd/src/agent/server.rs
+@@ -102,7 +102,10 @@ impl ServerContext {
+     /// all (W-7).
+     #[must_use]
+     pub fn as_of_ms(&self) -> u64 {
+-        self.env.now_elapsed().as_micros() / 1_000
++        // MUTANT M-P17-13: `as_of_ms` is read from CLOCK_MONOTONIC instead of
++        // CLOCK_BOOTTIME, so the age excludes any suspended interval — LC-8's
++        // failure that is invisible on a CI runner that never suspends.
++        self.env.now_monotonic().as_micros() / 1_000
+     }
+ }
+ 

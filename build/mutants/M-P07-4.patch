@@ -1,0 +1,29 @@
+Mutant:      M-P07-4
+Proof:       P07
+Spec:        docs/testing-strategy.md §4 P07 mutant table; ADR-0012 §11.9 KS-5
+Description: reports a v4-only install as PROTECTED instead of unprotected, so the DEGRADED disclosure is suppressed and v6 is left open
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-enforce --test fail_closed a_missing_family_is_never_reported_as_protected
+Fails:       a_missing_family_is_never_reported_as_protected
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-enforce/src/reconciler.rs b/core/crates/twinvpn-enforce/src/reconciler.rs
+index 193591d..fe0d852 100644
+--- a/core/crates/twinvpn-enforce/src/reconciler.rs
++++ b/core/crates/twinvpn-enforce/src/reconciler.rs
+@@ -60,7 +60,10 @@ impl Assertion {
+         if now.duration_since(self.asserted_at) > self.freshness_window {
+             return Posture::Unknown;
+         }
+-        if self.missing_family().is_some() {
++        // MUTANT M-P07-4: a v4-only install is reported as PROTECTED instead
++        // of driving the family-named unprotected posture — the DEGRADED
++        // disclosure is suppressed and v6 is left open.
++        if false {
+             return Posture::Unprotected(codes::ruleset_absent());
+         }
+         match self.installed {

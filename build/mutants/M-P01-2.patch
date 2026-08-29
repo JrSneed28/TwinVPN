@@ -1,0 +1,37 @@
+Mutant:      M-P01-2
+Proof:       P01
+Spec:        docs/testing-strategy.md §4 P01 mutant table; ADR-0004 §11.6
+Description: races candidate pairs serially, one per family-bias slot, instead of scheduling every pair at once
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-path --test ladder every_pair_is_scheduled_at_once_staggered_only_by_the_250ms_family_bias
+Fails:       every_pair_is_scheduled_at_once_staggered_only_by_the_250ms_family_bias
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-path/src/race.rs b/core/crates/twinvpn-path/src/race.rs
+index f32894b..61b4856 100644
+--- a/core/crates/twinvpn-path/src/race.rs
++++ b/core/crates/twinvpn-path/src/race.rs
+@@ -80,11 +80,17 @@ impl Race {
+     /// every entry gets a start instant up front.
+     #[must_use]
+     pub fn schedule(candidates: &[Candidate], now: MonotonicInstant) -> Self {
++        // MUTANT M-P01-2: candidate pairs are raced SERIALLY, one at a time,
++        // each waiting a full family-bias slot behind the previous one, instead
++        // of every pair being scheduled at once.
+         let entries = candidates
+             .iter()
+-            .map(|c| Entry {
++            .enumerate()
++            .map(|(i, c)| Entry {
+                 candidate: *c,
+-                first_probe_at: now.saturating_add(start_offset(c.family())),
++                first_probe_at: now
++                    .saturating_add(start_offset(c.family()))
++                    .saturating_add(T_HE_BIAS * u32::try_from(i).unwrap_or(u32::MAX)),
+                 cancelled: false,
+             })
+             .collect();

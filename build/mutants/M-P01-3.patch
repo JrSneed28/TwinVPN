@@ -1,0 +1,37 @@
+Mutant:      M-P01-3
+Proof:       P01
+Spec:        docs/testing-strategy.md §4 P01 mutant table; docs/networking.md §3.3, ADR-0004 §11
+Description: deprioritizes every IPv6 candidate kind below its IPv4 counterpart, so a dual-stack race selects v4
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-path --test ladder native_ipv6_outranks_everything_and_the_relay_is_the_floor
+Fails:       native_ipv6_outranks_everything_and_the_relay_is_the_floor
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/core/crates/twinvpn-path/src/candidate.rs b/core/crates/twinvpn-path/src/candidate.rs
+index c6f6cfc..36f4305 100644
+--- a/core/crates/twinvpn-path/src/candidate.rs
++++ b/core/crates/twinvpn-path/src/candidate.rs
+@@ -61,12 +61,14 @@ impl Kind {
+     /// `networking.md` §3.3's priority column.
+     #[must_use]
+     pub const fn priority(self) -> u32 {
++        // MUTANT M-P01-3: the IPv6 candidate kinds are DEPRIORITIZED below
++        // their IPv4 counterparts, so a dual-stack race selects v4.
+         match self {
+-            Kind::HostV6Global => 130,
+-            Kind::HostV6LinkLocal => 126,
+-            Kind::HostV4Private => 120,
+-            Kind::SrflxV6 => 110,
+-            Kind::SrflxV4 => 100,
++            Kind::HostV4Private => 130,
++            Kind::HostV6Global => 120,
++            Kind::HostV6LinkLocal => 116,
++            Kind::SrflxV4 => 110,
++            Kind::SrflxV6 => 100,
+             Kind::PortmapV4 => 95,
+             Kind::PredictedV4 => 40,
+             Kind::Relay => 10,

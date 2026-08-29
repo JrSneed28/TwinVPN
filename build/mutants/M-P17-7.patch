@@ -1,0 +1,28 @@
+Mutant:      M-P17-7
+Proof:       P17
+Spec:        docs/adr/ADR-0017 §11.17 P17 mutant table; ADR-0017 §11.7
+Description: closes the socket on a version mismatch WITHOUT a Reject, so the refusal is indistinguishable from an absent agent
+Workspace:   shells/linux
+Oracle:      cargo test -q -p twinvpnd --test mi_roundtrip a_version_mismatch_is_answered_before_the_close_never_silently
+Fails:       an answer, not a close
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+
+diff --git a/shells/linux/twinvpnd/src/agent/conn.rs b/shells/linux/twinvpnd/src/agent/conn.rs
+index 6057f0c..86a2400 100644
+--- a/shells/linux/twinvpnd/src/agent/conn.rs
++++ b/shells/linux/twinvpnd/src/agent/conn.rs
+@@ -310,6 +310,10 @@ where
+     // indistinguishable from 'the agent is not running', and it sends the user
+     // to reinstall rather than to update."
+     if mi_version_max < MI_VERSION_MIN || mi_version_min > MI_VERSION {
++        // MUTANT M-P17-7: the socket is closed on a version mismatch WITHOUT a
++        // Reject, which is indistinguishable from "the agent is not running".
++        return Ok(None);
++        #[allow(unreachable_code)]
+         let reject = server::envelope(
+             context.as_of_ms(),
+             // ADR-0017 spells these `MGMT.VERSION_TOO_OLD` / `TOO_NEW`, neither
