@@ -1,6 +1,6 @@
 # First Implementation Wave — acceptance report
 
-Commit `61540ec3fb1f5ff7c443a12c4895203b23d49c93` (DIRTY WORKTREE — not release evidence)
+Commit `5b13591d1d3eeec1200e1a69e9bc0d93706c6d5d` (DIRTY WORKTREE — not release evidence)
 Probes executed: **True**
 
 
@@ -8,13 +8,14 @@ Probes executed: **True**
 
 | criterion | verdict | evidence |
 |---|---|---|
-| crypto producer wired | **FAIL** | no non-test caller for: arm_resumption |
+| crypto producer wired | **PASS** | every entry point has a non-test caller: arm_resumption |
 | crypto consumer wired | **FAIL** | no non-test caller for: resume_on_wire |
-| real datagram roundtrip | **FAIL** | cargo test -q -p twinvpn-core --test crypto_carriage |
-| handshake secret type safety | **FAIL** | core/crates/twinvpn-core/src/resume/driver.rs still contains `handshake_secret: &[u8]` |
-| local role type/state safety | **FAIL** | core/crates/twinvpn-core/src/resume/driver.rs still contains `local_role: Role` |
+| real datagram roundtrip | **PASS** | cargo test -q -p twinvpn-core --test crypto_carriage |
+| handshake secret type safety | **PASS** | core/crates/twinvpn-core/src/resume/driver.rs no longer contains `handshake_secret: &[u8]` |
+| local role type/state safety | **PASS** | core/crates/twinvpn-core/src/resume/driver.rs no longer contains `local_role: Role` |
 | replay commit-last regression | **PASS** | cargo test -p twinvpn-crypto --lib replay::tests |
 | reflection rejection | **PASS** | cargo test -q -p twinvpn-core --test resume reflected |
+| handshake/role API shape asserted | **PASS** | cargo test -q -p twinvpn-core --test resume_api_shape |
 | RS-6 regression | **PASS** | cargo test -q -p twinvpn-core --test resume_lifecycle |
 
 ## F-2
@@ -54,7 +55,7 @@ Probes executed: **True**
 
 ## Phase 5 eligibility
 
-`7` of `23` required criteria are PASS.
+`12` of `24` required criteria are PASS.
 
 **Phase 5 eligibility: FAIL**
 

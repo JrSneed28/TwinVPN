@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-08-29T23:00:50.627796+00:00",
-  "commit": "61540ec3fb1f5ff7c443a12c4895203b23d49c93",
+  "generated_at": "2026-08-29T23:15:35.853419+00:00",
+  "commit": "5b13591d1d3eeec1200e1a69e9bc0d93706c6d5d",
   "worktree_dirty": true,
   "probes_executed": true,
   "rows": [
     {
       "section": "F-1",
       "criterion": "crypto producer wired",
-      "verdict": "FAIL",
-      "detail": "no non-test caller for: arm_resumption",
+      "verdict": "PASS",
+      "detail": "every entry point has a non-test caller: arm_resumption",
       "required": true
     },
     {
@@ -22,22 +22,22 @@
     {
       "section": "F-1",
       "criterion": "real datagram roundtrip",
-      "verdict": "FAIL",
-      "detail": "cargo test -q -p twinvpn-core --test crypto_carriage\n    command_path\n    core_lite_profile\n    cp_binding\n    data_plane_composed\n    datapath\n    falsification\n    pairing\n    pairing_refusals\n    relay\n    resume\n    resume_lifecycle\n    vault",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpn-core --test crypto_carriage",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "handshake secret type safety",
-      "verdict": "FAIL",
-      "detail": "core/crates/twinvpn-core/src/resume/driver.rs still contains `handshake_secret: &[u8]`",
+      "verdict": "PASS",
+      "detail": "core/crates/twinvpn-core/src/resume/driver.rs no longer contains `handshake_secret: &[u8]`",
       "required": true
     },
     {
       "section": "F-1",
       "criterion": "local role type/state safety",
-      "verdict": "FAIL",
-      "detail": "core/crates/twinvpn-core/src/resume/driver.rs still contains `local_role: Role`",
+      "verdict": "PASS",
+      "detail": "core/crates/twinvpn-core/src/resume/driver.rs no longer contains `local_role: Role`",
       "required": true
     },
     {
@@ -52,6 +52,13 @@
       "criterion": "reflection rejection",
       "verdict": "PASS",
       "detail": "cargo test -q -p twinvpn-core --test resume reflected",
+      "required": true
+    },
+    {
+      "section": "F-1",
+      "criterion": "handshake/role API shape asserted",
+      "verdict": "PASS",
+      "detail": "cargo test -q -p twinvpn-core --test resume_api_shape",
       "required": true
     },
     {
@@ -79,7 +86,7 @@
       "section": "F-2",
       "criterion": "complete MI-P1 PairingOffer returned",
       "verdict": "FAIL",
-      "detail": "cargo test -q -p twinvpn-core --test pairing_production\n    command_path\n    core_lite_profile\n    cp_binding\n    data_plane_composed\n    datapath\n    falsification\n    pairing\n    pairing_refusals\n    relay\n    resume\n    resume_lifecycle\n    vault",
+      "detail": "cargo test -q -p twinvpn-core --test pairing_production\n    cp_binding\n    crypto_carriage\n    data_plane_composed\n    datapath\n    falsification\n    pairing\n    pairing_refusals\n    relay\n    resume\n    resume_api_shape\n    resume_lifecycle\n    vault",
       "required": true
     },
     {
@@ -185,7 +192,7 @@
       "evidence": {}
     }
   ],
-  "required_total": 23,
-  "required_pass": 7,
+  "required_total": 24,
+  "required_pass": 12,
   "phase_5_eligibility": "FAIL"
 }

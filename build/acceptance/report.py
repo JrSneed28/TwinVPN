@@ -231,6 +231,13 @@ def build_rows(run: bool):
     v, d = probe_command(
         "core", "cargo test -q -p twinvpn-core --test resume reflected", run)
     add("F-1", "reflection rejection", v, d)
+    # F-1B/F-1C are enforced by the type system, which a test run cannot
+    # observe -- a compiler that rejects the bad call emits no test result. So
+    # `resume_api_shape` asserts the two absences at source level, and this row
+    # runs it.
+    v, d = probe_command(
+        "core", "cargo test -q -p twinvpn-core --test resume_api_shape", run)
+    add("F-1", "handshake/role API shape asserted", v, d)
     v, d = probe_command(
         "core", "cargo test -q -p twinvpn-core --test resume_lifecycle", run)
     add("F-1", "RS-6 regression", v, d)
