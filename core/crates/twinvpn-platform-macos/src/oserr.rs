@@ -437,22 +437,47 @@ mod tests {
         assert_eq!(e.reason_code().as_str(), "PLATFORM.OS_UNSUPPORTED");
     }
 
-    /// **The same finding `twinvpn-platform-linux` pinned, re-checked here.**
+    /// **W-40, closed — inverted, not deleted; the finding
+    /// `twinvpn-platform-linux` carries in full.**
     ///
-    /// `PlatformError::is_retryable` asks the registry for the code's class, and
-    /// every code a `PlatformError` can produce is `PERSISTENT` or `FATAL` under
-    /// the frozen registry. So `EAGAIN` — the most retryable condition a socket
-    /// has — reports `is_retryable() == false`. This adapter therefore never
-    /// drives a backoff off `is_retryable()`; it returns the variant and lets the
-    /// core decide, which is CB-2's direction anyway.
+    /// **Authority:** `contracts/FROZEN` Amendment 2 (`registry_version` 3),
+    /// `ownership.md` §8 (W-40, and W-18's rule that a tripwire keeps guarding
+    /// the behaviour after it is fixed), `reliability.md` §3.1 and §6.1.
+    ///
+    /// It first asserted `!transient.is_retryable()`. That function is
+    /// **deleted**: §3.1 makes `class` the only retry authority and forbids
+    /// guessing one "from an error type". Deleting it left this mapping as the
+    /// only retry authority, which is what turned W-40 from cosmetic into
+    /// load-bearing; it then asserted the mapping defect itself.
+    ///
+    /// Amendment 2 registered `PLATFORM.ADAPTER_BUSY` — `TRANSIENT`,
+    /// non-terminal, not `user_actionable` — and `PlatformError::Transient`
+    /// names it, so both halves now hold together: `EAGAIN` reaches the core
+    /// undecided (CB-2's direction, and what this adapter relies on instead of a
+    /// predicate) **and** names a code whose class §6.1's backoff can read.
+    /// `terminal` is asserted alongside `class` because a re-point that fixed
+    /// only the class would still tell the core the attempt had ended.
     #[test]
-    fn no_platform_error_is_retryable_under_the_frozen_registry() {
+    fn a_retryable_errno_reaches_the_core_as_transient_and_names_a_transient_code() {
         let transient = from_errno(&err(libc::EAGAIN), "recvmsg", Context::Socket);
+        // The adapter's half: the condition is reported, undecided, for the core.
         assert!(matches!(transient, PlatformError::Transient(_)));
-        assert!(
-            !transient.is_retryable(),
-            "if this ever passes, a TRANSIENT PLATFORM code was registered and \
-             this test and its finding should be deleted"
+        // The registry's half, which W-40 was.
+        let code = transient.reason_code();
+        assert_eq!(code.as_str(), "PLATFORM.ADAPTER_BUSY");
+        assert_eq!(
+            code.class(),
+            twinvpn_types::ErrorClass::Transient,
+            "an EAGAIN must name a TRANSIENT-class code: §6.1's backoff reads \
+             `class`, and it is the only retry authority left"
+        );
+        assert!(!code.terminal(), "may succeed if repeated");
+        // The code it left keeps its own, different, meaning: could not be
+        // *opened*, as against could not complete *now*.
+        let opened = from_errno(&err(libc::ENOENT), "connect(utun)", Context::TunnelDevice);
+        assert_eq!(
+            opened.reason_code().as_str(),
+            "PLATFORM.ADAPTER_UNAVAILABLE"
         );
     }
 }

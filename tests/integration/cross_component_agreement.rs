@@ -847,9 +847,9 @@ fn the_compiled_in_reason_registry_agrees_with_the_frozen_file() {
         checked += 1;
     }
     assert_eq!(
-        checked, 454,
-        "contracts/FROZEN records 454 reason codes as of registry_version 2; \
-         the file now has {checked}"
+        checked, 455,
+        "contracts/FROZEN records 455 reason codes as of registry_version 3 \
+         (Amendment 2 added PLATFORM.ADAPTER_BUSY); the file now has {checked}"
     );
 }
 

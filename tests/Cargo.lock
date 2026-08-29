@@ -3357,7 +3357,9 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-util",
  "prost 0.13.5",
+ "quinn",
  "thiserror",
  "tracing",
  "twinvpn-env",

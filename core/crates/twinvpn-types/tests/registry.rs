@@ -17,9 +17,37 @@ use twinvpn_types::{codes, CodeStatus, Domain, ObservedReasonCode, ReasonCode};
 /// defect rather than an inconvenience. The addition is append-only and
 /// wire-compatible: codes travel as strings, no `.proto` moved, and the closed
 /// domain set is unchanged.
+///
+/// **Amendment 2 (2026-08-28) took it to 455**, adding `PLATFORM.ADAPTER_BUSY`.
+/// This test is deliberately an exact count rather than a lower bound: the
+/// registry is frozen, so a code appearing without an amendment is the event
+/// worth failing on, and updating this line is part of the amendment procedure
+/// rather than an inconvenience it imposes.
 #[test]
-fn registry_has_the_454_frozen_codes() {
-    assert_eq!(ReasonCode::all().count(), 454);
+fn registry_has_the_455_frozen_codes() {
+    assert_eq!(ReasonCode::all().count(), 455);
+}
+
+/// Amendment 2's code exists, is `TRANSIENT`, and is not terminal.
+///
+/// The point of W-40 was that a transient syscall outcome had no honest code:
+/// `PlatformError::Transient` mapped onto `PLATFORM.ADAPTER_UNAVAILABLE`, which
+/// is `PERSISTENT` and `terminal`, so a recoverable `EAGAIN` reached the core
+/// labelled permanent. With `PlatformError::is_retryable` deleted — `class` is
+/// the only retry authority now, per `reliability.md` §3.1 — these three
+/// attributes are what the mapping's correctness rests on.
+#[test]
+fn amendment_2s_transient_platform_code_is_transient_and_not_terminal() {
+    let code = twinvpn_types::codes::PLATFORM_ADAPTER_BUSY;
+    assert_eq!(code.class(), twinvpn_types::ErrorClass::Transient);
+    assert!(
+        !code.terminal(),
+        "a retryable condition must not be terminal"
+    );
+    assert!(
+        !code.user_actionable(),
+        "there is nothing for a user to do about a call that will be retried"
+    );
 }
 
 #[test]
@@ -147,5 +175,5 @@ fn observed_code_accepts_a_code_at_exactly_the_64_byte_cap() {
 /// case nobody can answer.
 #[test]
 fn registry_version_is_embedded() {
-    assert_eq!(twinvpn_types::REASON_REGISTRY_VERSION, 2);
+    assert_eq!(twinvpn_types::REASON_REGISTRY_VERSION, 3);
 }

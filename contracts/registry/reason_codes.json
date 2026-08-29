@@ -1,5 +1,5 @@
 {
-  "registry_version": 2,
+  "registry_version": 3,
   "format": "DOMAIN.CONDITION or DOMAIN.SUBDOMAIN.CONDITION; uppercase, dot-separated, ASCII, <=64 bytes, two or three segments",
   "carried_on_wire_as": "string, never an enum",
   "closed_domain_set": [
@@ -3302,6 +3302,28 @@
       "next_action_key": "reason.platform_adapter_unavailable.next_action"
     },
     {
+      "reason_code": "PLATFORM.ADAPTER_BUSY",
+      "domain": "PLATFORM",
+      "class": "TRANSIENT",
+      "severity": "WARN",
+      "terminal": false,
+      "user_actionable": false,
+      "remediation_class": "NONE",
+      "scope": "DEVICE",
+      "summary_key": "reason.platform_adapter_busy.summary",
+      "doc_anchor": "architecture#platform_adapter_busy",
+      "evidence_fields": [
+        "errno",
+        "syscall",
+        "os_error_code",
+        "platform"
+      ],
+      "owning_document": "architecture.md",
+      "condition": "The platform adapter could not complete the call now; the same call may succeed if repeated",
+      "introduced_in_registry_version": 3,
+      "status": "ACTIVE"
+    },
+    {
       "reason_code": "PLATFORM.THIRD_PARTY_FILTER_SUSPECTED",
       "domain": "PLATFORM",
       "class": "PERSISTENT",
@@ -4019,7 +4041,7 @@
         "platform"
       ],
       "owning_document": "ADR-0011",
-      "condition": "The negative canary's deny counter did not increment. Drives T29 → BLOCKED",
+      "condition": "The negative canary's deny counter did not increment. Drives T29 \u2192 BLOCKED",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -4178,7 +4200,7 @@
         "platform"
       ],
       "owning_document": "ADR-0011",
-      "condition": "servers_v4[] or servers_v6[] absent; protocol §13.4 requires both present (empty ≠ absent). Bundle refused",
+      "condition": "servers_v4[] or servers_v6[] absent; protocol \u00a713.4 requires both present (empty \u2260 absent). Bundle refused",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.dns_policy_family_list_absent.next_action"
@@ -4291,7 +4313,7 @@
         "platform"
       ],
       "owning_document": "ADR-0011",
-      "condition": "DNSPolicy is EXPIRED, so grant-shaped forwarding is suspended; denials retained (§11.12, ADR-0009 §11.4)",
+      "condition": "DNSPolicy is EXPIRED, so grant-shaped forwarding is suspended; denials retained (\u00a711.12, ADR-0009 \u00a711.4)",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.dns_upstream_forwarding_suspended.next_action"
@@ -4309,7 +4331,7 @@
       "doc_anchor": "adr-0017#mgmt_audit_gap",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "A privileged local act could not be recorded — the UnblockRecord was unwritable, or the Tier-0 ledger was unavailable. Enforcement posture is treated as UNKNOWN until re-asserted (ADR-0015 O-17/O-18). Every occurrence is investigated",
+      "condition": "A privileged local act could not be recorded \u2014 the UnblockRecord was unwritable, or the Tier-0 ledger was unavailable. Enforcement posture is treated as UNKNOWN until re-asserted (ADR-0015 O-17/O-18). Every occurrence is investigated",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -4326,7 +4348,7 @@
       "doc_anchor": "adr-0017#mgmt_capture_expiry_required",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "A capture-level raise without an expiry was refused. → \"Choose how long to capture detailed logs.\"",
+      "condition": "A capture-level raise without an expiry was refused. \u2192 \"Choose how long to capture detailed logs.\"",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_capture_expiry_required.next_action"
@@ -4344,7 +4366,7 @@
       "doc_anchor": "adr-0017#mgmt_channel_unsupported",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "The platform channel cannot carry this operation in the current state (iOS stopped session, Android disarm). → the platform-specific next action, e.g. \"Open Settings › VPN.\" Names the residual rather than hiding it",
+      "condition": "The platform channel cannot carry this operation in the current state (iOS stopped session, Android disarm). \u2192 the platform-specific next action, e.g. \"Open Settings \u203a VPN.\" Names the residual rather than hiding it",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_channel_unsupported.next_action"
@@ -4362,7 +4384,7 @@
       "doc_anchor": "adr-0017#mgmt_client_too_slow",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "The client was evicted for backpressure (§11.10). → none; the client reconnects and resyncs",
+      "condition": "The client was evicted for backpressure (\u00a711.10). \u2192 none; the client reconnects and resyncs",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -4379,7 +4401,7 @@
       "doc_anchor": "adr-0023#mgmt_config_frontend_diverged",
       "evidence_fields": [],
       "owning_document": "ADR-0023",
-      "condition": "The authoring front-end (UCI) no longer matches the compiled generation — an edit landed without a reload. Next: twinvpn config diff, then reload.",
+      "condition": "The authoring front-end (UCI) no longer matches the compiled generation \u2014 an edit landed without a reload. Next: twinvpn config diff, then reload.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_config_frontend_diverged.next_action"
@@ -4648,7 +4670,7 @@
       "doc_anchor": "adr-0017#mgmt_disarm_no_local_authority",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "No interactive local principal exists (headless, cron, automation). → \"Disarm requires an interactive administrator session on this device.\" Terminal for the attempt",
+      "condition": "No interactive local principal exists (headless, cron, automation). \u2192 \"Disarm requires an interactive administrator session on this device.\" Terminal for the attempt",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_disarm_no_local_authority.next_action"
@@ -4666,7 +4688,7 @@
       "doc_anchor": "adr-0017#mgmt_duplicate_replayed",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "Idempotency-key hit; the recorded outcome is returned (MI-7). Supplies the local half of ADR-0008 §11.2's duplicate_replayed requirement",
+      "condition": "Idempotency-key hit; the recorded outcome is returned (MI-7). Supplies the local half of ADR-0008 \u00a711.2's duplicate_replayed requirement",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -4683,7 +4705,7 @@
       "doc_anchor": "adr-0017#mgmt_listen_failed",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "The agent could not create or verify its endpoint. \"TwinVPN is protecting this device but cannot be managed.\" → \"Reinstall TwinVPN, or check permissions on the service directory.\" Protection is unaffected (MI-I5-4)",
+      "condition": "The agent could not create or verify its endpoint. \"TwinVPN is protecting this device but cannot be managed.\" \u2192 \"Reinstall TwinVPN, or check permissions on the service directory.\" Protection is unaffected (MI-I5-4)",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_listen_failed.next_action"
@@ -4701,7 +4723,7 @@
       "doc_anchor": "adr-0017#mgmt_monotone_refused",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "A request would lower enforcement (MI-S3). → \"Protection cannot be reduced this way; use the disarm action.\" Refused, never silently clamped",
+      "condition": "A request would lower enforcement (MI-S3). \u2192 \"Protection cannot be reduced this way; use the disarm action.\" Refused, never silently clamped",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_monotone_refused.next_action"
@@ -4719,7 +4741,7 @@
       "doc_anchor": "adr-0017#mgmt_not_ready",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "Starting or rehydrating; not yet authoritative. → \"TwinVPN is starting.\" Never answered with a fabricated DISCONNECTED",
+      "condition": "Starting or rehydrating; not yet authoritative. \u2192 \"TwinVPN is starting.\" Never answered with a fabricated DISCONNECTED",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -4736,7 +4758,7 @@
       "doc_anchor": "adr-0017#mgmt_op_unknown",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "Operation absent from this build's catalogue (version or build profile). → \"This TwinVPN build does not support that action.\"",
+      "condition": "Operation absent from this build's catalogue (version or build profile). \u2192 \"This TwinVPN build does not support that action.\"",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_op_unknown.next_action"
@@ -4771,7 +4793,7 @@
       "doc_anchor": "adr-0017#mgmt_policy_forbids",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "The preference is outside the signed AccessPolicy/DNSPolicy (MI-S4). → \"Your TwinNet's policy does not permit that setting.\"",
+      "condition": "The preference is outside the signed AccessPolicy/DNSPolicy (MI-S4). \u2192 \"Your TwinNet's policy does not permit that setting.\"",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_policy_forbids.next_action"
@@ -4789,7 +4811,7 @@
       "doc_anchor": "adr-0017#mgmt_precondition_failed",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "if_version mismatch (ADR-0008 N-2). → \"Someone else changed this setting; reload and try again.\"",
+      "condition": "if_version mismatch (ADR-0008 N-2). \u2192 \"Someone else changed this setting; reload and try again.\"",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_precondition_failed.next_action"
@@ -4807,7 +4829,7 @@
       "doc_anchor": "adr-0017#mgmt_rate_limited",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "Carries retry_after_ms. → \"Too many requests; try again shortly.\"",
+      "condition": "Carries retry_after_ms. \u2192 \"Too many requests; try again shortly.\"",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_rate_limited.next_action"
@@ -4825,7 +4847,7 @@
       "doc_anchor": "adr-0017#mgmt_resync_required",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "An offered cursor cannot be serviced — agent restart, HELD past retention, or a lifecycle discontinuity (MI-9a). The client's prior state has no valid base. → the client MUST call event.resync before treating any state as current",
+      "condition": "An offered cursor cannot be serviced \u2014 agent restart, HELD past retention, or a lifecycle discontinuity (MI-9a). The client's prior state has no valid base. \u2192 the client MUST call event.resync before treating any state as current",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -4842,7 +4864,7 @@
       "doc_anchor": "adr-0017#mgmt_shutting_down",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "Draining; carries drain_deadline_ms. → \"TwinVPN is restarting.\"",
+      "condition": "Draining; carries drain_deadline_ms. \u2192 \"TwinVPN is restarting.\"",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -4859,7 +4881,7 @@
       "doc_anchor": "adr-0017#mgmt_unblock_invoked",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "The offline unblock command was invoked while the agent was not running (§11.21.2). Surfaced at next start. → \"Protection was removed from this device outside TwinVPN. Re-arm it.\" Not a failure — a visibility obligation",
+      "condition": "The offline unblock command was invoked while the agent was not running (\u00a711.21.2). Surfaced at next start. \u2192 \"Protection was removed from this device outside TwinVPN. Re-arm it.\" Not a failure \u2014 a visibility obligation",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_unblock_invoked.next_action"
@@ -4877,7 +4899,7 @@
       "doc_anchor": "adr-0017#mgmt_version_too_new",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "Client above mi_version_max. → \"Update the TwinVPN background service; your client is newer.\" Names which side is behind",
+      "condition": "Client above mi_version_max. \u2192 \"Update the TwinVPN background service; your client is newer.\" Names which side is behind",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_version_too_new.next_action"
@@ -4895,7 +4917,7 @@
       "doc_anchor": "adr-0017#mgmt_version_too_old",
       "evidence_fields": [],
       "owning_document": "ADR-0017",
-      "condition": "Client below mi_version_min. → \"Update the TwinVPN client; the background service is newer.\" Carries agent_version",
+      "condition": "Client below mi_version_min. \u2192 \"Update the TwinVPN client; the background service is newer.\" Carries agent_version",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.mgmt_version_too_old.next_action"
@@ -5277,7 +5299,7 @@
         "platform"
       ],
       "owning_document": "architecture.md",
-      "condition": "Mobile OS backgrounding; keepalives are parked per docs/reliability.md §11.2",
+      "condition": "Mobile OS backgrounding; keepalives are parked per docs/reliability.md \u00a711.2",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -5414,7 +5436,7 @@
         "platform"
       ],
       "owning_document": "ADR-0023",
-      "condition": "The terminal is smaller than 71×37, so the QR form is unavailable. Next: enlarge the terminal, or use --text.",
+      "condition": "The terminal is smaller than 71\u00d737, so the QR form is unavailable. Next: enlarge the terminal, or use --text.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.platform_embedded_enrolment_terminal_too_small.next_action"
@@ -5596,7 +5618,7 @@
         "platform"
       ],
       "owning_document": "ADR-0023",
-      "condition": "This platform admits no headless profile (iOS, iPadOS, Android — C-09). Next: manage this device from its application.",
+      "condition": "This platform admits no headless profile (iOS, iPadOS, Android \u2014 C-09). Next: manage this device from its application.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.platform_embedded_no_headless_profile.next_action"
@@ -6228,7 +6250,7 @@
         "platform"
       ],
       "owning_document": "ADR-0022",
-      "condition": "No TwinVPN peer is reachable on this network, so it cannot be proven trusted; the exception is unavailable here. Next: none required — this is the safe outcome",
+      "condition": "No TwinVPN peer is reachable on this network, so it cannot be proven trusted; the exception is unavailable here. Next: none required \u2014 this is the safe outcome",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.platform_lifecycle_trusted_net_unprovable.next_action"
@@ -7005,7 +7027,7 @@
       "doc_anchor": "adr-0012#policy_leak_dns_unprotected",
       "evidence_fields": [],
       "owning_document": "ADR-0012",
-      "condition": "The DNS policy interface of §11.12(a) is unsatisfied; detail codes are DNS.",
+      "condition": "The DNS policy interface of \u00a711.12(a) is unsatisfied; detail codes are DNS.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -7162,7 +7184,7 @@
       "doc_anchor": "adr-0006#relay_failover_cross_region",
       "evidence_fields": [],
       "owning_document": "ADR-0006",
-      "condition": "reliability §5.4 enters DEGRADED at > 250 ms absolute on a relay path, so a cross-region failover from an already-marginal region can land in DEGRADED — a working-but-worse path, announced with RELAY.FAILOVER.CROSS_REGION at the moment of the move and reliability's QOS_ code if the threshold is then crossed.",
+      "condition": "reliability \u00a75.4 enters DEGRADED at > 250 ms absolute on a relay path, so a cross-region failover from an already-marginal region can land in DEGRADED \u2014 a working-but-worse path, announced with RELAY.FAILOVER.CROSS_REGION at the moment of the move and reliability's QOS_ code if the threshold is then crossed.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -7179,7 +7201,7 @@
       "doc_anchor": "adr-0006#relay_failover_epoch_conflict",
       "evidence_fields": [],
       "owning_document": "ADR-0006",
-      "condition": "path_epoch is monotone (protocol §11.2); on an equal epoch the offer from the device with the lexicographically lower device_id wins and the other is ignored with RELAY.FAILOVER.EPOCH_CONFLICT.",
+      "condition": "path_epoch is monotone (protocol \u00a711.2); on an equal epoch the offer from the device with the lexicographically lower device_id wins and the other is ignored with RELAY.FAILOVER.EPOCH_CONFLICT.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -7230,7 +7252,7 @@
       "doc_anchor": "adr-0006#relay_fleet_unreachable",
       "evidence_fields": [],
       "owning_document": "ADR-0006",
-      "condition": "reliability §6.3's rule is confirmed unchanged: with breakers open on more than half the reachable relay set, relay retries stop for 60 s and the condition is reported — canonical code RELAY.FLEET.UNREACHABLE (§11.13).",
+      "condition": "reliability \u00a76.3's rule is confirmed unchanged: with breakers open on more than half the reachable relay set, relay retries stop for 60 s and the condition is reported \u2014 canonical code RELAY.FLEET.UNREACHABLE (\u00a711.13).",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.relay_fleet_unreachable.next_action"
@@ -7301,7 +7323,7 @@
       "doc_anchor": "adr-0006#relay_map_peer_supplied_accepted",
       "evidence_fields": [],
       "owning_document": "ADR-0006",
-      "condition": "A peer holding a strictly higher version MAY offer the signed document over the existing encrypted Session; the receiver verifies the issuer signature, refuses any non-increasing version (RELAY.MAP.VERSION_ROLLBACK_REFUSED), and applies it under §11.1 rule 3, emitting RELAY.MAP.PEER_SUPPLIED_ACCEPTED.",
+      "condition": "A peer holding a strictly higher version MAY offer the signed document over the existing encrypted Session; the receiver verifies the issuer signature, refuses any non-increasing version (RELAY.MAP.VERSION_ROLLBACK_REFUSED), and applies it under \u00a711.1 rule 3, emitting RELAY.MAP.PEER_SUPPLIED_ACCEPTED.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -7318,7 +7340,7 @@
       "doc_anchor": "adr-0006#relay_map_signature_invalid",
       "evidence_fields": [],
       "owning_document": "ADR-0006",
-      "condition": "A map that verifies against no held key is RELAY.MAP.SIGNATURE_INVALID and the previously held map remains in force — a bad publish must not disarm the fleet.",
+      "condition": "A map that verifies against no held key is RELAY.MAP.SIGNATURE_INVALID and the previously held map remains in force \u2014 a bad publish must not disarm the fleet.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -7352,7 +7374,7 @@
       "doc_anchor": "adr-0006#relay_map_version_rollback_refused",
       "evidence_fields": [],
       "owning_document": "ADR-0006",
-      "condition": "A lower version is refused with RELAY.MAP.VERSION_ROLLBACK_REFUSED — a security event, matching the S-06/S-03 anti-rollback discipline.",
+      "condition": "A lower version is refused with RELAY.MAP.VERSION_ROLLBACK_REFUSED \u2014 a security event, matching the S-06/S-03 anti-rollback discipline.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -7524,7 +7546,7 @@
       "doc_anchor": "adr-0006#relay_select_all_breakers_open",
       "evidence_fields": [],
       "owning_document": "ADR-0006",
-      "condition": "Two clarifications are added: a first attempt on a relay is never suppressed (reliability §6.3 already charges it no token), and if every candidate's breaker is open, selection MUST return the highest-scoring candidate as the half-open probe rather than returning empty, emitting RELAY.SELECT.ALL_BREAKERS_OPEN.",
+      "condition": "Two clarifications are added: a first attempt on a relay is never suppressed (reliability \u00a76.3 already charges it no token), and if every candidate's breaker is open, selection MUST return the highest-scoring candidate as the half-open probe rather than returning empty, emitting RELAY.SELECT.ALL_BREAKERS_OPEN.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -7662,7 +7684,7 @@
       "doc_anchor": "adr-0006#relay_standby_no_domain_diversity",
       "evidence_fields": [],
       "owning_document": "ADR-0006",
-      "condition": "§11.6 makes different-failure_domain a hard condition of RELAY_STANDBY_READY (ADR-0005 §11.6 already requires it — confirmed) and emits RELAY.STANDBY.NO_DOMAIN_DIVERSITY when the map cannot supply one, before the failure.",
+      "condition": "\u00a711.6 makes different-failure_domain a hard condition of RELAY_STANDBY_READY (ADR-0005 \u00a711.6 already requires it \u2014 confirmed) and emits RELAY.STANDBY.NO_DOMAIN_DIVERSITY when the map cannot supply one, before the failure.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.relay_standby_no_domain_diversity.next_action"
@@ -7852,7 +7874,7 @@
       "doc_anchor": "adr-0006#relay_upgrade_flapping_suppressed",
       "evidence_fields": [],
       "owning_document": "ADR-0006",
-      "condition": "If a pair oscillates RELAYED ↔ WAN_DIRECT ≥ N_UPGRADE_FLAP (proposed 3) times within T_UPGRADE_FLAP_WINDOW (proposed 10 min), the direct candidate for that pair is suppressed for T_UPGRADE_FLAP_SUPPRESS (proposed 30 min) on that network fingerprint only, with RELAY.UPGRADE.FLAPPING_SUPPRESSED.",
+      "condition": "If a pair oscillates RELAYED \u2194 WAN_DIRECT \u2265 N_UPGRADE_FLAP (proposed 3) times within T_UPGRADE_FLAP_WINDOW (proposed 10 min), the direct candidate for that pair is suppressed for T_UPGRADE_FLAP_SUPPRESS (proposed 30 min) on that network fingerprint only, with RELAY.UPGRADE.FLAPPING_SUPPRESSED.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -8159,7 +8181,7 @@
         "platform"
       ],
       "owning_document": "ADR-0010",
-      "condition": "One family's routes installed and the other's did not. §11.3 makes this non-conforming: both families install in one transaction or neither does",
+      "condition": "One family's routes installed and the other's did not. \u00a711.3 makes this non-conforming: both families install in one transaction or neither does",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -8557,7 +8579,7 @@
       "doc_anchor": "adr-0021#update_apply_reboot_required",
       "evidence_fields": [],
       "owning_document": "ADR-0021",
-      "condition": "The update is staged but a restart is required (the WinTun in-use case, §11.12 step 5). The previous version keeps running. Next: restart when convenient",
+      "condition": "The update is staged but a restart is required (the WinTun in-use case, \u00a711.12 step 5). The previous version keeps running. Next: restart when convenient",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.update_apply_reboot_required.next_action"
@@ -8749,7 +8771,7 @@
       "doc_anchor": "adr-0021#update_manifest_stale",
       "evidence_fields": [],
       "owning_document": "ADR-0021",
-      "condition": "The manifest is older than the freshness bound — a freeze attempt or a stalled mirror. Next: check the configured update origin",
+      "condition": "The manifest is older than the freshness bound \u2014 a freeze attempt or a stalled mirror. Next: check the configured update origin",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE",
       "next_action_key": "reason.update_manifest_stale.next_action"
@@ -8840,7 +8862,7 @@
         "caused_by"
       ],
       "owning_document": "reliability.md",
-      "condition": "reliability.md §4.5 T20: entry into RECONNECTING via EV_PATH_DEAD or EV_LINK_DOWN with no alternate path. The FAULT-SPECIFIC cause is carried in the caused_by evidence field, not in the code: testing-strategy.md P04 asserts one reason_code across all four variants and asserts caused_by DIFFERS, because a build that names every path death identically satisfies A-16's letter and defeats R-22's purpose.",
+      "condition": "reliability.md \u00a74.5 T20: entry into RECONNECTING via EV_PATH_DEAD or EV_LINK_DOWN with no alternate path. The FAULT-SPECIFIC cause is carried in the caused_by evidence field, not in the code: testing-strategy.md P04 asserts one reason_code across all four variants and asserts caused_by DIFFERS, because a build that names every path death identically satisfies A-16's letter and defeats R-22's purpose.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -8861,7 +8883,7 @@
         "offered_load_bps"
       ],
       "owning_document": "reliability.md",
-      "condition": "reliability.md §5.4: throughput below 25% of the measured baseline for this path when the offered load justifies more. Measured PASSIVELY under real load only - an idle tunnel is not slow, and no synthetic bandwidth test is ever run on a user path (networking.md §4.2).",
+      "condition": "reliability.md \u00a75.4: throughput below 25% of the measured baseline for this path when the offered load justifies more. Measured PASSIVELY under real load only - an idle tunnel is not slow, and no synthetic bandwidth test is ever run on a user path (networking.md \u00a74.2).",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -8881,7 +8903,7 @@
         "tolerance_ratio"
       ],
       "owning_document": "reliability.md",
-      "condition": "reliability.md §5.4: duplicate delivery above the declared tolerance for this path.",
+      "condition": "reliability.md \u00a75.4: duplicate delivery above the declared tolerance for this path.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     },
@@ -8901,7 +8923,7 @@
         "tolerance_ratio"
       ],
       "owning_document": "reliability.md",
-      "condition": "reliability.md §5.4: reordering above the declared tolerance for this path.",
+      "condition": "reliability.md \u00a75.4: reordering above the declared tolerance for this path.",
       "introduced_in_registry_version": 2,
       "status": "ACTIVE"
     }
@@ -8910,7 +8932,7 @@
     "fields": [
       "evidence_truncated"
     ],
-    "why": "errors.proto normatively requires a TRUNCATING EMITTER to append a final entry {key:\"evidence_truncated\"} to any Evidence set it had to cut. The key therefore belongs to no single reason code, and a validator checking a message's keys against its code's declared evidence_fields rejected a message the schema requires. Declared here so that check has a superset to consult instead of a hard-coded exemption in one implementation. ownership.md §8 W-5; registry_version 2.",
+    "why": "errors.proto normatively requires a TRUNCATING EMITTER to append a final entry {key:\"evidence_truncated\"} to any Evidence set it had to cut. The key therefore belongs to no single reason code, and a validator checking a message's keys against its code's declared evidence_fields rejected a message the schema requires. Declared here so that check has a superset to consult instead of a hard-coded exemption in one implementation. ownership.md \u00a78 W-5; registry_version 2.",
     "rule": "A receiver MUST accept these keys on ANY reason code. An emitter MUST NOT use them to carry anything but the condition each names."
   }
 }

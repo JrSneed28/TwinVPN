@@ -441,15 +441,25 @@ fn seal_fault(error: TunnelError) -> Stop {
 
 /// Maps a `PlatformError` onto the pump's own step outcome.
 ///
-/// # Why the variant and not `PlatformError::is_retryable`
+/// # Why the variant, and why there is no longer an alternative
 ///
-/// `is_retryable` asks the **registry** whether the mapped code's class is
-/// `TRANSIENT`, and `PlatformError::Transient` maps onto
-/// `PLATFORM.ADAPTER_UNAVAILABLE`, whose class is `PERSISTENT` — so it answers
-/// `false` for the one variant whose name says otherwise. The variant is what
-/// the adapter actually stated, so the variant is what the pump reads. Recorded
-/// here rather than worked around silently; it is reported as an integration
-/// item against `twinvpn-platform`.
+/// This used to read "why the variant and not `PlatformError::is_retryable`",
+/// and named that function as a defect: it asked the **registry** whether the
+/// mapped code's class was `TRANSIENT`, while `PlatformError::Transient` maps
+/// onto `PLATFORM.ADAPTER_UNAVAILABLE`, whose class is `PERSISTENT` — so it
+/// answered `false` for the one variant whose name said otherwise.
+///
+/// **`is_retryable` is now deleted**, and for a better reason than the mismatch:
+/// `docs/reliability.md` §3.1 says the retry policy, the backoff regime and the
+/// circuit breaker are all driven by `class`, "**never guessed from an error
+/// type**" — and a predicate on an error enum is exactly that guess. Correcting
+/// it to read the variant would have stood a second retry authority beside §6's
+/// governor. A caller that wants the answer reads
+/// [`PlatformError::reason_code`]`().class()`, which is the field §6 is
+/// specified to read and keeps all four classes apart; a `bool` could not.
+///
+/// The pump still matches on the variant, because the variant is what the
+/// adapter actually stated and CB-2 leaves the decision to the core.
 fn classify_adapter(error: PlatformError) -> Step {
     match error {
         PlatformError::Cancelled => Step::Stopped(Stop::Cancelled),

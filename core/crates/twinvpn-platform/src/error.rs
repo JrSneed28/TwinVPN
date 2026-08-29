@@ -36,6 +36,63 @@ pub struct OsDetail {
 }
 
 /// A failure of a platform capability.
+///
+/// # Why there is no `is_retryable`
+///
+/// **Authority:** `docs/reliability.md` §3.1 and §6.3, ADR-0018 CB-2,
+/// `docs/implementation/ownership.md` §8 W-40.
+///
+/// This type used to carry `is_retryable(&self) -> bool`. It is **deliberately
+/// gone**, and the deletion is the finding — not a tidy-up — so a reader who
+/// reaches for it finds the reason here rather than re-adding it.
+///
+/// `reliability.md` §3.1 gives exactly one authority for the question:
+///
+/// > `class` … is the field §6 reads: the retry policy, the backoff regime, and
+/// > the circuit breaker are all driven by `class`, **never guessed from an
+/// > error type**.
+///
+/// A predicate on an error enum is a retry decision read off an error type,
+/// which is the shape that sentence forbids, and it was wrong in both available
+/// implementations:
+///
+/// - **Asking the registry**, as it did, was honest about the registry and a lie
+///   about the variant. [`PlatformError::Transient`] then mapped to
+///   `PLATFORM.ADAPTER_UNAVAILABLE`, which the registry classes `PERSISTENT`, so
+///   the one variant whose whole purpose is "retry me" answered `false`. Five
+///   adapters found that independently and every one routed around this function
+///   rather than through it — a function that existed only to be avoided.
+///   Amendment 2 has since fixed that mapping (see [`Self::reason_code`]), which
+///   does **not** make the predicate right: it would still be a second retry
+///   authority, and the next mis-mapped arm would go just as quiet.
+/// - **Answering from the variant** would have fixed the name and broken the
+///   architecture: it would stand beside §6's governor and *disagree* with it,
+///   giving one system two answers to one question. §3.1 also records that an
+///   earlier `Retryability` attribute with four values was considered and
+///   **withdrawn**, replaced by `class`; reintroducing it here, keyed on a Rust
+///   variant, re-litigates a closed decision inside a seam crate.
+///
+/// A `bool` could not carry the answer in any case. §6.3's breaker needs all
+/// four classes kept apart: `PERSISTENT` opens it for a named
+/// `retry_precondition`, `POLICY` opens none at all and routes to `BLOCKED` via
+/// T29, `FATAL` opens it permanently. Collapsing those to one bit makes a policy
+/// refusal and an invariant violation indistinguishable, which §6.3 says is
+/// wrong in both directions.
+///
+/// **What to call instead:** `self.reason_code().class()`, which is one call,
+/// already public, and is the field §6 is specified to read. And under CB-2 the
+/// adapter should usually call nothing — it reports the variant and the core
+/// decides, which is what all five adapters already do.
+///
+/// **What has changed since, and what it does not license.** `ownership.md` §8
+/// W-40 — the *mapping* defect this note used to record as open — is **closed**:
+/// Amendment 2 to the freeze registered `PLATFORM.ADAPTER_BUSY` and
+/// [`Self::reason_code`] names it, so §6.1's ordinary backoff is now reachable
+/// for an `EAGAIN`. It is reachable *through `class`*, which is where §3.1 puts
+/// it. Nothing about that close argues for re-adding a predicate here; it
+/// removes the last practical excuse for one. Each adapter still pins the
+/// mapping with a test — now guarding the fixed behaviour rather than the
+/// defect.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum PlatformError {
@@ -97,24 +154,71 @@ pub enum PlatformError {
     #[error("the adapter is shutting down")]
     ShuttingDown,
 
-    /// A transient condition the caller may retry under the backoff regime.
+    /// Nothing is wrong; the call arrived at a bad moment. `EAGAIN`, `EBUSY`,
+    /// `ENOBUFS`, `WSAEWOULDBLOCK` and their kin.
+    ///
+    /// Reporting the condition is the adapter's whole job here — the decision to
+    /// retry is the core's, under `reliability.md` §6.1's interactive regime, and
+    /// CB-2 keeps it there. See the note on [`PlatformError`] for why this type
+    /// offers no predicate of its own, and [`Self::reason_code`] for the
+    /// `TRANSIENT`-class code this variant names.
     #[error("a transient platform condition ({0:?})")]
     Transient(Option<OsDetail>),
 }
 
 impl PlatformError {
     /// The registered `reason_code`.
+    ///
+    /// # W-40, closed: a transient condition names a transient code
+    ///
+    /// **Authority:** `contracts/FROZEN` Amendment 2 (`registry_version` 3),
+    /// `docs/implementation/ownership.md` §8 W-40, `docs/reliability.md` §6.1
+    /// and §6.3, ADR-0015 §11.2.
+    ///
+    /// [`PlatformError::Transient`] names `PLATFORM.ADAPTER_BUSY`: class
+    /// `TRANSIENT`, severity `WARN`, `terminal` false, `user_actionable` false,
+    /// `remediation_class` `NONE`, and the registered condition *"the platform
+    /// adapter could not complete the call now; the same call may succeed if
+    /// repeated"* — which is what an `EAGAIN`, `EINTR` or `WSAEWOULDBLOCK`
+    /// actually is.
+    ///
+    /// It used to name `PLATFORM.ADAPTER_UNAVAILABLE`, whose condition is *"the
+    /// platform network adapter could not be opened"* and which the registry
+    /// classes `PERSISTENT`, `terminal`, `user_actionable`, `LOCAL_ACTION`. A
+    /// call that would succeed on the next poll therefore reached the core as a
+    /// permanent, user-fixable failure to open the adapter — none of those four
+    /// things — and §6.3's breaker, which keys on `class`, opened for a named
+    /// precondition instead of taking §6.1's ordinary backoff. The deletion of
+    /// `is_retryable` is what made that load-bearing rather than cosmetic: with
+    /// the predicate gone, this mapping is the only retry authority left.
+    ///
+    /// **`ADAPTER_UNAVAILABLE` keeps its meaning and its other arms** — could
+    /// not be *opened*, as against could not complete *now*. Those are two
+    /// conditions, which is why ADR-0015 §11.2's admission rule *admits* the
+    /// second code rather than refusing it: no existing code owned "not now".
+    ///
+    /// The name is a condition and not a policy. It is `ADAPTER_BUSY`, not
+    /// `SYSCALL_RETRYABLE`, because "retryable" is the answer `class` carries,
+    /// and a code whose name asserts the retry decision invites back the second
+    /// retry authority `reliability.md` §3.1 forbids and whose Rust incarnation
+    /// was just deleted. `contracts/FROZEN` records that reasoning.
     #[must_use]
     pub const fn reason_code(&self) -> ReasonCode {
         match self {
-            // A privileged refusal that is not the VPN grant, and a transient
-            // condition, are both adapter-capability failures from the core's
-            // point of view; the OS detail is what tells a support case which one.
-            // They share a code deliberately, because ADR-0015 §11.2's admission
+            // A privileged refusal that is not the VPN grant is still a failure
+            // to *open* the capability, and it is `PERSISTENT` and remediable by
+            // a local action exactly as the registered condition says; the OS
+            // detail is what tells a support case which refusal it was. These
+            // two share a code deliberately, because ADR-0015 §11.2's admission
             // rule refuses a new code for a condition an existing one owns.
-            PlatformError::AdapterUnavailable(_)
-            | PlatformError::NotPermitted(_)
-            | PlatformError::Transient(_) => codes::PLATFORM_ADAPTER_UNAVAILABLE,
+            PlatformError::AdapterUnavailable(_) | PlatformError::NotPermitted(_) => {
+                codes::PLATFORM_ADAPTER_UNAVAILABLE
+            }
+            // `Transient` sat in that arm until Amendment 2 and does not belong
+            // there: "could not open" and "could not complete now" are different
+            // conditions with different classes, so the same rule that keeps the
+            // two above together is what separates this one out.
+            PlatformError::Transient(_) => codes::PLATFORM_ADAPTER_BUSY,
             PlatformError::VpnPermissionDenied(_) => codes::PLATFORM_VPN_PERMISSION_DENIED,
             PlatformError::OsUnsupported(_) => codes::PLATFORM_OS_UNSUPPORTED,
             PlatformError::ThirdPartyFilterSuspected(_) => {
@@ -153,35 +257,38 @@ impl PlatformError {
         }
     }
 
-    /// Whether a caller may retry under the `docs/reliability.md` backoff regime.
-    #[must_use]
-    pub fn is_retryable(&self) -> bool {
-        matches!(
-            self.reason_code().class(),
-            twinvpn_types::ErrorClass::Transient
-        )
-    }
-
     /// The registered diagnostic.
     ///
-    /// # A registry gap, reported rather than patched
+    /// # Which of these keys actually land, and why one of them did not
     ///
-    /// `ownership.md` §4.2 requires the platform detail to be carried "as typed
-    /// `Evidence`", but **no `PLATFORM.*`, `NET.*`, `ROUTE.*` or `AUTH.KEY_*`
-    /// code in `contracts/registry/reason_codes.json` declares an evidence key
-    /// for an OS error number** — `PLATFORM.ADAPTER_UNAVAILABLE` declares none at
-    /// all, and `PLATFORM.OS_UNSUPPORTED` declares only `os_version`. ADR-0015
-    /// §11.3 requires an undeclared key to be dropped, so the attempts below are
-    /// dropped for exactly those codes.
+    /// **Authority:** ADR-0015 §11.3 (an undeclared evidence key is dropped),
+    /// `ownership.md` §4.2 ("carry the platform detail as typed `Evidence`").
     ///
-    /// The rule's *substance* still holds — the code is registered, the user
-    /// never sees a bare number, and [`Self::os_detail`] carries the detail into
-    /// a Tier-1 bundle — but the typed-evidence half cannot be satisfied until
-    /// the registry declares a key. `contracts/` is frozen (`ownership.md` §3),
-    /// so this is reported to the integration lead, not patched.
+    /// The three `PLATFORM.*` codes this type can name —
+    /// `PLATFORM.ADAPTER_BUSY`, `PLATFORM.ADAPTER_UNAVAILABLE` and
+    /// `PLATFORM.OS_UNSUPPORTED` — each declare `errno`, `syscall`,
+    /// `os_error_code` and `platform`, so for those the detail flows. The
+    /// `NET.*`, `ROUTE.*` and `AUTH.KEY_*` codes it also names declare **no**
+    /// evidence keys at all, so for those every call below is dropped. That is
+    /// the builder working as specified, not a failure: it will not turn a
+    /// missing declaration into a second failure on a failure path. The rule's
+    /// substance still holds there — the code is registered, the user never sees
+    /// a bare number, and [`Self::os_detail`] carries the detail into a Tier-1
+    /// bundle — and the calls are written out unconditionally so that the day
+    /// such a key is registered the detail starts flowing with no change here.
     ///
-    /// The calls are written out rather than omitted so that the moment such a
-    /// key is registered, the detail starts flowing with no code change here.
+    /// **`errno` and `os_error_code` both carry the same number on purpose.**
+    /// The registry declares both, and this seam is cross-platform: the value is
+    /// a `GetLastError()` or an `NSError` code as often as it is an `errno`, so
+    /// a consumer that does not assume POSIX reads the neutral key. The second
+    /// call was spelled `os_error` — a key no code declares, so §11.3 dropped it
+    /// silently and the neutral key was absent from **every** diagnostic this
+    /// type has produced. A dropped key is invisible by design, which is why a
+    /// spelling slip here costs a support case and no test.
+    ///
+    /// `platform` is deliberately left unset: [`OsDetail`] does not carry it and
+    /// this crate is the platform-neutral half of the seam (ADR-0018 CB-3). The
+    /// adapter that knows the answer is the one that should add it.
     #[must_use]
     pub fn diagnostic(&self, component: Component) -> Diagnostic {
         let code = self.reason_code();
@@ -190,7 +297,7 @@ impl PlatformError {
             builder = builder
                 .evidence("errno", EvidenceValue::Int(detail.code))
                 .evidence("syscall", EvidenceValue::Text(detail.call.to_owned()))
-                .evidence("os_error", EvidenceValue::Int(detail.code));
+                .evidence("os_error_code", EvidenceValue::Int(detail.code));
         }
         builder.build()
     }

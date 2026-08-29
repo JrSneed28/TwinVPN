@@ -353,7 +353,11 @@ def run():
     # Bumped 1 -> 2 by the first amendment under ownership.md §3 (2026-08-28).
     # The three registries ship as ONE versioned set, which is what this case
     # asserts; reason_codes and limits both changed, so all three move together.
-    check_eq(reasons["registry_version"], 2, "reason registry version")
+    check_eq(reasons["registry_version"], 3, "reason registry version")
+    # Amendment 2 (2026-08-28) added PLATFORM.ADAPTER_BUSY and bumped ONLY this
+    # registry. The other three stay at 2 because nothing in them moved: version
+    # parity was Amendment 1's convenience, not a rule, and bumping an unchanged
+    # registry would claim a change a reader could not find.
     check_eq(caps["registry_version"], 2, "capability registry version")
     check_eq(lim["registry_version"], 2, "limits registry version")
 

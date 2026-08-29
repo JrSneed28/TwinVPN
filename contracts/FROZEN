@@ -1,4 +1,4 @@
-d35ada6abc197b7b8937a5ff12a1ca961671c718b7ce3e2b2801b56c0afddd6a
+318a787f30d24f29a27f81327194d1d0d9c94f09eaeec67cdc263ba518f9e214
 
 TwinVPN Phase 2 contract freeze — re-declared 2026-08-28.
 AMENDMENT 1 to the freeze of 2026-08-27 (digest 2f5323cf3351a757...).
@@ -88,3 +88,87 @@ not a precedent for doing it casually.
 
 If the schema changes, scripts/check_freeze_scope.py fails until this file is
 re-declared deliberately.
+
+================================================================================
+AMENDMENT 2 to the freeze — 2026-08-28. Digest on line 1 is this amendment's.
+Amendment 1's digest was d35ada6abc197b7b...
+================================================================================
+
+WHAT CHANGED, and nothing else changed:
+  registry/reason_codes.json      454 -> 455 codes; registry_version 2 -> 3
+                                  + PLATFORM.ADAPTER_BUSY (TRANSIENT, WARN,
+                                    terminal false, not user_actionable,
+                                    evidence errno/syscall/os_error_code/platform)
+  tests/test_registries.py        asserts reason registry_version 3
+
+  NO .proto changed. NO .cddl changed. contracts/gen/** is byte-identical.
+  The OTHER THREE registries are untouched and stay at registry_version 2.
+  Version parity was Amendment 1's convenience, not a rule; bumping an
+  unchanged registry would claim a change a reader could not find.
+
+WHY IT IS A DEFECT AND NOT AN INCONVENIENCE (§3 step 1):
+  This is finding W-40 in docs/implementation/ownership.md §8, whose disposition
+  said it would travel with W-18 to Amendment 1. IT DID NOT, and the register was
+  wrong to imply otherwise — checked against all 454 codes, in all sixteen
+  domains, not only PLATFORM.
+
+  The seam reports a transient syscall outcome as PlatformError::Transient, which
+  maps onto PLATFORM.ADAPTER_UNAVAILABLE — registered PERSISTENT, terminal true,
+  user_actionable, LOCAL_ACTION, condition "The platform network adapter could
+  not be opened". So an EAGAIN or EWOULDBLOCK on a socket that would succeed on
+  the next poll arrives at the core labelled a permanent, user-fixable failure to
+  open the adapter. It is not any of those four things.
+
+  Amendment 1 added 21 TRANSIENT PLATFORM.* codes and not one of them can carry
+  this: every one is a lifecycle, process or service event (PLATFORM.SUSPENDED,
+  PLATFORM.LIFECYCLE.*, PLATFORM.SERVICE.*, four PLATFORM.EMBEDDED.*). The three
+  closest codes anywhere in the registry were checked by name and all three are
+  dishonest for it — PLATFORM.EMBEDDED.NETIFD_TEARDOWN names a specific OpenWrt
+  event, RESOURCE.QUOTA.HANDSHAKE_RATE_LIMITED is gateway admission control, and
+  STORE.KEYSTORE_LOCKED is a store state rather than a call outcome. Borrowing any
+  of them would misattribute the condition to a domain that did not produce it.
+
+  WHY IT BECAME URGENT RATHER THAN LATENT. PlatformError carried an
+  is_retryable() predicate that read the variant's mapped class, so it answered
+  false for the one variant whose name said otherwise. Every adapter had already
+  noticed and routed around it, and five carried a tripwire test pinning the
+  defect. That predicate is now DELETED — docs/reliability.md §3.1 says the retry
+  policy, the backoff regime and the circuit breaker are driven by class, "never
+  guessed from an error type", so a predicate on the enum was a second retry
+  authority standing beside §6's governor. Deleting it was right, and it makes
+  the mapping the ONLY retry authority left. twinvpn-session's class_admissible
+  reads code.class() to decide which codes a state may carry, and PERSISTENT is
+  admissible in BLOCKED — so with no honest TRANSIENT code, a recoverable syscall
+  can be recorded as a blocking condition. The class is now load-bearing in a way
+  it was not when W-40 was first filed.
+
+WHY IT IS COMPATIBLE (§3 step 5):
+  Purely additive, and additive in the one direction the registry is designed
+  for. Reason codes travel the wire as STRINGS, so a reader that meets
+  PLATFORM.ADAPTER_BUSY handles it exactly as it already handles any unknown
+  code, using the carried attributes per ADR-0015 rule 5. No field number, no
+  enum value, no wire format, no generated binding and no existing entry moved.
+  The closed set of sixteen domains is unchanged. Nothing was deprecated,
+  retired or renamed, so no S-37 compatibility event arises.
+
+  The one wire-visible consequence is intended: SchemaDescriptor's
+  reason_registry_version, generated from this file, goes 2 -> 3. That is what
+  the field is for.
+
+WHY THE NAME IS A CONDITION AND NOT A POLICY (ADR-0015 §11.2):
+  Not PLATFORM.SYSCALL_RETRYABLE. "Retryable" is the answer the class carries,
+  and reliability.md §3.1 is explicit that retry policy is read from class and
+  never guessed elsewhere — a code whose NAME asserts the policy invites exactly
+  the second authority that was just deleted. ADAPTER_BUSY names what the adapter
+  reported and lets TRANSIENT carry what to do about it, and it pairs with
+  ADAPTER_UNAVAILABLE: could not complete the call now, versus could not be
+  opened at all.
+
+APPROVED BY (§3 step 6): the repository owner, explicitly, on 2026-08-28, after
+being shown that no existing code could honestly carry the condition and that
+closing it required re-opening the freeze.
+
+STILL OPEN after this amendment: the twinvpn-platform mapping itself. Registering
+the code does not remap PlatformError::Transient onto it; that is a code change
+in the five adapters and their tripwire tests, and W-40 closes only when both
+halves have landed.

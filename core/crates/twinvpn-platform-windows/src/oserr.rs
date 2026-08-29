@@ -279,10 +279,12 @@ pub const NTE_DEVICE_NOT_READY: u32 = 0x8009_002D;
 pub fn from_status(status: Win32Error, call: &'static str, context: Context) -> PlatformError {
     let d = Some(status.as_evidence(call));
     match status.get() {
-        // Retryable conditions. Reported as `Transient` even though the frozen
-        // registry classes the resulting code PERSISTENT — see
-        // `no_platform_error_is_retryable_under_the_frozen_registry`, which pins
-        // that finding rather than working around it.
+        // Retryable conditions. Reported as `Transient`, which since Amendment 2
+        // names `PLATFORM.ADAPTER_BUSY` — TRANSIENT, non-terminal — and no
+        // longer the PERSISTENT `ADAPTER_UNAVAILABLE` that W-40 recorded; the
+        // tripwire below guards that. Under CB-2 the adapter still only reports
+        // and the core still rules on the recovery, so what matters here is that
+        // "try again" is not collapsed into "refused".
         ERROR_BUSY
         | ERROR_NOT_ENOUGH_MEMORY
         | ERROR_OUTOFMEMORY
@@ -574,35 +576,35 @@ mod tests {
         assert_eq!(e.reason_code().as_str(), "PLATFORM.ADAPTER_UNAVAILABLE");
     }
 
-    /// **A finding, pinned as a test rather than reported only in prose.**
+    /// **W-40, closed — inverted, not deleted; full note in
+    /// `twinvpn-platform-linux`. Authority:** `contracts/FROZEN` Amendment 2
+    /// (`registry_version` 3), `ownership.md` §8 (W-40, and W-18's rule that a
+    /// tripwire keeps guarding the fixed behaviour), `reliability.md` §3.1/§6.1.
     ///
-    /// `PlatformError::is_retryable` asks the *registry* for the code's class,
-    /// and `PlatformError::Transient` maps to `PLATFORM.ADAPTER_UNAVAILABLE`,
-    /// which `contracts/registry/reason_codes.json` classes **`PERSISTENT`**.
-    /// So `WSAEWOULDBLOCK` — the most retryable condition a socket has —
-    /// reports `is_retryable() == false`, and in fact **no** `PlatformError`
-    /// variant is retryable under the frozen registry.
-    ///
-    /// This is `ownership.md` §8 W-18 landing on the Windows adapter exactly as
-    /// it landed on the Linux one: there is no registered `TRANSIENT`-class
-    /// `PLATFORM.*` code for the enum to name. Neither `contracts/` nor
-    /// `twinvpn-platform` is this domain's to change, so the behaviour is
-    /// asserted as it is and this adapter never drives a decision off
-    /// `is_retryable()` — it returns the variant and lets the core decide,
-    /// which is CB-2's direction anyway.
+    /// It first asserted `!transient.is_retryable()`; that is deleted, since
+    /// §3.1 makes `class` the only retry authority — which left this mapping as
+    /// the only one and made W-40 load-bearing. Amendment 2 registered
+    /// `PLATFORM.ADAPTER_BUSY` and `PlatformError::Transient` names it, so the
+    /// assertion inverts: a `WSAEWOULDBLOCK` reaches the core undecided per CB-2
+    /// **and** names a `TRANSIENT`, non-terminal code — both, because a re-point
+    /// fixing only the class would still tell the core the attempt had ended.
     #[test]
-    fn no_platform_error_is_retryable_under_the_frozen_registry() {
+    fn a_retryable_status_reaches_the_core_as_transient_and_names_a_transient_code() {
         let transient = from_status(Win32Error(WSAEWOULDBLOCK), "WSARecvFrom", Context::Socket);
+        // The adapter's half: the condition is reported, undecided, for the core.
         assert!(matches!(transient, PlatformError::Transient(_)));
+        // The registry's half, which W-40 was.
+        let code = transient.reason_code();
+        assert_eq!(code.as_str(), "PLATFORM.ADAPTER_BUSY");
         assert_eq!(
-            transient.reason_code().as_str(),
-            "PLATFORM.ADAPTER_UNAVAILABLE"
+            code.class(),
+            twinvpn_types::ErrorClass::Transient,
+            "a WSAEWOULDBLOCK must name a TRANSIENT-class code: §6.1's backoff \
+             reads `class`, and it is the only retry authority left"
         );
-        assert!(
-            !transient.is_retryable(),
-            "if this ever passes, a TRANSIENT PLATFORM code was registered and \
-             this test and its finding should be deleted"
-        );
+        assert!(!code.terminal(), "may succeed if repeated");
+        // `ADAPTER_UNAVAILABLE` keeps its own meaning — could not be *opened* —
+        // which `a_missing_wintun_dll_is_an_adapter_failure…` above still pins.
     }
 
     #[test]
