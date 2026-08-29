@@ -111,12 +111,20 @@ pub const fn disposition(op: CoreCommand) -> Disposition {
                   `path.probe` would imply a validation this build cannot perform",
         },
 
-        // -- refused: enforcement state cannot be read back (W-24) ------------
+        // -- refused: the read-back exists; nothing calls it yet ---------------
+        //
+        // This reason USED to be W-24 — "F-9 offers set_ruleset with no getter".
+        // That is no longer true: `twinvpn.h` carries `installed_ruleset` and
+        // `current_generation` at ABI minor 2, so every adapter can answer, and
+        // `enforce::arm` already queries it. What is missing is narrower and is
+        // stated as such rather than left blaming a closed finding — a reason
+        // that outlives its cause is `ownership.md` §4.3's residue.
         C::KillswitchGet | C::KillswitchExemptGet => Disposition::NotWired {
             code: codes::PLATFORM_ADAPTER_UNAVAILABLE,
-            why: "ADR-0015 §11.6 rule 1 requires the ProtectionAssertion to be produced by \
-                  QUERYING the enforcement layer, and F-9 offers set_ruleset with no getter. \
-                  Answering from the agent's belief is exactly what that rule forbids",
+            why: "the enforcement read-back exists on every adapter, and this operation is \
+                  not wired to NetworkConfig::installed_ruleset. It is refused rather than \
+                  answered from the agent's belief about what it configured, which is what \
+                  ADR-0015 §11.6 rule 1 forbids",
         },
 
         // -- refused: no durable store is open on this path -------------------
@@ -129,8 +137,9 @@ pub const fn disposition(op: CoreCommand) -> Disposition {
         // -- refused: diagnostics need a populated ledger ----------------------
         C::DiagReport => Disposition::NotWired {
             code: codes::PLATFORM_ADAPTER_UNAVAILABLE,
-            why: "ADR-0015 §11.8's eight parts include the enforcement snapshot, which W-24 \
-                  makes unreadable, and the candidate ledger, which needs a completed attempt",
+            why: "ADR-0015 §11.8's eight parts include the enforcement snapshot, which is now \
+                  readable but not assembled here, and the candidate ledger, which needs a \
+                  completed attempt",
         },
         C::DiagBundleCreate | C::DiagLogTail | C::DiagCaptureSet => Disposition::NotWired {
             code: codes::STORE_CUSTODY_DEGRADED,
@@ -151,7 +160,8 @@ pub const fn disposition(op: CoreCommand) -> Disposition {
         C::KillswitchModeSet => Disposition::NotWired {
             code: codes::PLATFORM_ADAPTER_UNAVAILABLE,
             why: "MI-S3's max(current, requested) needs the current mode read back from the \
-                  enforcement layer, which W-24 makes unreadable",
+                  enforcement layer. The posture read-back exists; the MODE does not — it is \
+                  a distinct fact from the BLOCKED/PROTECTED posture and no adapter reports it",
         },
         C::KillswitchDisarmBegin | C::KillswitchDisarmCommit => Disposition::NotWired {
             code: codes::MGMT_DISARM_REQUIRES_LOCAL_AUTH,

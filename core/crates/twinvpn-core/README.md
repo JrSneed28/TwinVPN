@@ -214,7 +214,7 @@ cluster into five causes, and none of them is this crate's to fix alone:
 | Cause | Operations |
 |---|---|
 | **the transport exists but `execute.rs` does not yet call it** — W-12 itself is closed (§5.3); what remains is the composition-root wiring | `peer.*`, `policy.get`, `device.revoke`, `key.rotate`, `dns.preference.set`, `route.accept.set`, `exitnode.select` |
-| **W-24** — F-9 has no `installed_ruleset` read-back, so the `ProtectionAssertion` cannot be produced | `killswitch.get`, `killswitch.exempt.get`, `killswitch.mode.set`, `diag.report` |
+| **not wired to the read-back** — **W-24 is closed** (F-9 gained `installed_ruleset` and `current_generation` at ABI minor 2, and `enforce::arm` queries them), so what is left is composition-root wiring, not an ABI gap. `killswitch.mode.set` is a separate case: MI-S3's mode is the `OFF < ARMED_ON_INTENT < ALWAYS_ON` order over S-18, a different fact from the `BLOCKED`/`PROTECTED` posture, and no adapter reports it | `killswitch.get`, `killswitch.exempt.get`, `killswitch.mode.set`, `diag.report` |
 | **D4-adjacent** — the operation is vault-backed and needs `open_store` | `settings.*`, `autostart.set`, `diag.bundle.create`, `diag.log.tail`, `diag.capture.set` |
 | **W-21** — `PairingOffer` appears nowhere in `contracts/` | `pair.*` |
 | **no owner built it** — ADR-0021's delivery, ADR-0016's local auth, `DiscoAuth` | `update.*`, `killswitch.disarm.*`, `path.probe`, `capability.get` |

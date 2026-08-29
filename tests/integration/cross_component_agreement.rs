@@ -854,45 +854,78 @@ fn the_compiled_in_reason_registry_agrees_with_the_frozen_file() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. W-24 and W-25: what the F-9 vtable cannot express.
+// 6. W-24, now closed; W-25, still open.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn w24_the_abi_refuses_a_ruleset_read_back_rather_than_answering_none() {
-    // **W-24**, asserted executably rather than re-discovered. ADR-0015 §11.6
-    // rule 1 makes a `ProtectionAssertion` a pure function of a *query* to the
-    // enforcement layer; F-9 has `set_ruleset` and no getter, so across this ABI
-    // the assertion cannot be produced.
+fn w24_the_abi_carries_the_ruleset_read_back_and_the_recovery_entry_point() {
+    // **W-24, INVERTED rather than deleted.** This test used to assert the
+    // getter's ABSENCE and said in terms: "this test fails if the vtable ever
+    // gains the getter, which is exactly when the refusal should be deleted."
+    // It did, so it was. The tripwire is kept and turned around, which is the
+    // pattern W-18's disposition made standard — a substitution that outlives
+    // its cause is G-2's defect, and a tripwire deleted rather than inverted is
+    // how that happens.
     //
-    // The disposition was a **typed refusal**, and the direction is the whole
-    // point: `Ok(None)` would read as "no ruleset installed" — the opposite of
-    // the truth, and the direction that drives a reconciler to re-install.
-    // `Err` renders the indicator `UNKNOWN`, which is O-18's fail-safe way.
-    //
-    // This test fails if the vtable ever gains the getter, which is exactly when
-    // the refusal should be deleted.
-    assert!(
-        !TWINVPN_H.contains("installed_ruleset"),
-        "the F-9 vtable now has an `installed_ruleset` read-back. W-24 is closed; \
-         delete twinvpn-ffi's typed refusal and let the ProtectionAssertion be \
-         produced across the ABI."
-    );
-    assert!(
-        !TWINVPN_H.contains("current_generation"),
-        "the F-9 vtable now has `current_generation` — ADR-0018 §11.4 calls it \
-         the recovery entry point, and W-24 says it is missing for the same \
-         reason as the getter"
+    // ADR-0015 §11.6 rule 1 makes a `ProtectionAssertion` a pure function of a
+    // *query* to the enforcement layer. F-9 now carries both entries, appended
+    // at ABI minor 1 -> 2 under VR-1, so the assertion IS producible across
+    // this ABI.
+    for entry in ["installed_ruleset", "current_generation"] {
+        assert!(
+            TWINVPN_H.contains(&format!("(*{entry})")),
+            "twinvpn.h no longer declares `{entry}`. W-24 closed by adding it; \
+             removing it would be an abi_major break, not a minor one"
+        );
+    }
+    assert_eq!(
+        twinvpn_core::ABI_MINOR,
+        2,
+        "W-24's two entries were an ADDITION, so VR-1 makes them a minor bump. \
+         A shell compiled against minor 1 reads its own shorter struct and is \
+         unaffected; the number is what tells it which entries it may expect"
     );
 
-    // The mock adapter CAN answer, which is the contrast that proves the refusal
-    // is a property of the ABI and not of the platform trait.
+    // Both halves agree: the platform trait answers, and so does the ABI over a
+    // shell that supplies the entries. The contrast this test used to draw —
+    // "the trait can, the vtable cannot" — is gone, which was the point.
     let rig = twinvpn_system_tests::Rig::new(twinvpn_system_tests::HostFamily::Dual, 70);
     let answered = twinvpn_system_tests::block_on(
         twinvpn_platform::PlatformAdapter::network_config(&rig.adapter).installed_ruleset(),
     );
+    assert!(answered.is_ok(), "the platform trait answers");
+}
+
+#[test]
+fn w24_the_header_still_states_what_an_older_shell_gets() {
+    // The direction that must survive the close, checked here as a
+    // **specification** read — which is what this file's header rule permits —
+    // rather than by driving `HostAdapter`.
+    //
+    // An older shell, or one that can only report what it last SET, leaves the
+    // entry null, and the answer must stay a typed refusal: `Ok(None)` would
+    // read as "no ruleset installed", the opposite of the truth and the
+    // direction that drives a reconciler to re-install, while `Err` renders the
+    // indicator UNKNOWN, which is O-18's fail-safe way. Closing W-24 added an
+    // ANSWER for shells that can query; it did not licence a guess for shells
+    // that cannot, and `twinvpn.h` has to say so or a shell author will not know.
+    //
+    // WHY THIS IS NOT THE RUNTIME CHECK IT LOOKS LIKE IT SHOULD BE. Constructing
+    // a `HostAdapter` here pulls `twinvpn-ffi`'s `twinvpn-platform` into a graph
+    // that already carries this workspace's `features = ["mock"]` build of it,
+    // and the two do not unify: the trait impl and the trait resolve to
+    // different crates and `cargo test --workspace` fails to compile with
+    // "perhaps two different versions of crate `twinvpn_platform`". The
+    // behaviour is asserted where it can be, in `twinvpn-ffi`'s own suite —
+    // `a_shell_predating_the_w24_entries_still_works_and_never_calls_poison`
+    // allocates a buffer that genuinely ends at the ABI-minor-1 struct, poisons
+    // the rest, and checks both entries read as absent, that the poison is never
+    // called, and that an entry the older shell did declare still works.
     assert!(
-        answered.is_ok(),
-        "the platform trait itself can be queried; only the vtable cannot"
+        TWINVPN_H.contains("PLATFORM.OS_UNSUPPORTED rather than echo its own"),
+        "twinvpn.h no longer tells a shell that cannot query the OS to REFUSE \
+         rather than report what it last set. That sentence is the whole \
+         difference between a ProtectionAssertion and the agent's belief"
     );
 }
 
@@ -936,8 +969,11 @@ fn w26_the_four_approved_vtable_additions_are_present_in_both_languages() {
             "twinvpn.h no longer declares `{field}`, which W-26 approved"
         );
     }
-    // And the ABI minor is still 0, because W-26's additions were the ones this
-    // major shipped with rather than a later addition.
+    // W-26's four were the entries this major SHIPPED with, so they did not move
+    // the minor; two later additions have — `tw_core_submit`'s MI-frame form
+    // (0 -> 1) and W-24's read-back pair (1 -> 2). What this asserts is the
+    // property that matters either way: the header and the Rust never disagree
+    // about the number, because a shell reads one and gets the other's entries.
     assert_eq!(twinvpn_ffi::TW_ABI_MINOR, twinvpn_core::ABI_MINOR);
     assert_eq!(twinvpn_ffi::TW_ABI_MAJOR, twinvpn_core::ABI_MAJOR);
 }
