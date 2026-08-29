@@ -9,6 +9,7 @@
 pub mod authority;
 pub mod conn;
 pub mod endpoint;
+pub mod enrolment;
 pub mod events;
 pub mod health;
 pub mod logging;

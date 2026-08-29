@@ -62,3 +62,19 @@ twinvpn-env            = { workspace = true, optional = true }
 libc                   = { workspace = true, optional = true }
 tracing-subscriber     = { workspace = true, optional = true }
 clap                   = { workspace = true, optional = true }
+
+# **Tests only.** `tests/pairing.rs` binds a `SigningElement` that produces real
+# ES256 signatures and emits ORK-signed Owner statements, because F-2's
+# acceptance is that a *composed* agent performs ADR-0007 §7.4's C-B ceremony —
+# and a fixture that stubbed the signature would be asserting against a
+# capability the product does not have.
+#
+# CD-I2 is satisfied by construction: this names `twinvpn-crypto`, which is the
+# exempt crate, and no cryptographic implementation. The `path` is spelled here
+# rather than added to `shells/linux/Cargo.toml`'s `[workspace.dependencies]`
+# because that manifest is the integration lead's; DP-1's `version` bound is on
+# the edge, where it asks for it.
+[dev-dependencies]
+twinvpn-crypto = { version = "0.1.0", path = "../../../core/crates/twinvpn-crypto", features = [
+  "test-support",
+] }

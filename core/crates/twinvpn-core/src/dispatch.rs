@@ -159,11 +159,21 @@ pub const fn disposition(op: CoreCommand) -> Disposition {
         // fourth and smallest gap — "the absent PairingLedger" — is closed:
         // `Core` holds one, `crate::pairing` drives ADR-0007 §7.4's C-B
         // ceremony through it, and the three producers G-21 and §11.4 D-6
-        // settled build the offer. A device with no enrolment record still gets
-        // `AUTH.PAIRING_NOT_AUTHORIZED`, and one with no element still gets
-        // `AUTH.KEY_UNAVAILABLE` under §11.16 (l) — but those are now *this
-        // device's* verdicts on a real ceremony rather than a dispatcher
-        // declining to have one.
+        // settled build the offer. **F-2A** then gave the enrolment record a
+        // production caller (`Core::enrol_for_pairing`), so the refusals below
+        // are what a composed agent actually answers rather than what one would
+        // answer if anything had installed a record:
+        //
+        //   - no element, or a key that fails ADR-0007 N-2 → nothing is
+        //     installed → `AUTH.IDENTITY_MISSING`. This is the Linux agent's
+        //     honest state today: it binds `AbsentElement` (§11.16 (l)), which
+        //     reports no public identity at all.
+        //   - an identity, but no ENROLL-powered OSK in the pinned chain →
+        //     `AUTH.PAIRING_NOT_AUTHORIZED`, from `AnchorChain::authorize`.
+        //
+        // Two facts, two codes, each produced by the check that owns it. They
+        // used to be one code, which sent an operator to provision an approval
+        // for a device whose real problem was that it had no identity.
         C::PairBegin | C::PairCancel | C::PairStatus => Disposition::Executes,
 
         // `pair.confirm` is the one that legitimately remains, and its reason is

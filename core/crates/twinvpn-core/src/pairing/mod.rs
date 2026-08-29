@@ -46,32 +46,39 @@
 //! | **Channel authentication** | C-B: the offer crosses an out-of-band confidential channel | [`ops::begin`] emits the offer; the channel is the shell's (ADR-0023 E1 renders it as a QR, E2 as Crockford base32) |
 //! | **Confirmation** | post-hoc fingerprint display | the shell's, and outside this module |
 //!
-//! # Why the enrolment record is injected rather than read
+//! # Where the enrolment record comes from — **F-2A**
 //!
-//! Three of its five parts have no source the composed core may reach today,
-//! and each absence is a seam gap this crate has already recorded rather than a
-//! shortcut taken here:
+//! [`enrol`] is the answer, and it is the module that gave
+//! [`crate::Core::install_pairing_enrolment`] its first production caller. Two
+//! of the record's five parts had no source the composed core could reach when
+//! this module was written; both now do, and the third is still open:
 //!
-//! - **The Owner chain.** `crate::cp_binding::verifier` states it: *"`Core` has
-//!   no `AnchorChain` field … the shell restores one and passes it in."*
-//! - **This device's ES256 `COSE_Key`** (field 2). The one production converter
-//!   from an element's public key to that map lives in
-//!   `services/twinvpn-service-common/src/binding/spki.rs` (`ownership.md`
-//!   G-21) — a different workspace — and
-//!   `twinvpn_platform::custody::IdentityPublic::public_key` is documented as
-//!   carrying "the public key bytes, **in the element's own encoding**", with no
-//!   declared encoding to parse. `crate::cp_binding::transport` records the same
-//!   gap in the same words: *"the seam owes a declared encoding, or
-//!   `IdentityCustody` owes an `spki()`."* Guessing one here would be the
-//!   second copy of a specified encoding that G-21 exists to prevent.
-//! - **The revocation set**, for the same reason `PeerList` is refused: it
-//!   arrives over C2 and the control-plane client has no transport (W-12).
+//! - **The Owner chain.** `crate::cp_binding::verifier` states the shape:
+//!   *"`Core` has no `AnchorChain` field … the shell restores one and passes it
+//!   in."* [`enrol::OwnerMaterial`] is what the shell passes — the pinned ORK
+//!   `COSE_Key`, the ORK-signed `OwnerTrustAnchor` and the delegation set, all
+//!   as **octets**, so a shell needs no cryptographic dependency to carry them.
+//!   [`enrol`] verifies and builds the chain, because CB-1 puts portable logic
+//!   in the core and only the *path* is the shell's.
+//! - **This device's ES256 `COSE_Key`** (field 2).
+//!   `twinvpn_platform::custody::IdentityPublic::public_key` is still documented
+//!   as "the public key bytes, **in the element's own encoding**" with no
+//!   declared encoding, and `crate::cp_binding::transport` still records the
+//!   seam as owing one (`ownership.md` G-21). [`enrol::ik_pub_cose_for`] does
+//!   not close that by *choosing* an encoding — which would be the second copy
+//!   of a specified encoding G-21 exists to prevent — it closes it by **proving**
+//!   one: a candidate is admissible iff `SHA-256` over it equals the
+//!   `identity_id` the element reports, which is ADR-0007 N-2's own definition.
+//! - **The revocation set**, still absent, for the same reason `PeerList` is
+//!   refused: it arrives over C2 and the control-plane client has no transport
+//!   (W-12).
 //!
-//! The injection is **not** trusted blindly. [`ops::begin`] recomputes
-//! `identity_id` from the supplied `COSE_Key` under ADR-0007 N-2 and refuses
+//! The injection is **not** trusted blindly, at either end. [`ops::begin`]
+//! recomputes `identity_id` from the supplied `COSE_Key` under N-2 and refuses
 //! `AUTH.IDENTITY_MISMATCH` unless it equals what the element reports — and at
 //! generation 0 it does the same for `device_id`. A key that is not this
-//! device's key cannot be enrolled through this path.
+//! device's key cannot be enrolled through this path, whether it arrived from
+//! [`enrol`] or from a caller holding [`PairingEnrolment`] directly.
 //!
 //! # Secrets
 //!
@@ -79,29 +86,42 @@
 //! PATH into the diagnostic ledger, syslog, a Tier-1 bundle, or ANY log level,
 //! at any severity, in any build profile". Three things hold that here:
 //!
-//! 1. **The offer does not reach the diagnostic surfaces.** It is reachable
-//!    only through [`crate::Core::with_pairing_offer`], a scoped borrow under
-//!    the same mutex, so it never lands in a `CommandCompleted` event, an
-//!    `Outcome::result`, or a `Diagnostic`. `pair.begin` answers with the
-//!    16-byte `pairing_id`, which `pairing_offer.cddl` classifies PUBLIC.
+//! 1. **The offer crosses to the calling MI client and to nothing else** —
+//!    ADR-0017 **MI-P1**, implemented rather than avoided. **F-2B.**
 //!
-//!    **This is NOT yet ADR-0017's contract, and the gap is a defect, not a
-//!    hardening.** §11.9's `pair.begin` row states the return value as "the
-//!    `PairingOffer` material to render — QR payload or 9-digit SPAKE2 code",
-//!    and calls it "the one `SECRET` that crosses MI". **MI-P1 does not
-//!    tolerate that crossing — it specifies it**, in three numbered rules that
-//!    exist precisely to govern it: under H2 the renderer is the unprivileged
-//!    UI and the key holder is the agent, so the value has to cross, permitted
-//!    "narrowly: 1. Only inside a `pair.begin` response…". §11.17's flow is
-//!    explicit that "`pair.begin` returns the QR payload; the CLI renders it as
-//!    terminal-drawn QR".
+//!    §11.9's `pair.begin` row states the return value as "the `PairingOffer`
+//!    material to render — QR payload or 9-digit SPAKE2 code" and calls it "the
+//!    one `SECRET` that crosses MI"; §11.17 says "`pair.begin` returns the QR
+//!    payload; the CLI renders it as terminal-drawn QR". MI-P1 does not
+//!    *tolerate* that crossing, it *specifies* it: under H2 the renderer is the
+//!    unprivileged UI and the key holder is the agent, so the value has to
+//!    cross, permitted "narrowly: 1. Only inside a `pair.begin` response…".
+//!    This module used to answer with the `pairing_id` alone, which left **no
+//!    shell able to render an offer** and so left C-B — the one ceremony this
+//!    build supports — unperformable end to end. Withholding a value the
+//!    contract requires is not a stricter reading of the secret-handling rule;
+//!    it is a different, non-conforming interface.
 //!
-//!    Returning only the `pairing_id` therefore leaves **no shell able to render
-//!    an offer**, so C-B — the one ceremony this build supports — cannot be
-//!    performed end to end. Closing it means implementing MI-P1's three rules,
-//!    not deleting the transfer they govern. Withholding a value the contract
-//!    requires is not a stricter reading of the secret-handling rule; it is a
-//!    different, non-conforming interface.
+//!    The crossing is narrow because of **where** it happens, and the two paths
+//!    are deliberately different:
+//!
+//!    | Path | Carries | Who sees it |
+//!    |---|---|---|
+//!    | `Outcome::result` → `CommandCompleted` → §11.10's event stream | the 16-byte `pairing_id`, which `pairing_offer.cddl` classifies **PUBLIC** | every subscribed MI client, and the ledger |
+//!    | the `pair.begin` **response** on one connection | `pairing_id ‖ dCBOR(offer)` | the client that called it |
+//!
+//!    So the offer is *not* returned through [`ops::begin`], because an
+//!    `Outcome::result` is broadcast — that is the property that would have made
+//!    a "response" value reach subscribers who never asked for it. It leaves
+//!    through [`crate::Core::render_pairing_offer`], a scoped borrow under the
+//!    same mutex, which the MI server calls **only** on the `pair.begin`
+//!    response path. Rule 2 follows from that shape rather than from a review:
+//!    there is no code path from an offer to a log line, `diag.log.tail`, or a
+//!    Tier-1 bundle, because the value never enters the event stream or a
+//!    `Diagnostic` at all. Rule 3 follows from [`PairingCeremonies::offers`]
+//!    being a `BTreeMap` in a mutex that nothing writes to the vault, and
+//!    [`PairingCeremonies::expire_stale`] is the agent-side half of rule 2's
+//!    120-second deadline.
 //! 2. **`PairingOffer` redacts itself.** Its `Debug` renders `<redacted>` for
 //!    the secret and withholds `tk_pub` and the hint, and it zeroizes on drop.
 //!    Every `Debug` in this module is hand-written for the same reason.
@@ -128,6 +148,7 @@
 //!   so it is a device-level key, and minting a second one per ceremony would
 //!   put two generation-1 bindings for one device in front of a peer.
 
+pub mod enrol;
 pub(crate) mod ops;
 
 use std::collections::BTreeMap;
@@ -233,11 +254,29 @@ pub const fn state_byte(state: twinvpn_trust::PairingState) -> u8 {
 
 /// Everything the composed core must be handed before it may begin a pairing.
 ///
-/// **An empty approver set is refused at construction**, for the reason
-/// `crate::cp_binding::ControlPlaneEnrolment::new` gives for refusing an empty
-/// pin set: it is the verdict every ceremony under it would reach, stated once
-/// instead of once per ceremony. There is no `Default`, and no constructor that
-/// admits an unverified signature — [`VerifiedSigner`] has none.
+/// **An empty approver set is accepted at construction and refused at the first
+/// ceremony**, and the change of mind is F-2A's. It used to be refused here, for
+/// the reason `crate::cp_binding::ControlPlaneEnrolment::new` gives for refusing
+/// an empty pin set — "the verdict every ceremony under it would reach, stated
+/// once instead of once per ceremony". That reasoning holds for the *verdict*
+/// and breaks for the *reason*: a composition root that has proved this device's
+/// identity but has no Owner material could then install **nothing**, so
+/// `pair.begin` answered `AUTH.IDENTITY_MISSING` on a device whose identity is
+/// perfectly well known. A refusal whose stated reason is wrong in the
+/// optimistic direction is `ownership.md` §11.2 **G-14**'s own defect class, and
+/// it sends an operator to provision an identity that is already there.
+///
+/// So the two facts stay distinguishable, each produced by the check that owns
+/// it:
+///
+/// | This device | `pair.begin` | Produced by |
+/// |---|---|---|
+/// | cannot prove its own name (no element, or a key that fails N-2) | `AUTH.IDENTITY_MISSING` | no record installed at all, [`ops::begin`] |
+/// | knows its name; no ENROLL-powered OSK | `AUTH.PAIRING_NOT_AUTHORIZED` | [`AnchorChain::authorize`], on a real chain |
+///
+/// `ik_pub_cose` is **still** refused when empty, and for the code above: a
+/// record with no key is not a record. There is no `Default`, and no constructor
+/// that admits an unverified signature — [`VerifiedSigner`] has none.
 pub struct PairingEnrolment {
     chain: AnchorChain,
     approvers: Vec<VerifiedSigner>,
@@ -259,11 +298,12 @@ impl PairingEnrolment {
     ///
     /// # Errors
     ///
-    /// `AUTH.PAIRING_NOT_AUTHORIZED` for an empty approver set,
-    /// `AUTH.IDENTITY_MISSING` for an empty `ik_pub_cose`, and
+    /// `AUTH.IDENTITY_MISSING` for an empty or over-long `ik_pub_cose`, and
     /// `PROTO.SIZE_EXCEEDED` for a `rendezvous_hint` past
-    /// `pairing.max_offer_hint_bytes` — all three refused here rather than at
-    /// the first ceremony.
+    /// `pairing.max_offer_hint_bytes` — both refused here rather than at the
+    /// first ceremony. An empty `approvers` is **not** refused: see the type's
+    /// own documentation for why that verdict moved to
+    /// [`AnchorChain::authorize`].
     pub fn new(
         chain: AnchorChain,
         approvers: Vec<VerifiedSigner>,
@@ -271,9 +311,6 @@ impl PairingEnrolment {
         ik_pub_cose: Vec<u8>,
         rendezvous_hint: String,
     ) -> Result<Self, Box<Diagnostic>> {
-        if approvers.is_empty() {
-            return Err(refusal(codes::AUTH_PAIRING_NOT_AUTHORIZED));
-        }
         if ik_pub_cose.is_empty() || ik_pub_cose.len() > limits::PAIRING_MAX_OFFER_COSE_KEY_BYTES {
             return Err(refusal(codes::AUTH_IDENTITY_MISSING));
         }
@@ -410,6 +447,47 @@ impl PairingCeremonies {
     #[must_use]
     pub fn begun_count(&self) -> usize {
         self.begun.len()
+    }
+
+    /// How many offers are still in flight.
+    ///
+    /// The count that makes [`Self::expire_stale`] assertable: `architecture.md`
+    /// S-67 requires the offer to be zeroized "on consumption or at expiry,
+    /// whichever is first", and a rule with no observable is a comment.
+    #[must_use]
+    pub fn offers_in_flight(&self) -> usize {
+        self.offers.len()
+    }
+
+    /// Burns every ceremony past N-17's window and zeroizes its offer.
+    ///
+    /// **S-67's expiry half, and ADR-0017 MI-P1 rule 2's agent-side twin.**
+    /// MI-P1 puts the deadline on the *client* — "MUST be dropped by the client
+    /// at the `not_after_ms` expiry (120 s)" — because the client is where the
+    /// value is rendered. The agent holds a copy too, and a copy it keeps past
+    /// the window is a secret retained after the only thing that could use it
+    /// has expired. `architecture.md` S-67 says the same about this side:
+    /// zeroized "on consumption or at expiry, whichever is first". Removing the
+    /// entry drops a `PairingOffer`, which zeroizes in `Drop`.
+    ///
+    /// **The ledger decides, not a second clock.** `PairingLedger::check_window`
+    /// is one of N-17's three independent enforcement points and it burns the id
+    /// with the `Expired` outcome; this removes the offer for exactly the
+    /// ceremonies it burned. Enforcing the window a second way here would be a
+    /// second answer to a question that already has one, and the two would
+    /// disagree at the boundary.
+    ///
+    /// Called from [`ops::begin`] — the one operation that both acts and touches
+    /// the whole map — rather than on a timer, because CD-2 makes timers the
+    /// core's and this is not one. `pair.status` deliberately does **not** call
+    /// it: burning is an act, and a `ReadOnly` operation does not perform one.
+    pub(crate) fn expire_stale(&mut self, now_secs: u64) {
+        let in_flight: Vec<[u8; PAIRING_ID_BYTES]> = self.offers.keys().copied().collect();
+        for pairing_id in in_flight {
+            if self.ledger.check_window(&pairing_id, now_secs).is_err() {
+                self.offers.remove(&pairing_id);
+            }
+        }
     }
 }
 

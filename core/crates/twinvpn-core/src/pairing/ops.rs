@@ -62,6 +62,13 @@ pub(crate) fn begin(core: &Core, submission: &Submission) -> Result<Outcome, Box
 
     let mut state = core.pairing();
 
+    // 0. **S-67 / MI-P1 rule 2.** Every offer whose N-17 window has passed is
+    //    burned and zeroized before this call adds another. Here rather than on
+    //    a timer (CD-2) and rather than in `status` (a read does not burn); see
+    //    `PairingCeremonies::expire_stale`. It runs before the replay check so a
+    //    retry cannot be answered out of a map still holding expired secrets.
+    state.expire_stale(core.env().now_elapsed().as_micros() / 1_000_000);
+
     // 1. The recorded outcome. One `pairing_id` per key, whatever else changed.
     if let Some(recorded) = state.begun.get(key) {
         return Ok(Outcome::new(recorded.to_vec(), 1));

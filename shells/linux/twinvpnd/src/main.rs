@@ -45,8 +45,8 @@
 use std::sync::Arc;
 
 use twinvpnd::agent::{
-    authority, boot_artifact_present, conn, endpoint, events, health, logging, peer, privilege,
-    runtime, server, StartSequence,
+    authority, boot_artifact_present, conn, endpoint, enrolment, events, health, logging, peer,
+    privilege, runtime, server, StartSequence,
 };
 use twinvpnd::mi;
 
@@ -261,6 +261,23 @@ fn start() -> Result<(), StartupRefusal> {
     // opened THROUGH it (CB-7 splits the store at the CB-1 line and the core
     // owns the bridge).
     open_vault(&tokio_runtime, &core)?;
+
+    // ---- 5c. install the pairing enrolment record --------------------------
+    //
+    // **Finding F-2A**, and the same defect R-10 found one step up:
+    // `Core::install_pairing_enrolment` existed, worked, and had **only test
+    // callers**, so the composed daemon reached `pair.begin` with no enrolment
+    // record and refused. ADR-0007 §7.4's C-B ceremony was implemented in
+    // `twinvpn_core::pairing` and performable by nothing the product ships.
+    //
+    // Before the endpoint, for the reason the vault is: no management command
+    // may observe a core whose enrolment is not yet established. After the
+    // vault, because both are "restore what this device already knows" and the
+    // order §11.6 gives is state first, connections last.
+    //
+    // Not fatal — see `enrolment::enrol_at_startup`. A host nobody has
+    // provisioned refuses one operation; it does not fail to boot.
+    enrolment::enrol_at_startup(&core, &state_dir());
 
     let agent = runtime::Agent {
         env: env.clone(),

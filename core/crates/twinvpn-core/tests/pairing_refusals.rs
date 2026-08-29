@@ -115,21 +115,116 @@ fn a_cose_key_that_is_not_this_devices_key_is_refused() {
     assert_eq!(adapter.identity_mock().sign_calls(), 0);
 }
 
-/// An enrolment record with no approver is refused at construction, for the
-/// reason `ControlPlaneEnrolment::new` refuses an empty pin set: it is the
-/// verdict every ceremony under it would reach, stated once rather than once per
-/// ceremony.
+/// **Unauthorized (c), and the reason the two codes must not merge — F-2A.**
+///
+/// A device that knows its own identity and has no `ENROLL`-powered OSK is
+/// **constructible** and is refused `AUTH.PAIRING_NOT_AUTHORIZED` at the first
+/// ceremony, by `AnchorChain::authorize` — not at construction.
+///
+/// This test used to assert the opposite, and the change is F-2A's. Refusing an
+/// empty approver set at construction meant a composition root that had proved
+/// this device's key but held no Owner material could install **nothing**, so
+/// `pair.begin` answered `AUTH.IDENTITY_MISSING` on a device whose identity was
+/// perfectly well known — a refusal wrong in the optimistic direction, which is
+/// `ownership.md` §11.2 G-14's own defect class.
+///
+/// Read with `a_core_with_no_enrolment_record_refuses_to_begin_a_pairing`: same
+/// operation, two different missing facts, two different codes. A build that
+/// merged them would fail one of the two.
 #[test]
-fn an_enrolment_record_with_no_approver_is_refused_at_construction() {
-    let refusal = PairingEnrolment::new(
+fn a_device_that_knows_its_identity_and_holds_no_approval_is_not_authorized() {
+    let (core, adapter, _time) = bare();
+    let cose = FixtureIdentity::from_seed(DEVICE_IK_SEED).cose_key();
+    adapter
+        .identity_mock()
+        .rotate(twinvpn_trust::derive_identity_id(&cose));
+
+    // An empty chain and an empty approver set: no Owner has authorized this
+    // device to enrol anyone. The record is still well formed.
+    let enrolment = PairingEnrolment::new(
         AnchorChain::new(),
         Vec::new(),
         RevocationState::new(),
-        FixtureIdentity::from_seed(b"ik").cose_key(),
+        cose,
         String::new(),
     )
-    .expect_err("an empty approver set authorizes nothing");
-    assert_eq!(refusal.code(), codes::AUTH_PAIRING_NOT_AUTHORIZED);
+    .expect("a record with a key and no approver is well formed");
+    core.install_pairing_enrolment(enrolment);
+
+    assert_eq!(
+        refused(&core, &begin(b"key-unapproved")),
+        codes::AUTH_PAIRING_NOT_AUTHORIZED
+    );
+    // And it refused before asking the element for anything, which is the order
+    // §7.4's table fixes: authorization first.
+    assert_eq!(adapter.identity_mock().sign_calls(), 0);
+}
+
+/// **F-2A's N-2 proof, and the thing it must never do.**
+///
+/// `IdentityPublic::public_key` carries "the public key bytes, **in the
+/// element's own encoding**" with no declared encoding to parse, so the
+/// composition root cannot *choose* one — `ownership.md` G-21. It proves one
+/// instead: a candidate is this device's key **iff** `SHA-256` over it equals
+/// the `identity_id` the element reports, which is ADR-0007 N-2's definition.
+///
+/// The three cases below are the whole of that rule. The third is the one that
+/// matters: an element reporting a well-formed key that names some *other*
+/// device yields `None`, so nothing is installed and `pair.begin` refuses
+/// `AUTH.IDENTITY_MISSING` rather than enrolling under a name this device cannot
+/// prove.
+#[test]
+fn a_key_is_admitted_only_when_n2_says_it_names_this_device() {
+    use twinvpn_core::pairing::enrol::ik_pub_cose_for;
+    use twinvpn_platform::custody::IdentityPublic;
+
+    let ik = FixtureIdentity::from_seed(DEVICE_IK_SEED);
+    let cose = ik.cose_key();
+    let identity = |public_key: Vec<u8>| IdentityPublic {
+        device_id: twinvpn_crypto::derive_device_id(&cose),
+        identity_id: twinvpn_crypto::derive_identity_id(&cose),
+        generation: 0,
+        public_key,
+    };
+
+    // (a) The element vends the dCBOR COSE_Key itself.
+    assert_eq!(
+        ik_pub_cose_for(&identity(cose.clone())).as_ref(),
+        Some(&cose)
+    );
+
+    // (b) It vends an SPKI — the encoding `cose::es256_cose_key_from_verifying_key`
+    //     documents as the device's own IK path. The same octets come back,
+    //     because the COSE encoding has exactly one home.
+    assert_eq!(
+        ik_pub_cose_for(&identity(ik.spki_der())).as_ref(),
+        Some(&cose)
+    );
+
+    // (c) It vends **someone else's** key, well formed and wrong. N-2 refuses
+    //     it: the digest does not match the identity_id this element reports.
+    let stranger = FixtureIdentity::from_seed(b"some-other-device");
+    assert!(ik_pub_cose_for(&identity(stranger.spki_der())).is_none());
+    assert!(ik_pub_cose_for(&identity(stranger.cose_key())).is_none());
+
+    // And bytes that are neither encoding are refused without a guess.
+    assert!(ik_pub_cose_for(&identity(vec![0xff; 91])).is_none());
+    assert!(ik_pub_cose_for(&identity(Vec::new())).is_none());
+}
+
+/// A record with **no key at all** is still refused at construction, and with
+/// the identity spelling: a record that cannot name this device is not a record.
+#[test]
+fn an_enrolment_record_with_no_identity_key_is_refused_at_construction() {
+    let refusal = PairingEnrolment::new(
+        AnchorChain::new(),
+        vec![VerifiedSigner::osk(APPROVER)],
+        RevocationState::new(),
+        Vec::new(),
+        String::new(),
+    )
+    .expect_err("a record with no COSE_Key names no device");
+    assert_eq!(refusal.code(), codes::AUTH_IDENTITY_MISSING);
 }
 
 // ---------------------------------------------------------------------------

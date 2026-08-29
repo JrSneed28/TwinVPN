@@ -200,8 +200,26 @@ where
         }
 
         let response = match request.body {
+            // **The `idempotency_key` travels on the ENVELOPE, not on the
+            // `Request`** (§11.3), so it has to be handed across here. It used
+            // to be dropped — `dispatch` built its `Submission` with `None` —
+            // which made every `CEREMONY`-class operation refuse
+            // `MGMT.PRECONDITION_FAILED` no matter what the client sent.
+            // `pair.begin` is one of them, so C-B was unreachable over MI even
+            // once the core could perform it. MI-2 is why the value is the
+            // envelope's rather than the request's: "a retry reuses
+            // `idempotency_key`, never `request_id`", and only the envelope
+            // carries both.
             Body::Request(ref call) => {
-                server::dispatch(context, principal, granted, subscription, call).await
+                server::dispatch(
+                    context,
+                    principal,
+                    granted,
+                    subscription,
+                    call,
+                    &request.idempotency_key,
+                )
+                .await
             }
             Body::Goodbye => return Ok(()),
             // A second `Hello` on one connection: §11.7 fixes the version "for

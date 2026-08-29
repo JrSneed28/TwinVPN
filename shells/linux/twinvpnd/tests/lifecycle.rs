@@ -12,9 +12,35 @@
 //! unprivileged one — and none of them needs `CAP_NET_ADMIN`, so they all run
 //! under a plain `cargo test`.
 
+//! # The `TWINVPN_LIFECYCLE_TRANSITION` markers
+//!
+//! `build/ci/ci-linux.sh` derives the acceptance gate's `lifecycle_transitions`
+//! array by grepping this suite's stdout (`cargo test -- --nocapture`), rather
+//! than from a hard-coded list — a list reports the same transitions whether or
+//! not anything drove one, which is a compile-only job dressed as a lifecycle
+//! job. So every transition a test **actually observes** prints one line, and
+//! nothing else does.
+//!
+//! The names are the code's, not invented ones: the startup steps are
+//! [`StartSequence`]'s own field names, `READY` is the literal
+//! `health::Report::state` that `main` writes at that point,
+//! `SHUTTING_DOWN` is `LinuxPlatformAdapter::is_shutting_down`, and
+//! `STREAM_CLOSED` is `events::Fanout::is_closed`. `START` is the one name with
+//! no counterpart in the code, because `StartSequence::default()` has none —
+//! there is no state before the first step, only the absence of every step.
+//!
+//! Tests that assert a property without driving a transition print nothing.
+
 use std::sync::Arc;
 
 use twinvpnd::agent::{authority, events, health, StartSequence};
+
+/// Emits one acceptance-gate marker. The format is matched by
+/// `^TWINVPN_LIFECYCLE_TRANSITION [A-Z_]+->[A-Z_]+$` and nothing else may
+/// appear on the line.
+fn transition(from: &str, to: &str) {
+    println!("TWINVPN_LIFECYCLE_TRANSITION {from}->{to}");
+}
 
 // ---------------------------------------------------------------------------
 // 11. startup
@@ -35,15 +61,20 @@ fn matrix_startup_reaches_ready_only_after_every_step_except_the_boot_artifact()
     // would still pass a single all-true assertion.
     sequence.ruleset_reclaimed = true;
     assert!(!sequence.ready());
+    transition("START", "RULESET_RECLAIMED");
     sequence.privilege_verified = true;
     assert!(!sequence.ready());
+    transition("RULESET_RECLAIMED", "PRIVILEGE_VERIFIED");
     sequence.state_rehydrated = true;
     assert!(!sequence.ready());
+    transition("PRIVILEGE_VERIFIED", "STATE_REHYDRATED");
     sequence.capabilities_probed = true;
     assert!(
         sequence.ready(),
         "§11.6: only then does it accept connections"
     );
+    transition("STATE_REHYDRATED", "CAPABILITIES_PROBED");
+    transition("CAPABILITIES_PROBED", "READY");
 
     // PS-7's exception, and it is an exception in the SAFE direction: the boot
     // artifact is package-owned and "MUST NOT be a prerequisite for [the
@@ -118,6 +149,7 @@ fn matrix_shutdown_leaves_enforcement_in_the_operating_systems_custody() {
         adapter.is_shutting_down(),
         "the shutdown latch is set, so new work is refused"
     );
+    transition("READY", "SHUTTING_DOWN");
 
     // And the swap is atomic in both directions, which is what makes a restart
     // safe: KS-23 requires an update to "replace the rule set by atomic swap,
@@ -155,6 +187,7 @@ async fn matrix_shutdown_closes_the_stream_and_settles_everything_waiting_on_it(
     );
     // And a detached subscriber's reads are answered rather than blocking.
     assert!(fanout.next_for(subscriber).is_none());
+    transition("SHUTTING_DOWN", "STREAM_CLOSED");
 }
 
 /// **Shutdown — EM-69's health file says the agent is gone.**
