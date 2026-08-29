@@ -1661,7 +1661,9 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-util",
  "prost",
+ "quinn",
  "thiserror",
  "tracing",
  "twinvpn-env",
