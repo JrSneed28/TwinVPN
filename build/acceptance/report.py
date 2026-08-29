@@ -302,9 +302,18 @@ def build_rows(run: bool):
     # means Phase 5 is not eligible. That is the intended behaviour: the
     # privileged criterion is undischarged until somebody actually discharges
     # it on real hardware.
+    # `android-device` is here rather than optional for three reasons the
+    # hosted emulator job cannot reach: `arm64-v8a` is PACKAGED by
+    # android-link-run and LOADED NOWHERE (the emulator runs the x86_64 .so);
+    # C-12's 16 KiB LOAD alignment flag is applied on every ABI and tested on
+    # none, because the pinned API-30 image has 4 KiB pages; and ADR-0020's
+    # assurance ladder reports its bottom rung on an emulator, so hardware
+    # custody is unproven. Shipping the ARM library on the strength of an
+    # x86_64 run is exactly the substitution this gate exists to refuse.
     for stem, label in (("windows-privileged", "Windows privileged lifecycle"),
                         ("macos-privileged", "macOS NetworkExtension lifecycle"),
-                        ("ios-device", "iOS physical-device lifecycle")):
+                        ("ios-device", "iOS physical-device lifecycle"),
+                        ("android-device", "Android physical-device lifecycle")):
         v, d, ev = probe_platform(stem, require_privileged=True)
         add("Privileged / physical", label, v, d)
         rows[-1]["evidence"] = ev

@@ -1,39 +1,39 @@
 # First Implementation Wave — acceptance report
 
-Commit `5b13591d1d3eeec1200e1a69e9bc0d93706c6d5d` (DIRTY WORKTREE — not release evidence)
-Probes executed: **True**
+Commit `aaabcce82b985cd05d2f37ebc26954988212ccad` (DIRTY WORKTREE — not release evidence)
+Probes executed: **False**
 
 
 ## F-1
 
 | criterion | verdict | evidence |
 |---|---|---|
-| crypto producer wired | **PASS** | every entry point has a non-test caller: arm_resumption |
-| crypto consumer wired | **FAIL** | no non-test caller for: resume_on_wire |
-| real datagram roundtrip | **PASS** | cargo test -q -p twinvpn-core --test crypto_carriage |
-| handshake secret type safety | **PASS** | core/crates/twinvpn-core/src/resume/driver.rs no longer contains `handshake_secret: &[u8]` |
-| local role type/state safety | **PASS** | core/crates/twinvpn-core/src/resume/driver.rs no longer contains `local_role: Role` |
-| replay commit-last regression | **PASS** | cargo test -p twinvpn-crypto --lib replay::tests |
-| reflection rejection | **PASS** | cargo test -q -p twinvpn-core --test resume reflected |
-| handshake/role API shape asserted | **PASS** | cargo test -q -p twinvpn-core --test resume_api_shape |
-| RS-6 regression | **PASS** | cargo test -q -p twinvpn-core --test resume_lifecycle |
+| crypto producer wired | **NOT-EXECUTED** | not run (pass --run) |
+| crypto consumer wired | **NOT-EXECUTED** | not run (pass --run) |
+| real datagram roundtrip | **NOT-EXECUTED** | not run (pass --run) |
+| handshake secret type safety | **NOT-EXECUTED** | not run (pass --run) |
+| local role type/state safety | **NOT-EXECUTED** | not run (pass --run) |
+| replay commit-last regression | **NOT-EXECUTED** | not run (pass --run) |
+| reflection rejection | **NOT-EXECUTED** | not run (pass --run) |
+| handshake/role API shape asserted | **NOT-EXECUTED** | not run (pass --run) |
+| RS-6 regression | **NOT-EXECUTED** | not run (pass --run) |
 
 ## F-2
 
 | criterion | verdict | evidence |
 |---|---|---|
-| production enrolment installation | **FAIL** | no non-test caller for: install_pairing_enrolment |
-| pair.begin production path | **PASS** | cargo test -q -p twinvpn-core --test pairing |
-| complete MI-P1 PairingOffer returned | **FAIL** | cargo test -q -p twinvpn-core --test pairing_production |
-| QR/text carriage available | **PASS** | cargo test -q -p twinvpn-crypto --test pairing_offer |
-| C-B integration flow | **PASS** | cargo test -q --workspace |
-| missing identity reason (AUTH.IDENTITY_MISSING) | **PASS** | cargo test -q -p twinvpn-core --test pairing_refusals |
+| production enrolment installation | **NOT-EXECUTED** | not run (pass --run) |
+| pair.begin production path | **NOT-EXECUTED** | not run (pass --run) |
+| complete MI-P1 PairingOffer returned | **NOT-EXECUTED** | not run (pass --run) |
+| QR/text carriage available | **NOT-EXECUTED** | not run (pass --run) |
+| C-B integration flow | **NOT-EXECUTED** | not run (pass --run) |
+| missing identity reason (AUTH.IDENTITY_MISSING) | **NOT-EXECUTED** | not run (pass --run) |
 
 ## F-5
 
 | criterion | verdict | evidence |
 |---|---|---|
-| mutation obligations discharged | **NOT-EXECUTED** | no machine-readable mutation report |
+| mutation obligations discharged | **FAIL** | specified=144 executable=17 executed=17 discharged/killed=17 survived=0 missing=127 B-1 0/22 |
 
 ## Platforms
 
@@ -52,10 +52,11 @@ Probes executed: **True**
 | Windows privileged lifecycle | **NOT-EXECUTED** | no evidence at build/ci/evidence/windows-privileged.json |
 | macOS NetworkExtension lifecycle | **NOT-EXECUTED** | no evidence at build/ci/evidence/macos-privileged.json |
 | iOS physical-device lifecycle | **NOT-EXECUTED** | no evidence at build/ci/evidence/ios-device.json |
+| Android physical-device lifecycle | **NOT-EXECUTED** | no evidence at build/ci/evidence/android-device.json |
 
 ## Phase 5 eligibility
 
-`12` of `24` required criteria are PASS.
+`0` of `25` required criteria are PASS.
 
 **Phase 5 eligibility: FAIL**
 
