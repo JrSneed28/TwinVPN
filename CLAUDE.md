@@ -51,12 +51,12 @@ them.** Treat "use ruflo", "be lazy", "be brief" as redundant confirmations, not
 as the trigger. There is no opt-in step and no announcement: do the thing.
 
 **`ruflo` is the CLI**, not a tool prefix. It is the npm package and the command
-— `npx ruflo@latest <command>` — and it has two faces, which are easy to blur
+— `ruflo <command>` — and it has two faces, which are easy to blur
 and must not be:
 
 | Face | How it is reached | Registered as |
 |---|---|---|
-| **CLI** | `npx ruflo@latest memory search …`, via Bash | n/a — there is no wrapper script and no local install |
+| **CLI** | `ruflo memory search …`, via Bash | a **global** npm install, `ruflo@3.38.20`, on `PATH`. Not npx, not a wrapper, and **not** in the project's `node_modules` |
 | **MCP server** | `mcp__claude-flow__*` tools | `.mcp.json` registers it under the name **`claude-flow`**, running `npx -y ruflo@latest mcp start`. **That legacy name is the ONLY reason the tool prefix is not `ruflo`** — upstream renamed `claude-flow` to `ruflo` and the server key did not follow. |
 
 So: the product is Ruflo, the CLI is `ruflo`, and `mcp__claude-flow__*` is Ruflo's
@@ -66,7 +66,7 @@ package and server (`npx ruv-swarm mcp start`), not part of Ruflo.
 | Layer | State | What that means in practice |
 |---|---|---|
 | **Ruflo, via `mcp__claude-flow__*`** | Automatic | Recall memory and route **before** non-trivial work; store what worked **after**. `guidance_brain` / `guidance_recommend` before complex Ruflo work. `aidefence_*` on untrusted input. Never wait to be told. |
-| **Ruflo, via the CLI** | Automatic | The same jobs where the MCP surface has no equivalent, or where a shell one-liner is smaller — `npx ruflo@latest memory search`, `hooks route`, `doctor`, `security scan`. Same coordination ledger underneath; pick whichever is fewer steps. |
+| **Ruflo, via the CLI** | Automatic | The same jobs where the MCP surface has no equivalent, or where a shell one-liner is smaller — `ruflo memory search`, `hooks route`, `doctor`, `security scan`. Same coordination ledger underneath; pick whichever is fewer steps. |
 | **ruv-swarm, via `mcp__ruv-swarm__*`** | Automatic | The neural/DAA and benchmarking half: `swarm_init`, `agent_spawn`, `task_orchestrate`, `daa_*`, `neural_*`, `benchmark_run`, `memory_usage`. Reach for it on the same trigger, for the capabilities Ruflo's server does not carry. |
 | **Ponytail** (`lite`) | Always on | Climb the ladder on every coding task and name the lazier alternative in one line. Never announce the mode. |
 | **Caveman** (`lite`) | Always on | Terse conversational prose only. Project artifacts stay normal — see the bullet above. |
@@ -86,7 +86,7 @@ of "automatic", not an excuse to skip it.
 
 Two consequences worth stating: a different MCP client may not defer at all, so
 never write a rule that depends on deferral; and **the CLI face has no such step
-in either case** — `npx ruflo@latest …` is just Bash, which is one reason to
+in either case** — `ruflo …` is just Bash, which is one reason to
 reach for it when a single command would do.
 
 **Automatic ≠ unbounded.** Using the coordination tools by default does not
@@ -194,7 +194,7 @@ SendMessage({ to: "researcher", summary: "Start", message: "[task context]" })
 - **Neural**: Enabled
 
 ```bash
-npx ruflo@latest swarm init --topology hierarchical-mesh --max-agents 15 --strategy specialized
+ruflo swarm init --topology hierarchical-mesh --max-agents 15 --strategy specialized
 ```
 
 ### Agent Routing
@@ -223,14 +223,14 @@ npx ruflo@latest swarm init --topology hierarchical-mesh --max-agents 15 --strat
 
 ### Before Any Task
 ```bash
-npx ruflo@latest memory search --query "[task keywords]" --namespace patterns
-npx ruflo@latest hooks route --task "[task description]"
+ruflo memory search --query "[task keywords]" --namespace patterns
+ruflo hooks route --task "[task description]"
 ```
 
 ### After Success
 ```bash
-npx ruflo@latest memory store --namespace patterns --key "[name]" --value "[what worked]"
-npx ruflo@latest hooks post-task --task-id "[id]" --success true --store-results true
+ruflo memory store --namespace patterns --key "[name]" --value "[what worked]"
+ruflo hooks post-task --task-id "[id]" --success true --store-results true
 ```
 
 ### MCP Tools (use `ToolSearch("keyword")` to discover)
@@ -272,7 +272,7 @@ Used **automatically** — see "Automatic activation" above. Deferred, so
 | `document` | After API changes |
 
 ```bash
-npx ruflo@latest hooks worker dispatch --trigger audit
+ruflo hooks worker dispatch --trigger audit
 ```
 
 ## Agents
@@ -298,19 +298,19 @@ npm run build && npm test
 ## CLI Quick Reference
 
 ```bash
-npx ruflo@latest init --wizard             # Setup
-npx ruflo@latest swarm init --v3-mode      # Start swarm
-npx ruflo@latest memory search --query ""  # Vector search
-npx ruflo@latest hooks route --task ""     # Route to agent
-npx ruflo@latest doctor --fix              # Diagnostics
-npx ruflo@latest security scan             # Security scan
-npx ruflo@latest performance benchmark     # Benchmarks
+ruflo init --wizard             # Setup
+ruflo swarm init --v3-mode      # Start swarm
+ruflo memory search --query ""  # Vector search
+ruflo hooks route --task ""     # Route to agent
+ruflo doctor --fix              # Diagnostics
+ruflo security scan             # Security scan
+ruflo performance benchmark     # Benchmarks
 ```
 
 52 commands, 140+ subcommands. Use `--help` on any command for details.
 
 > Upstream: <https://github.com/ruvnet/ruflo> (formerly `ruvnet/claude-flow`).
-> `npx ruflo@latest <command>` is the documented entry point on every surface —
+> `ruflo <command>` is the documented entry point on every surface —
 > there is no wrapper script and no local CLI install in this repo.
 
 ## Setup
@@ -320,11 +320,11 @@ npx ruflo@latest performance benchmark     # Benchmarks
 ```bash
 npm install                # project deps: aidefence, agentic-flow, ruv-swarm
 ./scripts/npx-mcp-deps     # let the npx MCP tree resolve ruflo's extra packages
-npx ruflo@latest doctor    # verify; --fix prints suggestions, applies nothing
+ruflo doctor    # verify; --fix prints suggestions, applies nothing
 ```
 
 To re-scaffold `.claude/`, `.claude-flow/`, `CLAUDE.md`, the helpers, and the
-hooks from scratch, the documented flow is `npx ruflo@latest init --wizard`
+hooks from scratch, the documented flow is `ruflo init --wizard`
 (`init --yes` for the non-interactive form). It overwrites the checked-in
 scaffold, so commit before running it.
 
@@ -337,17 +337,77 @@ claude mcp add claude-flow -- npx -y ruflo@latest mcp start
 `.mcp.json` already carries that command plus this project's env, so a fresh
 clone needs no `claude mcp add`.
 
-### Nothing is version-pinned
+### The two faces are pinned differently, and can drift apart
 
-Both the CLI and the MCP servers resolve `ruflo@latest` through npx, so a new
-upstream release is picked up on the next launch. That is the documented
-behaviour; if a specific version is ever needed, pin it in `.mcp.json` and in
-the CLI invocations together.
+**They are not the same install and not necessarily the same version.**
 
-### Three of ruflo's packages are unusable from the npx tree
+- **CLI** — a **global** npm install, currently `ruflo@3.38.20`, resolved from
+  `PATH`. Pinned in the sense that it moves only when someone runs
+  `npm i -g ruflo@…`. The user installed it globally on purpose; there is no
+  local install and no wrapper script, and neither should be reintroduced.
+- **MCP servers** — `npx -y ruflo@latest mcp start` and `npx ruv-swarm`, which
+  **float**: a new upstream release is picked up on the next launch.
 
-npx runs ruflo out of `~/.npm/_npx/<hash>/`. Three packages ruflo imports by
-bare specifier do not work from there, and every failure is **silent**:
+So the CLI can sit on an older release than the MCP surface indefinitely, and
+nothing warns. If a behaviour differs between a `ruflo …` command and the
+equivalent `mcp__claude-flow__*` tool, **check the versions before debugging the
+behaviour**. To pin both, pin `.mcp.json` and re-run the global install together.
+
+### The global CLI's `better-sqlite3` — fixed, and it comes back on reinstall
+
+**Symptom, if it returns.** `ruflo <anything>` prints correct output and then dies
+with SIGABRT, so every invocation exits **134** even on success:
+
+```
+node[…]: void node::RemoveEnvironmentCleanupHook(…) at ../src/api/hooks.cc:142
+Assertion failed: (env) != nullptr
+… Statement::~Statement() [.../ruflo/node_modules/agentdb/node_modules/better-sqlite3/…]
+```
+
+**Cause.** The global install ships `agentdb` → `better-sqlite3@11.10.0`, which
+aborts at teardown on Node 24 (ABI 137). This project already fixes exactly that
+defect with `"overrides": {"better-sqlite3": "12.11.1"}` in `package.json` — but
+an override applies to the **project** tree only and cannot reach a global
+install. Same defect, second location, and the existing pin is powerless there.
+
+**Fix, applied 2026-08-29:**
+
+```bash
+cd "$(dirname "$(readlink -f "$(command -v ruflo)")")/../node_modules/agentdb"
+npm install better-sqlite3@12.11.1 --no-save --no-audit --no-fund
+```
+
+After it, `ruflo memory stats` and `ruflo status` exit **0**, and embeddings stay
+real (`Xenova/all-MiniLM-L6-v2`, 384 dims). Note the command pulls agentdb's full
+dependency tree (~438 packages) into the global install, and npm blocks two
+`esbuild` postinstalls — neither affects ruflo.
+
+**It is not durable.** Any `npm i -g ruflo@…` reinstalls 11.10.0 and the abort
+returns. Re-run the fix after every global version bump, and check with
+`ruflo status >/dev/null 2>&1; echo $?` — **0** is healthy, **134** means redo it.
+Until then, do not branch on a `ruflo` CLI exit code in a hook or `set -e`
+script. The MCP surface was never affected: the npx tree resolves the project's
+pinned copy.
+
+### Optional packages, per surface — `npx-mcp-deps` serves the MCP tree only
+
+**This section is about the MCP surface. The global CLI resolves differently and
+`npx-mcp-deps` does nothing for it** — the script links into
+`~/.npm/_npx/node_modules`, which is not on the global install's resolution path.
+Measured on the global `ruflo@3.38.20`:
+
+| Package | Global CLI | Effect |
+|---------|-----------|--------|
+| `@huggingface/transformers` | **resolves** — bundled at `…/ruflo/node_modules/@huggingface/transformers` | embeddings are real: `ruflo memory stats` reports `Xenova/all-MiniLM-L6-v2`, 384 dims, semantic search yes |
+| `@claude-flow/aidefence` | **`MODULE_NOT_FOUND`** | `aidefence` CLI paths degrade; the MCP surface is unaffected because it is linked there |
+
+So a CLI `memory search` gives real semantic recall, and `aidefence` does not.
+Do not "fix" the CLI by linking into the global tree without asking — the global
+install is the user's deliberate choice.
+
+The rest of this section is the **npx/MCP** tree. npx runs ruflo out of
+`~/.npm/_npx/<hash>/`. Three packages ruflo imports by bare specifier do not work
+from there, and every failure is **silent**:
 
 | Package | Why it fails | Symptom |
 |---------|--------------|---------|
@@ -392,7 +452,7 @@ never with `doctor`:
 > in both `.mcp.json` and `.claude/settings.json`. It runs interval workers that
 > each spawn a headless `claude` session, so it bills tokens continuously — this
 > is intended, do not "fix" it. Ruflo also auto-starts it on every CLI command
-> except `daemon` itself, so a read-only `npx ruflo@latest status` leaves workers
+> except `daemon` itself, so a read-only `ruflo status` leaves workers
 > running too; prefix `RUFLO_DAEMON_AUTOSTART=0` to opt out of a single call.
 > Daemons self-stop after 12h (`--ttl 0` to disable). Audit with `ps`, not
 > `daemon status --all`, which reports false negatives.
