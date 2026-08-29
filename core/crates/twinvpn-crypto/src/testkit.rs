@@ -240,3 +240,123 @@ pub fn verified_tunnel_key(tk_pub: &[u8; 32]) -> crate::VerifiedTunnelKey {
 pub fn x25519_cose_key(pubkey: &[u8; 32]) -> Vec<u8> {
     crate::cose::x25519_cose_key(pubkey)
 }
+
+/// Two [`crate::EstablishedHandshake`]s, from **one real `Noise_IKpsk2`
+/// handshake**.
+///
+/// # There is no back door, and that is the point
+///
+/// [`crate::EstablishedHandshake`] has no constructor at all outside
+/// `twinvpn-crypto` — not a public one, and not a test-gated one either. So this
+/// fixture does what `verified_tunnel_key` does one gate over: it runs the whole
+/// production path. Two [`crate::noise::Handshake`]s exchange the two `IKpsk2`
+/// messages and each is `split`, so both results carry a role their own
+/// handshake fixed and a secret their own chaining key produced.
+///
+/// A test-only `EstablishedHandshake::from_parts(role, bytes)` would have been
+/// four lines, and would have re-opened exactly the two holes F-1 closes:
+/// arbitrary bytes as a handshake secret, and a caller-chosen role. A test suite
+/// that can express the bug it is guarding against is not guarding against it.
+///
+/// Returns `(initiator, responder)` — the two halves of one handshake, so their
+/// secrets are equal and their roles are opposite, which is what a resumption
+/// consumer's direction labels depend on.
+///
+/// # Panics
+///
+/// If the handshake does not complete. It is a fixture; a defect in it is a
+/// defect in this function, not in a caller.
+#[must_use]
+pub fn established_pair(
+    env: &twinvpn_env::Env,
+) -> (crate::EstablishedHandshake, crate::EstablishedHandshake) {
+    use crate::noise::{static_public_key, Handshake, HandshakeConfig, Role};
+
+    let init_static = fixture_static(0x21);
+    let resp_static = fixture_static(0x42);
+    let resp_pub = static_public_key(&resp_static).expect("responder public");
+    let init_pub = static_public_key(&init_static).expect("initiator public");
+    let resp_key = verified_tunnel_key(&resp_pub);
+    let init_key = verified_tunnel_key(&init_pub);
+
+    let psk =
+        crate::psk::TwinNetPsk::derive(b"twinvpn/testkit/pair-secret", &[0x33; 32], "tn-1", 1)
+            .expect("fixture psk");
+    let prologue = fixture_prologue();
+
+    let mut initiator = Handshake::new(
+        env,
+        Role::Initiator,
+        &HandshakeConfig {
+            local_static: &init_static,
+            remote_static: Some(&resp_key),
+            psk: &psk,
+            prologue: &prologue,
+        },
+    )
+    .expect("fixture initiator");
+    let mut responder = Handshake::new(
+        env,
+        Role::Responder,
+        &HandshakeConfig {
+            local_static: &resp_static,
+            remote_static: None,
+            psk: &psk,
+            prologue: &prologue,
+        },
+    )
+    .expect("fixture responder");
+
+    let mut wire = [0u8; 1024];
+    let mut scratch = [0u8; 1024];
+    let n = initiator
+        .write_message(&[], &mut wire)
+        .expect("fixture message 1");
+    responder
+        .read_message(&wire[..n], &mut scratch)
+        .expect("fixture reads message 1");
+    let n = responder
+        .write_message(&[], &mut wire)
+        .expect("fixture message 2");
+    initiator
+        .read_message(&wire[..n], &mut scratch)
+        .expect("fixture reads message 2");
+
+    let (_, init_established) = initiator.split().expect("initiator splits");
+    let (_, resp_established) = responder.split().expect("responder splits");
+    // The `init_key` is built so the fixture's responder half proves an identity
+    // a caller can assert against; binding it here keeps clippy from calling it
+    // unused while stating why it exists.
+    debug_assert_eq!(resp_established.remote_static(), init_key.tk_pub());
+    (init_established, resp_established)
+}
+
+/// One X25519 static in the locked allocator, from a fixed byte.
+fn fixture_static(seed: u8) -> crate::LockedBytes {
+    crate::LockedBytes::new_with(32, |dst| {
+        dst.fill(seed);
+        // The implementation clamps; a fixed pattern is a valid scalar.
+        dst[0] = seed | 0x01;
+    })
+    .expect("fixture static")
+}
+
+/// The 83-byte §7.3.1 prologue both fixture ends agree on.
+fn fixture_prologue() -> crate::Prologue {
+    crate::Prologue::new(
+        &crate::IdentityBinding {
+            twinnet: crate::TwinnetTag::from_twinnet_id("tn-1"),
+            device_id_init: [0x01; 32],
+            device_id_resp: [0x02; 32],
+            trust_epoch: 1,
+            psk_epoch: 1,
+            anchor_version: 1,
+            delegation_set_digest: [0x03; 32],
+        },
+        &crate::NegotiationBinding {
+            h_initiator: [0x04; 32],
+            h_responder: [0x05; 32],
+            selection_dcbor: vec![0xf6],
+        },
+    )
+}

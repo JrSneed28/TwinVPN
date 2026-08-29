@@ -5,7 +5,7 @@
 //! `twinvpn-crypto` and this module names no cryptography crate of its own.
 
 use twinvpn_crypto::noise::Role;
-use twinvpn_crypto::{hkdf_expand_label, sha256, LockedBytes};
+use twinvpn_crypto::{hkdf_expand_label, sha256, EstablishedHandshake, LockedBytes};
 use twinvpn_types::codes;
 
 use super::{ResumeRefusal, RESUME_TAG_LEN, RESUMPTION_ID_LEN, RESUMPTION_SECRET_LEN};
@@ -36,7 +36,23 @@ impl ResumptionKeys {
     /// [`hkdf_expand_label`], which keeps RFC 8446's `"tls13 "` prefix — I2
     /// forbids a TwinVPN-designed variant of a standard construction, and the
     /// KDF module already made that call for exactly this consumer.
-    pub fn derive(handshake_secret: &[u8], local_role: Role) -> Result<Self, ResumeRefusal> {
+    ///
+    /// # Both inputs come from the handshake, and neither from the caller
+    ///
+    /// `handshake` is `twinvpn-crypto`'s [`EstablishedHandshake`], which has no
+    /// public constructor: the only thing that mints one is
+    /// `noise::Handshake::split`, consuming the handshake it describes. So the
+    /// secret is the one that handshake produced, and `local_role` is read
+    /// **off it** rather than accepted beside it.
+    ///
+    /// The two parameters this replaced were both silent downgrades. A bare
+    /// `&[u8]` accepted the handshake hash — a value ADR-0001 §7.3 D2 puts on
+    /// the wire — and a `Role` parameter accepted the *same* role on both
+    /// peers, which collapses the two direction labels below into one and
+    /// removes the reflection defence entirely. Neither compiles now.
+    pub fn derive(handshake: &EstablishedHandshake) -> Result<Self, ResumeRefusal> {
+        let handshake_secret = handshake.secret().expose();
+        let local_role = handshake.local_role();
         let mut raw = [0u8; RESUMPTION_SECRET_LEN];
         hkdf_expand_label(handshake_secret, "twinvpn resume", b"", &mut raw)
             .map_err(|_| ResumeRefusal::DerivationFailed)?;

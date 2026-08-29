@@ -17,7 +17,7 @@
 //! `EV_RESUME` in `RECONNECTING{parked}` means; what was missing was anything
 //! that computed its guard from a **wire fact** instead of a guess.
 
-use twinvpn_crypto::noise::Role;
+use twinvpn_crypto::EstablishedHandshake;
 use twinvpn_env::BootId;
 use twinvpn_platform::iface::ResumeFacts;
 use twinvpn_session::event::{Event, Trigger};
@@ -32,88 +32,76 @@ use crate::session_loop::{ResumeVerdict, SessionRuntime};
 impl SessionRuntime {
     /// Arms ADR-0001 §7.3.2 resumption for a handshake that just completed.
     ///
-    /// The one call that turns a `Session` into one that can resume, and the
-    /// only place `handshake_secret` is read. Call it from the handshake step,
-    /// once, with the `path_epoch` the `Session` was established at.
+    /// The one call that turns a `Session` into one that can resume. Its
+    /// production caller is [`crate::execute::establishment`], on every
+    /// `Session` whose direct `Noise_IKpsk2` handshake produced a live tunnel;
+    /// it is called once, with the `path_epoch` the `Session` was established
+    /// at.
     ///
     /// Arming twice replaces the state, which is what a **rekey** should do:
     /// RS-6 bounds resumption by the rekey schedule, so new keys must not
     /// inherit the old material's age or its window.
     ///
-    /// # Security — what `handshake_secret` must be, and what it must not
+    /// # The seam is closed: neither input can be chosen by a caller
     ///
-    /// ADR-0001 §7.3.2 names the input `handshake_secret`: the **per-session
-    /// secret** the completed Noise handshake produced, which no observer of the
-    /// transcript can recompute.
+    /// ADR-0001 §7.3.2's input is the **per-session secret** the completed Noise
+    /// handshake produced, which no observer of the transcript can recompute.
+    /// This function takes [`twinvpn_crypto::EstablishedHandshake`], which is
+    /// exactly that value and nothing else: it has no public constructor, and
+    /// `twinvpn_crypto::noise::Handshake::split` — which consumes the handshake
+    /// — is the only thing in the workspace that mints one. The role is read
+    /// **off** it, and the secret comes with it.
     ///
-    /// It is **not** `twinvpn_crypto::noise::Handshake::handshake_hash`, and
-    /// the reason matters more than the conclusion — an earlier version of this
-    /// block gave two reasons that were both **factually wrong**, which is worse
-    /// than giving none: a maintainer who checks a premise, finds it false, and
-    /// concludes the whole warning is stale is behaving reasonably, and ships the
-    /// downgrade. So, precisely:
+    /// An earlier version of this function took `&[u8]` and a caller-supplied
+    /// `Role`, and both were silent downgrades rather than failures:
     ///
-    /// **`h` is not "public" and it is not DH-free.** `Noise_IKpsk2`'s `psk`
-    /// token fires in message 2, *after* `es`, `ss`, `ee` and `se` have all been
-    /// mixed into `ck`; snow's `SymmetricState::mix_key_and_hash`
-    /// (`symmetricstate.rs:76-88`) then HKDFs from that DH-laden `ck` and mixes
-    /// the second output into `h`. So `h` **is** a function of the DH outputs,
-    /// and a TwinNet member holding the PSK and a full transcript capture
-    /// **cannot** recompute it. The "any member can recover it" attack this
-    /// block used to describe does not exist.
+    /// - **the handshake hash compiled.** `handshake_hash()` is exported
+    ///   deliberately, for ADR-0001 §7.3 D2's confirmation value — a value that
+    ///   may be **transmitted and compared in the clear** — and Noise's own
+    ///   specification says it is not to be used as secret material. (Note the
+    ///   objection is disclosure, not weakness: `IKpsk2`'s `psk` token fires in
+    ///   message 2, after `es`, `ss`, `ee` and `se` are mixed into `ck`, so `h`
+    ///   *is* a function of the DH outputs and a TwinNet member holding the PSK
+    ///   cannot recompute it. Keying from something the design sends on the wire
+    ///   is unsound however well it is mixed.)
+    /// - **arming both peers under one role compiled**, which collapses the two
+    ///   direction labels into one and removes the reflection defence
+    ///   `a_resume_reflected_back_at_its_sender_does_not_authenticate` exists to
+    ///   guarantee. That test passed anyway, because the harness assigned the
+    ///   roles correctly by hand.
     ///
-    /// **The real reason is disclosure, not secrecy.** `handshake_hash()` is
-    /// exported deliberately, for ADR-0001 §7.3 D2's confirmation value — a
-    /// value that may be **transmitted and compared in the clear**. Keying from
-    /// something the design sends on the wire is unsound however well it is
-    /// mixed, and Noise's own specification says the handshake hash is not to be
-    /// used as secret material. That argument is sufficient on its own and does
-    /// not depend on any claim about what `h` absorbs.
+    /// # The crypto-seam decision this used to be blocked on, and how it went
     ///
-    /// # What exists, and why it is still not the input
+    /// This block used to report the derivation as an **open** decision. It is
+    /// not open any more, and the record is worth keeping straight:
     ///
-    /// **snow does have an accessor** — `HandshakeState::dangerously_get_raw_split`
-    /// (`handshakestate.rs:511`), behind its `risky-raw-split` feature. Saying
-    /// "snow offers nothing else" would be false, and is exactly the kind of
-    /// false premise this block exists to avoid. It returns the two 32-byte
-    /// **transport** keys, which is a *different* construction from §7.3.2's:
-    /// reusing keying material the datapath is actively using for a second
-    /// purpose is not the derivation the ADR specifies, and enabling that feature
-    /// is a dependency-surface decision under ADR-0018 DP-3.
+    /// `snow`'s `HandshakeState::dangerously_get_raw_split`, behind its
+    /// `risky-raw-split` feature, returns the two 32-byte outputs of Noise's
+    /// `Split()`. `twinvpn-crypto` now enables that feature — a pure feature
+    /// flag, `risky-raw-split = []` in snow 0.10.0, which adds no dependency and
+    /// therefore does not engage ADR-0018 DP-3's dependency-surface rule — and
+    /// derives
     ///
-    /// What is genuinely missing is in **`twinvpn-crypto`'s own wrapper**:
-    /// `Handshake` surfaces only `handshake_hash()` (`noise.rs:283`) and
-    /// `into_transport` (`:299`) consumes the state. So the blocker is a
-    /// one-method addition there — an accessor for the chaining-key material, or
-    /// a `resumption_secret` derived inside that crate — and it is a crypto-seam
-    /// decision, not wiring.
+    /// ```text
+    /// handshake_secret = HKDF-Extract(salt = "TwinVPN/resumption/v1", ikm = k1 || k2)
+    /// ```
     ///
-    /// # This seam does not catch a wrong input
-    ///
-    /// `handshake_secret` is a bare `&[u8]` and `local_role` is caller-supplied.
-    /// Passing the handshake hash compiles. Arming **both** peers with the same
-    /// `Role` compiles too, and silently collapses the two direction labels into
-    /// one, removing the reflection defence that
-    /// `a_resume_reflected_back_at_its_sender_does_not_authenticate` is supposed
-    /// to guarantee — that test still passes, because the harness assigns the
-    /// roles correctly by hand. Both are silent downgrades rather than failures.
-    /// Whoever adds the `twinvpn-crypto` accessor should give this function a
-    /// newtype that only that accessor can mint, and derive the role rather than
-    /// accept it.
+    /// The old objection to those two values was that "reusing keying material
+    /// the datapath is actively using for a second purpose is not the derivation
+    /// the ADR specifies". The extract answers it: this is the **TLS 1.3 shape**
+    /// — RFC 8446 §7.1 derives `resumption_master_secret` from the same secret
+    /// the traffic keys come from, separated by a label — and HKDF-Extract is
+    /// one-way, so resumption material never yields transport keys. Unlike the
+    /// handshake hash, `k1` and `k2` are never disclosed on the wire in any
+    /// form. `twinvpn_crypto::established` carries the full argument.
     pub fn arm_resumption(
         &mut self,
-        handshake_secret: &[u8],
-        local_role: Role,
+        handshake: &EstablishedHandshake,
         session_nonce: SessionNonce,
         path_epoch: u64,
     ) -> Result<(), ResumeRefusal> {
-        let state = ResumeState::armed(
-            handshake_secret,
-            local_role,
-            session_nonce,
-            path_epoch,
-            self.env.now_elapsed(),
-        )?;
+        let state =
+            ResumeState::armed(handshake, session_nonce, path_epoch, self.env.now_elapsed())?;
         self.resume = Some(state);
         Ok(())
     }

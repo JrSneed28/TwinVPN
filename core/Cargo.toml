@@ -177,9 +177,21 @@ quinn = { version = "0.11", default-features = false, features = [
 # curve25519-dalek, chacha20poly1305 and blake2 -- the same crates
 # `core/Cargo.toml` already pins for `twinvpn-crypto` under CD-I2. What changes
 # is which implementation computes them, not which ones they are.
+#
+# `risky-raw-split` is a PURE FEATURE FLAG and NOT a dependency-surface change.
+# snow 0.10.0's own manifest declares it as `risky-raw-split = []` -- an empty
+# list, which pulls in no crate and enables no optional dependency. It gates
+# exactly one method, `HandshakeState::dangerously_get_raw_split`. ADR-0018 DP-3
+# governs the DEPENDENCY surface, so it is not engaged here: the graph
+# `cargo tree` prints is identical with and without this feature.
+#
+# What it is for: `twinvpn_crypto::established::HandshakeSecret` extracts
+# ADR-0001 §7.3.2's `handshake_secret` from the two raw split outputs. That
+# module states why the extract is one-way, and why the handshake hash is not a
+# substitute for it.
 snow               = { version = "0.10", default-features = false, features = [
   "default-resolver", "use-curve25519", "use-chacha20poly1305", "use-blake2",
-  "use-sha2", "use-getrandom",
+  "use-sha2", "use-getrandom", "risky-raw-split",
 ] }
 x25519-dalek       = "3.0"
 ed25519-dalek      = "3.0"

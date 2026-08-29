@@ -52,7 +52,7 @@ use std::sync::Mutex;
 
 use twinvpn_crypto::noise::{Handshake, HandshakeConfig, Role, TransportSession};
 use twinvpn_crypto::prologue::NEG_LABEL;
-use twinvpn_crypto::VerifiedTunnelKey;
+use twinvpn_crypto::{EstablishedHandshake, VerifiedTunnelKey};
 use twinvpn_env::{Env, MonotonicInstant};
 use twinvpn_types::{Endpoint, SessionId, TunnelId};
 
@@ -110,6 +110,14 @@ pub struct NoiseBinding {
     expected_peer: [u8; 32],
     /// `snow`'s handshake hash, captured at completion for §7.3 D2.
     handshake_hash: Option<[u8; 32]>,
+    /// ADR-0001 §7.3.2's authenticated handshake result, captured at completion
+    /// and **moved out once** by [`NoiseBinding::take_established`].
+    ///
+    /// `Option` rather than an accessor returning a reference, because this
+    /// keys resumption: RS-1 says the material lives for the life of one
+    /// `Session`, and two callers each holding a copy is exactly how it comes to
+    /// outlive it. There is no `Clone` on the value and none here.
+    established: Option<EstablishedHandshake>,
 }
 
 impl NoiseBinding {
@@ -147,6 +155,7 @@ impl NoiseBinding {
             prologue: *cfg.prologue.as_bytes(),
             expected_peer: *expected_peer.tk_pub(),
             handshake_hash: None,
+            established: None,
         })
     }
 
@@ -172,6 +181,30 @@ impl NoiseBinding {
     #[must_use]
     pub const fn expected_peer_static(&self) -> &[u8; 32] {
         &self.expected_peer
+    }
+
+    /// **Moves out** ADR-0001 §7.3.2's authenticated handshake result.
+    ///
+    /// `None` until the handshake completes — N-9's "no state may be written
+    /// before the handshake completes" as an absent value, exactly like
+    /// [`Self::handshake_hash`] — and `None` again after the first call.
+    ///
+    /// # Why once, and not a borrow
+    ///
+    /// What this hands out keys resumption, and ADR-0001 §7.3.2 RS-1 says that
+    /// material lives **in memory only, for the life of the `Session`**. A
+    /// second caller receiving a second copy is precisely the shape that ends
+    /// with resumption material outliving the `Session` that owns it, so the
+    /// value is moved rather than lent or cloned, and
+    /// [`twinvpn_crypto::EstablishedHandshake`] implements neither `Clone` nor
+    /// `Copy` to make that the only option.
+    ///
+    /// A caller that wants only the traffic keys ignores this entirely;
+    /// `NoiseHandshake`'s three methods are unchanged and still return
+    /// `Box<dyn TransportKeys>` on their own.
+    #[must_use]
+    pub fn take_established(&mut self) -> Option<EstablishedHandshake> {
+        self.established.take()
     }
 
     /// P-1's cross-check: the caller's 83 bytes must be the ones this binding
@@ -204,8 +237,17 @@ impl NoiseBinding {
             return Err(CryptoUnavailable);
         }
         hash.copy_from_slice(observed);
-        let session = handshake.into_transport().map_err(|_| CryptoUnavailable)?;
+        // `split` rather than `into_transport`: the transport session is keyed
+        // identically either way — `snow`'s `split_raw` only reads the chaining
+        // key — and the second half is ADR-0001 §7.3.2's authenticated
+        // handshake result, which `twinvpn-core` arms resumption from. It is
+        // captured here because this is the one place the `Handshake` is
+        // consumed, and it is captured only on the path where the peer static
+        // has already been checked, so it can never name a device this binding
+        // refused.
+        let (session, established) = handshake.split().map_err(|_| CryptoUnavailable)?;
         self.handshake_hash = Some(hash);
+        self.established = Some(established);
         Ok(Box::new(SessionKeys::new(session)))
     }
 }
@@ -220,6 +262,10 @@ impl core::fmt::Debug for NoiseBinding {
             .field("role", &self.role)
             .field("live", &self.handshake.is_some())
             .field("completed", &self.handshake_hash.is_some())
+            // Whether the resumption half is still here, never what it holds:
+            // `EstablishedHandshake`'s own `Debug` redacts the secret, and this
+            // one does not reach for it at all.
+            .field("resumption_material_held", &self.established.is_some())
             .finish_non_exhaustive()
     }
 }

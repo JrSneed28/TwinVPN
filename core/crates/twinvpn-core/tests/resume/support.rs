@@ -7,18 +7,12 @@
 use twinvpn_core::resume::PeerTrustFacts;
 use twinvpn_core::session_loop::SessionRuntime;
 use twinvpn_core::testing;
-use twinvpn_crypto::noise::Role;
 use twinvpn_env::virtual_time::VirtualTime;
 use twinvpn_env::Env;
 use twinvpn_session::event::{Event, Trigger};
 use twinvpn_session::state::SessionState;
 use twinvpn_session::{Context, Guards, SessionMachine};
 use twinvpn_types::{SessionId, SessionNonce};
-
-/// The `handshake_secret` both peers derive from. A fixture, not a key: the
-/// derivation under test is `HKDF-Expand-Label`, and a constant input makes the
-/// whole suite reproducible byte for byte.
-pub const HANDSHAKE_SECRET: [u8; 32] = [0x5a; 32];
 
 /// The `path_epoch` the `Session` was established at.
 pub const ESTABLISHED_EPOCH: u64 = 7;
@@ -45,29 +39,49 @@ pub fn runtime(env: &Env, tag: u8) -> SessionRuntime {
     SessionRuntime::new(env.clone(), machine)
 }
 
-/// Two peers of one `Session`, armed from the same completed handshake.
+/// Two peers of one `Session`, armed from **one real `Noise_IKpsk2`
+/// handshake**.
 ///
-/// `a` was the handshake initiator and `b` the responder, which is what fixes
-/// the direction label each side MACs under.
+/// `a` was the handshake initiator and `b` the responder, and that is not this
+/// fixture's choice: `twinvpn_crypto::testkit::established_pair` runs the whole
+/// handshake and each half's role is the one its own `Handshake` was built with.
+/// There is no way to hand both peers the same role, here or anywhere — see
+/// `SessionRuntime::arm_resumption`, whose `&[u8]` secret and caller-supplied
+/// `Role` this replaced.
+///
+/// The material is therefore no longer a constant. That is a real loss of
+/// byte-for-byte reproducibility across runs and it is the right trade: a
+/// fixture that could express the bug the API now forbids is not testing the
+/// API. Determinism where it matters is preserved anyway — the entropy behind
+/// `testing::env()` is seeded, so a run is reproducible.
 pub fn armed_pair() -> (SessionRuntime, SessionRuntime, VirtualTime) {
     let (env, vt) = testing::env();
+    let (initiator, responder) = twinvpn_crypto::testkit::established_pair(&env);
     let mut a = runtime(&env, 1);
     let mut b = runtime(&env, 2);
-    a.arm_resumption(
-        &HANDSHAKE_SECRET,
-        Role::Initiator,
-        nonce(),
-        ESTABLISHED_EPOCH,
-    )
-    .expect("initiator arms");
-    b.arm_resumption(
-        &HANDSHAKE_SECRET,
-        Role::Responder,
-        nonce(),
-        ESTABLISHED_EPOCH,
-    )
-    .expect("responder arms");
+    a.arm_resumption(&initiator, nonce(), ESTABLISHED_EPOCH)
+        .expect("initiator arms");
+    b.arm_resumption(&responder, nonce(), ESTABLISHED_EPOCH)
+        .expect("responder arms");
     (a, b, vt)
+}
+
+/// One `SessionRuntime` armed from a fresh handshake of its own, under `nonce`.
+///
+/// For the tests that need a **second, unrelated** `Session`: a resume from it
+/// must not authenticate here, and the reason it must not is that neither the
+/// `session_nonce` nor the resumption material is shared.
+///
+/// `allow(dead_code)` because this file is `#[path]`-included by two test
+/// targets and only `resume.rs` needs it — the same reason `datapath/support.rs`
+/// is shared without every consumer using every helper.
+#[allow(dead_code, reason = "one harness, two test targets")]
+pub fn armed_elsewhere(env: &Env, tag: u8, session_nonce: SessionNonce) -> SessionRuntime {
+    let (initiator, _responder) = twinvpn_crypto::testkit::established_pair(env);
+    let mut rt = runtime(env, tag);
+    rt.arm_resumption(&initiator, session_nonce, ESTABLISHED_EPOCH)
+        .expect("a second session arms");
+    rt
 }
 
 /// Parks `rt` in `RECONNECTING{parked}` — §4.5 T34 — which is the state a

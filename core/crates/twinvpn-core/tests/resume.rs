@@ -16,10 +16,9 @@
 mod support;
 
 use prost::Message as _;
-use support::{armed_pair, hint, nonce, park, runtime, ESTABLISHED_EPOCH, HANDSHAKE_SECRET};
+use support::{armed_elsewhere, armed_pair, hint, nonce, park, ESTABLISHED_EPOCH};
 use twinvpn_core::resume::ResumeRefusal;
 use twinvpn_core::testing;
-use twinvpn_crypto::noise::Role;
 use twinvpn_session::state::SessionState;
 use twinvpn_session::{Context, Guards};
 use twinvpn_types::{codes, Identifier as _, SessionNonce};
@@ -240,15 +239,11 @@ fn malformed_forged_and_misdirected_resumes_are_all_refused_without_moving_the_w
     ));
     // A perfectly good resume for a different `Session`.
     let (other_env, _other_vt) = testing::env();
-    let mut other = runtime(&other_env, 3);
-    other
-        .arm_resumption(
-            &HANDSHAKE_SECRET,
-            Role::Initiator,
-            SessionNonce::from_slice(&[0x22; 16]).expect("16"),
-            ESTABLISHED_EPOCH,
-        )
-        .expect("a second session arms");
+    let mut other = armed_elsewhere(
+        &other_env,
+        3,
+        SessionNonce::from_slice(&[0x22; 16]).expect("16"),
+    );
     let elsewhere = other.offer_resume(None, trusting()).expect("fresh");
     assert_eq!(
         b.accept_resume_offer(&elsewhere, trusting()),

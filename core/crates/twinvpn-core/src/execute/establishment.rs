@@ -67,6 +67,21 @@ use crate::datapath::Cancel;
 use crate::execute::{carriage, handshake};
 use crate::session_table::Established;
 
+/// The `path_epoch` a freshly established `Session` is armed at.
+///
+/// ADR-0001 §7.3.2 RS-4 requires a resume to present a **strictly greater**
+/// `path_epoch` than the highest already seen, and
+/// [`crate::resume::ResumeState::armed`] seeds both the inbound window and the
+/// outbound counter from this value. Zero is the correct seed for a `Path` that
+/// has just come up and has never migrated: the first resume in either
+/// direction therefore presents `1`.
+///
+/// It is a constant rather than a field because both peers must seed the same
+/// value from the same handshake and there is nothing on the wire that carries
+/// one — see `handshake::Handshaken::session_nonce` for the same situation and
+/// the same reason.
+const ESTABLISHED_PATH_EPOCH: u64 = 0;
+
 /// Drives one `Session` from NEGOTIATING to a steady state, or to a refusal.
 ///
 /// Returns the number of observable effects, which is what `session.connect`
@@ -204,6 +219,28 @@ fn direct(core: &Core, session_id: SessionId) -> Result<(), handshake::Refusal> 
     entry.keying = keying;
 
     let handshaken = outcome.expect("block_on drives the future to completion")?;
+
+    // ADR-0001 §7.3.2 RS-1, on the production path: both peers derive the
+    // resumption material from the completed handshake and hold it in memory
+    // for the life of the `Session`. This is the **only** non-test caller of
+    // `arm_resumption`, and it is reached only from the branch that produced a
+    // live tunnel — a refused handshake arms nothing, which is RS-1's "a process
+    // restart therefore loses them" applied to a `Session` that never started.
+    //
+    // A derivation failure is **not** a reason to fail the `Session`. The
+    // tunnel is up and carries traffic; what is lost is the ~1 RTT optimisation
+    // §12.1 calls the *first* recovery attempt, and every refusal in
+    // `ResumeRefusal` falls back to a full handshake by construction. Failing a
+    // working tunnel because an optimisation could not be armed would be the
+    // fail-closed rule pointed at the wrong thing.
+    if let Err(refusal) = entry.runtime.arm_resumption(
+        &handshaken.established,
+        handshaken.session_nonce,
+        ESTABLISHED_PATH_EPOCH,
+    ) {
+        core.publish_diagnostic(&refuse(refusal.reason_code()));
+    }
+
     entry.established = Some(Established {
         tunnel: handshaken.tunnel,
         pump: None,

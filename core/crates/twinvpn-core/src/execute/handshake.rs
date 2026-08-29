@@ -84,13 +84,16 @@ use core::time::Duration;
 use std::sync::{Arc, Mutex};
 
 use twinvpn_crypto::noise::{HandshakeConfig, Role};
+use twinvpn_crypto::EstablishedHandshake;
 use twinvpn_env::{Env, MonotonicInstant};
 use twinvpn_platform::error::PlatformError;
 use twinvpn_platform::socket::UdpSocket;
 use twinvpn_tunnel::bind::NoiseBinding;
 use twinvpn_tunnel::crypto::{NoiseHandshake as _, Prologue};
 use twinvpn_tunnel::{establish_tunnel, Tunnel};
-use twinvpn_types::{codes, DeviceId, Endpoint, Identifier as _, ReasonCode, SessionId, TunnelId};
+use twinvpn_types::{
+    codes, DeviceId, Endpoint, Identifier as _, ReasonCode, SessionId, SessionNonce, TunnelId,
+};
 
 use crate::datapath::ReceiverIndex;
 use crate::session_table::TunnelKeying;
@@ -188,6 +191,30 @@ pub struct Handshaken {
     pub local_receiver: ReceiverIndex,
     /// The index the peer expects.
     pub peer_receiver: ReceiverIndex,
+    /// ADR-0001 §7.3.2's authenticated handshake result, for
+    /// [`crate::session_loop::SessionRuntime::arm_resumption`].
+    ///
+    /// Carries this device's **authenticated** role, the peer static the
+    /// handshake proved, and the per-session secret — none of which a caller
+    /// can name. It is moved out of the `NoiseBinding` exactly once, so there is
+    /// one copy in the process and it lives as long as this value does.
+    pub established: EstablishedHandshake,
+    /// The `session_nonce` both peers of this handshake agree on.
+    ///
+    /// **This build derives it from the handshake hash, and that is an interim
+    /// binding stated rather than hidden.** `docs/protocol.md` §10.2 makes the
+    /// nonce the rendezvous `ConnectOffer`'s, chosen by the initiator and
+    /// adopted by the responder on glare — and this workspace has no
+    /// `ControlTransport` (W-12), so no offer and no nonce ever arrive. The
+    /// first 16 octets of the §7.3 D2 handshake hash are the honest stand-in:
+    /// both ends compute the identical value from the identical handshake, it
+    /// names *this* handshake and no other, and it is not secret, which the
+    /// nonce is not either — it travels in clear in every `ResumeSession`.
+    ///
+    /// Nothing rests on it being unguessable: the resume MAC is over the whole
+    /// message, this field included. When a rendezvous transport lands, the
+    /// offer's nonce replaces this and the resume flow does not change.
+    pub session_nonce: SessionNonce,
 }
 
 /// This device's own name, as the key material states it.
@@ -361,6 +388,13 @@ pub async fn drive(
     // handshake hash is what binds it to *this* handshake rather than to a
     // concurrent one.
     let handshake_hash = *binding.handshake_hash().ok_or(Refusal::Rejected)?;
+    // ADR-0001 §7.3.2's half of a completed handshake, moved out once. `None`
+    // here would mean the binding produced transport keys without completing,
+    // which `NoiseBinding::finish` makes impossible — so it is a refusal rather
+    // than an `expect`, on the fail-closed side of a condition that cannot occur.
+    let established = binding.take_established().ok_or(Refusal::Rejected)?;
+    let session_nonce = SessionNonce::from_slice(&handshake_hash[..16])
+        .expect("SessionNonce is 16 bytes and a handshake hash is 32");
     let mut tunnel = establish_tunnel(
         tunnel_id(session),
         session,
@@ -382,6 +416,8 @@ pub async fn drive(
         tunnel: Arc::new(Mutex::new(tunnel)),
         local_receiver,
         peer_receiver,
+        established,
+        session_nonce,
     })
 }
 
