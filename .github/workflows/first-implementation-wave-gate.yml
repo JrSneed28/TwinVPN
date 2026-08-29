@@ -1,0 +1,534 @@
+name: First Implementation Wave — acceptance gate
+
+# ===========================================================================
+# WHAT THIS WORKFLOW IS
+# ===========================================================================
+# The First Implementation Wave does not pass on a reviewer's agreement. It
+# passes when each of its blockers is closed by EXECUTABLE EVIDENCE, produced
+# by a named job whose result a reader can go and look at.
+#
+# So every blocker gets its own visible job, and the four platforms are FOUR
+# JOBS rather than one opaque matrix cell -- a single red platform must be
+# nameable from the checks list without opening a log.
+#
+#   core-crypto            F-1  the crypto core is used by the real data path
+#   pairing-mi             F-2  pairing exists in the shipped composition
+#   mutation-proof         F-5  the mutation/proof obligations are executed
+#   windows-link-run       Windows compiles, links, loads, invokes, transitions
+#   macos-link-run         macOS   "
+#   ios-link-run           iOS     "
+#   android-link-run       Android "
+#   linux-link-run         Linux, already PASSing, re-run only as regression
+#   first-wave-acceptance  the conjunction, via `needs:`
+#
+# `first-wave-acceptance` is the only job whose verdict means anything on its
+# own, and it cannot be green unless every job it needs was green, because
+# GitHub will not run it otherwise and the report it prints re-derives each
+# platform verdict from that platform's own machine-readable evidence rather
+# than trusting the job that wrote it.
+#
+# ===========================================================================
+# WHAT A HOSTED RUNNER CANNOT PROVE
+# ===========================================================================
+# A hosted runner proves linking and execution. It does not prove privileged
+# platform behaviour: WFP/driver/service activation on Windows, a signed
+# NetworkExtension on macOS, an on-device packet tunnel on iOS. Those are
+# SEPARATE required jobs on self-hosted runners, below, and they are separate
+# on purpose: a simulator run and a device run are different evidence and this
+# file must not let one stand in for the other.
+# ===========================================================================
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+# Minimal token. Nothing here writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  # Stale PR runs are cancelled; a verdict on the integration branch is not
+  # disposable and is allowed to finish.
+  group: first-wave-gate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+
+  # =========================================================================
+  # F-1 -- the cryptographic core must be used by the real data path.
+  #
+  # Blocking. The tests this runs are written so that they FAIL IF THE WIRING
+  # IS REMOVED: that is the property under test, not the crypto primitives,
+  # which were already reviewed as sound.
+  # =========================================================================
+  core-crypto:
+    name: core-crypto
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+          uname -a
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: make test-crypto-integration
+        run: make test-crypto-integration
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-crypto-report
+          path: |
+            build/acceptance/*.json
+            build/acceptance/*.md
+          if-no-files-found: ignore
+
+  # =========================================================================
+  # F-2 -- pairing must exist in the shipped product.
+  #
+  # The point of this job is that it drives the SAME COMPOSITION the shipped
+  # application uses. A test that calls `install_pairing_enrolment` directly
+  # is explicitly not evidence here.
+  # =========================================================================
+  pairing-mi:
+    name: pairing-mi
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: make test-pairing-integration
+        run: make test-pairing-integration
+
+  # =========================================================================
+  # F-5 -- mutation/proof coverage.
+  #
+  # This job exists to publish NUMBERS. "Mutation tests pass" is not an
+  # acceptable output and the gate script refuses to print it: the report
+  # distinguishes killed / survived / timeout / unviable / missing / not-
+  # executed, and a missing mutant is never counted as killed.
+  # =========================================================================
+  mutation-proof:
+    name: mutation-proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The mutant rig builds with `git worktree add` at an explicit
+          # revision, so the full history must be present.
+          fetch-depth: 0
+
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: make test-mutation
+        run: make test-mutation
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-report
+          path: |
+            build/proof/mutation-report.json
+            build/proof/obligations.tsv
+            build/proof/register.tsv
+          if-no-files-found: error
+
+  # =========================================================================
+  # Linux -- already has executed PASS evidence.
+  #
+  # Re-run as a REGRESSION check only, because this wave changes shared-core
+  # code that Linux links. It is not this wave's new evidence and is not
+  # re-proved beyond that.
+  # =========================================================================
+  linux-link-run:
+    name: linux-link-run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+      - name: make ci-linux
+        run: make ci-linux
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-linux
+          path: build/ci/evidence/linux.json
+          if-no-files-found: error
+
+  # =========================================================================
+  # WINDOWS -- hosted. Compile, link the real shared core, cross the
+  # production FFI boundary, drive a lifecycle transition, shut down.
+  # A compilation-only job is insufficient and `make ci-windows` fails if it
+  # cannot record a transition.
+  # =========================================================================
+  windows-link-run:
+    name: windows-link-run
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+          cmd //c ver
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+      - name: make ci-windows
+        run: make ci-windows
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-windows
+          path: |
+            build/ci/evidence/windows.json
+            build/ci/logs/windows/**
+          if-no-files-found: error
+
+  # =========================================================================
+  # macOS -- hosted. Real macOS shared-core/native boundary, NetworkExtension
+  # targets built and the shared core linked, XCTest smoke run.
+  #
+  # This job does NOT claim a full NetworkExtension lifecycle PASS: hosted
+  # runners have no signing identity or entitlements for activation. That
+  # claim belongs to `macos-privileged-lifecycle` below and nowhere else.
+  # =========================================================================
+  macos-link-run:
+    name: macos-link-run
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain versions
+        run: |
+          sudo xcode-select -s "$(build/ci/ci-macos.sh --print-xcode-path)"
+          xcodebuild -version
+          swift --version
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+      - name: make ci-macos
+        run: make ci-macos
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-macos
+          path: |
+            build/ci/evidence/macos.json
+            build/ci/logs/macos/**
+          if-no-files-found: error
+
+  # =========================================================================
+  # iOS -- hosted SIMULATOR. Builds the real app target and the real packet-
+  # tunnel/NetworkExtension target, links the approved shared core into the
+  # production targets, boots a simulator, runs the real XCTest integration
+  # target across the production bridge.
+  #
+  # SIMULATOR EVIDENCE IS NOT DEVICE EVIDENCE. `ios-device-lifecycle` below is
+  # the physical-device job and the two are never conflated.
+  # =========================================================================
+  ios-link-run:
+    name: ios-link-run
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain versions
+        run: |
+          sudo xcode-select -s "$(build/ci/ci-ios.sh --print-xcode-path)"
+          xcodebuild -version
+          xcrun simctl list runtimes
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+      - name: make ci-ios
+        run: make ci-ios
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-ios
+          path: |
+            build/ci/evidence/ios.json
+            build/ci/logs/ios/**
+          if-no-files-found: error
+
+  # =========================================================================
+  # ANDROID -- hosted emulator. Real app, real JNI .so packaged into the APK,
+  # instrumentation tests across the production native bridge, VpnService and
+  # application lifecycle transitions, ABI packaging verified.
+  #
+  # JVM/Robolectric tests alone are explicitly NOT sufficient and `make
+  # ci-android` fails rather than degrading to them.
+  # =========================================================================
+  android-link-run:
+    name: android-link-run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          java -version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: fwg-android-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock', 'shells/android/**/*.gradle.kts') }}
+      - name: make ci-android
+        run: make ci-android
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-android
+          path: |
+            build/ci/evidence/android.json
+            build/ci/logs/android/**
+          if-no-files-found: error
+
+  # =========================================================================
+  # PRIVILEGED / PHYSICAL LIFECYCLE -- self-hosted.
+  #
+  # These prove what a hosted runner cannot. They are separate jobs so that a
+  # hosted PASS can never be read as a privileged PASS.
+  #
+  # Each starts from a resettable environment, never echoes signing secrets,
+  # cleans tunnel/route/firewall state on EVERY exit path (`if: always()`), and
+  # uploads diagnostics on failure. A failed lifecycle test must not leave the
+  # runner's networking stack corrupted for the next workflow.
+  #
+  # They are gated on the runner label existing: a repository without the
+  # runner gets a NOT-EXECUTED row in the acceptance report, which counts
+  # against Phase 5 eligibility exactly as a failure does. That is deliberate
+  # -- an absent runner is an absence of evidence, not a pass.
+  # =========================================================================
+  windows-privileged-lifecycle:
+    name: windows-privileged-lifecycle
+    runs-on: [self-hosted, Windows, twinvpn-vpn-lifecycle]
+    timeout-minutes: 60
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: reset to a known-clean state
+        run: build/ci/ci-windows.sh --reset
+      - name: privileged lifecycle
+        run: build/ci/ci-windows.sh --privileged
+      - name: tear down tunnel, routes and firewall state
+        if: always()
+        run: build/ci/ci-windows.sh --cleanup
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-windows-privileged
+          path: build/ci/logs/windows/**
+          if-no-files-found: ignore
+
+  macos-privileged-lifecycle:
+    name: macos-privileged-lifecycle
+    runs-on: [self-hosted, macOS, twinvpn-vpn-lifecycle]
+    timeout-minutes: 60
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: reset to a known-clean state
+        run: build/ci/ci-macos.sh --reset
+      - name: privileged NetworkExtension lifecycle
+        run: build/ci/ci-macos.sh --privileged
+      - name: tear down tunnel, routes and firewall state
+        if: always()
+        run: build/ci/ci-macos.sh --cleanup
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-macos-privileged
+          path: build/ci/logs/macos/**
+          if-no-files-found: ignore
+
+  ios-device-lifecycle:
+    name: ios-device-lifecycle
+    runs-on: [self-hosted, macOS, twinvpn-ios-device]
+    timeout-minutes: 60
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: reset to a known-clean state
+        run: build/ci/ci-ios.sh --reset
+      # xcodebuild against the PROVISIONED PHYSICAL DEVICE. This is not the
+      # simulator job and its evidence file is written separately.
+      - name: on-device packet-tunnel lifecycle
+        run: build/ci/ci-ios.sh --device
+      - name: tear down tunnel, routes and firewall state
+        if: always()
+        run: build/ci/ci-ios.sh --cleanup
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-ios-device
+          path: build/ci/logs/ios/**
+          if-no-files-found: ignore
+
+  # =========================================================================
+  # THE CONJUNCTION.
+  #
+  # `needs:` is the mechanism: this job does not run at all unless every
+  # blocker job above succeeded, so it cannot report green over a red one.
+  # It then re-derives every platform verdict from that platform's own
+  # machine-readable evidence, so a job that writes PASS with no lifecycle
+  # transition is caught here rather than believed.
+  #
+  # It ends by asserting Phase 5 eligibility, which is COMPUTED from the rows
+  # and never set by hand.
+  # =========================================================================
+  first-wave-acceptance:
+    name: first-wave-acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs:
+      - core-crypto
+      - pairing-mi
+      - mutation-proof
+      - linux-link-run
+      - windows-link-run
+      - macos-link-run
+      - ios-link-run
+      - android-link-run
+      - windows-privileged-lifecycle
+      - macos-privileged-lifecycle
+      - ios-device-lifecycle
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          python3 --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      # Every platform job wrote one evidence file and uploaded it. Collect
+      # them all back into build/ci/evidence/ so the report reads real files
+      # rather than a job's word for it.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: evidence-*
+          path: build/ci/evidence-download
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: mutation-report
+          path: build/proof
+        continue-on-error: false
+
+      - name: collect platform evidence
+        run: |
+          mkdir -p build/ci/evidence
+          find build/ci/evidence-download -name '*.json' -exec cp {} build/ci/evidence/ \;
+          ls -la build/ci/evidence/
+
+      - name: make test-first-wave-gate
+        run: make test-first-wave-gate
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: first-wave-acceptance-report
+          path: |
+            build/acceptance/first-wave-acceptance.json
+            build/acceptance/first-wave-acceptance.md
+            build/ci/evidence/*.json
+            build/proof/mutation-report.json
+          if-no-files-found: error

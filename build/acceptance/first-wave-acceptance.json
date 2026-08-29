@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-29T22:57:17.921019+00:00",
+  "commit": "74d49e5d4a36f20acceabcced602c4085f62ebe8",
+  "worktree_dirty": true,
+  "probes_executed": false,
+  "rows": [
+    {
+      "section": "F-1",
+      "criterion": "crypto producer wired",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-1",
+      "criterion": "crypto consumer wired",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-1",
+      "criterion": "real datagram roundtrip",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-1",
+      "criterion": "handshake secret type safety",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-1",
+      "criterion": "local role type/state safety",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-1",
+      "criterion": "replay commit-last regression",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-1",
+      "criterion": "reflection rejection",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-1",
+      "criterion": "RS-6 regression",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-2",
+      "criterion": "production enrolment installation",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-2",
+      "criterion": "pair.begin production path",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-2",
+      "criterion": "complete MI-P1 PairingOffer returned",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-2",
+      "criterion": "QR/text carriage available",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-2",
+      "criterion": "C-B integration flow",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-2",
+      "criterion": "missing identity reason (AUTH.IDENTITY_MISSING)",
+      "verdict": "NOT-EXECUTED",
+      "detail": "not run (pass --run)",
+      "required": true
+    },
+    {
+      "section": "F-5",
+      "criterion": "mutation obligations discharged",
+      "verdict": "NOT-EXECUTED",
+      "detail": "no machine-readable mutation report",
+      "required": true,
+      "counts": {
+        "specified": null,
+        "executable": null,
+        "executed": null,
+        "discharged": null,
+        "survived": null,
+        "missing": null,
+        "b1_specified": null,
+        "b1_discharged": null
+      }
+    },
+    {
+      "section": "Platforms",
+      "criterion": "Linux",
+      "verdict": "PASS",
+      "detail": "linux-link-run on local (local), 3 transition(s): STARTING->READY, READY->STOPPING, STOPPING->STOPPED",
+      "required": true,
+      "evidence": {
+        "schema_version": 1,
+        "platform": "linux",
+        "job_name": "linux-link-run",
+        "runner": "local",
+        "runner_kind": "local",
+        "privileged": false,
+        "github_run_id": null,
+        "github_run_url": null,
+        "commit": "74d49e5d4a36f20acceabcced602c4085f62ebe8",
+        "toolchain": {
+          "rustc": "rustc 1.90.0 (1159e78c4 2025-09-14)",
+          "cargo": "cargo 1.90.0 (840b83a10 2025-07-30)",
+          "kernel": "Linux 6.18.33.2-microsoft-standard-WSL2"
+        },
+        "compiled": true,
+        "linked_real_core": true,
+        "loaded": true,
+        "invoked_core": true,
+        "received_result": true,
+        "lifecycle_transitions": [
+          "STARTING->READY",
+          "READY->STOPPING",
+          "STOPPING->STOPPED"
+        ],
+        "graceful_shutdown": true,
+        "test_command": "cargo test -q -p twinvpnd --test lifecycle -- --nocapture",
+        "test_exit_code": 0,
+        "artifacts": [
+          "build/ci/logs/linux/lifecycle.log"
+        ],
+        "notes": "",
+        "verdict": "PASS",
+        "generated_at": "2026-08-29T22:55:34Z"
+      }
+    },
+    {
+      "section": "Platforms",
+      "criterion": "Windows link/run",
+      "verdict": "NOT-EXECUTED",
+      "detail": "no evidence at build/ci/evidence/windows.json",
+      "required": true,
+      "evidence": {}
+    },
+    {
+      "section": "Platforms",
+      "criterion": "macOS link/run",
+      "verdict": "NOT-EXECUTED",
+      "detail": "no evidence at build/ci/evidence/macos.json",
+      "required": true,
+      "evidence": {}
+    },
+    {
+      "section": "Platforms",
+      "criterion": "iOS link/run",
+      "verdict": "NOT-EXECUTED",
+      "detail": "no evidence at build/ci/evidence/ios.json",
+      "required": true,
+      "evidence": {}
+    },
+    {
+      "section": "Platforms",
+      "criterion": "Android link/run",
+      "verdict": "NOT-EXECUTED",
+      "detail": "no evidence at build/ci/evidence/android.json",
+      "required": true,
+      "evidence": {}
+    }
+  ],
+  "required_total": 20,
+  "required_pass": 1,
+  "phase_5_eligibility": "FAIL"
+}

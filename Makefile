@@ -835,3 +835,83 @@ proof-mutants:
 
 proof: proof-register proof-oracles proof-mutants
 	@echo "==> none of the above is a PT-1 PASS; see build/proof/register.tsv"
+
+# ---------------------------------------------------------------------------
+# First Implementation Wave — the acceptance gate.
+#
+# These are the stable repository-level commands the wave's blockers are proved
+# with. They are thin: every one of them delegates to a script or a cargo test
+# that is the actual evidence, so that the same proof runs identically here and
+# in .github/workflows/first-implementation-wave-gate.yml. A make target that
+# reimplemented the check would be a second thing to keep in step, and the two
+# would silently diverge.
+#
+# NOTHING HERE PRINTS "PASS" ON ITS OWN AUTHORITY. Each target exits non-zero
+# when its evidence is absent or red, and `test-first-wave-gate` computes
+# Phase 5 eligibility from the rows rather than asserting it.
+# ---------------------------------------------------------------------------
+.PHONY: test-crypto-integration test-pairing-integration test-mutation \
+        ci-linux ci-windows ci-macos ci-ios ci-android test-first-wave-gate \
+        first-wave-report
+
+# F-1. The crypto core must be exercised by the real producer/consumer paths,
+# and these tests are written to FAIL IF THE WIRING IS REMOVED.
+test-crypto-integration:
+	@echo "==> F-1: crypto integration across the production data path"
+	@source build/toolchain/env.sh && cd core && \
+	  $(CARGO) test --locked -p twinvpn-crypto && \
+	  $(CARGO) test --locked -p twinvpn-core --test resume && \
+	  $(CARGO) test --locked -p twinvpn-core --test resume_lifecycle && \
+	  $(CARGO) test --locked -p twinvpn-core --test crypto_carriage
+
+# F-2. Pairing must work in the SAME COMPOSITION the shipped application uses.
+# A test that calls `install_pairing_enrolment` directly is not evidence here.
+test-pairing-integration:
+	@echo "==> F-2: pairing through the production MI/application composition"
+	@source build/toolchain/env.sh && cd core && \
+	  $(CARGO) test --locked -p twinvpn-core --test pairing && \
+	  $(CARGO) test --locked -p twinvpn-core --test pairing_refusals && \
+	  $(CARGO) test --locked -p twinvpn-core --test pairing_production
+	@source build/toolchain/env.sh && cd shells/linux && \
+	  $(CARGO) test --locked --workspace
+
+# F-5. The mutation gate. It fails if any required obligation is missing, any
+# required mutation is not executed, any prohibited mutant survives, B-1 is
+# below 22/22, or the catalogue and the executable set disagree. It prints the
+# exact totals; "mutation tests pass" is not an output it can produce.
+test-mutation:
+	@build/proof/mutation-gate.sh
+
+# Platform link/run. Each writes build/ci/evidence/<platform>.json in the
+# format build/acceptance/platform-evidence.schema.json fixes, and each fails
+# rather than degrading to a compile-only run.
+ci-linux:
+	@build/ci/ci-linux.sh
+
+ci-windows:
+	@build/ci/ci-windows.sh
+
+ci-macos:
+	@build/ci/ci-macos.sh
+
+ci-ios:
+	@build/ci/ci-ios.sh
+
+ci-android:
+	@build/ci/ci-android.sh
+
+# The whole gate: every host-independent blocker, executed, plus verification
+# of the machine-readable platform CI evidence. Non-zero unless every required
+# criterion is genuinely green -- NOT-EXECUTED counts against eligibility
+# exactly as a failure does, because an absence of evidence is not evidence.
+test-first-wave-gate:
+	@$(MAKE) --no-print-directory test-crypto-integration
+	@$(MAKE) --no-print-directory test-pairing-integration
+	@$(MAKE) --no-print-directory test-mutation
+	@build/acceptance/report.py --run
+
+# The report without re-running the host-independent blockers: reads whatever
+# evidence is on disk and prints the acceptance table. Useful locally; it is
+# NOT the gate, because it proves nothing it did not find already written.
+first-wave-report:
+	@build/acceptance/report.py
