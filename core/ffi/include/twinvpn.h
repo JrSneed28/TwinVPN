@@ -94,8 +94,16 @@ extern "C" {
 #define TW_ABI_MAJOR 1u
 /* 0 -> 1: `tw_core_submit` gained the MI-frame form, which can carry an
  * operation's PARAMETERS. VR-1 makes an ADDITION a MINOR bump: the bare-name
- * form it joins is unchanged and still accepted, so no shell breaks. */
-#define TW_ABI_MINOR 1u
+ * form it joins is unchanged and still accepted, so no shell breaks.
+ *
+ * 1 -> 2: F-9 gained `installed_ruleset` and `current_generation` (W-24). Both
+ * are APPENDED vtable entries, so a shell compiled against minor 1 declares a
+ * shorter struct, the core reads only the prefix that struct's `size` covers,
+ * and every entry past it stays absent — which is the same state a shell that
+ * declared them and left them null already produces. Nothing is removed, no
+ * signature changes, and no existing entry moves; VR-1 therefore makes this a
+ * MINOR bump and NOT an `abi_major` break. */
+#define TW_ABI_MINOR 2u
 
 /* Opaque handles. F-8: no struct with product fields crosses. */
 typedef struct tw_core tw_core; /* one core instance (S-47)               */
@@ -277,6 +285,65 @@ typedef struct tw_host_vtable {
   /* A stable identifier for this boot, or TW_ERR where the platform has none.
    * W-7's third required shell interface. */
   int32_t (*boot_id)(void *ctx, uint8_t out[16]);
+
+  /* ---- The enforcement read-back (W-24) ---------------------------------
+   *
+   * These two belong beside `set_ruleset` and `rollback` and are NOT there,
+   * because F-9's `size` field only makes an APPEND compatible: moving an
+   * entry changes the prefix every older shell already compiled, which is an
+   * abi_major break that compiles cleanly on both sides and corrupts at run
+   * time. Position here is an ABI constraint, not a statement about what they
+   * are for. Read them with `set_ruleset` and `rollback`.
+   *
+   * WHY THEY EXIST. ADR-0015 §11.6 rule 1: "A `ProtectionAssertion` is
+   * produced by QUERYING THE ENFORCEMENT LAYER … The user-visible protection
+   * indicator is a pure function of the most recent assertion, NEVER of the
+   * agent's belief about what it configured." ADR-0018 §11.4's printed F-9
+   * struct offers `set_ruleset` and no getter, so across this ABI the
+   * assertion could not be produced AT ALL, and `twinvpn-ffi` returned a typed
+   * refusal that rendered the indicator UNKNOWN. That is O-18's fail-safe
+   * direction and it is not the required one: a Swift or Kotlin shell bound
+   * only to this vtable could never report protection truthfully. Recorded as
+   * W-24 in `docs/implementation/ownership.md` §8, and added here on the same
+   * ground and by the same mechanism as W-26's four additions.
+   *
+   * Both are QUERIES OF THE OS, never of a value the shell remembers. The
+   * reconciler's whole job is to notice that something else changed the rules,
+   * and a cached answer cannot. A shell that can only report what it last set
+   * MUST return TW_ERR with PLATFORM.OS_UNSUPPORTED rather than echo its own
+   * belief back: an unreadable posture is not an asserted one, and the core
+   * renders that UNKNOWN instead of claiming protection nobody confirmed. */
+
+  /* The ruleset the OS is ACTUALLY holding.
+   *
+   * On TW_OK the shell MUST write BOTH out-parameters. `*present_out` is 0 when
+   * no ruleset of this product's is installed and non-zero otherwise;
+   * `*ruleset_out` is meaningful only when `*present_out` is non-zero and MUST
+   * then be TW_RULESET_BLOCKED or TW_RULESET_PROTECTED. The core initializes
+   * both before the call and REFUSES any other posture value rather than
+   * guessing one — an unrecognized posture is a shell defect, and treating it
+   * as PROTECTED would assert protection nobody stated.
+   *
+   * There is deliberately no third Ruleset value: KS-17 makes the two postures
+   * an atomic swap and "a moment with no ruleset is the leak window the whole
+   * mechanism exists to close". `present_out` reports the ABSENCE of this
+   * product's rules, which is a different fact from a third posture. */
+  int32_t (*installed_ruleset)(void *ctx, uint64_t h, int32_t *ruleset_out,
+                               int32_t *present_out, tw_buf **err);
+
+  /* The contract generation currently in force, if any.
+   *
+   * THE RECOVERY ENTRY POINT: after a crash the core reads this and decides
+   * whether to converge or roll back (ADR-0022 LC-4). Read from the OS, not
+   * from this process's history — a value remembered in memory is exactly what
+   * a crash destroys.
+   *
+   * On TW_OK the shell MUST write both out-parameters. `*present_out` is 0
+   * when no generation is in force, and `*generation_out` is meaningful only
+   * when it is non-zero. A generation id is a monotone `uint64` allocated by
+   * the core, so no reserved value could carry "none" without stealing one. */
+  int32_t (*current_generation)(void *ctx, uint64_t h, uint64_t *generation_out,
+                                int32_t *present_out, tw_buf **err);
 } tw_host_vtable;
 
 /* --------------------------------------------------------------------------

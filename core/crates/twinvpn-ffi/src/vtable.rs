@@ -18,27 +18,44 @@
 //! is not *withheld* from the core — **it is not representable in any type the
 //! core can name** (CD-I4).
 //!
-//! # Two gaps in F-9, reported rather than papered over
+//! # Two gaps in F-9 — one closed, one still open
 //!
 //! F-9's struct listing carries `docs/networking.md` §5.1 "verbatim", and two
-//! things the core needs are not in it:
+//! things the core needs were not in it:
 //!
-//! 1. **No socket provider and no interface enumerator.** ADR-0018 §11.2 row
-//!    2.10 puts *all* NAT traversal in the core with "sockets via the adapter",
-//!    and `twinvpn_platform::PlatformAdapter` requires `sockets()` and
-//!    `interfaces()`. Neither has a vtable entry. This crate therefore returns a
-//!    typed `PLATFORM.ADAPTER_UNAVAILABLE` from both, rather than inventing ABI
-//!    entries — extending `twinvpn.h` beyond what §11.4 specifies is a permanent
-//!    compatibility obligation and not this domain's to create unilaterally.
-//! 2. **No read-back of the installed ruleset or the current generation.**
-//!    ADR-0015 §11.6 rule 1 is emphatic: *"A `ProtectionAssertion` is produced by
-//!    **querying the enforcement layer** … The user-visible protection indicator
-//!    is a pure function of the most recent assertion, **never of the agent's
-//!    belief about what it configured**."* F-9 offers `set_ruleset` and no
-//!    getter, so the assertion cannot be produced across this ABI at all. Same
-//!    for `current_generation`, which `NetworkConfig` calls "the recovery entry
-//!    point: after a crash the core reads this and decides whether to converge or
-//!    roll back".
+//! 1. **W-25, STILL OPEN. No socket provider and no interface enumerator.**
+//!    ADR-0018 §11.2 row 2.10 puts *all* NAT traversal in the core with "sockets
+//!    via the adapter", and `twinvpn_platform::PlatformAdapter` requires
+//!    `sockets()` and `interfaces()`. Neither has a vtable entry. This crate
+//!    therefore returns a typed `PLATFORM.ADAPTER_UNAVAILABLE` from both.
+//!
+//!    **This one is deliberately NOT closed the way W-24 was, and the asymmetry
+//!    is the point.** W-24 needed two scalar queries whose whole content is a
+//!    posture and a `u64`. A socket provider is a *lifecycle*: bind, send,
+//!    receive, close, readiness, per-datagram addressing — a per-packet surface
+//!    against PB-1's budget, and an interface enumerator brings change events,
+//!    which F-6 already forbids as an outbound callback. Guessing that shape
+//!    unilaterally would spend F-1's "compatibility obligation forever" on a
+//!    design nobody reviewed. §10.4 already rules that these stay **in Rust,
+//!    in-process** for the mobile shells; W-25 still asks ADR-0018 §11.4 for the
+//!    general answer.
+//! 2. **W-24, CLOSED. No read-back of the installed ruleset or the current
+//!    generation.** ADR-0015 §11.6 rule 1 is emphatic: *"A `ProtectionAssertion`
+//!    is produced by **querying the enforcement layer** … The user-visible
+//!    protection indicator is a pure function of the most recent assertion,
+//!    **never of the agent's belief about what it configured**."* F-9 offered
+//!    `set_ruleset` and no getter, so the assertion could not be produced across
+//!    this ABI at all — and the same for `current_generation`, which
+//!    `NetworkConfig` calls "the recovery entry point: after a crash the core
+//!    reads this and decides whether to converge or roll back".
+//!
+//!    `twinvpn.h` now carries both, **appended** to `tw_host_vtable` at ABI
+//!    minor `1 -> 2`. VR-1 makes an addition a minor bump and F-9's `size` field
+//!    is what makes it one in fact: a shell compiled against minor 1 declares a
+//!    shorter struct, [`HostFns::copy_from`] reads only the prefix that struct
+//!    covers, and both entries stay `None` — the same state that shell already
+//!    produced. Nothing was removed, no signature changed, no existing entry
+//!    moved. Same mechanism and same justification as W-26's four additions.
 //!
 //! Both are recorded in this crate's `README.md` and in the completion report.
 
@@ -71,6 +88,14 @@ pub const TW_TIMEOUT: i32 = 2;
 pub const TW_RULESET_BLOCKED: i32 = 0;
 /// `TW_RULESET_PROTECTED`.
 pub const TW_RULESET_PROTECTED: i32 = 1;
+/// What the core writes into `installed_ruleset`'s `ruleset_out` **before** the
+/// call.
+///
+/// Not a posture, and deliberately not in `twinvpn.h`: it is never passed to a
+/// shell as an input and never accepted from one as an output, so it is not part
+/// of the ABI. It exists so that a shell returning `TW_OK` without writing the
+/// parameter cannot leave a `0` behind to be read as `TW_RULESET_BLOCKED`.
+const TW_RULESET_UNSET: i32 = -1;
 
 /// `TW_LINK_DOWN`.
 pub const TW_LINK_DOWN: i32 = 0;
@@ -142,6 +167,17 @@ pub struct TwHostVtable {
     pub elapsed_millis: Option<extern "C" fn(*mut c_void, *mut u64) -> i32>,
     /// `boot_id`. W-7's boot identifier.
     pub boot_id: Option<extern "C" fn(*mut c_void, *mut u8) -> i32>,
+
+    /// `installed_ruleset`. W-24's read-back: a **query of the OS**.
+    ///
+    /// Appended rather than placed beside `set_ruleset` because F-9's `size`
+    /// field only makes an *append* compatible — moving an entry changes the
+    /// prefix every older shell already compiled.
+    pub installed_ruleset:
+        Option<extern "C" fn(*mut c_void, u64, *mut i32, *mut i32, BufOut) -> i32>,
+    /// `current_generation`. W-24's recovery entry point, likewise appended.
+    pub current_generation:
+        Option<extern "C" fn(*mut c_void, u64, *mut u64, *mut i32, BufOut) -> i32>,
 }
 
 /// `sizeof(tw_host_vtable)`, as the `size` field carries it.
@@ -258,6 +294,8 @@ impl TwHostVtable {
         os_csprng: None,
         elapsed_millis: None,
         boot_id: None,
+        installed_ruleset: None,
+        current_generation: None,
     };
 }
 
@@ -838,10 +876,44 @@ impl NetworkConfig for HostNetworkConfig {
     fn current_generation(
         &self,
     ) -> BoxFuture<'_, Result<Option<ContractGeneration>, PlatformError>> {
-        // GAP, reported: F-9 has no read-back. `NetworkConfig` calls this "the
-        // recovery entry point: after a crash the core reads this and decides
-        // whether to converge or roll back", and across this ABI it cannot.
-        Box::pin(async move { Err(PlatformError::OsUnsupported(None)) })
+        // **W-24, closed.** This was a typed refusal, because F-9 had no
+        // read-back and `NetworkConfig` calls this "the recovery entry point:
+        // after a crash the core reads this and decides whether to converge or
+        // roll back". `twinvpn.h` now carries the entry — ABI minor 1 -> 2, an
+        // append under VR-1 — so the recovery decision is answerable across this
+        // ABI instead of being refused.
+        //
+        // A shell compiled against minor 1 declared a shorter struct, so
+        // `copy_from` leaves this `None` and the refusal below is still what it
+        // gets: the behaviour it was built against, unchanged.
+        let host = self.0;
+        Box::pin(async move {
+            let Some(f) = host.v.current_generation else {
+                return Err(PlatformError::OsUnsupported(None));
+            };
+            // Both out-parameters are initialized here, so a shell that returns
+            // TW_OK without writing them yields "nothing in force" rather than a
+            // stack value read as a generation id. `present` carries the absence
+            // because a generation is a monotone u64 with no spare value to
+            // reserve for it.
+            let mut generation: u64 = 0;
+            let mut present: i32 = 0;
+            let mut err: *mut TwBuf = core::ptr::null_mut();
+            if f(
+                host.ctx(),
+                0,
+                &raw mut generation,
+                &raw mut present,
+                &raw mut err,
+            ) != TW_OK
+            {
+                return Err(host.error(err, PlatformError::OsUnsupported(None)));
+            }
+            if present == 0 {
+                return Ok(None);
+            }
+            Ok(Some(ContractGeneration(generation)))
+        })
     }
 
     fn set_ruleset(
@@ -867,18 +939,59 @@ impl NetworkConfig for HostNetworkConfig {
     }
 
     fn installed_ruleset(&self) -> BoxFuture<'_, Result<Option<Ruleset>, PlatformError>> {
-        // **THE GAP THAT MATTERS MOST.** ADR-0015 §11.6 rule 1: a
-        // `ProtectionAssertion` is produced by QUERYING THE ENFORCEMENT LAYER,
-        // and the indicator is "a pure function of the most recent assertion,
-        // NEVER of the agent's belief about what it configured". F-9 offers
-        // `set_ruleset` and no getter, so across this ABI the assertion cannot
-        // be produced at all.
+        // **W-24, the gap that mattered most, closed.** ADR-0015 §11.6 rule 1:
+        // a `ProtectionAssertion` is produced by QUERYING THE ENFORCEMENT
+        // LAYER, and the indicator is "a pure function of the most recent
+        // assertion, NEVER of the agent's belief about what it configured".
+        // F-9 offered `set_ruleset` and no getter, so across this ABI the
+        // assertion could not be produced at all and this returned a typed
+        // refusal — UNKNOWN, which is O-18's fail-safe direction but not the
+        // required one. `twinvpn.h` now carries the getter.
         //
-        // Answering `Ok(None)` would be worse than failing: `None` reads as "no
-        // ruleset installed", which is the opposite of the truth and would drive
-        // the reconciler to re-install. The typed refusal makes the indicator
-        // render UNKNOWN, which is O-18's fail-safe direction.
-        Box::pin(async move { Err(PlatformError::OsUnsupported(None)) })
+        // **Three outcomes, and each keeps a distinct fact distinct.** The
+        // entry ABSENT — an older shell, or one that cannot query the OS — is
+        // still the typed refusal, because an unreadable posture is not an
+        // asserted one and `Ok(None)` would read as "nothing is installed",
+        // the opposite of the truth. `present == 0` is `Ok(None)`, which is now
+        // an ANSWER rather than a guess: the shell queried the OS and found no
+        // rules of ours. A posture this core does not recognize is REFUSED
+        // rather than rounded to one, because rounding it up asserts protection
+        // nobody stated and rounding it down hides a shell defect behind a
+        // plausible reading.
+        let host = self.0;
+        Box::pin(async move {
+            let Some(f) = host.v.installed_ruleset else {
+                return Err(PlatformError::OsUnsupported(None));
+            };
+            // Initialized to "absent, and no posture": a shell that returns
+            // TW_OK without writing them yields `Ok(None)`, never a stack value
+            // read as TW_RULESET_PROTECTED.
+            let mut ruleset: i32 = TW_RULESET_UNSET;
+            let mut present: i32 = 0;
+            let mut err: *mut TwBuf = core::ptr::null_mut();
+            if f(
+                host.ctx(),
+                0,
+                &raw mut ruleset,
+                &raw mut present,
+                &raw mut err,
+            ) != TW_OK
+            {
+                return Err(host.error(err, PlatformError::OsUnsupported(None)));
+            }
+            if present == 0 {
+                return Ok(None);
+            }
+            match ruleset {
+                TW_RULESET_BLOCKED => Ok(Some(Ruleset::Blocked)),
+                TW_RULESET_PROTECTED => Ok(Some(Ruleset::Protected)),
+                // A shell claiming a ruleset is present and naming a posture
+                // this core has no value for. `PLATFORM.ADAPTER_UNAVAILABLE` is
+                // the registered code for a vtable entry that does not honour
+                // its own contract, and refusing renders the indicator UNKNOWN.
+                _ => Err(missing()),
+            }
+        })
     }
 
     fn enforcement_custody(&self) -> EnforcementCustody {
@@ -1106,6 +1219,8 @@ mod tests {
             os_csprng: None,
             elapsed_millis: None,
             boot_id: None,
+            installed_ruleset: None,
+            current_generation: None,
         };
         // SAFETY: `&raw const v` is a valid, readable pointer to a live value.
         assert!(unsafe { HostFns::copy_from(&raw const v) }.is_none());
@@ -1227,6 +1342,8 @@ mod tests {
             os_csprng: None,
             elapsed_millis: None,
             boot_id: None,
+            installed_ruleset: None,
+            current_generation: None,
         };
         // SAFETY: a live, readable value.
         let fns = unsafe { HostFns::copy_from(&raw const v) }.expect("size is adequate");
@@ -1273,6 +1390,8 @@ mod tests {
             os_csprng: None,
             elapsed_millis: None,
             boot_id: None,
+            installed_ruleset: None,
+            current_generation: None,
         };
         // SAFETY: a live, readable value.
         let fns = unsafe { HostFns::copy_from(&raw const v) }.expect("size");
@@ -1280,5 +1399,320 @@ mod tests {
         // With every entry null, a shutdown that tried to call one would panic
         // or no-op silently. It does neither: it touches nothing.
         adapter.begin_shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // W-24 — the enforcement read-back
+    // -----------------------------------------------------------------------
+
+    /// A tiny inline executor.
+    ///
+    /// Every future in this module is ready on first poll — a vtable entry is a
+    /// synchronous C call — and asserting that keeps these tests free of an
+    /// async runtime this crate does not depend on.
+    fn ready<T>(mut future: BoxFuture<'_, T>) -> T {
+        let waker = core::task::Waker::noop();
+        let mut cx = core::task::Context::from_waker(waker);
+        match core::future::Future::poll(future.as_mut(), &mut cx) {
+            core::task::Poll::Ready(value) => value,
+            core::task::Poll::Pending => unreachable!("a vtable call is ready on first poll"),
+        }
+    }
+
+    /// A full-size host vtable with the entries this test supplies.
+    fn host(build: impl FnOnce(&mut TwHostVtable)) -> HostFns {
+        let mut v = TwHostVtable::EMPTY;
+        build(&mut v);
+        v.size = vtable_size();
+        // SAFETY: `&raw const v` is a valid, readable, fully-initialised value
+        // whose `size` field truthfully reports `size_of::<TwHostVtable>()`.
+        unsafe { HostFns::copy_from(&raw const v) }.expect("size is adequate")
+    }
+
+    extern "C" fn reads_back_protected(
+        _ctx: *mut c_void,
+        _h: u64,
+        ruleset: *mut i32,
+        present: *mut i32,
+        _err: BufOut,
+    ) -> i32 {
+        // SAFETY: `twinvpn.h`'s contract for this entry is that both
+        // out-parameters are valid, writable pointers to a live `int32_t` for
+        // the duration of the call. The caller here is `HostNetworkConfig`,
+        // which passes two stack locals of its own.
+        unsafe {
+            *ruleset = TW_RULESET_PROTECTED;
+            *present = 1;
+        }
+        TW_OK
+    }
+
+    extern "C" fn reads_back_blocked(
+        _ctx: *mut c_void,
+        _h: u64,
+        ruleset: *mut i32,
+        present: *mut i32,
+        _err: BufOut,
+    ) -> i32 {
+        // SAFETY: as `reads_back_protected`.
+        unsafe {
+            *ruleset = TW_RULESET_BLOCKED;
+            *present = 1;
+        }
+        TW_OK
+    }
+
+    extern "C" fn reads_back_nothing_installed(
+        _ctx: *mut c_void,
+        _h: u64,
+        _ruleset: *mut i32,
+        present: *mut i32,
+        _err: BufOut,
+    ) -> i32 {
+        // SAFETY: as `reads_back_protected`. `ruleset` is deliberately left
+        // unwritten, which is what the contract permits when nothing is
+        // installed.
+        unsafe {
+            *present = 0;
+        }
+        TW_OK
+    }
+
+    extern "C" fn reads_back_an_unknown_posture(
+        _ctx: *mut c_void,
+        _h: u64,
+        ruleset: *mut i32,
+        present: *mut i32,
+        _err: BufOut,
+    ) -> i32 {
+        // SAFETY: as `reads_back_protected`.
+        unsafe {
+            *ruleset = 7;
+            *present = 1;
+        }
+        TW_OK
+    }
+
+    extern "C" fn returns_ok_and_writes_nothing(
+        _ctx: *mut c_void,
+        _h: u64,
+        _ruleset: *mut i32,
+        _present: *mut i32,
+        _err: BufOut,
+    ) -> i32 {
+        TW_OK
+    }
+
+    extern "C" fn returns_ok_and_writes_no_generation(
+        _ctx: *mut c_void,
+        _h: u64,
+        _generation: *mut u64,
+        _present: *mut i32,
+        _err: BufOut,
+    ) -> i32 {
+        TW_OK
+    }
+
+    extern "C" fn read_back_fails(
+        _ctx: *mut c_void,
+        _h: u64,
+        _ruleset: *mut i32,
+        _present: *mut i32,
+        _err: BufOut,
+    ) -> i32 {
+        TW_ERR
+    }
+
+    extern "C" fn generation_in_force(
+        _ctx: *mut c_void,
+        _h: u64,
+        generation: *mut u64,
+        present: *mut i32,
+        _err: BufOut,
+    ) -> i32 {
+        // SAFETY: `twinvpn.h`'s contract for this entry — both out-parameters
+        // are valid, writable pointers to live storage for the call's duration.
+        unsafe {
+            *generation = 41 + 1;
+            *present = 1;
+        }
+        TW_OK
+    }
+
+    extern "C" fn no_generation_in_force(
+        _ctx: *mut c_void,
+        _h: u64,
+        _generation: *mut u64,
+        present: *mut i32,
+        _err: BufOut,
+    ) -> i32 {
+        // SAFETY: as `generation_in_force`.
+        unsafe {
+            *present = 0;
+        }
+        TW_OK
+    }
+
+    extern "C" fn accepts_any_ruleset(
+        _ctx: *mut c_void,
+        _h: u64,
+        _ruleset: i32,
+        _err: BufOut,
+    ) -> i32 {
+        TW_OK
+    }
+
+    /// The property W-24 exists for: the posture is the OS's answer, not ours.
+    #[test]
+    fn the_read_back_reports_the_posture_the_shell_queried() {
+        let protected =
+            HostNetworkConfig(host(|v| v.installed_ruleset = Some(reads_back_protected)));
+        assert_eq!(
+            ready(protected.installed_ruleset()).expect("a posture"),
+            Some(Ruleset::Protected)
+        );
+        let blocked = HostNetworkConfig(host(|v| v.installed_ruleset = Some(reads_back_blocked)));
+        assert_eq!(
+            ready(blocked.installed_ruleset()).expect("a posture"),
+            Some(Ruleset::Blocked)
+        );
+    }
+
+    /// `None` is now an ANSWER, not the absence of one.
+    ///
+    /// Before W-24 closed there was no getter, so `Ok(None)` would have meant
+    /// "we could not ask" while reading as "nothing is installed". With a shell
+    /// that queried the OS and found no rules of ours, `None` is the truth.
+    #[test]
+    fn a_shell_that_queried_and_found_nothing_answers_none() {
+        let config = HostNetworkConfig(host(|v| {
+            v.installed_ruleset = Some(reads_back_nothing_installed);
+        }));
+        assert_eq!(ready(config.installed_ruleset()).expect("an answer"), None);
+    }
+
+    /// A posture this core has no value for is refused, never rounded.
+    #[test]
+    fn an_unrecognized_posture_is_refused_and_never_read_as_protected() {
+        let config = HostNetworkConfig(host(|v| {
+            v.installed_ruleset = Some(reads_back_an_unknown_posture);
+        }));
+        // Rounding it up would assert protection nobody stated; rounding it down
+        // would hide a shell defect behind a plausible reading.
+        assert!(matches!(
+            ready(config.installed_ruleset()),
+            Err(PlatformError::AdapterUnavailable(_))
+        ));
+    }
+
+    /// The out-parameters are initialized core-side, so a shell that returns
+    /// `TW_OK` and writes neither cannot leave a stack value behind that reads
+    /// as `TW_RULESET_PROTECTED`.
+    #[test]
+    fn an_unwritten_out_parameter_is_never_read_as_a_posture() {
+        let config = HostNetworkConfig(host(|v| {
+            v.installed_ruleset = Some(returns_ok_and_writes_nothing);
+        }));
+        assert_eq!(ready(config.installed_ruleset()).expect("an answer"), None);
+
+        let generation = HostNetworkConfig(host(|v| {
+            v.current_generation = Some(returns_ok_and_writes_no_generation);
+        }));
+        assert_eq!(
+            ready(generation.current_generation()).expect("an answer"),
+            None
+        );
+    }
+
+    /// A failing read-back is a typed refusal, so the indicator renders UNKNOWN.
+    #[test]
+    fn a_failing_read_back_refuses_rather_than_answering_none() {
+        let config = HostNetworkConfig(host(|v| v.installed_ruleset = Some(read_back_fails)));
+        assert!(matches!(
+            ready(config.installed_ruleset()),
+            Err(PlatformError::OsUnsupported(_))
+        ));
+    }
+
+    /// The recovery entry point round-trips, and reports absence separately.
+    #[test]
+    fn current_generation_round_trips_and_reports_absence_separately() {
+        let in_force =
+            HostNetworkConfig(host(|v| v.current_generation = Some(generation_in_force)));
+        assert_eq!(
+            ready(in_force.current_generation()).expect("a generation"),
+            Some(ContractGeneration(42))
+        );
+        let none = HostNetworkConfig(host(|v| {
+            v.current_generation = Some(no_generation_in_force);
+        }));
+        assert_eq!(ready(none.current_generation()).expect("an answer"), None);
+    }
+
+    /// **R-3's clamping rule, applied to the two entries this change adds.**
+    ///
+    /// A shell compiled against ABI minor 1 declared a `tw_host_vtable` that
+    /// ENDS at `boot_id`. This allocates exactly that struct — a buffer that
+    /// genuinely stops there — fills the bytes past it with a non-zero pattern
+    /// standing in for memory the shell never owned, and checks three things:
+    ///
+    /// 1. the core does not turn the poison into `Some(fn)` and call it;
+    /// 2. the two new entries read as absent, so the older shell gets exactly
+    ///    the typed refusal it was built against — which is what makes this a
+    ///    MINOR bump under VR-1 rather than a break;
+    /// 3. an entry the older shell DID declare still works, so the addition
+    ///    cost it nothing.
+    #[test]
+    fn a_shell_predating_the_w24_entries_still_works_and_never_calls_poison() {
+        let entry = core::mem::size_of::<*mut c_void>();
+        // The struct as ABI minor 1 declared it: everything up to, and not
+        // including, the first entry this change appended.
+        let declared = core::mem::offset_of!(TwHostVtable, installed_ruleset);
+
+        // `Vec<usize>` and not `Vec<u8>`: the element type IS the alignment, and
+        // reading a `TwHostVtable` out of a 1-aligned buffer would be undefined
+        // regardless of what this test is trying to prove.
+        let words = (declared + 4 * entry).div_ceil(entry);
+        let mut backing = vec![0usize; words];
+        // SAFETY: `backing` owns `words * entry` initialised bytes and outlives
+        // this borrow; `u8` has no alignment requirement and no invalid bit
+        // pattern, so viewing the allocation as bytes is sound.
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), words * entry)
+        };
+        bytes[declared..].fill(0xAA);
+        bytes[..core::mem::size_of::<u32>()]
+            .copy_from_slice(&u32::try_from(declared).expect("small").to_le_bytes());
+        let set = accepts_any_ruleset as *const ();
+        let at = core::mem::offset_of!(TwHostVtable, set_ruleset);
+        bytes[at..at + entry].copy_from_slice(&(set as usize).to_ne_bytes());
+
+        // SAFETY: the buffer holds `declared` bytes of initialised memory,
+        // aligned for `TwHostVtable` because its element type is pointer-sized,
+        // and its first field truthfully declares that size — exactly the
+        // `twinvpn.h` contract for a shell compiled against a shorter header.
+        let fns = unsafe { HostFns::copy_from(backing.as_ptr().cast::<TwHostVtable>()) }
+            .expect("the header is present");
+
+        assert!(
+            fns.v.installed_ruleset.is_none(),
+            "an entry past `size` must be None, never the 0xAA poison as a fn"
+        );
+        assert!(fns.v.current_generation.is_none());
+
+        let config = HostNetworkConfig(fns);
+        // (2) The refusal it was built against, unchanged — and reached without
+        // ever calling through the poison.
+        assert!(matches!(
+            ready(config.installed_ruleset()),
+            Err(PlatformError::OsUnsupported(_))
+        ));
+        assert!(matches!(
+            ready(config.current_generation()),
+            Err(PlatformError::OsUnsupported(_))
+        ));
+        // (3) What it did declare still works. This is the whole claim of a
+        // minor bump: the older shell paid nothing for the addition.
+        assert!(ready(config.set_ruleset(ContractGeneration(1), Ruleset::Blocked)).is_ok());
     }
 }

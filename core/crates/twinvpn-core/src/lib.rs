@@ -119,4 +119,11 @@ pub const ABI_MAJOR: u32 = 1;
 /// operation's parameters. An addition — the bare-name form is unchanged and
 /// still accepted — so a shell compiled against minor 0 keeps working, which is
 /// exactly what makes it minor rather than major.
-pub const ABI_MINOR: u32 = 1;
+///
+/// `1 -> 2`: F-9's host vtable gained `installed_ruleset` and
+/// `current_generation` (W-24). Both are **appended** entries, so a shell
+/// compiled against minor 1 declares a shorter struct and the core reads only
+/// the prefix its `size` covers — the same state that shell already produced by
+/// declaring the entries null. Nothing was removed, no signature changed and no
+/// existing entry moved, so VR-1 makes it minor.
+pub const ABI_MINOR: u32 = 2;

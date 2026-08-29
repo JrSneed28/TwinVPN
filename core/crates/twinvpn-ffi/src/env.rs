@@ -175,6 +175,8 @@ mod tests {
             os_csprng: None,
             elapsed_millis: None,
             boot_id: None,
+            installed_ruleset: None,
+            current_generation: None,
         }
     }
 

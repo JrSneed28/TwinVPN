@@ -76,39 +76,67 @@ and for `vtable::HostFns` (function pointers plus that token).
 
 ## 5. F-9's gaps, found by implementing it
 
-Three things the core needs that the vtable §11.4 specifies does not carry. This
-crate returns a **typed** `PLATFORM.ADAPTER_UNAVAILABLE` or
-`PLATFORM.OS_UNSUPPORTED` from each rather than inventing ABI entries: extending
-`twinvpn.h` is a permanent compatibility obligation and not this domain's to
-create unilaterally.
+Three things the core needs that the vtable §11.4 specifies does not carry. Two
+are still open, and this crate returns a **typed**
+`PLATFORM.ADAPTER_UNAVAILABLE` or `PLATFORM.OS_UNSUPPORTED` from each rather
+than inventing ABI entries: extending `twinvpn.h` is a permanent compatibility
+obligation, and the shape of a socket provider or an MTU setter is not one this
+domain may pick unilaterally. **The first is now closed**, because its shape was
+not a judgement call — two scalar queries the `NetworkConfig` trait already
+declares.
 
-1. **No `installed_ruleset` read-back. This is the one that matters.**
-   ADR-0015 §11.6 rule 1: *"A `ProtectionAssertion` is produced by **querying the
-   enforcement layer** … The user-visible protection indicator is a pure function
-   of the most recent assertion, **never of the agent's belief about what it
-   configured**."* F-9 offers `set_ruleset` and no getter, so across this ABI the
-   assertion **cannot be produced at all**. Answering `Ok(None)` would be worse
-   than failing — `None` reads as "no ruleset installed", the opposite of the
-   truth — so the typed refusal makes the indicator render `UNKNOWN`, which is
-   O-18's fail-safe direction. Same absence for `current_generation`, which
-   `NetworkConfig` calls "the recovery entry point".
-2. **No socket provider and no interface enumerator.** ADR-0018 §11.2 row 2.10
+1. **CLOSED (W-24) — the `installed_ruleset` read-back. This was the one that
+   mattered.** ADR-0015 §11.6 rule 1: *"A `ProtectionAssertion` is produced by
+   **querying the enforcement layer** … The user-visible protection indicator is
+   a pure function of the most recent assertion, **never of the agent's belief
+   about what it configured**."* F-9 offered `set_ruleset` and no getter, so
+   across this ABI the assertion **could not be produced at all**, and this
+   crate returned a typed refusal so the indicator rendered `UNKNOWN` — O-18's
+   fail-safe direction, but not the required one. `current_generation`, which
+   `NetworkConfig` calls "the recovery entry point", was absent for the same
+   reason.
+
+   Both are now **appended** vtable entries at **ABI minor `1 → 2`**. VR-1 makes
+   an addition a minor bump and F-9's `size` field makes it one in fact: a shell
+   compiled against minor 1 declares a shorter struct, the core reads only the
+   prefix that struct covers, both entries stay absent, and it gets exactly the
+   refusal it was built against. Nothing was removed, no signature changed, no
+   existing entry moved. Same mechanism and same justification as the four
+   additions below.
+
+   Three outcomes are kept apart, deliberately. The entry **absent** is the
+   typed refusal, because an unreadable posture is not an asserted one.
+   `present == 0` is `Ok(None)` — now an *answer*: the shell queried the OS and
+   found no rules of ours. A posture value this core does not recognize is
+   **refused**, never rounded: rounding up asserts protection nobody stated, and
+   rounding down hides a shell defect behind a plausible reading.
+2. **STILL OPEN (W-25). No socket provider and no interface enumerator.** ADR-0018 §11.2 row 2.10
    puts all NAT traversal in the core with "sockets via the adapter", and
    `PlatformAdapter` requires `sockets()` and `interfaces()`. Neither has a
    vtable entry, so a shell that binds *only* this ABI cannot do NAT traversal.
    (§11.5's Rust hosts link the `staticlib` and use `twinvpn-platform-*`
    directly, so this bites the Swift and Kotlin consumers.)
-3. **No `set_mtu`, and no encoding for `LinkFacts` or the `apply` plan.**
+3. **STILL OPEN. No `set_mtu`, and no encoding for `LinkFacts` or the `apply` plan.**
    DPLPMTUD raises and lowers the MTU as it probes (`networking.md` §6.2), and
    `query_link_facts` returns a blob whose shape no document defines. Decoding a
    shape nobody has specified would be inventing a contract.
 
-**Four entries this crate added to the header**, all as minor-version additions
+**Six entries this crate added to the header**, all as minor-version additions
 that F-9's `size` field permits, each with its reason in the header:
 `buf_bytes` (F-2 makes the shell's allocation the shell's to free, so the core
 must ask to read it), `identity_agree` (§11.6 lists it as a seam direction while
 §11.4's struct omits it), `elapsed_millis` and `boot_id` (`ownership.md` §8
-**W-7**: three required shell interfaces §11.16 does not list).
+**W-7**: three required shell interfaces §11.16 does not list), and
+`installed_ruleset` and `current_generation` (**W-24**, above).
+
+**ADR-0018 §11.4's printed struct is now behind `twinvpn.h` by nine entries**,
+and that is worth counting rather than leaving to be rediscovered. §11.4's code
+block declares 16 fields; `twinvpn.h` declares 25. The nine are the six above
+plus `buf_free`, `secure_item_delete` and `record_aead_custody` — each of which
+predates this crate's additions and none of which §11.4's code block names. The
+header is the ABI of record (§11.12) and the ADR's listing is a specification
+that has fallen behind it; reconciling them is the integration lead's, not this
+domain's.
 
 ---
 
