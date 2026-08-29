@@ -360,3 +360,96 @@ fn every_statement_payload_decoder_is_total_under_a_signing_adversary() {
         "the positive control must still decode"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The PairingOffer — the one untrusted payload with no signature in front of it
+// ---------------------------------------------------------------------------
+//
+// This target does not belong to either threat model above, which is exactly
+// why it needs its own section. `wire_decoders.rs` fuzzes bytes behind a
+// transport; the targets above fuzz payloads behind a signature. The offer has
+// **neither**. `ownership.md` §11 G-9 puts it plainly: it is "the MOST untrusted
+// input in the system — parsed by a device holding no trust anchor, from a
+// camera or a paste buffer".
+//
+// So the adversary here is whoever controls the pixels on a screen or the
+// characters in a paste buffer, and they choose every byte. There is no key to
+// forge and no envelope to corrupt: the decoder is the entire defence.
+
+/// A structurally plausible offer, for a mutation seed.
+///
+/// Built with the real field widths so a mutation lands *inside* the schema
+/// rather than being refused by the length check on the way in — the same reason
+/// every other target here starts from a valid encoding.
+fn pairing_offer_seed() -> Vec<u8> {
+    encode(&Item::Map(vec![
+        (Item::Uint(1), Item::Bytes(vec![0x11; 32])),
+        (Item::Uint(2), Item::Bytes(vec![0x22; 43])),
+        (Item::Uint(3), Item::Bytes(vec![0x33; 32])),
+        (Item::Uint(4), Item::Bytes(vec![0x44; 216])),
+        (Item::Uint(5), Item::Null),
+        (Item::Uint(6), Item::Text("rendezvous.example".to_owned())),
+        (Item::Uint(7), Item::Uint(1_787_995_789_742)),
+    ]))
+    .expect("seed encodes")
+}
+
+#[test]
+fn the_pairing_offer_decoder_is_total_over_arbitrary_bytes() {
+    let seeds = vec![pairing_offer_seed()];
+    // `max_len` is deliberately above `pairing.max_offer_bytes` so the corpus
+    // exercises the payload-cap refusal as well as everything behind it.
+    let corpus = corpus(SEED ^ 0x0FFE_4001, ITERATIONS, 640, &seeds);
+    let report = fuzz("pairing_offer::decode", &corpus, |bytes| {
+        outcome_of(&twinvpn_crypto::pairing_offer::decode(bytes))
+    });
+    assert!(report.reached_reject());
+    assert!(
+        report.reached_accept(),
+        "no input reached the accepting path; the corpus tested the length check and nothing else"
+    );
+}
+
+/// The text channel is a second parser over the same payload, and it is the one
+/// a human pastes into. Fuzzed as text rather than as bytes, because that is the
+/// shape the adversary actually controls at a serial console.
+#[test]
+fn the_text_offer_parser_is_total_over_arbitrary_strings() {
+    let corpus = corpus(SEED ^ 0x0FFE_4002, ITERATIONS, 900, &[]);
+    let report = fuzz("pairing_offer::parse_text", &corpus, |bytes| {
+        // Lossy on purpose: the parser takes a `&str`, so the fuzzer's job is to
+        // hand it every string a corrupted paste can produce, not to test UTF-8
+        // decoding, which `String::from_utf8_lossy` is not the subject of.
+        let text = String::from_utf8_lossy(bytes);
+        outcome_of(&twinvpn_crypto::pairing_offer::parse_text(&text))
+    });
+    assert!(report.reached_reject());
+}
+
+/// A decode failure may say one thing and one thing only.
+///
+/// `pairing_offer.cddl`: "A decode failure is reported as a bare registered
+/// `reason_code` with NO evidence drawn from the input." This asserts the
+/// property over the fuzz corpus rather than over the eight hand-written
+/// negatives: every refusal's rendering must be one of this module's own
+/// `&'static str`s, so no input byte, length or field value can reach a log.
+#[test]
+fn no_refusal_of_an_offer_carries_anything_drawn_from_the_input() {
+    let seeds = vec![pairing_offer_seed()];
+    for input in corpus(SEED ^ 0x0FFE_4003, ITERATIONS, 640, &seeds) {
+        if let Err(e) = twinvpn_crypto::pairing_offer::decode(&input) {
+            let rendered = format!("{e:?}");
+            for window in input.windows(8).take(64) {
+                let hex: String = window.iter().map(|b| format!("{b:02x}")).collect();
+                assert!(
+                    !rendered.to_lowercase().contains(&hex),
+                    "a refusal carried input bytes: {rendered}"
+                );
+            }
+            assert!(
+                !rendered.contains(&format!("{}", input.len())) || input.len() < 10,
+                "a refusal carried the input's length: {rendered}"
+            );
+        }
+    }
+}

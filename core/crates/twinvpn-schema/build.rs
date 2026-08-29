@@ -77,6 +77,15 @@ const LIMITS: &[(&str, &str, &str, &str)] = &[
     ("pairing", "max_failed_runs", "PAIRING_MAX_FAILED_RUNS", "The five-attempt budget that makes a nine-digit code safe (ADR-0007 N-17)."),
     ("pairing", "max_peer_hint_bytes", "PAIRING_MAX_PEER_HINT_BYTES", "Byte cap on a pairing peer hint."),
     ("pairing", "max_ceremony_payload_bytes", "PAIRING_MAX_CEREMONY_PAYLOAD_BYTES", "Byte cap on a ceremony payload."),
+    // The six PairingOffer bounds, Amendment 4. `cddl/twinvpn/v1/pairing_offer.cddl`
+    // is the schema they bound; the payload cap is checked BEFORE any field is
+    // parsed, and the per-field bounds sum to 493, at or below it.
+    ("pairing", "secret_bytes", "PAIRING_SECRET_BYTES", "Exact width of `pairing_secret`, the C-B optical secret (ADR-0007 §7.4)."),
+    ("pairing", "max_offer_bytes", "PAIRING_MAX_OFFER_BYTES", "Byte cap on a whole `PairingOffer`. Checked **before any field is parsed**, which is why the per-field bounds can never disagree with it in the dangerous direction."),
+    ("pairing", "max_offer_cose_key_bytes", "PAIRING_MAX_OFFER_COSE_KEY_BYTES", "Byte cap on the offer's embedded `ik_pub` COSE_Key. A P-256 compressed EC2 key measures 43 bytes; the bound admits the uncompressed form so a producer ignoring §7.4's \"compressed point\" is refused by the schema rather than by a length accident."),
+    ("pairing", "max_offer_binding_bytes", "PAIRING_MAX_OFFER_BINDING_BYTES", "Byte cap on the offer's embedded `COSE_Sign1(TunnelKeyBinding)`. Measured at 216."),
+    ("pairing", "max_offer_attestation_bytes", "PAIRING_MAX_OFFER_ATTESTATION_BYTES", "Byte cap on the offer's `attestation`. **Zero**, so `null` is the only admissible value — a narrowing of ADR-0007 §7.4 recorded as finding F-1 under `ownership.md` §11 G-9."),
+    ("pairing", "max_offer_hint_bytes", "PAIRING_MAX_OFFER_HINT_BYTES", "Byte cap on the offer's `rendezvous_hint`. Tighter than `max_peer_hint_bytes` on purpose: that one travels a 64 KiB C1 envelope, this one has to survive being photographed."),
     ("relay", "pair_tag_bucket_seconds", "RELAY_PAIR_TAG_BUCKET_SECONDS", "The `pair_tag` rotation bucket."),
     ("relay", "accepted_bucket_skew", "RELAY_ACCEPTED_BUCKET_SKEW", "How many buckets either side of the current one a peer accepts."),
     ("relay", "token_lifetime_ms", "RELAY_TOKEN_LIFETIME_MS", "Relay token lifetime."),

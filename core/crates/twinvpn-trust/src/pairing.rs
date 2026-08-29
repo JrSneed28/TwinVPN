@@ -185,12 +185,15 @@ impl Pairing {
 ///
 /// The parameter is named `pairing_secret` because that is the only correct
 /// input; there is no variant taking a server-supplied id.
+///
+/// **Delegated, not re-derived.** `twinvpn_crypto::pairing_offer` owns the one
+/// definition, because the offer carries the secret this id names and two
+/// derivations of one value are a place for them to disagree. Duplicate
+/// declarations were the recurring defect class of this wave (W-20, X-4, R-14),
+/// and this is the same rule applied before it could become one.
 #[must_use]
 pub fn derive_pairing_id(pairing_secret: &[u8]) -> [u8; 16] {
-    let d = twinvpn_crypto::sha256(pairing_secret);
-    let mut out = [0u8; 16];
-    out.copy_from_slice(&d[..16]);
-    out
+    twinvpn_crypto::pairing_offer::derive_pairing_id(pairing_secret)
 }
 
 /// The device's pairing ledger: in-flight ceremonies and burned identifiers.

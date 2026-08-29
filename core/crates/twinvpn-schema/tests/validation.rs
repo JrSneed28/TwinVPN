@@ -65,6 +65,69 @@ fn limits_generated_from_the_frozen_registry() {
         "max_evidence_entries",
         limits::MAX_EVIDENCE_ENTRIES,
     );
+    // Amendment 4's six. The offer's per-field bounds are the only place in the
+    // registry where a sum has to stay under a sibling, so they are all checked
+    // rather than sampled like the sections above.
+    expect("pairing", "secret_bytes", limits::PAIRING_SECRET_BYTES);
+    expect(
+        "pairing",
+        "max_offer_bytes",
+        limits::PAIRING_MAX_OFFER_BYTES,
+    );
+    expect(
+        "pairing",
+        "max_offer_cose_key_bytes",
+        limits::PAIRING_MAX_OFFER_COSE_KEY_BYTES,
+    );
+    expect(
+        "pairing",
+        "max_offer_binding_bytes",
+        limits::PAIRING_MAX_OFFER_BINDING_BYTES,
+    );
+    expect(
+        "pairing",
+        "max_offer_attestation_bytes",
+        limits::PAIRING_MAX_OFFER_ATTESTATION_BYTES,
+    );
+    expect(
+        "pairing",
+        "max_offer_hint_bytes",
+        limits::PAIRING_MAX_OFFER_HINT_BYTES,
+    );
+}
+
+/// The offer's per-field bounds sum to at most its payload bound.
+///
+/// `pairing_offer.cddl` encoding rule 2 rests on this: the payload cap is checked
+/// **before any field is parsed**, so a receiver that enforces it first "can meet
+/// no field it has not already budgeted for". Amendment 1's recorded cost was a
+/// per-field cap that exceeded its envelope cap and passed because nothing
+/// compared them. `contracts/tests/test_registries.py` asserts the same relation
+/// against the JSON; this asserts it against the constants a validator actually
+/// reads, which is the copy that can drift.
+#[test]
+fn the_offer_field_bounds_fit_inside_the_offer_payload_bound() {
+    let per_field = limits::PAIRING_SECRET_BYTES
+        + limits::PAIRING_MAX_OFFER_COSE_KEY_BYTES
+        + 32 // tk_pub, `bstr .size 32`, spelled in the CDDL rather than bounded
+        + limits::PAIRING_MAX_OFFER_BINDING_BYTES
+        + limits::PAIRING_MAX_OFFER_ATTESTATION_BYTES
+        + limits::PAIRING_MAX_OFFER_HINT_BYTES;
+    assert!(
+        per_field <= limits::PAIRING_MAX_OFFER_BYTES,
+        "per-field bounds sum to {per_field}, over the {} payload cap",
+        limits::PAIRING_MAX_OFFER_BYTES
+    );
+}
+
+/// `null` is the only admissible `attestation`, and the constant is why.
+///
+/// A future amendment that gives the field a real bound must also revisit
+/// `pairing_offer::decode`, which refuses a non-null value outright. This test
+/// is the tripwire that makes the two move together.
+#[test]
+fn the_offer_attestation_bound_is_zero_so_null_is_the_only_value() {
+    assert_eq!(limits::PAIRING_MAX_OFFER_ATTESTATION_BYTES, 0);
 }
 
 /// `twinvpn-types` restates three diagnostics limits as constants because it

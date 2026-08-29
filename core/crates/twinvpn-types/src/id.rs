@@ -398,7 +398,12 @@ impl DeviceId {
     /// comparing strings.
     #[must_use]
     pub fn fingerprint(&self) -> String {
-        const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+        // The alphabet is `crockford::ALPHABET`'s, not a second copy: ADR-0023
+        // E2 renders the pairing offer in the same one, and two spellings of an
+        // alphabet is how two renderings of one identifier come to disagree.
+        // The *grouping* differs on purpose — four here, eight for E2 — so only
+        // the alphabet is shared.
+        use crate::crockford::ALPHABET as CROCKFORD;
         let mut out = String::with_capacity(24);
         for i in 0..20 {
             let bit = i * 5;

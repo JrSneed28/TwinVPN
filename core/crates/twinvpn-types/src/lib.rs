@@ -67,6 +67,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod crockford;
 pub mod diagnostic;
 pub mod error;
 pub mod evidence;

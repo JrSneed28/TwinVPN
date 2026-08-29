@@ -92,6 +92,7 @@ pub mod error;
 pub mod kdf;
 pub mod locked;
 pub mod noise;
+pub mod pairing_offer;
 pub mod prologue;
 pub mod psk;
 pub mod relay_leg;
@@ -112,6 +113,7 @@ pub use deviceid::{
 pub use error::{CryptoError, Result, StatementKind};
 pub use kdf::{hkdf_expand_label, hkdf_sha256, sha256, HkdfSha256};
 pub use locked::{LockedBytes, LockedMemoryReport};
+pub use pairing_offer::{OfferReject, PairingOffer};
 pub use prologue::{IdentityBinding, NegotiationBinding, Prologue, TwinnetTag};
 pub use psk::TwinNetPsk;
 pub use relay_leg::{CompletedLeg, LegInitiator, LegResponder};

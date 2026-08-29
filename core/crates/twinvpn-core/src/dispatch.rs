@@ -148,10 +148,29 @@ pub const fn disposition(op: CoreCommand) -> Disposition {
         },
 
         // -- refused: the ceremonies -------------------------------------------
-        C::PairBegin | C::PairConfirm | C::PairCancel | C::PairStatus => Disposition::NotWired {
+        //
+        // W-21 is CLOSED. `PairingOffer` is contracted (Amendment 4,
+        // `cddl/twinvpn/v1/pairing_offer.cddl`) and implemented
+        // (`twinvpn_crypto::pairing_offer`, which decodes, emits and bounds it).
+        // The four arms below therefore no longer share one cause and are no
+        // longer merged: each now names what IT is waiting for, which is the
+        // whole reason this function exists rather than a wildcard.
+        C::PairBegin => Disposition::NotWired {
             code: codes::AUTH_PAIRING_NOT_AUTHORIZED,
-            why: "the C-B ceremony carries a PairingOffer, which appears NOWHERE in \
-                  contracts/ (W-21). Neither channel authenticator is complete",
+            why: "producing an offer needs entropy and an IdentityCustody signature over the \
+                  TunnelKeyBinding, and the composed core holds no PairingLedger to begin a \
+                  ceremony in. Composition-root wiring, not a missing contract",
+        },
+        C::PairConfirm => Disposition::NotWired {
+            code: codes::CONTROL_UNREACHABLE,
+            why: "N-18 requires BOTH PairingAttestations before a ceremony is confirmed, and \
+                  the peer's half crosses the rendezvous. Same C1 ceremony transport as \
+                  device.revoke and key.rotate",
+        },
+        C::PairCancel | C::PairStatus => Disposition::NotWired {
+            code: codes::AUTH_PAIRING_NOT_AUTHORIZED,
+            why: "both read the PairingLedger, and the composed core holds none. They are \
+                  local operations blocked only on pair.begin's wiring, not on a peer",
         },
         C::DeviceRevoke | C::KeyRotate => Disposition::NotWired {
             code: codes::CONTROL_UNREACHABLE,
