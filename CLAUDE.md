@@ -12,6 +12,38 @@
 - Keep files under 500 lines
 - Validate input at system boundaries
 
+## Agent stack
+
+Three plugins, three non-overlapping jobs. Do not blur them.
+
+- **Ruflo** — canonical orchestration, routing, swarms, agents, learning, and
+  persistent engineering memory. The only project knowledge store; the only MCP
+  orchestration layer. Everything below this line is advisory, not authoritative.
+- **Ponytail** (`lite` by default, `~/.config/ponytail/config.json`) —
+  implementation minimalism only: reuse first, stdlib and native platform first,
+  YAGNI, the minimum correct implementation. It understands the code path before
+  minimizing it. It must never remove an explicit requirement, a security or
+  authorization control, trust-boundary validation, required tests, or the
+  observability, failure handling, and architectural contracts this project has
+  already accepted.
+- **Caveman** (`lite` by default, `.caveman/config.json`) — conversational
+  terseness only. Project artifacts stay in normal professional prose: source
+  comments, docs, ADRs, commit messages, PR and issue text, tests, logs, Ruflo
+  memory entries, security findings, and user-facing copy. Caveman is not a
+  memory store; Cavecrew is not the agent pipeline; the proxy stays off and
+  Claude Code is never launched through `caveman claude`.
+
+Priority when these conflict:
+
+```text
+user requirements > security/correctness/data integrity >
+accepted architecture and Ruflo decisions >
+Ponytail minimalism > Caveman terseness
+```
+
+Ruflo coordination records never substitute for real execution — Claude Code,
+its subagents, and worktrees still do the actual work.
+
 ## Ruflo Capability Brain & Implementation Loop
 
 Ruflo is the coordination ledger and policy decision point. Claude Code is the
