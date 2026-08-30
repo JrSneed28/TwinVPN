@@ -102,7 +102,13 @@
 
       - name: select the pinned Xcode and print every toolchain version
         run: |
-          sudo xcode-select -s "$(build/ci/ci-ios.sh --print-xcode-path)"
+          # RESOLVED FIRST, into a variable. Inlining the command substitution
+          # into `xcode-select -s "$(...)"` discards the resolver's exit status
+          # and hands `xcode-select` an empty string, which fails with
+          # `invalid developer directory ''` instead of with the resolver's own
+          # message naming the pin and every Xcode the machine does have.
+          XCODE_DEV_DIR="$(build/ci/ci-ios.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
           xcodebuild -version
           swift --version
           xcrun --sdk iphoneos --show-sdk-version
@@ -148,15 +154,41 @@
         # next job — and its owner — inherits.
         run: build/ci/ci-ios.sh --cleanup
 
+      # TWO uploads, split the way `build/ci/jobs/android-link-run.yml` splits
+      # its own, because they are not the same claim. The evidence is the
+      # acceptance gate's input and stays `error`: a run that reached the end
+      # without writing evidence must go red rather than be read as a pass. The
+      # diagnostics are `failure()` + `ignore`, so a job that died in its FIRST
+      # step (selecting Xcode, say) does not stack a second, misleading
+      # "No files were found" red on top of the real failure.
+      #
+      # NOTE FOR THE INTEGRATION OWNER: this renames the evidence half from
+      # `diagnostics-ios-device` to `evidence-ios-device`. The gate job collects
+      # `pattern: evidence-*`, and `build/acceptance/report.py` probes
+      # `build/ci/evidence/ios-device.json` — so under the old name this job's
+      # evidence was uploaded but never collected, and that row could only ever
+      # read NOT_EXECUTED. The new name is what `android-device-lifecycle.yml`
+      # already does (`evidence-android-device`).
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: diagnostics-ios-device
+          name: evidence-ios-device
           # ENUMERATED. NEVER a provisioning profile, a signing identity, a
           # keychain, a pairing secret, an authentication token, tunnel
           # plaintext, or a packet capture.
           path: |
             build/ci/evidence/ios-device.json
-            build/ci/logs/ios/**
+            build/ci/logs/ios/xctest-device.log
           if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-ios-device
+          # ENUMERATED to this job's own log tree, under the same prohibition as
+          # above. NEVER the CoreSimulator tree and NEVER the device syslog.
+          path: |
+            build/ci/logs/ios/**
+          if-no-files-found: ignore
           retention-days: 14

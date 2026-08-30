@@ -33,24 +33,59 @@
 # ===========================================================================
 # Resolved by `build/ci/ci-ios.sh --print-xcode-path`, so the version lives in
 # ONE place — `build/ci/ci-common-apple.sh`'s `TWINVPN_XCODE_VERSION`, currently
-# 16.4.
+# **26.6**.
 #
 # Authority: ADR-0018 §11.3 ("one exact toolchain version pinned … advanced only
-# by a reviewed commit that re-runs the full §11.9 matrix") applied to Swift by
-# `build/toolchain/env.sh:10` — `TWINVPN_SWIFT_VERSION=6.1.2`. Xcode 16.4 is the
-# release that ships Swift 6.1.2. `apple_require_pinned_swift` asserts the pair
-# at run time, so a runner-image update that moved Swift fails the job rather
-# than silently changing the binary.
+# by a reviewed commit that re-runs the full §11.9 matrix"), applied to Xcode
+# because §11.9 rows 1 and 2 name the iOS toolchain as "Xcode + pinned Rust" —
+# Xcode is the thing pinned, and the Swift compiler is whatever it ships.
 #
-# `shells/ios/README.md:79` documents a separate FLOOR ("Xcode 15+"). A floor is
+# Xcode 26.6 ships Swift 6.3.3 (swift.org's release index,
+# `_data/builds/swift_releases.yml` in swiftlang/swift-org-website) and is the
+# DEFAULT Xcode of the `macos-26` image. Both facts are cited with URLs in
+# `ci-common-apple.sh`'s header. `apple_require_pinned_swift` asserts the pair at
+# run time, so a runner-image update that moved Swift fails the job rather than
+# silently changing the binary.
+#
+# NOT `build/toolchain/env.sh`'s `TWINVPN_SWIFT_VERSION=6.1.2`: that pins the
+# LINUX Swift `make swift-parse` uses on a host with no Darwin SDK, never
+# compiles a shipped Apple artifact, and does not have to equal the
+# Xcode-bundled compiler. Reading it as the Darwin pin is what previously put
+# Xcode 16.4 here — absent from `macos-26` entirely, so this job's first step
+# failed with `xcode-select: error: invalid developer directory ''`.
+#
+# `shells/ios/README.md` documents a separate FLOOR ("Xcode 15+"). A floor is
 # not a pin.
 #
 # ===========================================================================
 # WHAT IS UPLOADED, AND WHAT MUST NEVER BE
 # ===========================================================================
-# Uploaded on failure: the `.xcresult`, the xcodebuild logs (which carry the
-# linker diagnostics), the simulator inventory, and the simulator's own crash
-# reports for our two bundle identifiers.
+# TWO uploads, the same split `build/ci/jobs/android-link-run.yml` uses, because
+# they are not the same claim:
+#
+#   evidence-ios              `if: always()`,  if-no-files-found: **error**
+#                             `ios.json` plus `xctest.log`, the log the
+#                             `lifecycle_transitions` array is read out of. This
+#                             is the acceptance gate's input; a job that reached
+#                             the end while writing no evidence must go red
+#                             rather than be read as a green tick.
+#
+#   diagnostics-ios-link-run  `if: failure()`, if-no-files-found: **ignore**
+#                             the whole log tree: the `.xcresult`, the xcodebuild
+#                             logs with the linker diagnostics, the simulator
+#                             inventory, and the simulator's own crash reports
+#                             for our two bundle identifiers. `ignore`, because a
+#                             job that died in its FIRST step has no diagnostics
+#                             to upload and must not have a second, misleading
+#                             red stacked on top of the real failure.
+#
+# Splitting them is what stops one failure becoming two: in run 33283744937 the
+# Apple jobs died selecting Xcode, and a single combined `always()`+`error`
+# upload then failed with "No files were found" — burying the actual cause.
+#
+# A green run therefore uploads the evidence and the transition log and nothing
+# else; `DerivedData` (which lives under `build/ci/logs/ios/`) is no longer swept
+# into a passing run's artifact.
 #
 # NEVER uploaded: provisioning profiles, signing identities or private keys,
 # pairing secrets, authentication tokens, tunnel plaintext, or unredacted packet
@@ -74,11 +109,18 @@
       # Keep the version in step with build/ci/ci-common-apple.sh.
       # - uses: maxim-lobanov/setup-xcode@v1
       #   with:
-      #     xcode-version: '16.4'
+      #     xcode-version: '26.6'
 
       - name: select the pinned Xcode and print every toolchain version
         run: |
-          sudo xcode-select -s "$(build/ci/ci-ios.sh --print-xcode-path)"
+          # RESOLVED FIRST, into a variable. Inlining the command substitution
+          # into `xcode-select -s "$(...)"` discards the resolver's exit status
+          # and hands `xcode-select` an empty string, so the job died with
+          # `invalid developer directory ''` instead of with the resolver's own
+          # message naming the pin and every Xcode the runner does have.
+          # `bash -e` fails the assignment when the resolver fails.
+          XCODE_DEV_DIR="$(build/ci/ci-ios.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
           xcodebuild -version
           swift --version
           xcrun --sdk iphoneos --show-sdk-version
@@ -122,6 +164,8 @@
         # nothing booted.
         run: build/ci/ci-ios.sh --cleanup
 
+      # The gate's input. `error` is deliberate and stays: a run that reached
+      # the end without evidence must not be read as a pass.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -129,6 +173,19 @@
           # ENUMERATED, never `path: .`. See the header.
           path: |
             build/ci/evidence/ios.json
-            build/ci/logs/ios/**
+            build/ci/logs/ios/xctest.log
           if-no-files-found: error
+          retention-days: 14
+
+      # The diagnostics, on failure only, and `ignore` so a job that died before
+      # producing any cannot stack a second red on the real failure.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-ios-link-run
+          # ENUMERATED to the log tree this job writes. NEVER the CoreSimulator
+          # tree — see the header.
+          path: |
+            build/ci/logs/ios/**
+          if-no-files-found: ignore
           retention-days: 14

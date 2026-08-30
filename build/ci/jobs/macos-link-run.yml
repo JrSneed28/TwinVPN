@@ -26,20 +26,32 @@
 # ===========================================================================
 # The version is NOT written here. `build/ci/ci-macos.sh --print-xcode-path`
 # resolves it, so the pin lives in exactly one place
-# (`build/ci/ci-common-apple.sh`'s `TWINVPN_XCODE_VERSION`, currently 16.4) and
-# a workflow cannot drift from a script.
+# (`build/ci/ci-common-apple.sh`'s `TWINVPN_XCODE_VERSION`, currently **26.6**)
+# and a workflow cannot drift from a script.
 #
 # Where the requirement comes from: ADR-0018 §11.3 requires "one exact toolchain
 # version pinned … advanced only by a reviewed commit that re-runs the full
-# §11.9 matrix", and `build/toolchain/env.sh:10` applies that to Swift —
-# `TWINVPN_SWIFT_VERSION=6.1.2`. Xcode 16.4 is the release that ships Swift
-# 6.1.2, so pinning Xcode is how the Swift pin is honoured on a Darwin builder.
-# `ci-common-apple.sh`'s `apple_require_pinned_swift` then ASSERTS the pair, so
-# a runner-image update that quietly moved Swift fails the job instead of
-# changing the binary nobody reviewed.
+# §11.9 matrix", and §11.9 row 5 names the macOS toolchain as "Xcode + pinned
+# Rust" — so Xcode itself is the thing pinned to one exact version on a Darwin
+# builder, and the Swift compiler is whatever that Xcode ships.
 #
-# `shells/ios/README.md:79` separately documents a FLOOR ("Xcode 15+"). A floor
-# is not a pin and this job uses the pin.
+# Xcode 26.6 ships Swift 6.3.3 (swift.org's own release index,
+# `_data/builds/swift_releases.yml` in swiftlang/swift-org-website), and 26.6 is
+# the DEFAULT Xcode of the `macos-26` runner image this job runs on. Both facts
+# are cited with their URLs in `ci-common-apple.sh`'s header.
+# `apple_require_pinned_swift` then ASSERTS the pair at run time, so a
+# runner-image update that quietly moved Swift fails the job instead of changing
+# the binary nobody reviewed.
+#
+# NOT `build/toolchain/env.sh`'s `TWINVPN_SWIFT_VERSION=6.1.2`. That pins the
+# LINUX-hosted Swift that `make swift-parse` uses on a host with no Darwin SDK;
+# it never compiles a shipped Apple artifact and does not have to equal the
+# Xcode-bundled compiler. Reading it as the Darwin pin is what previously put
+# Xcode 16.4 here — a version `macos-26` does not carry at all, so this very
+# step failed with `xcode-select: error: invalid developer directory ''`.
+#
+# `shells/ios/README.md` separately documents a FLOOR ("Xcode 15+"). A floor is
+# not a pin and this job uses the pin.
 #
 # The `maxim-lobanov/setup-xcode` step below is the FALLBACK for a runner image
 # that does not ship the pinned Xcode side by side. It is commented out rather
@@ -49,9 +61,31 @@
 # ===========================================================================
 # WHAT IS UPLOADED, AND WHAT MUST NEVER BE
 # ===========================================================================
-# Uploaded on failure: the `.xcresult` bundle, the xcodebuild logs (which carry
-# the linker diagnostics), the native lifecycle log, and any crash report the
-# run produced.
+# TWO uploads, and they are not the same claim — the same split
+# `build/ci/jobs/android-link-run.yml` uses:
+#
+#   evidence-macos            `if: always()`,  if-no-files-found: **error**
+#                             `macos.json` plus the two logs the
+#                             `lifecycle_transitions` array is read out of. This
+#                             is the acceptance gate's input, and a job that
+#                             reached the end while writing no evidence must go
+#                             red rather than be read as a green tick.
+#
+#   diagnostics-macos-link-run  `if: failure()`, if-no-files-found: **ignore**
+#                             the whole log tree: xcodebuild logs with the
+#                             linker diagnostics, the `.xcresult`, crash reports.
+#                             `ignore`, because a job that died in its FIRST step
+#                             has no diagnostics to upload and must not have a
+#                             second, misleading red stacked on top of the real
+#                             failure.
+#
+# Splitting them is what stops one failure becoming two: run 33283744937 died
+# selecting Xcode, and the single combined `always()`+`error` upload then failed
+# with "No files were found" — burying the actual cause.
+#
+# A green run therefore uploads the evidence and the transition logs and nothing
+# else; `DerivedData` (which lives under `build/ci/logs/macos/`) is no longer
+# swept into a passing run's artifact.
 #
 # NEVER uploaded: signing identities or private keys, pairing secrets,
 # authentication tokens, tunnel plaintext, or unredacted packet captures. The
@@ -78,12 +112,20 @@
       # `TWINVPN_XCODE_VERSION` in build/ci/ci-common-apple.sh.
       # - uses: maxim-lobanov/setup-xcode@v1
       #   with:
-      #     xcode-version: '16.4'
+      #     xcode-version: '26.6'
 
       - name: select the pinned Xcode and print every toolchain version
         run: |
           # The pin lives in build/ci/ci-common-apple.sh and nowhere else.
-          sudo xcode-select -s "$(build/ci/ci-macos.sh --print-xcode-path)"
+          #
+          # RESOLVED FIRST, into a variable. Inlining the command substitution
+          # into `xcode-select -s "$(...)"` discards the resolver's exit status
+          # and hands `xcode-select` an empty string, so the job died with
+          # `invalid developer directory ''` instead of with the resolver's own
+          # message naming the pin and every Xcode the runner does have.
+          # `bash -e` fails the assignment when the resolver fails.
+          XCODE_DEV_DIR="$(build/ci/ci-macos.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
           xcodebuild -version
           swift --version
           xcrun --sdk macosx --show-sdk-version
@@ -119,6 +161,8 @@
           cp -R ~/Library/Logs/DiagnosticReports/* build/ci/logs/macos/crashes/ 2>/dev/null \
             || echo "no crash reports"
 
+      # The gate's input. `error` is deliberate and stays: a run that reached
+      # the end without evidence must not be read as a pass.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -127,6 +171,20 @@
           # uploaded from an Apple runner.
           path: |
             build/ci/evidence/macos.json
-            build/ci/logs/macos/**
+            build/ci/logs/macos/lifecycle-native.log
+            build/ci/logs/macos/xctest.log
           if-no-files-found: error
+          retention-days: 14
+
+      # The diagnostics, on failure only, and `ignore` so a job that died before
+      # producing any cannot stack a second red on the real failure.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-macos-link-run
+          # ENUMERATED to the log tree this job writes. Never `path: .`, never
+          # `~/Library/Keychains`, never `~/Library/MobileDevice`.
+          path: |
+            build/ci/logs/macos/**
+          if-no-files-found: ignore
           retention-days: 14

@@ -123,11 +123,20 @@ documented toolchain, and the first person with a Mac should expect to correct i
 # 0. Prerequisites: the PINNED Xcode, the pinned Rust toolchain, xcodegen.
 #
 #    Xcode 15 is the FLOOR — what these sources need. It is not the pin.
-#    ADR-0018 §11.3 requires one exact toolchain version, and
-#    `build/toolchain/env.sh` fixes TWINVPN_SWIFT_VERSION=6.1.2; Xcode 16.4 is
-#    the release that ships that Swift, so 16.4 is what CI selects.
-#    `build/ci/ci-common-apple.sh` holds the pin and asserts the pair, and
+#    ADR-0018 §11.3 requires one exact toolchain version, and §11.9 rows 1-2
+#    name the iOS toolchain as "Xcode + pinned Rust" — so XCODE is the pinned
+#    thing on a Darwin builder, and the Swift compiler is whatever it ships.
+#    `build/ci/ci-common-apple.sh` holds that pin: TWINVPN_XCODE_VERSION=26.6,
+#    which ships Swift 6.3.3 (swift.org's release index) and is the default
+#    Xcode of the `macos-26` runner image. It asserts the pair at run time, and
 #    `build/ci/ci-ios.sh --print-xcode-path` is how a runner resolves it.
+#
+#    NOT `build/toolchain/env.sh`'s TWINVPN_SWIFT_VERSION=6.1.2. That pins the
+#    LINUX Swift `make swift-parse` uses on a host with no Darwin SDK; it never
+#    compiles a shipped Apple artifact and does not have to equal the
+#    Xcode-bundled compiler. Both shells build in Swift LANGUAGE MODE 5.9
+#    (`project.yml`'s `SWIFT_VERSION`), which every Swift 6.x compiler
+#    implements.
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
 # 1. Build the two staticlibs. The FULL core for the provider; `core-lite` for

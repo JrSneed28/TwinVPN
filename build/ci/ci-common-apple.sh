@@ -4,43 +4,95 @@
 # duplicate: the Xcode pin, the toolchain banner, and the assertion that the
 # selected Xcode carries the Swift this repository pins.
 #
-# SOURCED, never executed. It defines functions and one variable and runs
+# SOURCED, never executed. It defines functions and two variables and runs
 # nothing.
 #
 # ===========================================================================
 # THE XCODE PIN, AND WHERE THE REQUIREMENT COMES FROM
 # ===========================================================================
 # ADR-0018 §11.3 requires "one exact toolchain version pinned … advanced only by
-# a reviewed commit that re-runs the full §11.9 matrix", and `build/toolchain/
-# env.sh` applies that discipline to all four toolchains, not only Rust:
+# a reviewed commit that re-runs the full §11.9 matrix". §11.9 rows 1, 2 and 5
+# name the Apple toolchain as "Xcode + pinned Rust" — so on a Darwin builder the
+# thing that must be pinned to one exact version is XCODE, and the Swift
+# compiler is whatever that Xcode ships.
 #
-#     export TWINVPN_SWIFT_VERSION=6.1.2        build/toolchain/env.sh:10
+# TWO CONSTANTS, AND THEY ARE ONE FACT
 #
-# That is the SWIFT pin, and it is the authority here. Xcode is how a Darwin
-# builder obtains a Swift compiler, and **Xcode 16.4 is the release that ships
-# Swift 6.1.2** — so pinning Xcode is how the Swift pin is honoured on macOS.
-# The two move together or not at all, and `require_pinned_swift` below turns
-# that from a comment into a check: if the selected Xcode's `swift --version`
-# does not report `TWINVPN_SWIFT_VERSION`, the job fails and names both numbers.
+#     TWINVPN_XCODE_VERSION=26.6           the pin
+#     TWINVPN_XCODE_SWIFT_VERSION=6.3.3    the Swift that pin ships
 #
-# The FLOOR is separately documented and is lower: `shells/ios/README.md:79`
-# says "Prerequisites: Xcode 15+". 15 is what the sources need; 16.4 is what
-# this repository pins. A pin is not a floor and the two must not be conflated —
-# a job that accepted "15 or newer" would drift silently, which is precisely the
-# R-32 failure ("it does not build for that target any more") arriving one
-# runner-image update at a time.
+# The second is not an independent choice. It is derived from the first, from
+# swift.org's own release index — `_data/builds/swift_releases.yml` in
+# swiftlang/swift-org-website, which carries `- name: "6.3.3" … xcode: Xcode
+# 26.6, xcode_release: true`:
 #
-# TO CHANGE IT: change `TWINVPN_SWIFT_VERSION` in `build/toolchain/env.sh` and
-# `TWINVPN_XCODE_VERSION` here, in ONE commit, and re-run the §11.9 matrix.
-# Changing either alone makes every Apple job fail, which is the intended
-# behaviour rather than an inconvenience.
+#   https://raw.githubusercontent.com/swiftlang/swift-org-website/main/_data/builds/swift_releases.yml
+#
+# `apple_require_pinned_swift` below asserts it at run time, so a runner-image
+# update that quietly moved Swift under a same-named Xcode fails the job instead
+# of changing the binary nobody reviewed.
+#
+# WHY 26.6 AND NOT SOMETHING ELSE. Both Apple jobs run on `macos-26`, and the
+# runner image ships Xcode 26.0.1 … 26.6 side by side with **26.6 as the image
+# default** (`/Applications/Xcode_26.6.app`, build 17F113, aliased as
+# `/Applications/Xcode.app`):
+#
+#   https://github.com/actions/runner-images/blob/main/images/macos/macos-26-Readme.md
+#
+# Pinning the image default is the version with the longest life on that image
+# and the one Apple's own tooling treats as current.
+#
+# ===========================================================================
+# WHY THIS IS NOT `TWINVPN_SWIFT_VERSION`
+# ===========================================================================
+# `build/toolchain/env.sh:9` sets `TWINVPN_SWIFT_VERSION=6.1.2`, and an earlier
+# revision of this file read that variable as the Darwin Swift pin. It is not
+# one, and reading it as one is what put `TWINVPN_XCODE_VERSION=16.4` here —
+# a version `macos-26` does not carry at all, so `--print-xcode-path` resolved
+# to the empty string and `xcode-select -s ""` failed both Apple jobs in their
+# first step.
+#
+# What that variable actually governs is the LINUX-HOSTED Swift toolchain: the
+# user-local install `build/toolchain/install-swift.sh` unpacks into
+# `$SWIFT_HOME`, which `make swift-parse` then uses to `swiftc -parse` the two
+# Apple shells on a host with no Darwin SDK. That toolchain never compiles a
+# shipped Apple artifact — `shells/macos/README.md:32` says so directly ("Swift
+# 6.1.2 here is the Linux toolchain with no Darwin SDK") — and its version is
+# fixed independently at `install-swift.sh:16`, which does not read
+# `TWINVPN_SWIFT_VERSION` either.
+#
+# So the two pins are genuinely separate toolchains with separate jobs, and
+# neither has to equal the other. Nothing forces them together: both Apple
+# shells set the Xcode build setting `SWIFT_VERSION: "5.9"` (`shells/*/
+# project.yml`), which is the LANGUAGE MODE, not the compiler version, and every
+# Swift 6.x compiler implements it. The Linux parse check running an OLDER
+# compiler than the Darwin build is the conservative direction: syntax Linux
+# accepts, Darwin accepts.
+#
+# TO CHANGE THE APPLE PIN: change `TWINVPN_XCODE_VERSION` and
+# `TWINVPN_XCODE_SWIFT_VERSION` here, in ONE commit, re-derived from the
+# swift.org index above, and re-run the §11.9 matrix. Changing either alone
+# makes every Apple job fail at `apple_require_pinned_swift`, which is the
+# intended behaviour rather than an inconvenience.
+#
+# THE FLOOR IS SEPARATE AND LOWER: `shells/ios/README.md` says "Prerequisites:
+# Xcode 15+". 15 is what the sources need; 26.6 is what this repository pins. A
+# pin is not a floor and the two must not be conflated — a job that accepted "15
+# or newer" would drift silently, which is precisely the R-32 failure ("it does
+# not build for that target any more") arriving one runner-image update at a
+# time.
 #
 # WHAT HAPPENS IF THE RUNNER DOES NOT HAVE IT: the job fails, loudly, naming the
 # Xcodes it did find. It does NOT fall back to the runner default. A pinned
 # toolchain that silently accepts whatever is installed is not a pin.
 
 # The pinned Xcode. See the header for the authority and for how to change it.
-TWINVPN_XCODE_VERSION="${TWINVPN_XCODE_VERSION:-16.4}"
+TWINVPN_XCODE_VERSION="${TWINVPN_XCODE_VERSION:-26.6}"
+
+# The Swift that pinned Xcode ships, per swift.org's release index. DERIVED from
+# the line above, never chosen independently; `apple_require_pinned_swift`
+# asserts it.
+TWINVPN_XCODE_SWIFT_VERSION="${TWINVPN_XCODE_SWIFT_VERSION:-6.3.3}"
 
 # ---------------------------------------------------------------------------
 # The developer path of the pinned Xcode.
@@ -55,7 +107,7 @@ apple_xcode_developer_path() {
 
   # GitHub's macOS images install side-by-side Xcodes as `Xcode_<version>.app`.
   # The exact-version form is tried first; the glob catches point releases that
-  # spell themselves `Xcode_16.4.0.app`.
+  # spell themselves `Xcode_26.6.0.app`.
   for candidate in "/Applications/Xcode_${want}.app" "/Applications/Xcode_${want}"*.app; do
     if [ -x "$candidate/Contents/Developer/usr/bin/xcodebuild" ]; then
       found="$candidate"
@@ -76,8 +128,11 @@ apple_xcode_developer_path() {
   if [ -z "$found" ]; then
     {
       echo "no Xcode ${want} on this runner, and this job will not fall back to the default."
-      echo "ADR-0018 §11.3 pins one exact toolchain; build/toolchain/env.sh pins Swift"
-      echo "${TWINVPN_SWIFT_VERSION:-6.1.2}, and Xcode ${want} is the release that ships it."
+      echo "ADR-0018 §11.3 pins one exact toolchain. build/ci/ci-common-apple.sh pins"
+      echo "Xcode ${want}, which ships Swift ${TWINVPN_XCODE_SWIFT_VERSION}."
+      echo "If this runner image no longer carries that Xcode, the fix is a REVIEWED"
+      echo "commit that moves TWINVPN_XCODE_VERSION and TWINVPN_XCODE_SWIFT_VERSION"
+      echo "together and re-runs the ADR-0018 §11.9 matrix — not a fallback here."
       echo "What IS installed:"
       ls -d /Applications/Xcode*.app 2>/dev/null || echo "  (no /Applications/Xcode*.app at all)"
     } >&2
@@ -109,32 +164,62 @@ apple_toolchain_banner() {
 
 # ---------------------------------------------------------------------------
 # ADR-0018 §11.3, mechanically: the compiler in the selected Xcode must be the
-# version this repository pins.
+# one this repository's Xcode pin ships.
 #
-# There is no `|| true` and no warning-only mode. A Swift that is not the pinned
-# one produces a different binary, and a lane that tolerated it would report a
-# green tick for a toolchain nobody reviewed.
+# The expected version is `TWINVPN_XCODE_SWIFT_VERSION` — declared at the top of
+# this file and DERIVED from `TWINVPN_XCODE_VERSION` via swift.org's release
+# index — and NOT `TWINVPN_SWIFT_VERSION`, which pins the Linux-hosted parse
+# toolchain and never compiles a Darwin artifact. The header says why.
+#
+# What it fails on. Three cases, all loudly, with no `|| true` and no
+# warning-only mode:
+#
+#   1. `swift --version` printing no parsable version at all — a broken or
+#      absent toolchain, which must not read as a pass.
+#   2. A version that is not EXACTLY the expected one. Exactly: `6.3` is not
+#      `6.3.3`, and the substring match this function used to do would have let
+#      a point release through.
+#   3. `TWINVPN_XCODE_SWIFT_VERSION` unset, i.e. this file not sourced.
+#
+# A Swift that is not the pinned one produces a different binary, and a lane
+# that tolerated it would report a green tick for a toolchain nobody reviewed.
 # ---------------------------------------------------------------------------
 apple_require_pinned_swift() {
-  local want="${TWINVPN_SWIFT_VERSION:?build/toolchain/env.sh was not sourced}"
-  local reported
+  local want="${TWINVPN_XCODE_SWIFT_VERSION:?build/ci/ci-common-apple.sh was not sourced}"
+  local reported detected
+
+  # On an Xcode toolchain the first line is
+  #   "Apple Swift version 6.3.3 (swiftlang-6.3.3.x.y clang-…)"
+  # sometimes prefixed by "swift-driver version: 1.x ". The number is EXTRACTED
+  # and compared for equality rather than substring-matched, so "6.3" cannot
+  # satisfy an assertion that wants "6.3.3".
   reported="$(swift --version 2>&1 | head -1)"
-  # `swift --version` prints e.g. "Apple Swift version 6.1.2 (swiftlang-…)".
-  case "$reported" in
-    *"Swift version $want"*) : ;;
-    *)
-      {
-        echo "::error::the selected Xcode carries the wrong Swift."
-        echo "  pinned by build/toolchain/env.sh: $want"
-        echo "  reported by this toolchain:       $reported"
-        echo "  ADR-0018 §11.3: one exact toolchain version, advanced only by a"
-        echo "  reviewed commit that re-runs the full §11.9 matrix. Change"
-        echo "  TWINVPN_SWIFT_VERSION and TWINVPN_XCODE_VERSION together."
-      } >&2
-      return 1
-      ;;
-  esac
-  echo "swift ${want} — matches build/toolchain/env.sh"
+  detected="$(printf '%s' "$reported" | sed -n 's/.*Swift version \([0-9][0-9.]*\).*/\1/p')"
+
+  if [ "$detected" = "$want" ]; then
+    echo "swift ${want} — matches the Xcode ${TWINVPN_XCODE_VERSION} pin in build/ci/ci-common-apple.sh"
+    return 0
+  fi
+
+  {
+    echo "::error::the selected Xcode carries the wrong Swift."
+    echo "  pinned Xcode:                  ${TWINVPN_XCODE_VERSION} (build/ci/ci-common-apple.sh)"
+    echo "  Swift that Xcode should ship:  $want"
+    if [ -n "$detected" ]; then
+      echo "  Swift this toolchain reports:  $detected"
+    else
+      echo "  Swift this toolchain reports:  (no version could be parsed)"
+    fi
+    echo "  raw \`swift --version\`:         $reported"
+    echo "  developer dir:                 $(xcode-select -p 2>&1)"
+    echo
+    echo "  ADR-0018 §11.3: one exact toolchain version, advanced only by a"
+    echo "  reviewed commit that re-runs the full §11.9 matrix. If the runner"
+    echo "  image moved Swift under this Xcode, re-derive the pair from"
+    echo "  swift.org's release index and change TWINVPN_XCODE_VERSION and"
+    echo "  TWINVPN_XCODE_SWIFT_VERSION together. Do not relax this check."
+  } >&2
+  return 1
 }
 
 # ---------------------------------------------------------------------------
