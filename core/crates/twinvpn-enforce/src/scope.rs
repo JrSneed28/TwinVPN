@@ -169,3 +169,115 @@ pub struct ScopeTransaction {
     /// network-change event.
     pub on_link: Vec<IpPrefix>,
 }
+
+/// ADR-0012 §11.13's `ruleset_digest` width.
+pub const RULESET_DIGEST_LEN: usize = 32;
+
+/// The domain separator. A digest is only ever compared with another digest of
+/// the same thing, and this makes "the same thing" explicit and versioned.
+const RULESET_DIGEST_DOMAIN: &[u8] = b"twinvpn/enforce/ruleset-digest/v1";
+
+impl ScopeTransaction {
+    /// ADR-0012 §11.13's `ruleset_digest`: "hash of the installed rule set, for
+    /// O-17 assertion".
+    ///
+    /// # What it covers, and why the generation is not in it
+    ///
+    /// The digest is over the **rule set**, which §11.1 defines as the Tier-1
+    /// protected scope, the Tier-2 egress rule, and KS-4's local-network
+    /// setting. [`ScopeTransaction::generation`] is deliberately **excluded**:
+    /// it identifies the transaction, not the rules. Including it would make
+    /// every re-application produce a new digest, and the clause this value
+    /// exists to serve is a stability clause — `docs/testing-strategy.md` P07:
+    /// "the `ruleset_digest` is **unchanged** across the trigger … A digest
+    /// change here means the design's structural claim is false even if no
+    /// packet leaked."
+    ///
+    /// `on_link` is folded in **only under [`LocalNetworkAccess::Allow`]**,
+    /// because that is the only setting under which those prefixes are rules at
+    /// all. Under `Deny` they permit nothing, so a new interface appearing must
+    /// not move the digest — which is P07 variant (c) exactly. Under `Allow` a
+    /// new on-link prefix genuinely does widen the installed rule set, and the
+    /// digest says so rather than hiding it; that widening is what KS-4's `DENY`
+    /// toggle exists to refuse.
+    ///
+    /// # Framing
+    ///
+    /// Length-prefixed, unlike this project's wire MACs. Those hash formats the
+    /// ADRs specify as fixed-width-then-variable; this one concatenates several
+    /// variable-length prefix lists, where an unprefixed encoding would let two
+    /// different rule sets collide — the same call ADR-0020 §11.5 made for the
+    /// record AAD. Prefixes are sorted and de-duplicated so that two equal rule
+    /// sets discovered in different orders digest identically.
+    #[must_use]
+    pub fn ruleset_digest(&self) -> [u8; RULESET_DIGEST_LEN] {
+        let mut buf = Vec::with_capacity(256);
+        buf.extend_from_slice(RULESET_DIGEST_DOMAIN);
+
+        // Tier 1: the discriminant first, so a mode change alone moves the
+        // digest even when the two modes carry the same prefix list.
+        match &self.tier1 {
+            Tier1::TwinnetOnly { overlay } => {
+                buf.push(1);
+                absorb_prefixes(&mut buf, overlay);
+            }
+            Tier1::SplitTunnel { overlay, accepted } => {
+                buf.push(2);
+                absorb_prefixes(&mut buf, overlay);
+                absorb_prefixes(&mut buf, accepted);
+            }
+            // The complement form carries no prefix list, which is the whole
+            // point of §11.1's "MUST NOT be expressed as an enumeration of
+            // protected prefixes" — and is why a newly learned prefix cannot
+            // move this digest in full-tunnel mode.
+            Tier1::FullTunnelComplement => buf.push(3),
+            Tier1::PerApp => buf.push(4),
+        }
+
+        // Tier 2: one interface, both families, no destination.
+        buf.push(0x80);
+        buf.extend_from_slice(&self.tier2.overlay_interface.0.to_be_bytes());
+
+        // KS-4.
+        buf.push(match self.local_network_access {
+            LocalNetworkAccess::Allow => 1,
+            LocalNetworkAccess::Deny => 2,
+        });
+        if self.local_network_access == LocalNetworkAccess::Allow {
+            absorb_prefixes(&mut buf, &self.on_link);
+        }
+
+        twinvpn_crypto::sha256(&buf)
+    }
+}
+
+/// Absorbs a prefix list: count, then each prefix as `family ‖ len ‖ octets`.
+///
+/// Sorted and de-duplicated first, so the digest is a function of the SET rather
+/// than of the order the prefixes happened to be discovered in.
+fn absorb_prefixes(buf: &mut Vec<u8>, prefixes: &[IpPrefix]) {
+    let mut canonical: Vec<([u8; 16], usize, u32, u8)> = prefixes
+        .iter()
+        .map(|p| {
+            let (octets, len) = p.address().octet_buffer();
+            let family = match p.family() {
+                AddressFamily::V4 => 4u8,
+                AddressFamily::V6 => 6u8,
+            };
+            (octets, len, p.prefix_len(), family)
+        })
+        .collect();
+    canonical.sort_unstable();
+    canonical.dedup();
+
+    buf.extend_from_slice(
+        &u32::try_from(canonical.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
+    for (octets, len, prefix_len, family) in canonical {
+        buf.push(family);
+        buf.extend_from_slice(&prefix_len.to_be_bytes());
+        buf.extend_from_slice(&octets[..len]);
+    }
+}

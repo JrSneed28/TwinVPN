@@ -20,6 +20,11 @@ twinvpn-types         = { workspace = true }
 twinvpn-env           = { workspace = true }
 twinvpn-schema        = { workspace = true }
 twinvpn-platform      = { workspace = true }
+# ADR-0012 §11.13's `ruleset_digest` is a hash, and CD-I2 puts every
+# cryptographic implementation behind this crate. `twinvpn_crypto::sha256` is the
+# same entry point `twinvpn-store`'s `Vault::digest` uses, so there is one hash
+# here rather than a second one grown locally.
+twinvpn-crypto        = { workspace = true }
 twinvpn-route         = { workspace = true }
 twinvpn-dns           = { workspace = true }
 thiserror             = { workspace = true }
