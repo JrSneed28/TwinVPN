@@ -1170,3 +1170,39 @@ P08/P11, 23 mutants across 5 proof tests, runnable on hosted `ubuntu-24.04`
 with privileged Docker and needing none of the self-hosted runners. It is the
 only group whose cost is a CI harness rather than product work. It belongs to
 Wave 2.
+
+### 11.6 The four privileged rows — 2026-08-30
+
+The four self-hosted rows were understood as blocked on three machines that do
+not exist. They were blocked on that **and on two wiring defects that would have
+survived the purchase**, both found by auditing jobs that have never executed.
+
+| # | Finding | Disposition |
+|---|---|---|
+| **G-22** | **The four privileged rows could not have been flipped by any machine.** `first-wave-acceptance` collected evidence with `actions/download-artifact@v4` and `pattern: evidence-*`. The four privileged artifacts are uploaded by `first-implementation-wave-privileged.yml` — a **different workflow**, therefore a **different run** — and that action defaults `run-id` to the current run, needing a `github-token` with `actions: read` to reach across. So `report.py`'s `probe_platform("windows-privileged")` and its three siblings found no file and read **NOT-EXECUTED permanently**, whatever any machine did. | **FIXED.** `first-wave-acceptance` gains `permissions: actions: read` and a tolerant import step that resolves the completed privileged run **for this exact `$GITHUB_SHA`** and downloads its `evidence-*` artifacts; the collect step then re-checks each imported file's own `commit` field before admitting it. Proven both ways against synthetic evidence: 4 × PASS with the imported files, 4 × NOT-EXECUTED without. |
+| **G-23** | **The privileged workflow could never complete a run.** `gh run list --workflow first-implementation-wave-privileged.yml --limit 20` returns **19 `cancelled` and 1 `queued` — zero completed, ever.** A `push` trigger on a branch taking ~20 pushes a day, with `cancel-in-progress: true`, supersedes a 30–75 minute self-hosted lifecycle before it can finish. Three machines online would still have produced no evidence. | **FIXED.** The `push` trigger is dropped; the workflow is `workflow_dispatch` plus the 05:00 nightly, and the gate gains a 07:00 nightly so the ordering is privileged-05:00 → gate-07:00 on the same branch and SHA. One nightly decides all rows with no human re-run. **The join is time-based**: a commit landing between the two makes the SHAs differ, the import correctly finds nothing, and the four rows read NOT-EXECUTED for that night. That is the honest outcome, but moving either cron breaks the join silently. |
+| **G-24** | **`first-wave-acceptance` was skipped whenever anything was red.** On run `33306033416` seven jobs were green, `mutation-proof` was red, and the acceptance job was **skipped** — so the one artifact that names which rows are outstanding was never produced, precisely when it was most wanted. | **FIXED** with `if: always()`. The job still goes red, because `report.py` exits non-zero. This is partial credit that needs no hardware: the acceptance report is now produced on every run. |
+| **G-25** | **Three cleanup comments claimed removals the scripts do not perform.** Every `if: always()` guard is correct — `always()` does cover cancellation and `timeout-minutes` — so the *steps* were never the defect; the *claims* were. macOS: `ci-macos.sh --cleanup:96` runs `systemextensionsctl list`, which **records** and never deactivates; no `systemextensionsctl uninstall` exists anywhere in the repo. Windows: `ci-windows.sh:120-127` says in terms that persistent WFP filters are **CB-6 survivors by design** and are not removed, and the overlay-adapter step only greps `netsh interface show interface`. | **Comments corrected; scripts untouched** (`build/ci/**` was out of the auditing agent's scope). The implication is promoted to a stated provisioning requirement: **automated snapshot restore before every run is mandatory on machines A and B, not a nicety.** `ci-windows.sh --reset` deliberately *fails* rather than cleans when it finds a leftover service or overlay adapter, so without the restore, run #2 and every run after it goes red at step 2. |
+
+**What `first-implementation-wave-gate.yml`'s `:687-:699` comment meant.** It
+named one condition and it was the harmless one. The condition it described —
+`report.py` re-deriving each verdict rather than trusting the job's own, so a
+job can exit 0 and still not satisfy its row when it writes `privileged: false`
+or an empty `lifecycle_transitions` — is **real, correct, and stays**. The
+condition it did not mention is G-22, under which the answer to *"does a green
+run flip the row?"* was **no, never**. It is now yes.
+
+**All four rows nonetheless stay blocked on hardware**, and no hosted
+substitute is honest. `windows-latest` is not LocalSystem and cannot open the
+BFE for write; `macos-26` has no Developer ID and cannot activate a system
+extension; every iOS lifecycle case is guarded by
+`XCTSkipUnless(DeviceCapabilities.isPhysicalDevice)`; and the pinned Android
+emulator runs the x86_64 `.so` with 4 KiB pages. **An `ubuntu-24.04-arm` hosted
+runner was considered and rejected**: it can load an aarch64 `.so`, so the row
+would go green, but its pages are 4 KiB and C-12 would still be tested nowhere.
+`-Wl,-z,max-page-size=16384` only raises the `LOAD` segments' `p_align`; a
+4 KiB kernel maps an under-aligned library perfectly happily, and the refusal
+C-12 exists to prevent occurs only on a 16 KiB kernel. **A vacuous pass is
+worse than a red row, because nothing downstream can tell it from a real one.**
+The Android job now hard-fails unless the attached device reports
+`getconf PAGE_SIZE` = 16384 and `arm64-v8a`.

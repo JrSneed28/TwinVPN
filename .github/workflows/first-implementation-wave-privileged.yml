@@ -20,6 +20,24 @@ name: First Implementation Wave — privileged lifecycle
 # when the file is absent -- which counts against Phase 5 eligibility exactly as
 # a failure does. No runner still means no pass; it just no longer means no gate.
 #
+# WHAT CARRIES THAT EVIDENCE ACROSS THE SPLIT. Nothing did, until
+# first-implementation-wave-gate.yml grew its "import the privileged evidence
+# for this commit" step: `actions/download-artifact` reads the CURRENT run
+# unless it is handed `run-id` and a token, so these four artifacts were
+# uploaded into a run the acceptance job never looked at, and the four rows
+# could not be flipped by any machine, however green. The gate now asks GitHub
+# for the completed run of THIS workflow at the SAME head SHA and reads its
+# `evidence-*` artifacts, re-checking each file's own `commit` before admitting
+# it. Two consequences worth knowing before changing anything here:
+#
+#   * the artifact names below are load-bearing -- they must keep matching
+#     `evidence-*`, and each file inside must keep the exact stem
+#     `report.py` probes (`windows-privileged`, `macos-privileged`,
+#     `ios-device`, `android-device`);
+#   * the schedule below runs at 05:00 and the gate's at 07:00, in that order
+#     and on the same branch, which is what lets one nightly decide all
+#     twenty-six rows. Moving either time apart breaks the join silently.
+#
 # ===========================================================================
 # WHAT THESE PROVE THAT A HOSTED RUNNER CANNOT
 # ===========================================================================
@@ -36,10 +54,19 @@ name: First Implementation Wave — privileged lifecycle
 
 on:
   # Deliberately NOT on pull_request: a fork PR must not reach a self-hosted
-  # runner. Manual, plus the integration branch, plus a nightly.
+  # runner. Nothing here is reachable from a fork -- `workflow_dispatch` needs
+  # write access and `schedule` runs the default branch's own copy of this file.
+  #
+  # AND DELIBERATELY NOT ON `push` ANY MORE. `push` plus the
+  # `cancel-in-progress: true` below is a cancellation storm on a branch that
+  # takes twenty pushes a day: every one of the twenty most recent runs of this
+  # workflow is `cancelled`, and a self-hosted lifecycle that needs 30-75
+  # minutes cannot survive a superseding push ten minutes later. The evidence
+  # these jobs exist to produce could never be produced. A nightly on the
+  # integration branch plus an explicit dispatch is the honest cadence for
+  # three physical machines that run one job at a time -- and the acceptance
+  # gate's own nightly is scheduled AFTER this one so it can read the result.
   workflow_dispatch:
-  push:
-    branches: [main, master, 'fix/wave1-final-review-register']
   schedule:
     - cron: '0 5 * * *'
 
@@ -91,11 +118,23 @@ jobs:
       - name: privileged WFP, driver and service lifecycle
         run: build/ci/ci-windows.sh --privileged
 
-      # EVERY exit path, including a timeout and a cancelled run. A failed
-      # lifecycle test must not leave the runner's networking stack blocked for
-      # the next workflow. `--cleanup` never fails the job, so it cannot mask
-      # the real failure above it.
-      - name: tear down tunnel, routes and firewall state
+      # EVERY exit path, including a timeout and a cancelled run. `--cleanup`
+      # exits 0 unconditionally, so it cannot mask the real failure above it.
+      #
+      # IT REMOVES THE SERVICE AND REPORTS THE OVERLAY ADAPTERS. IT DOES NOT
+      # REMOVE THE WFP FILTERS, and that is deliberate rather than an
+      # oversight: ADR-0018 CB-6 and ADR-0022 §11.4's Windows row require
+      # persistent filters to SURVIVE the process -- "shutdown MUST NOT remove
+      # enforcement" -- so an in-process remover would contradict the invariant
+      # this job exists to test, and there must not be one.
+      #
+      # The consequence is a hard provisioning requirement, not a nice-to-have:
+      # this rig LEAKS WFP FILTERS BY DESIGN on every privileged run, the next
+      # run's `--reset` refuses to start on a rig that was not restored, and
+      # therefore the SECOND run onwards fails until a snapshot restore or
+      # reimage happens between runs. See the runner provisioning
+      # specification.
+      - name: tear down the service and the overlay adapter
         if: always()
         run: build/ci/ci-windows.sh --cleanup
 
@@ -143,9 +182,27 @@ jobs:
     # wedged privileged job holding a machine's firewall is worse than a failed
     # one.
     timeout-minutes: 60
+    permissions:
+      contents: read
+    # Same guard as the other three, and for the same reason. There is no
+    # `pull_request` trigger on this workflow, so this can only ever be true --
+    # which is exactly why it belongs here: it costs nothing and it survives
+    # somebody adding a trigger later without reading the header.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     # Never two of these on one machine at once: ADR-0016 PS-1 admits exactly one
     # authority per host, and a second would be refused mid-run in a way that
     # looks like a product defect.
+    #
+    # THIS GROUP DOES NOT SERIALISE THIS JOB AGAINST `ios-device-lifecycle`,
+    # which carries a different group and is expected to run on the SAME Mac.
+    # Deliberately not merged: a shared group would mean a queued iOS job with
+    # no phone attached holds this one for twenty-four hours, which is the
+    # queue-hold this whole file was split out to avoid. The serialisation is
+    # made physical instead -- the Mac registers ONE runner process carrying
+    # BOTH labels, and one runner process runs one job at a time. Two runner
+    # processes on one Mac would let these two interleave over a machine-global
+    # `xcode-select`, a machine-global pf ruleset and one system extension
+    # slot; the provisioning specification says one, and it means it.
     concurrency:
       group: twinvpn-macos-privileged-lifecycle
       cancel-in-progress: false
@@ -178,10 +235,22 @@ jobs:
 
       - name: reset to a known-clean state
         # BEFORE anything is built. Removes a stale generated project, stale
-        # staged archives, a stale evidence file, a leftover system extension,
-        # an owner-tagged pf anchor and a leftover utun. A privileged run that
-        # started from the previous run's firewall would be measuring the
-        # previous run.
+        # staged archives, a stale evidence file, an owner-tagged pf anchor and
+        # a leftover utun7. A privileged run that started from the previous
+        # run's firewall would be measuring the previous run.
+        #
+        # IT DOES NOT REMOVE A LEFT-BEHIND SYSTEM EXTENSION, and an earlier
+        # version of this comment said it did. `ci-macos.sh --reset` delegates
+        # to `--cleanup`, which runs `systemextensionsctl list` -- it RECORDS
+        # the extension, it does not deactivate it, and there is no
+        # `systemextensionsctl uninstall` anywhere in this repository. On macOS
+        # the sanctioned removal is deleting the containing app bundle, which
+        # only the machine's own reset can do. So the extension slot is
+        # PERSISTENT STATE THE RIG OWNS: the Mac must be snapshotted or
+        # reimaged between runs, exactly as the Windows rig is, and the runner
+        # provisioning specification states it as a requirement rather than a
+        # preference. Do not restore the old wording without also making the
+        # script true.
         run: build/ci/ci-macos.sh --reset
 
       - name: privileged lifecycle
@@ -204,11 +273,18 @@ jobs:
 
       - name: return the machine to a known state
         if: always()
-        # UNCONDITIONAL. A self-hosted Mac left with our system extension
-        # active and an owner-tagged pf anchor installed is a machine whose next
-        # job — and whose owner — inherits our firewall. `--cleanup` removes the
+        # UNCONDITIONAL, and `always()` covers a cancelled run and a
+        # `timeout-minutes` expiry as well as a failure. A self-hosted Mac left
+        # with an owner-tagged pf anchor installed is a machine whose next job —
+        # and whose owner — inherits our firewall. `--cleanup` removes the
         # anchor through `twinvpn-unblock`, which is KS-20a's sanctioned removal
-        # path, so the teardown and the supported recovery are the same code.
+        # path, so the teardown and the supported recovery are the same code,
+        # and destroys utun7 if a run left one.
+        #
+        # WHAT IT DOES NOT REMOVE, said here because the step's name promises
+        # more than the script delivers: the activated system extension. See
+        # the reset step above. This step returns the NETWORK state; the
+        # machine's snapshot returns the extension slot.
         run: build/ci/ci-macos.sh --cleanup
 
       # TWO uploads, split the way `build/ci/jobs/android-link-run.yml` splits
@@ -259,8 +335,15 @@ jobs:
     # hardware. If it has not finished in 75 minutes the device is wedged and
     # holding it is worse than failing.
     timeout-minutes: 75
+    permissions:
+      contents: read
+    # Same guard as the other three: unreviewed code must never install and run
+    # on a provisioned device attached to a machine inside the network.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     # One at a time per device. Two `xcodebuild -destination id=` runs against
-    # one iPhone interleave in ways that look like product defects.
+    # one iPhone interleave in ways that look like product defects. See the note
+    # on `macos-privileged-lifecycle`'s group for why the two are NOT merged and
+    # what the Mac must be provisioned as instead.
     concurrency:
       group: twinvpn-ios-device-lifecycle
       cancel-in-progress: false
@@ -401,6 +484,40 @@ jobs:
           adb shell getprop ro.build.version.release
           adb shell getprop ro.product.cpu.abi
           echo "page size: $(adb shell getconf PAGE_SIZE | tr -d '\r')"
+
+      # C-12's WHOLE POINT, ASSERTED BEFORE ANYTHING IS BUILT.
+      #
+      # `ci-android.sh` puts `-Wl,-z,max-page-size=16384` on every ABI, and
+      # NOTHING exercises it unless the `.so` is actually mapped by a kernel
+      # with 16 KiB pages: a 4 KiB-aligned library loads perfectly well on a
+      # 4 KiB device. So a 4 KiB phone takes this job green, writes evidence
+      # with every boolean true, and flips the `Android physical-device
+      # lifecycle` row while leaving the alignment tested nowhere. That is a
+      # VACUOUS PASS, and it is worse than a red row precisely because it is
+      # indistinguishable from a real one in the report.
+      #
+      # `getconf PAGE_SIZE` is the on-device answer -- toybox reads
+      # `sysconf(_SC_PAGESIZE)`, which is the running kernel's page size and
+      # not a build-time constant, so it cannot be right about the wrong thing.
+      # The ABI check is the second half of the same claim: `arm64-v8a` is the
+      # library the emulator lane packages and never loads.
+      - name: the attached device must be arm64 with 16 KiB pages
+        run: |
+          abi="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
+          pagesize="$(adb shell getconf PAGE_SIZE | tr -d '\r')"
+          echo "abi=$abi page_size=$pagesize"
+          if [ "$abi" != "arm64-v8a" ]; then
+            echo "::error::the attached device reports ABI '$abi'; this row is" \
+                 "about arm64-v8a on real silicon and nothing else discharges it"
+            exit 1
+          fi
+          if [ "$pagesize" != "16384" ]; then
+            echo "::error::the attached device reports a ${pagesize}-byte page." \
+                 "C-12's 16 KiB LOAD alignment cannot be exercised on it, so a" \
+                 "green run here would be a vacuous pass. Attach a 16 KiB-page" \
+                 "arm64 device; see the runner provisioning specification."
+            exit 1
+          fi
 
       # A device carrying the previous run's install would let a stale APK
       # answer. `--reset` removes both packages and clears the local evidence

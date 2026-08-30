@@ -13,19 +13,23 @@ name: First Implementation Wave — acceptance gate
 #
 #   core-crypto            F-1  the crypto core is used by the real data path
 #   pairing-mi             F-2  pairing exists in the shipped composition
-#   mutation-proof         F-5  the mutation/proof obligations are executed
+#   mutation-proof         F-5  the mutation/proof obligations are executed --
+#                               DEFERRED past Wave 1, still runs, no longer
+#                               gates; see the block on `needs:` below
 #   windows-link-run       Windows compiles, links, loads, invokes, transitions
 #   macos-link-run         macOS   "
 #   ios-link-run           iOS     "
 #   android-link-run       Android "
 #   linux-link-run         Linux, already PASSing, re-run only as regression
-#   first-wave-acceptance  the conjunction, via `needs:`
+#   first-wave-acceptance  the conjunction, computed from evidence
 #
 # `first-wave-acceptance` is the only job whose verdict means anything on its
-# own, and it cannot be green unless every job it needs was green, because
-# GitHub will not run it otherwise and the report it prints re-derives each
+# own. It RUNS on every path, including one where a job it needs went red, so
+# that the report naming which rows are red always exists -- but it can only be
+# GREEN when `build/acceptance/report.py` exits zero, and that re-derives each
 # platform verdict from that platform's own machine-readable evidence rather
-# than trusting the job that wrote it.
+# than trusting the job that wrote it. A red platform job leaves no evidence or
+# leaves failing evidence, and either way the row is not PASS.
 #
 # ===========================================================================
 # WHAT A HOSTED RUNNER CANNOT PROVE
@@ -47,6 +51,15 @@ on:
     # looked configured while proving nothing on merge.
     branches: [main, master, 'fix/wave1-final-review-register']
   workflow_dispatch:
+  # TWO HOURS AFTER the privileged workflow's own 05:00 nightly, which is the
+  # whole point of the time: those jobs are allowed 60-75 minutes each on three
+  # physical machines, and this run imports their evidence for the same commit.
+  # Earlier and the import finds nothing; on a commit that moved in between it
+  # correctly finds nothing either. This is the only cadence on which all
+  # twenty-six rows can be decided in one report without a human re-running a
+  # job by hand.
+  schedule:
+    - cron: '0 7 * * *'
 
 # Minimal token. Nothing here writes to the repository.
 permissions:
@@ -672,22 +685,38 @@ jobs:
     name: first-wave-acceptance
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      contents: read
+      # For the cross-run artifact read below, and for nothing else. A fork
+      # PR's token is read-only whatever this says, so it cannot be widened
+      # from outside.
+      actions: read
     needs:
       - core-crypto
       - pairing-mi
-      - mutation-proof
       - linux-link-run
       - windows-link-run
       - macos-link-run
       - ios-link-run
       - android-link-run
-    # THE THREE PRIVILEGED JOBS ARE REQUIRED, AND ARE DELIBERATELY NOT IN
+    # `always()`, so the report is PRINTED rather than skipped.
+    #
+    # Without it a single red `needs:` job skips this one, and the artifact
+    # that names WHICH rows are red -- the only machine-readable answer to
+    # "what is left" -- is never produced. Run 33306033416 is the example:
+    # seven jobs green, `mutation-proof` red, `first-wave-acceptance` skipped,
+    # no acceptance report anywhere in the run. The job still goes red when the
+    # report is not eligible, because `report.py` exits non-zero.
+    if: always()
+    #
+    # THE FOUR PRIVILEGED JOBS ARE REQUIRED, AND ARE DELIBERATELY NOT IN
     # `needs:`.
     #
-    # They run on self-hosted runners. A `needs:` on a job whose runner label
-    # is not registered does not fail -- it QUEUES, for up to twenty-four
-    # hours, and the gate sits pending instead of returning a verdict. A check
-    # that cannot go red is not a gate.
+    # They live in first-implementation-wave-privileged.yml and run on
+    # self-hosted runners. A `needs:` on a job whose runner label is not
+    # registered does not fail -- it QUEUES, for up to twenty-four hours, and
+    # the gate sits pending instead of returning a verdict. A check that cannot
+    # go red is not a gate.
     #
     # So the requirement is enforced where it can be enforced promptly: each
     # privileged job writes its own evidence file with `privileged: true`, and
@@ -695,9 +724,31 @@ jobs:
     # no file means NOT-EXECUTED, which counts against Phase 5 eligibility
     # exactly as a failure does -- immediately, and by name.
     #
-    # This is strictly stronger than `needs:` would be, not a relaxation: a
-    # self-hosted job that runs and goes green still cannot satisfy the row
-    # unless it also recorded a real privileged lifecycle.
+    # That is only true if the file can ever ARRIVE, which until the import
+    # step below it could not: `actions/download-artifact` reads the CURRENT
+    # workflow run unless it is given `run-id` and a token, and those four
+    # artifacts belong to a different run of a different workflow. A fully
+    # green privileged run wrote evidence nobody collected, and the four rows
+    # were pinned at NOT-EXECUTED no matter what any machine did. The import
+    # step is what makes a green privileged run able to flip its row.
+    #
+    # It stays strictly stronger than `needs:` would be: a self-hosted job that
+    # runs and goes green still cannot satisfy the row unless the file it wrote
+    # also carries `privileged: true`, a non-empty transition list, and this
+    # exact commit.
+    #
+    # `mutation-proof` IS IN THIS WORKFLOW AND IS ALSO NOT IN `needs:`, FOR AN
+    # UNRELATED REASON. Do not read the two as the same case. The privileged
+    # jobs are still required and are enforced through their evidence rows;
+    # B-1 is DEFERRED PAST WAVE 1 by the integration lead (2026-08-30), because
+    # `mutation-gate.sh` §5 discharges a proof obligation only on the
+    # conjunction of an `IMPLEMENTED` register row and every specified mutant
+    # killed, and `build/proof/register.tsv` holds 21 PARTIAL and 1
+    # NOT-RUNNABLE and zero IMPLEMENTED -- so B-1 is 0/22 on the oracle half
+    # whatever the mutant count does, and no sequencing inside Wave 1 closes
+    # it. The job still runs, still goes red, and still uploads its report;
+    # it has only lost its gating edge, and `report.py` marks the F-5 row
+    # deferred rather than counting it toward eligibility.
     steps:
       - uses: actions/checkout@v4
         with:
@@ -720,21 +771,94 @@ jobs:
       # them all back into build/ci/evidence/ so the report reads real files
       # rather than a job's word for it.
       - uses: actions/download-artifact@v4
+        # TOLERANT, because this job is now `always()`: a platform job that
+        # died in setup uploads no artifact at all, and the correct outcome
+        # then is a NOT-EXECUTED row in the report, not a job that dies before
+        # it can print one.
+        continue-on-error: true
         with:
           pattern: evidence-*
           path: build/ci/evidence-download
           merge-multiple: true
 
+      # TOLERANT since B-1 lost its `needs:` edge. `mutation-proof` may still
+      # be running when this job starts -- it is allowed 180 minutes and this
+      # one 45 -- so the artifact is frequently absent, and `report.py` reads
+      # that as NOT-EXECUTED on the deferred F-5 row. It must not take the
+      # whole gate down with it.
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: mutation-report
           path: build/proof
-        continue-on-error: false
+
+      # THE PRIVILEGED EVIDENCE IS IN A DIFFERENT WORKFLOW RUN.
+      #
+      # `actions/download-artifact` above reads this run only; without `run-id`
+      # and a token it cannot see another workflow's artifacts, so the four
+      # `Privileged / physical` rows had no route to their evidence at all.
+      # This step is that route.
+      #
+      # BOUND TO THIS COMMIT, twice. `--commit "$GITHUB_SHA"` asks GitHub only
+      # for privileged runs of this exact head SHA, and the collect step below
+      # re-checks each file's own recorded `commit` before it is allowed into
+      # build/ci/evidence/. Evidence from an older commit can therefore never
+      # flip a row here, which is rule C-5 and is the difference between a
+      # verdict and a rumour.
+      #
+      # TOLERANT, ALWAYS. No privileged run, no registered runner, or a run
+      # cancelled before it uploaded (`gh run download` prints "no valid
+      # artifacts found to download" and exits 1) all leave the directory
+      # empty, and the rows then read NOT-EXECUTED -- the honest verdict, which
+      # counts against eligibility exactly as a failure does. This step never
+      # fails the gate and never turns a row green on its own.
+      - name: import the privileged evidence for this commit
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Named rather than inferred from the checkout's git remote, so this
+          # keeps working if the checkout step ever moves or gains a `path:`.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p build/ci/privileged-download
+          run_id="$(gh run list \
+            --workflow first-implementation-wave-privileged.yml \
+            --commit "$GITHUB_SHA" --status completed --limit 1 \
+            --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
+          if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+            echo "no completed privileged run for $GITHUB_SHA;" \
+                 "the four privileged rows stay NOT-EXECUTED"
+            exit 0
+          fi
+          echo "privileged run: $run_id"
+          gh run download "$run_id" --pattern 'evidence-*' \
+            --dir build/ci/privileged-download \
+            || echo "that run uploaded no evidence artifact"
 
       - name: collect platform evidence
         run: |
-          mkdir -p build/ci/evidence
+          mkdir -p build/ci/evidence build/ci/privileged-download
           find build/ci/evidence-download -name '*.json' -exec cp {} build/ci/evidence/ \;
+          # The imported half, one file at a time. `gh run list --commit` is
+          # GitHub's word for which commit that run was about; this is the
+          # file's own, and only a file that agrees with both is admitted.
+          python3 - "$GITHUB_SHA" <<'PY'
+          import json, shutil, sys
+          from pathlib import Path
+          sha = sys.argv[1]
+          for f in sorted(Path("build/ci/privileged-download").rglob("*.json")):
+              try:
+                  got = json.loads(f.read_text()).get("commit", "")
+              except json.JSONDecodeError as exc:
+                  print(f"::warning::dropping {f.name}: not valid JSON ({exc})")
+                  continue
+              if got == sha:
+                  print(f"admitting {f.name} (commit {got})")
+                  shutil.copy(f, "build/ci/evidence/")
+              else:
+                  print(f"::warning::dropping {f.name}: "
+                        f"recorded commit {got!r} is not {sha}")
+          PY
           ls -la build/ci/evidence/
 
       - name: make test-first-wave-gate
