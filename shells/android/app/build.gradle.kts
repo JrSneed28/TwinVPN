@@ -123,8 +123,11 @@ dependencies {
     implementation(libs.mlkit.barcode)
     implementation(libs.zxing.core)
 
+    // `androidx.test:rules` is deliberately absent: nothing under
+    // `src/androidTest/` takes a `@Rule` from it, and sharing `runner`'s version
+    // ref with it named `androidx.test:rules:1.6.2`, which does not exist.
+    // `gradle/libs.versions.toml` carries the whole account.
     androidTestImplementation(libs.test.runner)
-    androidTestImplementation(libs.test.rules)
     androidTestImplementation(libs.test.junit)
     androidTestImplementation(libs.test.uiautomator)
 }

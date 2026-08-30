@@ -114,14 +114,21 @@
       # `NativeLinkRunTest` never calls `VpnService.establish()`, the identity
       # key never leaves the Keystore (ADR-0018 §11.16 (c)), and ADR-0015 §11.4
       # classes an address SENSITIVE so nothing in this shell logs one.
+      #
+      # `gradle-assemble.log` carries the Gradle run's stdout AND stderr, which
+      # is the only place `* What went wrong:` appears. Without it a failure
+      # before the device is ever reached uploads nothing at all -- the defect
+      # that cost run 33288074040 a whole round trip on the hosted lane. It
+      # holds dependency coordinates and task names, and no credential.
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: diagnostics-android-device
           path: |
+            build/ci/logs/android/gradle-assemble.log
             build/ci/logs/android/instrumentation.log
             build/ci/logs/android/logcat.txt
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
       # The device evidence, under its own name. `build/acceptance/report.py`
       # reads exactly `build/ci/evidence/android.json`, so uploading this as

@@ -100,6 +100,21 @@
       # and ADR-0015 §11.4 classes an address SENSITIVE so nothing in this shell
       # logs one. It is uploaded on FAILURE only; a green run uploads the
       # evidence file and the normalised transition list and nothing else.
+      #
+      # `gradle-assemble.log` is the Gradle run's own stdout AND stderr, which
+      # is where `* What went wrong:` lives. Run 33288074040 failed at
+      # `:app:processDebugAndroidTestManifest` and uploaded NOTHING -- "No files
+      # were found with the provided path" -- because that log did not exist and
+      # the other three are written only after a device is reached. It carries
+      # dependency coordinates, task names and repository URLs, and no
+      # credential: the build resolves from `google()` and `mavenCentral()`
+      # anonymously (`shells/android/settings.gradle.kts`) and this job holds no
+      # signing secret.
+      #
+      # `if-no-files-found: warn`, not `ignore`: on a FAILED run this list being
+      # empty is itself the defect above, and it must be visible rather than
+      # silent. It does not fail the step, because the job has already failed
+      # for a better reason and an artifact error would bury it.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -114,10 +129,11 @@
         with:
           name: diagnostics-android-link-run
           path: |
+            build/ci/logs/android/gradle-assemble.log
             build/ci/logs/android/instrumentation.log
             build/ci/logs/android/logcat.txt
             build/ci/logs/android/emulator.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
       # The emulator is a background process this job started. Killing it on
       # every path keeps a self-hosted runner usable for the next workflow and

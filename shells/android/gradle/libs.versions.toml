@@ -25,7 +25,7 @@ protobufJava    = "4.33.1"
 cameraX         = "1.4.1"
 mlkitBarcode    = "17.3.0"
 zxingCore       = "3.5.3"
-androidxTest    = "1.6.2"
+androidxTest    = "1.6.2"   # androidx.test:runner ONLY -- see the note below
 androidxJunit   = "1.2.1"
 uiAutomator     = "2.3.0"
 
@@ -48,8 +48,21 @@ camera-view        = { module = "androidx.camera:camera-view", version.ref = "ca
 mlkit-barcode      = { module = "com.google.mlkit:barcode-scanning", version.ref = "mlkitBarcode" }
 zxing-core         = { module = "com.google.zxing:core", version.ref = "zxingCore" }
 
+# `androidx.test:runner` and `androidx.test:rules` are published SEPARATELY and
+# their version lines DIVERGED: runner reached 1.6.2, rules stopped at 1.6.1 and
+# ships 1.7.0 next -- there has never been a `rules:1.6.2`. One `androidxTest`
+# ref covering both is what put that non-existent coordinate on
+# `:app:debugAndroidTestRuntimeClasspath` and failed run 33288074040 at
+# `:app:processDebugAndroidTestManifest`, which is the first task in the
+# androidTest chain that resolves that configuration -- so the manifest merger
+# was never the problem and nothing in it was ever wrong.
+#
+# `rules` is now not declared at all, rather than pinned to 1.6.1, because
+# nothing under `src/androidTest/` imports it: all four suites use
+# `AndroidJUnit4`, `InstrumentationRegistry` and `UiDevice`, and none takes a
+# `@Rule` from that artifact. A suite that later wants `ServiceTestRule` or
+# `GrantPermissionRule` must add it back with a version line OF ITS OWN.
 test-runner      = { module = "androidx.test:runner", version.ref = "androidxTest" }
-test-rules       = { module = "androidx.test:rules", version.ref = "androidxTest" }
 test-junit       = { module = "androidx.test.ext:junit", version.ref = "androidxJunit" }
 test-uiautomator = { module = "androidx.test.uiautomator:uiautomator", version.ref = "uiAutomator" }
 
