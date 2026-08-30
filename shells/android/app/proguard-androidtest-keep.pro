@@ -1,5 +1,10 @@
 # Keep rules for classes the INSTRUMENTATION needs from the APP APK.
 #
+# GENERATED, NOT WRITTEN. Every rule below came out of R8's own
+# `TraceReferences`, run over the androidTest code against the app's. DO NOT
+# hand-edit this file to chase a `NoClassDefFoundError`: a hand-added rule is
+# precisely the guess this file exists to replace, and it never leaves again.
+#
 # WHY THE APP APK AND NOT THE TEST APK. AGP wraps the androidTest runtime
 # classpath in a `SubtractingArtifactCollection` against the tested variant
 # (VariantDependencies.kt:265), so every artifact already on the app's runtime
@@ -10,28 +15,63 @@
 # in it.
 #
 # The instrumentation runs IN THE APP PROCESS, so anything AndroidJUnitRunner
-# touches has to survive the APP's R8 pass. Two runs died proving it, each on a
+# touches has to survive the APP's R8 pass. Three runs died proving it, each on a
 # different class, before a single test method executed:
 #
 #   33322921169  NoClassDefFoundError androidx.tracing.Trace  (onCreate:307)
 #   33324089343  NoClassDefFoundError kotlin.LazyKt           (onCreate:321)
+#   the run after that, `kotlin.collections.SetsKt`, reached from
+#   `NativeLinkRunTest.kt:109`'s own `setOf` -- OUR test code, not a library,
+#   which is why a list derived from the androidTest LIBRARIES alone could not
+#   have carried it.
 #
-# HOW THIS LIST WAS PRODUCED, and why it is not a third guess. R8's own
-# `TraceReferences` tool was run over the androidTest libraries against the app's
-# libraries, which is exactly the question "what does the test code reference
-# that lives on the app side". It emitted these 53 rules. They are member-level,
-# not `-keep class X { *; }`, so they cost far less than the alternative:
-# `-keep class kotlin.** { *; }` measures 993 classes and 2,013,852 bytes of
-# uncompressed dex.
+# WHAT CATCHES AN INCOMPLETE LIST NOW. `build/ci/ci-android.sh` §2d runs a
+# PREFLIGHT GATE on the two built release APKs, before the emulator boots: it
+# enumerates every class the test APK references that neither APK defines and
+# fails naming ALL of them at once. That is a STATIC answer to the same question
+# a device crash answers one class per forty-minute run. It does NOT regenerate
+# this file -- it tells you to.
 #
-# TO REGENERATE after an androidx.test or Kotlin version bump:
-#   java -cp r8.jar com.android.tools.r8.tracereferences.TraceReferences \
-#     --keep-rules --output <this file> \
-#     --source <androidTest runtime jars> --target <app runtime jars> \
-#     --lib $ANDROID_HOME/platforms/android-<compileSdk>/android.jar
+# TO REGENERATE, after an androidx.test or Kotlin version bump, after any change
+# under `src/androidTest/`, and whenever the preflight gate names a class:
 #
-# DO NOT hand-edit this file to chase a NoClassDefFoundError. Regenerate it --
-# a hand-added rule is the guess this file exists to replace.
+#   R8_JAR=$(find ~/.gradle/caches -name 'r8-8.*.jar' | sort -V | tail -1)
+#   java -cp "$R8_JAR" com.android.tools.r8.tracereferences.TraceReferences \
+#     --keep-rules --map-diagnostics error warning \
+#     --lib "$ANDROID_SDK_ROOT/platforms/android-35/android.jar" \
+#     --source <androidTest kotlin + javac CLASS DIRS> \
+#     $(printf -- '--source %s ' $TEST_ONLY_JARS) \
+#     --target <release kotlin + javac CLASS DIRS> \
+#     $(printf -- '--target %s ' $APP_RUNTIME_JARS) \
+#     --output shells/android/app/proguard-androidtest-keep.pro
+#
+# `--lib` is android-35 because `app/build.gradle.kts` sets `compileSdk = 35`.
+#
+# CLASS FILES, NEVER DEX. TraceReferences resolves against `.class` files. A zip
+# containing `classes.dex` is accepted SILENTLY and contributes NOTHING, so
+# pointing `--source`/`--target` at the APKs yields a plausible, empty, wrong
+# answer. Point them at `app/build/intermediates/**/classes` and at the runtime
+# jars. `$TEST_ONLY_JARS` is the androidTest runtime classpath MINUS the app's
+# (the subtraction AGP itself performs); `$APP_RUNTIME_JARS` is the app's.
+# Resolving those two sets is a resolution of two Gradle configurations and has
+# no on-disk artifact, which is why CI does not yet re-derive and diff this file.
+#
+# THE STANDING COST, because this is a ONE-WAY RATCHET and nothing here is free:
+#
+#   * These keeps are driven by TEST-CODE IDIOMS, not by the product. A test
+#     author who writes `buildList` next month changes WHAT SHIPS: the release
+#     APK has to start carrying `kotlin.collections.CollectionsKt` for a reason
+#     no user of the app will ever exercise.
+#   * Every rule here permanently inhibits R8's inlining and horizontal class
+#     merging on the class it names, in the artifact users install.
+#   * NOTHING EVER PROVES A KEEP IS NO LONGER NEEDED. Deleting a test's last
+#     `setOf` produces no signal that `kotlin.collections.SetsKt` may go, so the
+#     list only ever grows -- unless it is regenerated from scratch, which is why
+#     regeneration and not appending is the only supported edit.
+#
+# They are member-level rather than `-keep class X { *; }`, so the ratchet is at
+# least a cheap one: `-keep class kotlin.** { *; }` measures 993 classes and
+# 2,013,852 bytes of uncompressed dex.
 
 -keep class androidx.concurrent.futures.AbstractResolvableFuture {
   public void addListener(java.lang.Runnable,java.util.concurrent.Executor);

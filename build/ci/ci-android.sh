@@ -815,6 +815,209 @@ ANDROID-16K-PAGE-SIZE would fail on it"
 fi
 
 # ---------------------------------------------------------------------------
+# 2d. THE PREFLIGHT GATE: every class the instrumentation needs, DEFINED
+# ---------------------------------------------------------------------------
+#
+# THIS REPLACES ONE 40-MINUTE CI ROUND TRIP PER MISSING CLASS.
+#
+# The 16 KiB lane builds the androidTest APK against the RELEASE variant, which
+# is minified. AGP wraps the androidTest runtime classpath in a
+# `SubtractingArtifactCollection` against the tested variant
+# (`VariantDependencies.kt:265`), so every dependency artifact that is on BOTH
+# runtime classpaths is packaged ONLY in the app APK -- and therefore has to
+# survive the APP's R8 pass to exist at all.
+#
+# The androidTest R8 run cannot catch a casualty. It is handed the app's PRE-R8
+# classes, as `TESTED_CODE` in `referencedButNotMergedScopes`
+# (`ProguardConfigurableTask.kt:458-460`), so every class it needs resolves at
+# BUILD time and is gone at RUN time. The build is structurally incapable of
+# reporting this, and it has only ever arrived as a device crash before the
+# first test method executed -- one class per run, one run per class:
+#
+#   33322921169  NoClassDefFoundError androidx.tracing.Trace
+#   33324089343  NoClassDefFoundError kotlin.LazyKt
+#   (the run after)  NoClassDefFoundError kotlin.collections.SetsKt, from
+#                    `NativeLinkRunTest.kt:109`'s own `setOf` -- OUR test code,
+#                    which is why the keep file derived from the LIBRARIES alone
+#                    could not have contained it
+#
+# The question is STATIC, though: a class the test APK REFERENCES that NEITHER
+# APK DEFINES cannot resolve on any device, and `apkanalyzer` answers it against
+# the two built artifacts in seconds. So this enumerates ALL of them at once and
+# refuses BEFORE the emulator is booted, which turns "one crash per run" into one
+# list.
+#
+# WHY THE ANSWER IS NOT MOSTLY FALSE POSITIVES:
+#
+#   * the ANDROID RUNTIME's own packages are in neither APK by design and never
+#     were -- `android.`, `java.`, `javax.`, `dalvik.`, `org.w3c.`, `org.xml.`,
+#     `org.json.`, `org.apache.http.`;
+#   * array descriptors (`com.example.Foo[]`) are printed as rows of their own
+#     and name no class that anything could keep;
+#   * COMPILE-ONLY annotations are deliberately absent from every runtime
+#     classpath, and R8 is ALREADY told so by name. That list is READ OUT OF THE
+#     `-dontwarn` LINES rather than restated here: a second copy would drift from
+#     the one R8 actually obeys, and this way the fix for a new one is a single
+#     edit that both consume.
+#
+# A class R8 RENAMED but kept is NOT a false-positive source: AGP hands the test
+# APK the app's mapping (`-applymapping`), so its references were rewritten to
+# the obfuscated names at build time and match what the app APK defines.
+#
+# The link/run lane does not run this. Its tested variant is `debug`, which is
+# not minified, so nothing can have been shrunk out of it.
+
+# `apkanalyzer` writes its answer to stdout and its complaints to stderr. A
+# failure has to say WHICH APK and WHAT, rather than aborting on `set -e` with a
+# bare status and no line -- the same defect `android_show_failure` exists for.
+android_apkanalyzer_dex() {
+  local out="$1" apk="$2"
+  shift 2
+  if ! "$apkanalyzer_bin" dex packages "$@" "$apk" > "$out" 2> "$out.err"; then
+    echo "::error::apkanalyzer dex packages $* failed on $apk" >&2
+    cat "$out.err" >&2
+    return 1
+  fi
+}
+
+if [ "$linked" = true ] && [ "$do_pagesize16k" = true ]; then
+  # `|| true` ON A DISCOVERY, NOT ON A PROOF, and it is the same reasoning
+  # `discover_ps16k_image` uses: `find` exits 1 when its directory is absent, and
+  # under `set -e` an assignment from a failing command substitution ABORTS this
+  # script with a bare status and no line -- so the careful `::error::` two lines
+  # below would never be reached. What grades the result is the emptiness test,
+  # not the exit code.
+  preflight_test_apk="$(find "$GRADLE_DIR/app/build/outputs/apk/androidTest/release" \
+    -name '*.apk' -print -quit 2>/dev/null || true)"
+  if [ -z "$preflight_test_apk" ] || [ -z "${release_apk:-}" ]; then
+    echo "::error::the preflight gate compares the two RELEASE APKs and one of them \
+is absent (app='${release_apk:-}', androidTest='$preflight_test_apk'). \
+:app:assembleReleaseAndroidTest is what produces the second." >&2
+    exit 1
+  fi
+
+  apkanalyzer_bin="$sdk_root/cmdline-tools/latest/bin/apkanalyzer"
+  if [ ! -x "$apkanalyzer_bin" ]; then
+    # Same discovery-not-proof `|| true` as above: a runner whose cmdline-tools
+    # layout differs must reach the diagnosis below, not die on `find`'s status.
+    apkanalyzer_bin="$(find "$sdk_root/cmdline-tools" -name apkanalyzer -type f 2>/dev/null \
+      | sort -V | tail -1 || true)"
+  fi
+  if [ -z "$apkanalyzer_bin" ] || [ ! -x "$apkanalyzer_bin" ]; then
+    # NOT SKIPPED, for the same reason a missing `zipalign` is not skipped in 2b:
+    # a check that did not run has made no claim, and the alternative to running
+    # it here is discovering the same answer on the device forty minutes later,
+    # one class at a time.
+    echo "::error::no apkanalyzer under $sdk_root/cmdline-tools. It ships in \
+cmdline-tools and is what makes 'the instrumentation references a class the app \
+APK no longer defines' answerable before the emulator boots; without it this lane \
+can only find that out by crashing on the device. Install a cmdline-tools package \
+on this runner." >&2
+    exit 1
+  fi
+
+  echo "::group::preflight: every class the instrumentation references, resolved"
+  pf="$LOGDIR/preflight"
+  rm -rf "${pf:?}"
+  mkdir -p "$pf"
+  echo "apkanalyzer: $apkanalyzer_bin"
+  echo "app APK:     $release_apk"
+  echo "test APK:    $preflight_test_apk"
+
+  if ! android_apkanalyzer_dex "$pf/test-dex.txt"      "$preflight_test_apk" \
+     || ! android_apkanalyzer_dex "$pf/app-defined.txt"  "$release_apk"        --defined-only \
+     || ! android_apkanalyzer_dex "$pf/test-defined.txt" "$preflight_test_apk" --defined-only
+  then
+    echo "::endgroup::"
+    exit 1
+  fi
+
+  # THE COLUMNS, PRINTED RAW, so the `$1`/`$2`/`$NF` below can be CHECKED against
+  # what this SDK's apkanalyzer actually emitted rather than taken on faith.
+  # Column 1 is the node type (`P` package, `C` class, `M` method, `F` field),
+  # column 2 its state (`d` defined, `r` referenced, `k` kept, `x` removed), and
+  # the last field of a `C` row is the class name.
+  #
+  # `head` reads the FILE and not a pipe from apkanalyzer: under `set -o
+  # pipefail` a closed pipe would take a working run down with SIGPIPE.
+  echo "--- apkanalyzer dex packages, first 5 rows, raw ---"
+  head -5 "$pf/test-dex.txt"
+  echo "---"
+
+  # `LC_ALL=C` on every `sort` AND on the `comm`. `comm` requires its two inputs
+  # ordered by the same collation it compares in, and a runner whose locale is
+  # not C orders case differently -- which produces a WRONG set difference,
+  # silently, in BOTH directions: invented missing classes and missed real ones.
+  awk '$1=="C" && $2=="r" { print $NF }' "$pf/test-dex.txt"     | LC_ALL=C sort -u > "$pf/refs"
+  awk '$1=="C" && $2=="d" { print $NF }' "$pf/app-defined.txt"  | LC_ALL=C sort -u > "$pf/app-defs"
+  awk '$1=="C" && $2=="d" { print $NF }' "$pf/test-defined.txt" | LC_ALL=C sort -u > "$pf/test-defs"
+  LC_ALL=C sort -u "$pf/app-defs" "$pf/test-defs" > "$pf/defs"
+
+  refs_n="$(wc -l < "$pf/refs")"
+  defs_n="$(wc -l < "$pf/defs")"
+  echo "referenced by the test APK, defined elsewhere: $refs_n"
+  echo "defined by the app APK and the test APK:       $defs_n"
+
+  # THE PARSE ITSELF, CHECKED. If apkanalyzer's column layout ever moves, the awk
+  # above extracts nothing and this gate would report every class in the project
+  # as missing -- a wall of noise that reads like a catastrophic regression and is
+  # really a tool upgrade. Zero on either side is a broken parse and never a real
+  # answer: an APK always defines classes, and an instrumentation APK always
+  # references some.
+  if [ "$refs_n" -eq 0 ] || [ "$defs_n" -eq 0 ]; then
+    echo "::endgroup::"
+    echo "::error::the preflight gate parsed $refs_n referenced and $defs_n defined \
+classes out of apkanalyzer's output, and neither of those can legitimately be zero. \
+The column layout this gate reads has moved; the raw rows are printed above and the \
+whole output is in build/ci/logs/android/preflight/." >&2
+    exit 1
+  fi
+
+  # The compile-only packages, TAKEN FROM THE R8 CONFIGURATION rather than kept
+  # as a second list here. `-dontwarn com.google.errorprone.annotations.**`
+  # becomes the prefix `com.google.errorprone.annotations.`; a bare `-dontwarn`
+  # names no prefix and is skipped, which can only make this gate stricter.
+  {
+    printf '%s\n' android. java. javax. dalvik. org.w3c. org.xml. org.json. org.apache.http.
+    awk '$1=="-dontwarn" && NF>1 { p=$2; sub(/\**$/,"",p); if (p != "") print p }' \
+      "$GRADLE_DIR/app/proguard-rules.pro" \
+      "$GRADLE_DIR/app/proguard-androidtest-keep.pro"
+  } | LC_ALL=C sort -u > "$pf/ignored-prefixes"
+  echo "--- prefixes this gate does not report ---"
+  cat "$pf/ignored-prefixes"
+
+  LC_ALL=C comm -23 "$pf/refs" "$pf/defs" > "$pf/undefined"
+  awk '
+    NR==FNR { prefix[++n] = $0; next }
+    /\[\]$/ { next }
+    {
+      for (i = 1; i <= n; i++)
+        if (index($0, prefix[i]) == 1) next
+      print
+    }
+  ' "$pf/ignored-prefixes" "$pf/undefined" > "$pf/missing"
+  echo "::endgroup::"
+
+  if [ -s "$pf/missing" ]; then
+    echo "::error::the instrumentation APK references $(wc -l < "$pf/missing") class(es) \
+that NEITHER APK DEFINES. Each one is a NoClassDefFoundError waiting for the device, and \
+they are listed together so that fixing them costs one CI run rather than one run each." >&2
+    echo "--- referenced by the test APK, defined by neither ---" >&2
+    cat "$pf/missing" >&2
+    echo "--- what to do with that list ---" >&2
+    echo "Each entry is one of two things. If R8 shrank it out of the app APK -- which is \
+what AGP's SubtractingArtifactCollection makes possible for anything on both runtime \
+classpaths -- REGENERATE shells/android/app/proguard-androidtest-keep.pro with \
+TraceReferences over the CURRENT androidTest sources; that file's header carries the \
+command and the standing cost. If it is a compile-only annotation that is on no runtime \
+classpath, add a -dontwarn for it to shells/android/app/proguard-rules.pro, which is the \
+single list both R8 and this gate read. Do NOT hand-append a keep rule." >&2
+    exit 1
+  fi
+  echo "preflight: all $refs_n referenced classes resolve inside the two APKs"
+fi
+
+# ---------------------------------------------------------------------------
 # 3. a device
 # ---------------------------------------------------------------------------
 device_ready=false

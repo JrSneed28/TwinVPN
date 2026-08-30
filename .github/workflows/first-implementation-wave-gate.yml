@@ -939,6 +939,11 @@ jobs:
             build/ci/logs/android/logcat.txt
             build/ci/logs/android/emulator.log
             build/ci/logs/android/zipalign.log
+            # `ci-android.sh` §2d's preflight gate. It prints the missing
+            # classes in the clear, so this is for the OTHER failure: an
+            # apkanalyzer whose column layout moved, where the whole dump is
+            # what says which column the class name went to.
+            build/ci/logs/android/preflight/
           if-no-files-found: warn
 
       - name: stop the emulator and remove the packages
