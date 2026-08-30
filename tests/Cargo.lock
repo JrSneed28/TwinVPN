@@ -2313,6 +2313,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "security-framework-sys"
+version = "2.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2809,6 +2819,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "system-configuration-sys"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3253,6 +3273,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "thiserror",
+ "twinvpn-crypto",
  "twinvpn-dns",
  "twinvpn-env",
  "twinvpn-platform",
@@ -3282,6 +3303,7 @@ dependencies = [
  "twinvpn-env",
  "twinvpn-mgmt",
  "twinvpn-platform",
+ "twinvpn-platform-ios",
  "twinvpn-schema",
  "twinvpn-types",
 ]
@@ -3331,6 +3353,26 @@ dependencies = [
  "futures-core",
  "thiserror",
  "twinvpn-env",
+ "twinvpn-types",
+ "zeroize",
+]
+
+[[package]]
+name = "twinvpn-platform-ios"
+version = "0.1.0"
+dependencies = [
+ "core-foundation-sys",
+ "futures-core",
+ "libc",
+ "security-framework-sys",
+ "serde_json",
+ "socket2",
+ "system-configuration-sys",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "twinvpn-env",
+ "twinvpn-platform",
  "twinvpn-types",
  "zeroize",
 ]
