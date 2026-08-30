@@ -113,7 +113,7 @@ struct RenderedDiagnostic {
     let explanation: String
     let nextAction: NextAction?
 
-    static func decode(_ buffer: UnsafeMutablePointer<tw_buf>?) -> RenderedDiagnostic {
+    static func decode(_ buffer: OpaquePointer?) -> RenderedDiagnostic {
         guard let buffer else {
             // ADR-0015 §11.2 rule 5: an unknown code "degrades to the DOMAIN
             // prefix" and "must not display the raw code as the primary signal".
