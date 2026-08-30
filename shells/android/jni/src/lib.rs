@@ -184,8 +184,58 @@ fn take_buf(env: &mut JNIEnv<'_>, buf: *mut TwBuf) -> jbyteArray {
     // SAFETY: live and not yet freed; freed exactly once, here.
     unsafe { tw_buf_free(buf) };
 
-    env.byte_array_from_slice(&bytes)
-        .map_or(std::ptr::null_mut(), jni::objects::JByteArray::into_raw)
+    let Ok(array) = env.byte_array_from_slice(&bytes) else {
+        // `NewByteArray` failed and left an exception pending, which would
+        // surface as a throw no Kotlin signature declares. CB-2: this
+        // boundary answers "could not produce a buffer" with `null`.
+        clear_pending(env);
+        return std::ptr::null_mut();
+    };
+    array.into_raw()
+}
+
+/// Discards a pending Java exception so the next JNI call in this frame is
+/// legal. **A no-op when nothing is pending.**
+///
+/// # M-18, and why every marshalling read below routes through here
+///
+/// `jni` 0.21.1 checks `ExceptionCheck` only **after** issuing a call
+/// (`src/wrapper/macros.rs`), and `Error::JavaException` does not clear. So a
+/// discarded `Result` left the exception pending and the **next** JNI call was
+/// issued illegally: the JNI specification permits only fifteen functions with
+/// an exception pending, and neither `NewByteArray` (from [`take_buf`]) nor
+/// `FindClass` (from `JNIEnv::get_string`, which resolves `java/lang/String`
+/// before reading) is one of them. That is undefined behaviour — jni-rs #731.
+///
+/// `ExceptionClear` **is** on that list, so clearing first is always sound.
+/// Upstream pre-checks before every call from `jni` 0.22.2, but that would
+/// **not** remove the need for this: a pending exception still materialises
+/// in managed code the instant a native method returns.
+fn clear_pending(env: &JNIEnv<'_>) {
+    // 0.21.1 returns `Result` only for uniformity; `ExceptionClear` cannot fail.
+    let _ = env.exception_clear();
+}
+
+/// Reads a Java `byte[]`, clearing any pending exception rather than leaving
+/// it. The empty vector on failure is the behaviour that was already here; the
+/// clear is the fix. See [`clear_pending`].
+fn bytes_or_clear(env: &JNIEnv<'_>, array: &JByteArray<'_>) -> Vec<u8> {
+    let Ok(bytes) = env.convert_byte_array(array) else {
+        clear_pending(env);
+        return Vec::new();
+    };
+    bytes
+}
+
+/// Reads a Java `String` as UTF-8 bytes, clearing any pending exception. The
+/// one that mattered most: `get_string` reaches `FindClass`, so a *second*
+/// `get_string` after a failed first was the undefined behaviour.
+fn utf8_or_clear(env: &mut JNIEnv<'_>, text: &JString<'_>) -> Vec<u8> {
+    let Ok(text) = env.get_string(text) else {
+        clear_pending(env);
+        return Vec::new();
+    };
+    String::from(text).into_bytes()
 }
 
 /// `NativeBridge.nativeCoreCreate(config: ByteArray): Long`
@@ -220,7 +270,7 @@ pub unsafe extern "system" fn Java_net_twinvpn_android_NativeBridge_nativeCoreCr
     config: JByteArray<'_>,
 ) -> jlong {
     catch_unwind(AssertUnwindSafe(|| {
-        let bytes = env.convert_byte_array(&config).unwrap_or_default();
+        let bytes = bytes_or_clear(&env, &config);
         let mut error: *mut TwBuf = std::ptr::null_mut();
         let slice = TwSlice {
             ptr: bytes.as_ptr(),
@@ -296,7 +346,7 @@ pub unsafe extern "system" fn Java_net_twinvpn_android_NativeBridge_nativeCoreSu
 ) -> jbyteArray {
     let mut env = env;
     catch_unwind(AssertUnwindSafe(|| {
-        let bytes = env.convert_byte_array(&command).unwrap_or_default();
+        let bytes = bytes_or_clear(&env, &command);
         let mut error: *mut TwBuf = std::ptr::null_mut();
         let slice = TwSlice {
             ptr: bytes.as_ptr(),
@@ -409,14 +459,14 @@ pub unsafe extern "system" fn Java_net_twinvpn_android_NativeBridge_nativeRender
 ) -> jbyteArray {
     let mut env = env;
     catch_unwind(AssertUnwindSafe(|| {
-        let code = env
-            .get_string(&reason_code)
-            .map_or_else(|_| Vec::new(), |s| String::from(s).into_bytes());
-        let evidence_bytes = env.convert_byte_array(&evidence).unwrap_or_default();
-        let tag = env
-            .get_string(&locale)
-            .map_or_else(|_| Vec::new(), |s| String::from(s).into_bytes());
-        let platform_bytes = env.convert_byte_array(&platform_ctx).unwrap_or_default();
+        // Four reads in a row, and the chain this crate actually issued
+        // illegally: a failed `get_string(&reason_code)` left an exception
+        // pending, and `get_string(&locale)` resolves `java/lang/String`
+        // through `FindClass`, which the JNI spec forbids with one pending.
+        let code = utf8_or_clear(&mut env, &reason_code);
+        let evidence_bytes = bytes_or_clear(&env, &evidence);
+        let tag = utf8_or_clear(&mut env, &locale);
+        let platform_bytes = bytes_or_clear(&env, &platform_ctx);
 
         let of = |v: &[u8]| TwSlice {
             ptr: v.as_ptr(),
@@ -438,3 +488,6 @@ pub unsafe extern "system" fn Java_net_twinvpn_android_NativeBridge_nativeRender
     }))
     .unwrap_or(std::ptr::null_mut())
 }
+
+#[cfg(test)]
+mod tests;

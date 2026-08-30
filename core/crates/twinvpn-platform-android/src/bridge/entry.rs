@@ -346,6 +346,13 @@ pub unsafe extern "system" fn Java_net_twinvpn_android_NativeBridge_nativeCreate
 ) -> jlong {
     let mut env = env;
     let outcome = catch_unwind(AssertUnwindSafe(|| {
+        // Each `.ok()?` DISCARDS a JNI error, and `jni` 0.21.1's
+        // `Error::JavaException` does not clear the exception it reports (see
+        // `nativeOnNetwork` above). `?` short-circuits, so no further JNI call
+        // is issued here — but a pending exception is a real Java exception the
+        // instant this frame returns, which would hand Kotlin a throw in place
+        // of the `0` this entry documents as its startup failure. Cleared on
+        // the way out below, which is a no-op when nothing is pending.
         let vm = Arc::new(env.get_java_vm().ok()?);
         let host = env.new_global_ref(host).ok()?;
         let root: String = env.get_string(&store_root).ok()?.into();
@@ -358,9 +365,16 @@ pub unsafe extern "system" fn Java_net_twinvpn_android_NativeBridge_nativeCreate
         });
         Some(Box::into_raw(Box::new(AndroidBridge::new(adapter))) as jlong)
     }));
-    match outcome {
-        Ok(Some(handle)) => handle,
-        _ => 0,
+    if let Ok(Some(handle)) = outcome {
+        handle
+    } else {
+        // A discarded JNI error above, or a panic, may have left an exception
+        // pending. `0` is this entry's whole vocabulary for "startup failed",
+        // so the exception is dropped rather than allowed to surface as a
+        // throw the Kotlin declaration does not carry. No-op when none is
+        // pending, and `ExceptionClear` is itself exception-safe.
+        let _ = env.exception_clear();
+        0
     }
 }
 
