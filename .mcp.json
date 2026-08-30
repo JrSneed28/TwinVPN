@@ -6,7 +6,9 @@
         "-y",
         "ruflo@latest",
         "mcp",
-        "start"
+        "start",
+        "--tools",
+        "memory,swarm,hooks"
       ],
       "env": {
         "npm_config_update_notifier": "false",
