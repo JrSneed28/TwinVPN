@@ -1,6 +1,6 @@
 # First Implementation Wave — acceptance report
 
-Commit `6f1eb01bf68e2b04b46f1bb0a148428dcbd3a312` (DIRTY WORKTREE — not release evidence)
+Commit `c896d823ba8af1443502eeff12f382834dac20a3` (DIRTY WORKTREE — not release evidence)
 Probes executed: **True**
 
 
@@ -9,7 +9,7 @@ Probes executed: **True**
 | criterion | verdict | evidence |
 |---|---|---|
 | crypto producer wired | **PASS** | every entry point has a non-test caller: arm_resumption |
-| crypto consumer wired | **FAIL** | no non-test caller for: resume_on_wire |
+| crypto consumer wired | **PASS** | every entry point has a non-test caller: accept_resume_offer, resume_on_wire |
 | real datagram roundtrip | **PASS** | cargo test -q -p twinvpn-core --test crypto_carriage |
 | handshake secret type safety | **PASS** | core/crates/twinvpn-core/src/resume/driver.rs no longer contains `handshake_secret: &[u8]` |
 | local role type/state safety | **PASS** | core/crates/twinvpn-core/src/resume/driver.rs no longer contains `local_role: Role` |
@@ -40,7 +40,7 @@ Probes executed: **True**
 
 | criterion | verdict | evidence |
 |---|---|---|
-| Linux | **NOT-EXECUTED** | no evidence at build/ci/evidence/linux.json |
+| Linux | **PASS** | linux-link-run on local (local), 7 transition(s): CAPABILITIES_PROBED->READY, PRIVILEGE_VERIFIED->STATE_REHYDRATED, READY->SHUTTING_DOWN, RULESET_RECLAIMED->PRIVILEGE_VERIFIED, SHUTTING_DOWN->STREAM_CLOSED, START->RULESET_RECLAIMED, STATE_REHYDRATED->CAPABILITIES_PROBED |
 | Windows link/run | **NOT-EXECUTED** | no evidence at build/ci/evidence/windows.json |
 | macOS link/run | **NOT-EXECUTED** | no evidence at build/ci/evidence/macos.json |
 | iOS link/run | **NOT-EXECUTED** | no evidence at build/ci/evidence/ios.json |
@@ -57,7 +57,7 @@ Probes executed: **True**
 
 ## Phase 5 eligibility
 
-`15` of `26` required criteria are PASS.
+`17` of `26` required criteria are PASS.
 
 **Phase 5 eligibility: FAIL**
 

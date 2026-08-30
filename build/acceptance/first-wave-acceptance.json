@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-08-29T23:28:28.407709+00:00",
-  "commit": "6f1eb01bf68e2b04b46f1bb0a148428dcbd3a312",
+  "generated_at": "2026-08-30T00:07:49.352439+00:00",
+  "commit": "c896d823ba8af1443502eeff12f382834dac20a3",
   "worktree_dirty": true,
   "probes_executed": true,
   "rows": [
@@ -15,8 +15,8 @@
     {
       "section": "F-1",
       "criterion": "crypto consumer wired",
-      "verdict": "FAIL",
-      "detail": "no non-test caller for: resume_on_wire",
+      "verdict": "PASS",
+      "detail": "every entry point has a non-test caller: accept_resume_offer, resume_on_wire",
       "required": true
     },
     {
@@ -137,10 +137,48 @@
     {
       "section": "Platforms",
       "criterion": "Linux",
-      "verdict": "NOT-EXECUTED",
-      "detail": "no evidence at build/ci/evidence/linux.json",
+      "verdict": "PASS",
+      "detail": "linux-link-run on local (local), 7 transition(s): CAPABILITIES_PROBED->READY, PRIVILEGE_VERIFIED->STATE_REHYDRATED, READY->SHUTTING_DOWN, RULESET_RECLAIMED->PRIVILEGE_VERIFIED, SHUTTING_DOWN->STREAM_CLOSED, START->RULESET_RECLAIMED, STATE_REHYDRATED->CAPABILITIES_PROBED",
       "required": true,
-      "evidence": {}
+      "evidence": {
+        "schema_version": 1,
+        "platform": "linux",
+        "job_name": "linux-link-run",
+        "runner": "local",
+        "runner_kind": "local",
+        "privileged": false,
+        "github_run_id": null,
+        "github_run_url": null,
+        "commit": "6f1eb01bf68e2b04b46f1bb0a148428dcbd3a312",
+        "toolchain": {
+          "rustc": "rustc 1.90.0 (1159e78c4 2025-09-14)",
+          "cargo": "cargo 1.90.0 (840b83a10 2025-07-30)",
+          "kernel": "Linux 6.18.33.2-microsoft-standard-WSL2"
+        },
+        "compiled": true,
+        "linked_real_core": true,
+        "loaded": true,
+        "invoked_core": true,
+        "received_result": true,
+        "lifecycle_transitions": [
+          "CAPABILITIES_PROBED->READY",
+          "PRIVILEGE_VERIFIED->STATE_REHYDRATED",
+          "READY->SHUTTING_DOWN",
+          "RULESET_RECLAIMED->PRIVILEGE_VERIFIED",
+          "SHUTTING_DOWN->STREAM_CLOSED",
+          "START->RULESET_RECLAIMED",
+          "STATE_REHYDRATED->CAPABILITIES_PROBED"
+        ],
+        "graceful_shutdown": true,
+        "test_command": "cargo test -q -p twinvpnd --test lifecycle -- --nocapture",
+        "test_exit_code": 0,
+        "artifacts": [
+          "build/ci/logs/linux/lifecycle.log"
+        ],
+        "notes": "",
+        "verdict": "PASS",
+        "generated_at": "2026-08-29T23:28:51Z"
+      }
     },
     {
       "section": "Platforms",
@@ -208,6 +246,6 @@
     }
   ],
   "required_total": 26,
-  "required_pass": 15,
+  "required_pass": 17,
   "phase_5_eligibility": "FAIL"
 }

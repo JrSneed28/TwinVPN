@@ -1,0 +1,12 @@
+# One run's evidence, not the repository's state.
+#
+# A platform evidence file records what happened on ONE runner at ONE commit.
+# Committing it would let a stale green file outlive the code it described --
+# and build/acceptance/report.py reads these files to decide Phase 5
+# eligibility, so a committed one is a way to make the gate lie.
+#
+# In CI they arrive as job artifacts, downloaded into evidence/ by
+# first-wave-acceptance. Locally they are whatever your last `make ci-*` run
+# produced.
+evidence/
+logs/
