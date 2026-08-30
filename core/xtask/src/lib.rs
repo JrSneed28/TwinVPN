@@ -14,6 +14,7 @@
 //! | [`checks::cd_i2`] | CD-I2 | only `twinvpn-crypto` declares a cryptographic dependency |
 //! | [`checks::cd_i5`] | CD-I5 | no data-plane crate reaches `twinvpn-cp-client`, directly or **transitively**; the reverse edge is equally denied; only the composition root names both |
 //! | [`checks::cb3`] | CD-CB3 | no `#[cfg(target_os = …)]` outside a `twinvpn-platform-*` crate |
+//! | [`checks::u22_updater_unlinked`] | U-22 | no data-plane, state-machine or platform-adapter crate links the updater, directly or **transitively** (ADR-0021 §11.9) |
 //!
 //! Each check is a pure function over data, so `tests/lints_fire.rs` plants a
 //! deliberate violation and asserts it fires. A lint that has never been seen to
@@ -47,6 +48,7 @@ pub fn run(manifest_path: &Path) -> Result<Vec<Violation>, String> {
     violations.extend(checks::cd_i2(&workspace));
     violations.extend(checks::cd_i5(&workspace));
     violations.extend(checks::cd_i5_composition_root_wired(&workspace));
+    violations.extend(checks::u22_updater_unlinked(&workspace));
 
     for package in &workspace.packages {
         for path in rust_sources(&root.join(&package.dir)) {

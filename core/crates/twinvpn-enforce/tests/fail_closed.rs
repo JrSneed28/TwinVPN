@@ -18,7 +18,7 @@ use twinvpn_enforce::portal::{
 use twinvpn_enforce::reconciler::{
     Assertion, Posture, Reclamation, ReclamationAction, Reconciler, TickOutcome,
 };
-use twinvpn_enforce::scope::{LocalNetworkAccess, Tier1, Tier2};
+use twinvpn_enforce::scope::{LocalNetworkAccess, ScopeTransaction, Tier1, Tier2};
 use twinvpn_env::{ElapsedInstant, MonotonicInstant};
 use twinvpn_platform::{
     BootEnforcement, ContractGeneration, EnforcementCustody, InterfaceIndex, Ruleset,
@@ -71,6 +71,135 @@ fn full_tunnel_tier_1_is_complement_form_and_never_prefix_enumerated() {
     // and is not dropped by it. Without this, a TwinNet-only device in BLOCKED
     // would lose all name resolution and therefore all Internet.
     assert!(!twinnet_only.contains(v4([1, 1, 1, 1])));
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0012 §11.13's ruleset_digest, and P07's stability clause
+// ---------------------------------------------------------------------------
+
+/// A full-tunnel, local-network-denied scope: what P07 arms before it triggers.
+fn fail_closed_scope(overlay_if: InterfaceIndex, accepted: Vec<IpPrefix>) -> ScopeTransaction {
+    ScopeTransaction {
+        generation: ContractGeneration(1),
+        tier1: Tier1::for_mode(RoutingMode::FullTunnel, Vec::new(), accepted),
+        tier2: Tier2 {
+            overlay_interface: overlay_if,
+        },
+        local_network_access: LocalNetworkAccess::Deny,
+        on_link: Vec::new(),
+    }
+}
+
+/// **P07's digest-stability clause.**
+///
+/// `docs/testing-strategy.md` P07: "For variants (b) and (c), the
+/// `ruleset_digest` is **unchanged** across the trigger: the new interface or
+/// prefix is denied by the *pre-existing* interface-scoped default-deny rule
+/// with no rule update required for correctness (ADR-0012 §11.3 row 3). **A
+/// digest change here means the design's structural claim is false even if no
+/// packet leaked.**"
+///
+/// That is the clause this file could not assert until `ruleset_digest` existed:
+/// it catches a STRUCTURAL falsehood with no packet on the wire.
+#[test]
+fn p07_the_ruleset_digest_is_unchanged_when_a_prefix_or_an_interface_appears() {
+    let before = fail_closed_scope(OVERLAY, Vec::new());
+
+    // Variant (b): an RA advertises a new prefix, so a route is accepted
+    // mid-session. Full tunnel is the COMPLEMENT form, so the protected set does
+    // not grow by enumeration and the rule set is untouched.
+    let new_prefix = IpPrefix::new(v4([198, 51, 100, 0]), 24).unwrap();
+    let after_prefix = fail_closed_scope(OVERLAY, vec![new_prefix]);
+    assert_eq!(
+        before.ruleset_digest(),
+        after_prefix.ruleset_digest(),
+        "variant (b): a newly learned prefix moved the digest, so Tier 1 is \
+         enumerating prefixes rather than taking the complement form §11.1 requires"
+    );
+
+    // Variant (c): a new interface appears (tethering, a VM bridge). Tier 2 is
+    // interface-scoped to the OVERLAY and names no other interface at all, so
+    // there is nothing for a new one to change.
+    let mut after_iface = fail_closed_scope(OVERLAY, Vec::new());
+    after_iface.on_link = vec![IpPrefix::new(v4([192, 168, 8, 0]), 24).unwrap()];
+    assert_eq!(
+        before.ruleset_digest(),
+        after_iface.ruleset_digest(),
+        "variant (c): a new interface's on-link prefix moved the digest under \
+         LocalNetworkAccess::Deny, where it permits nothing"
+    );
+
+    // And a re-application at a later generation is the same rule set. The
+    // digest is over the RULES, not over the transaction that carried them;
+    // otherwise the stability clause could never hold across any re-assertion.
+    let mut regenerated = fail_closed_scope(OVERLAY, Vec::new());
+    regenerated.generation = ContractGeneration(9);
+    assert_eq!(before.ruleset_digest(), regenerated.ruleset_digest());
+}
+
+/// The other half: a digest that never changes would satisfy the clause above
+/// while being useless. Every element §11.1 calls part of the rule set must move
+/// it.
+#[test]
+fn the_ruleset_digest_changes_when_the_rule_set_actually_changes() {
+    let base = fail_closed_scope(OVERLAY, Vec::new());
+
+    let mut other_overlay = fail_closed_scope(WIFI, Vec::new());
+    other_overlay.generation = ContractGeneration(1);
+    assert_ne!(
+        base.ruleset_digest(),
+        other_overlay.ruleset_digest(),
+        "Tier 2's egress interface is the rule; changing it must change the digest"
+    );
+
+    let mut split = fail_closed_scope(OVERLAY, Vec::new());
+    split.tier1 = Tier1::for_mode(
+        RoutingMode::TwinnetOnly,
+        vec![IpPrefix::new(v4([100, 100, 0, 0]), 22).unwrap()],
+        Vec::new(),
+    );
+    assert_ne!(
+        base.ruleset_digest(),
+        split.ruleset_digest(),
+        "the Tier-1 mode is the rule"
+    );
+
+    let mut allowed = fail_closed_scope(OVERLAY, Vec::new());
+    allowed.local_network_access = LocalNetworkAccess::Allow;
+    assert_ne!(
+        base.ruleset_digest(),
+        allowed.ruleset_digest(),
+        "KS-4's setting is the rule"
+    );
+
+    // Under ALLOW the on-link prefixes ARE rules, so a new one widens the
+    // installed set and the digest says so rather than hiding it. That widening
+    // is exactly what KS-4's DENY toggle exists to refuse.
+    let mut allowed_more = allowed.clone();
+    allowed_more.on_link = vec![IpPrefix::new(v4([192, 168, 8, 0]), 24).unwrap()];
+    assert_ne!(
+        allowed.ruleset_digest(),
+        allowed_more.ruleset_digest(),
+        "under ALLOW an added on-link prefix is an added permission"
+    );
+}
+
+/// The digest is a function of the rule SET, not of discovery order.
+#[test]
+fn the_ruleset_digest_does_not_depend_on_the_order_prefixes_arrived_in() {
+    let a = IpPrefix::new(v4([100, 100, 0, 0]), 22).unwrap();
+    let b = IpPrefix::new(v4([10, 0, 0, 0]), 8).unwrap();
+
+    let mut one = fail_closed_scope(OVERLAY, Vec::new());
+    one.tier1 = Tier1::for_mode(RoutingMode::TwinnetOnly, vec![a, b], Vec::new());
+    let mut two = fail_closed_scope(OVERLAY, Vec::new());
+    two.tier1 = Tier1::for_mode(RoutingMode::TwinnetOnly, vec![b, a, a], Vec::new());
+
+    assert_eq!(
+        one.ruleset_digest(),
+        two.ruleset_digest(),
+        "the same prefixes in a different order, with a duplicate, are the same rule set"
+    );
 }
 
 #[test]

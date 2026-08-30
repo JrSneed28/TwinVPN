@@ -78,6 +78,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod aead;
+pub mod arena;
 pub mod binding;
 pub mod blake2s;
 pub mod cose;
@@ -107,6 +108,7 @@ pub mod tk;
 pub mod transcript;
 
 pub use aead::{AeadOpenError, StoreKey};
+pub use arena::{Secret, SecretArena};
 pub use binding::{emit_tunnel_key_binding, verify_tunnel_key_binding, VerifiedTunnelKey};
 pub use blake2s::{frame_mac, hrw_weight_digest, verify_frame_mac};
 pub use cose::{verify_cose_sign1, x25519_cose_key, PublicVerifyingKey, VerifiedStatement};

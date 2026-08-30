@@ -158,6 +158,10 @@ pub enum FallbackRung {
     SourceLocale,
     /// The code was not registered; the sentence is its `DOMAIN`'s.
     DomainFallback,
+    /// The code declares no next action, so part 3 is the sentence for its
+    /// `remediation_class` (ADR-0019 §11.13 oracle 1). Only [`Resolved::next_action_rung`]
+    /// ever carries this: a summary is never sourced this way.
+    RemediationClass,
     /// Nothing matched. Reserved: [`render`] never returns this, because the
     /// domain rung is total over the closed sixteen-domain set and the
     /// unparseable case has its own neutral sentence.
@@ -304,11 +308,22 @@ pub fn render(
                 Some(FallbackRung::DomainFallback),
             ),
         },
+        // A REGISTERED code with no declared next action is the
+        // `user_actionable == false` case, and ADR-0019 §11.13 oracle 1 is
+        // explicit about it: "Where `user_actionable == false`, part 3 is the
+        // `remediation_class` sentence — the field is never empty." Returning
+        // `None` here is the empty part 3 that oracle forbids, so what it gets
+        // is the sentence for the SHAPE of its remediation — which is what
+        // ADR-0018 F-4 put `remediation_class` in the attribute set for, "so a
+        // surface can pick an affordance for a code it has never seen".
+        None if registered.is_some() => (
+            Some(remediation_sentence(attributes.remediation_class).to_owned()),
+            Some(FallbackRung::RemediationClass),
+        ),
         // An unregistered code has no declared next action. Offering the domain
         // fallback anyway is the right call: rule 5 requires a consumer meeting
         // an unknown code to still be able to present something actionable, and
         // "we do not know this code" is not an instruction.
-        None if !attributes.user_actionable && registered.is_some() => (None, None),
         None => (
             Some(domain_next_action(domain).to_owned()),
             Some(FallbackRung::DomainFallback),
@@ -379,6 +394,41 @@ fn domain_summary(domain: Domain) -> &'static str {
 fn domain_next_action(domain: Domain) -> &'static str {
     find(DOMAIN_NEXT_ACTION, domain)
         .unwrap_or("Create a diagnostic report and share it with support.")
+}
+
+/// Part 3 for a code that declares no next action of its own.
+///
+/// ADR-0019 §11.13 oracle 1: "Where `user_actionable == false`, part 3 is the
+/// `remediation_class` sentence — the field is never empty."
+///
+/// The build script asserts a non-empty sentence for all nine classes, so the
+/// `map_or` default is unreachable in a build that compiled. It is written
+/// rather than `expect`ed because F-10 must not panic: the moment `render` is
+/// called is often the moment nothing else works.
+fn remediation_sentence(class: RemediationClass) -> &'static str {
+    let name = remediation_name(class);
+    REMEDIATION_SENTENCE
+        .iter()
+        .find(|(c, _)| *c == name)
+        .map_or(
+            "Create a diagnostic report and share it with support.",
+            |(_, t)| *t,
+        )
+}
+
+/// The registry spelling of a remediation class.
+const fn remediation_name(class: RemediationClass) -> &'static str {
+    match class {
+        RemediationClass::None => "NONE",
+        RemediationClass::Wait => "WAIT",
+        RemediationClass::LocalAction => "LOCAL_ACTION",
+        RemediationClass::PeerAction => "PEER_ACTION",
+        RemediationClass::PolicyChange => "POLICY_CHANGE",
+        RemediationClass::UpdateRequired => "UPDATE_REQUIRED",
+        RemediationClass::NetworkChange => "NETWORK_CHANGE",
+        RemediationClass::PermissionGrant => "PERMISSION_GRANT",
+        RemediationClass::ReportDefect => "REPORT_DEFECT",
+    }
 }
 
 fn find(table: &'static [(&'static str, &'static str)], domain: Domain) -> Option<&'static str> {
@@ -623,6 +673,191 @@ mod tests {
         assert!(!r.summary.is_empty());
         // F-4: attributes are present for an unknown code too.
         assert_eq!(r.attributes.severity, ErrorSeverity::Error);
+    }
+
+    /// ADR-0019 §11.13 oracle 1: "**Three non-empty parts** are produced. Where
+    /// `user_actionable == false`, part 3 is the `remediation_class` sentence —
+    /// the field is never empty."
+    ///
+    /// This is the oracle `M-P18-7` — "`user_actionable == false` renders an
+    /// empty part 3" — must fail. It stood as MISSING-NO-ORACLE because the
+    /// PRODUCT was the defect: `render` returned `next_action: None` for every
+    /// registered non-actionable code, so the mutant was a no-op against the
+    /// shipped behaviour. `lt_3c_…` could not see it either — it `continue`s
+    /// past exactly the codes this drives.
+    ///
+    /// Part 2 is the disposition-class sentence of ADR-0019 §11.4 and is not
+    /// this crate's to produce; parts 1 and 3 are, and both are asserted here
+    /// for **every** registered code rather than only the actionable ones.
+    #[test]
+    fn oracle_1_every_code_renders_a_non_empty_part_3() {
+        let mut non_actionable = 0_usize;
+        for code in ReasonCode::all() {
+            let r = render(code.as_str(), &[], "en", &neutral());
+            assert!(!r.summary.trim().is_empty(), "{code}: part 1 is empty");
+            let action = r
+                .next_action
+                .as_deref()
+                .unwrap_or_else(|| panic!("{code}: part 3 is absent, which oracle 1 forbids"));
+            assert!(!action.trim().is_empty(), "{code}: part 3 is empty");
+            if !code.user_actionable() {
+                non_actionable += 1;
+                assert_eq!(
+                    r.next_action_rung,
+                    Some(FallbackRung::RemediationClass),
+                    "{code}: user_actionable == false, so part 3 must be the \
+                     remediation_class sentence"
+                );
+                assert_eq!(
+                    action,
+                    remediation_sentence(r.attributes.remediation_class),
+                    "{code}: part 3 is not its remediation_class sentence"
+                );
+            }
+        }
+        // A registry with no non-actionable codes would make the clause above
+        // vacuous, and a vacuous oracle is how M-P18-7 stayed invisible.
+        assert!(
+            non_actionable > 0,
+            "no non-actionable code was exercised, so oracle 1's second sentence \
+             asserted nothing"
+        );
+    }
+
+    /// Every remediation class carries a distinct, non-empty sentence.
+    ///
+    /// The completeness half of oracle 1. Collapsing the nine to one constant
+    /// would keep part 3 non-empty while destroying its meaning, and
+    /// [`oracle_1_every_code_renders_a_non_empty_part_3`] alone would not
+    /// notice.
+    #[test]
+    fn oracle_1_the_nine_remediation_classes_have_distinct_sentences() {
+        let classes = [
+            RemediationClass::None,
+            RemediationClass::Wait,
+            RemediationClass::LocalAction,
+            RemediationClass::PeerAction,
+            RemediationClass::PolicyChange,
+            RemediationClass::UpdateRequired,
+            RemediationClass::NetworkChange,
+            RemediationClass::PermissionGrant,
+            RemediationClass::ReportDefect,
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for class in classes {
+            let s = remediation_sentence(class);
+            assert!(!s.trim().is_empty(), "{class:?} has an empty sentence");
+            seen.insert(s);
+        }
+        assert_eq!(
+            seen.len(),
+            classes.len(),
+            "the nine remediation sentences collapsed to {}",
+            seen.len()
+        );
+    }
+
+    /// The sixteen-domain closed set of ADR-0015 §11.2, spelled as the registry
+    /// spells it. Written out rather than derived from [`domain_name`], because
+    /// a test that asks the product for the answer it is checking asserts
+    /// nothing — the same reason [`oracle_4_an_unknown_code_degrades_to_its_own_domain`]
+    /// compares the sixteen renders with each other and never with
+    /// [`domain_summary`].
+    const DOMAINS: [&str; 16] = [
+        "NET", "NAT", "RELAY", "AUTH", "CRYPTO", "PROTO", "POLICY", "DNS", "ROUTE", "PLATFORM",
+        "RESOURCE", "CONTROL", "INTERNAL", "MGMT", "STORE", "UPDATE",
+    ];
+
+    /// An identifier no build ships, in `domain`'s namespace.
+    fn unknown_in(domain: &str) -> String {
+        format!("{domain}.SOMETHING_THIS_BUILD_DOES_NOT_SHIP")
+    }
+
+    /// ADR-0019 §11.13 oracle 4: "For an unknown code: part 1 equals that
+    /// `DOMAIN`'s fallback (or the neutral entry for an unrecognized domain);
+    /// parts 2 and 3 are still produced".
+    ///
+    /// `M-P18-3` is the build that renders one constant — "Unknown error" — for
+    /// every unknown code. The discriminating assertion is therefore that the
+    /// sixteen renders are **pairwise distinct**: a collapsed fallback fails it
+    /// no matter what the constant says, and comparing each render against
+    /// `domain_summary` instead would move with the mutation and assert nothing.
+    #[test]
+    fn oracle_4_an_unknown_code_degrades_to_its_own_domain() {
+        let mut summaries = std::collections::BTreeSet::new();
+        let mut actions = std::collections::BTreeSet::new();
+        for domain in DOMAINS {
+            let r = render(&unknown_in(domain), &[], "en", &neutral());
+            assert!(!r.registered, "{domain}: the probe code must be unknown");
+            assert_eq!(
+                r.summary_rung,
+                FallbackRung::DomainFallback,
+                "{domain}: an unknown code degrades on its domain"
+            );
+            assert!(
+                !r.summary.trim().is_empty(),
+                "{domain}: part 1 is empty for an unknown code"
+            );
+            // "parts 2 and 3 are still produced" — part 3 is this crate's half.
+            let action = r
+                .next_action
+                .as_deref()
+                .unwrap_or_else(|| panic!("{domain}: part 3 absent for an unknown code"));
+            assert!(
+                !action.trim().is_empty(),
+                "{domain}: part 3 is empty for an unknown code"
+            );
+            summaries.insert(r.summary.clone());
+            actions.insert(action.to_owned());
+        }
+        assert_eq!(
+            summaries.len(),
+            DOMAINS.len(),
+            "the sixteen domain fallbacks collapsed to {} distinct summaries; \
+             an unknown code no longer degrades to ITS OWN domain",
+            summaries.len()
+        );
+        assert_eq!(
+            actions.len(),
+            DOMAINS.len(),
+            "the sixteen domain next actions collapsed to {} distinct sentences",
+            actions.len()
+        );
+    }
+
+    /// ADR-0019 §11.13 oracle 2: "No rendered part contains the raw
+    /// `reason_code`, a bare integer, an OS errno, or an i18n key."
+    ///
+    /// `M-P18-1` is the build whose **catalogue miss** falls back to the raw
+    /// code string. `every_registered_code_resolves_to_a_real_sentence` cannot
+    /// see it: for a registered code the generated catalogue never misses, so
+    /// the only reachable miss is an unknown code, and that is what this drives.
+    #[test]
+    fn oracle_2_no_rendered_part_carries_the_raw_code_or_an_i18n_key() {
+        for domain in DOMAINS {
+            let code = unknown_in(domain);
+            let r = render(&code, &[], "en", &neutral());
+            for (part, text) in [
+                ("part 1", Some(r.summary.as_str())),
+                ("part 3", r.next_action.as_deref()),
+            ] {
+                let Some(text) = text else { continue };
+                assert!(
+                    !text.contains(&code),
+                    "{domain}: {part} contains the raw reason_code: {text}"
+                );
+                assert!(
+                    !text.contains("SOMETHING_THIS_BUILD_DOES_NOT_SHIP"),
+                    "{domain}: {part} contains the code's identifier: {text}"
+                );
+                assert!(
+                    !text.contains("reason."),
+                    "{domain}: {part} contains an i18n key: {text}"
+                );
+            }
+            // The code is still reported, once, as data rather than as prose.
+            assert_eq!(r.reason_code, code);
+        }
     }
 
     #[test]

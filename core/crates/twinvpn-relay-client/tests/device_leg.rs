@@ -514,6 +514,112 @@ fn selection_returns_the_whole_set_and_never_an_empty_one() {
     assert!(!sel.order.is_empty());
 }
 
+/// **ADR-0006 §11.16 (b) / RQ12 / R-23 — the auditability oracle.**
+///
+/// §11.16 (b): "a `RelaySelected{… top_k[]{relay_id, score} …}` event is emitted
+/// — selection is auditable, not a black box (RQ12, R-23)." RQ12 is the sentence
+/// that makes it decidable: "Every selection and every failover MUST be
+/// **reconstructable** after the fact from a structured event."
+///
+/// So the assertion is reconstruction, not presence: the record must reproduce
+/// the whole ordering, entry for entry. A record that drops `top_k` — which is
+/// `M-P02-5` — still names the chosen relay and its score, and would satisfy any
+/// weaker "the event exists" check while making "why THIS relay rather than the
+/// other three" unanswerable, which is exactly the black box R-23 forbids.
+#[test]
+fn r_23_the_selection_is_reconstructable_from_the_relay_selected_event() {
+    let relays = [
+        relay(1, "a", "eu"),
+        relay(2, "b", "eu"),
+        relay(3, "c", "us"),
+        relay(4, "d", "us"),
+    ];
+    // Distinct measured RTTs, so the ordering is a real ranking rather than a
+    // tie broken by relay id.
+    let scored: Vec<Scored> = relays
+        .iter()
+        .enumerate()
+        .map(|(i, r)| Scored {
+            id: r.id,
+            score: select::score(
+                r,
+                Observations {
+                    ewma_rtt_ms: 10 * u32::try_from(i).unwrap(),
+                    ..Observations::default()
+                },
+            ),
+            breaker_open: false,
+        })
+        .collect();
+    let sel = Selection::order(scored);
+    let chosen_id = sel.best().expect("a non-empty map selects something").id;
+    let chosen = relays
+        .iter()
+        .find(|r| r.id == chosen_id)
+        .expect("in the map");
+
+    let event = select::RelaySelected::for_selection(
+        &sel,
+        chosen,
+        Observations::default(),
+        /* map_version */ 42,
+        /* map_age_ms  */ 1_500,
+    )
+    .expect("the chosen relay is in the order it was chosen from");
+
+    assert!(
+        event.reconstructs(&sel),
+        "RQ12: the event must reconstruct the selection. top_k held {} of {} \
+         candidates",
+        event.top_k.len(),
+        sel.order.len()
+    );
+    assert_eq!(
+        event.top_k.len(),
+        relays.len(),
+        "selection is a total ordering, so the audit covers every candidate"
+    );
+    assert_eq!(event.relay_id, chosen_id);
+    assert_eq!(event.rank, 0, "the best candidate ranks first");
+    assert_eq!(event.top_k[0].relay_id, chosen_id);
+    assert_eq!(event.map_version, 42);
+    assert_eq!(event.map_age_ms, 1_500);
+    assert_eq!(event.inputs.server_rank, chosen.server_rank);
+    assert_eq!(event.inputs.load_class, chosen.load_class);
+    assert!(!event.inputs.breaker_open);
+
+    // "Why this relay rather than that one" must be answerable from the record
+    // alone, which needs the scores to be there and to be ordered.
+    let scores: Vec<i32> = event.top_k.iter().map(|c| c.score).collect();
+    assert!(
+        scores.windows(2).all(|w| w[0] >= w[1]),
+        "the audited candidate list must be in selection order: {scores:?}"
+    );
+    assert!(
+        scores.first() > scores.last(),
+        "the four candidates were given distinct measurements, so a record that \
+         cannot separate them is not carrying the input vector: {scores:?}"
+    );
+}
+
+/// An audit record must never describe a relay the selection did not rank.
+#[test]
+fn an_audit_record_is_refused_for_a_relay_the_selection_never_ranked() {
+    let ranked = relay(1, "a", "eu");
+    let stranger = relay(9, "z", "ap");
+    let sel = Selection::order(vec![Scored {
+        id: ranked.id,
+        score: 900,
+        breaker_open: false,
+    }]);
+    assert!(
+        select::RelaySelected::for_selection(&sel, &stranger, Observations::default(), 1, 0)
+            .is_none(),
+        "answering \"why this relay\" with a relay that was never considered is \
+         worse than not answering"
+    );
+}
+
 #[test]
 fn a_self_hosted_relay_that_cannot_signal_drain_gets_no_bonus_rather_than_a_penalty() {
     let mut good = relay(1, "a", "eu");

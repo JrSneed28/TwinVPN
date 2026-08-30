@@ -46,6 +46,10 @@ pub const CONNTRACK_ENTRY_BYTES: u64 = 320;
 /// MG-10's guaranteed floor for one peer.
 ///
 /// `floor(K) = max(256 kbit/s, configured_uplink / max_admitted_peers)`.
+///
+/// This is ADR-0013 §11.11's `gw_peer_floor_share_bps` — the ADR names that
+/// gauge and this function is its value. The name is recorded here rather than
+/// introduced as a second thing to keep in step.
 #[must_use]
 pub fn floor_bits_per_sec(configured_uplink_bps: u64, max_admitted_peers: usize) -> u64 {
     let share = if max_admitted_peers == 0 {
@@ -54,6 +58,52 @@ pub fn floor_bits_per_sec(configured_uplink_bps: u64, max_admitted_peers: usize)
         configured_uplink_bps / (max_admitted_peers as u64)
     };
     share.max(FLOOR_MIN_BITS_PER_SEC)
+}
+
+/// ADR-0013 §11.11's `gw_peer_achieved_bps`, as arithmetic over an observation.
+///
+/// `docs/testing-strategy.md` §P06 designates the pair as the fairness oracle:
+/// "the assertion is `gw_peer_achieved_bps(B) ≥ gw_peer_floor_share_bps(B)`
+/// sustained, reached within 100 ms".
+///
+/// # What this is, and what it deliberately is not
+///
+/// ADR-0013 names the gauge in one table row — "`gw_peer_floor_share_bps` /
+/// `gw_peer_achieved_bps` | gauge | peer | **The P06 fairness oracle**" — and
+/// defines `achieved` nowhere: no unit, no window, no sampling interval. So what
+/// is written here is only the part that is not a choice: bits per second is
+/// bytes over an interval, and that conversion is the same on every platform.
+///
+/// The **measurement** is not here and cannot be. `lib.rs` states this crate's
+/// shape — "This crate decides; it does not forward … none of them touches a
+/// packet" — and ADR-0018 §11.7 puts it below the composition root, so a rate
+/// window with a clock in it would live in `twinvpn-core` where the values live.
+/// Picking a window length here would be inventing the part of the gauge the ADR
+/// left open, in the crate least able to hold it.
+///
+/// Returns 0 for a zero-length interval rather than dividing by it: "no time has
+/// passed" has no rate, and the conservative answer is the one that cannot
+/// satisfy [`meets_floor`] by accident.
+#[must_use]
+pub fn achieved_bits_per_sec(bytes: u64, over: Duration) -> u64 {
+    let nanos = over.as_nanos();
+    if nanos == 0 {
+        return 0;
+    }
+    let bits = u128::from(bytes)
+        .saturating_mul(8)
+        .saturating_mul(1_000_000_000);
+    u64::try_from(bits / nanos).unwrap_or(u64::MAX)
+}
+
+/// MG-10's fairness predicate: a peer is at or above its guaranteed floor.
+///
+/// The comparison is `>=`, from `docs/testing-strategy.md` §P06's wording. MG-10
+/// makes falling below it "a defect, not a condition", reported as
+/// `RESOURCE.FAIRNESS.FLOOR_NOT_MET`.
+#[must_use]
+pub const fn meets_floor(achieved_bps: u64, floor_bps: u64) -> bool {
+    achieved_bps >= floor_bps
 }
 
 /// One peer's quota allowance.

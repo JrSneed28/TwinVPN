@@ -1,0 +1,62 @@
+Mutant:      M-P18-1
+Proof:       P18
+Spec:        docs/adr/ADR-0019 §11.13 P18 mutant table; ADR-0019 §11.13 oracles 2 and 4; ADR-0015 §11.2 rule 5
+Description: a catalogue miss falls back to the raw code string instead of the DOMAIN's fallback, so the reason_code becomes the headline
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-diag oracle_2_no_rendered_part_carries_the_raw_code_or_an_i18n_key
+Fails:       oracle_2_no_rendered_part_carries_the_raw_code_or_an_i18n_key
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+#
+# BOTH miss sites are mutated, and only one of them is reachable.
+#
+# `render` falls back to the domain summary in two places: when a REGISTERED
+# code's catalogue lookup misses, and when the code is not registered at all.
+# The first is unreachable in a shipped build — `build.rs` emits one entry per
+# summary key and `the_catalogue_covers_every_key_the_registry_names` asserts
+# it — so a patch touching only that site would compile, change nothing
+# observable, and be reported NOT-CAUGHT against a test that is in fact
+# correct. The unregistered path is the reachable catalogue miss, and it is
+# what the oracle drives. Both are patched so the injected defect is the one
+# the ADR names rather than half of it.
+
+diff --git a/core/crates/twinvpn-diag/src/resolve.rs b/core/crates/twinvpn-diag/src/resolve.rs
+--- a/core/crates/twinvpn-diag/src/resolve.rs
++++ b/core/crates/twinvpn-diag/src/resolve.rs
+@@ -269,13 +269,15 @@ pub fn render(
+     let (summary, summary_rung, authored) = match registered {
+         Some(c) => {
+             let entry = lookup(c.summary_key());
+             entry.map_or_else(
+                 || {
+                     (
+-                        domain_summary(domain).to_owned(),
++                        // MUTANT M-P18-1: a catalogue miss falls back to the
++                        // raw code string instead of the DOMAIN's fallback.
++                        reason_code.to_owned(),
+                         FallbackRung::DomainFallback,
+                         false,
+                     )
+                 },
+                 |e| {
+                     (
+@@ -284,13 +286,15 @@ pub fn render(
+                         e.authored,
+                     )
+                 },
+             )
+         }
+         None => (
+-            domain_summary(domain).to_owned(),
++            // MUTANT M-P18-1: a catalogue miss falls back to the raw code
++            // string instead of the DOMAIN's fallback.
++            reason_code.to_owned(),
+             FallbackRung::DomainFallback,
+             false,
+         ),
+     };
+
+     let (next_action, next_action_rung) = match registered.and_then(ReasonCode::next_action_key) {

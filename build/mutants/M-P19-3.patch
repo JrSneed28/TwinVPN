@@ -1,0 +1,61 @@
+Mutant:      M-P19-3
+Proof:       P19
+Spec:        docs/adr/ADR-0020 §15 P19 mutant table; ADR-0020 ST-23, ST-24 rows 2 and 4
+Description: ST-23 is reordered so the anchor is written after the vault commit, so a crash between the two writes leaves an advanced floor undurable and the floor set falls back to the previous epoch
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-store --test ladder a_crash_between_the_anchor_and_the_vault_cannot_lose_the_advanced_floor
+Fails:       a_crash_between_the_anchor_and_the_vault_cannot_lose_the_advanced_floor
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+#
+# WHY THE TWO EXISTING CRASH TESTS DO NOT CATCH THIS
+#
+# `ladder.rs` already has `a_crash_between_the_anchor_write_and_the_vault_commit_is_treated_as_a_rollback`
+# and `a_crash_between_the_vault_commit_and_the_second_anchor_write_is_fatal`.
+# Both FORGE the post-crash state by hand — they write an anchor at
+# `store_seq + 1` and then reopen — so they assert what `open` concludes from a
+# given on-disk state and say nothing about which state `commit` actually
+# produces. The ORDER of ST-23 steps 3 and 5 is therefore invisible to them, and
+# this mutant leaves both of them green. That is why the obligation stood as
+# MISSING-NO-ORACLE with the product already correct.
+#
+# The oracle drives `commit` for real through the ST-23 crash-injection point
+# ADR-0020 §11.17 names as a P19 observable, and reads the floor set after the
+# reopen — ADR-0020 §15 oracle (b), "A's `effective_floor_set` after open shows
+# `trust_epoch = e1`, **not** `e0`". Under ST-23's order the anchor is durable
+# first, so ST-24 row 2 classifies a rollback and the anchor's floors win.
+# Reversed, the same window leaves the vault ahead of an anchor still holding
+# the old floors; ST-24 row 4 resolves that to `max(anchor, vault)`, and
+# `vault_floors` is empty, so the maximum is the old floor set. Measured: the
+# oracle reads 5 where 9 is required.
+
+diff --git a/core/crates/twinvpn-store/src/lib.rs b/core/crates/twinvpn-store/src/lib.rs
+--- a/core/crates/twinvpn-store/src/lib.rs
++++ b/core/crates/twinvpn-store/src/lib.rs
+@@ -522,8 +522,10 @@ impl Store {
+         // deliberately wrong `vault_digest` — the vault has not been written
+         // yet, and claiming a digest for content that does not exist would make
+         // a crash here look healthy.
+-        let pre = Anchor::new(candidate.store_id, next_seq, [0u8; 32], &new_floors);
+-        self.write_anchor(&anchor_key, &pre).await?;
++        // MUTANT M-P19-3: ST-23 is reordered so the anchor is written AFTER the
++        // vault commit. Step 5 runs first; the floor advance is no longer
++        // durable in Tier 1 before Tier 2 changes.
++        vault::commit_vault(&self.paths, &image)?;
+
+         // Step 4: no hardware counter is available through this seam.
+         let _ = proposal.advances_a_trust_floor();
+@@ -534,8 +536,8 @@ impl Store {
+         // window with them.
+         self.crashes_at(CommitCrash::BetweenAnchorAndVault)?;
+
+-        // Step 5.
+-        vault::commit_vault(&self.paths, &image)?;
++        let pre = Anchor::new(candidate.store_id, next_seq, [0u8; 32], &new_floors);
++        self.write_anchor(&anchor_key, &pre).await?;
+
+         // Step 6.
+         let post = Anchor::new(

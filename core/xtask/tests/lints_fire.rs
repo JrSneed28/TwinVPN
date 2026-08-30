@@ -553,6 +553,125 @@ fn cd_i5_does_not_report_an_unwired_skeleton_composition_root() {
 }
 
 // ---------------------------------------------------------------------------
+// U-22
+// ---------------------------------------------------------------------------
+//
+// Phase 1 ships no updater, so U-22 finds nothing to deny on the real
+// workspace. Every assertion that the rule WORKS therefore lives here, against
+// a planted edge -- which is the same reason `checks` is a set of pure
+// functions over data in the first place.
+
+/// A workspace in which `twinvpn-update` exists and `linker` links it.
+fn updater_workspace(linker: &str, deps: &[&str]) -> Workspace {
+    ws(vec![
+        dp("twinvpn-types", &[]),
+        dp("twinvpn-update", &["twinvpn-types"]),
+        dp("twinvpn-store", &["twinvpn-types"]),
+        dp(linker, deps),
+    ])
+}
+
+#[test]
+fn u22_fires_on_the_edge_from_the_connection_state_machine() {
+    // ADR-0021 §11.17 `M-P20-7`: "The updater module is linked from the
+    // connection state machine" -> "The §11.9 U-22 build-time dependency
+    // assertion fails in T1". This is that assertion failing.
+    let workspace = updater_workspace("twinvpn-session", &["twinvpn-store", "twinvpn-update"]);
+    let found = checks::u22_updater_unlinked(&workspace);
+    assert_eq!(rules(&found), vec!["U-22"], "{found:?}");
+    assert!(
+        found[0].detail.contains("twinvpn-session"),
+        "{:?}",
+        found[0]
+    );
+    assert!(found[0].detail.contains("directly"), "{:?}", found[0]);
+}
+
+#[test]
+fn u22_fires_on_a_transitive_edge_no_manifest_grep_would_find() {
+    // U-22 denies an INBOUND EDGE, and an edge laundered through one
+    // intermediate crate is still one. `twinvpn-session` names only
+    // `twinvpn-store` here; the link is real all the same.
+    let workspace = ws(vec![
+        dp("twinvpn-types", &[]),
+        dp("twinvpn-update", &["twinvpn-types"]),
+        dp("twinvpn-store", &["twinvpn-types", "twinvpn-update"]),
+        dp("twinvpn-session", &["twinvpn-store"]),
+    ]);
+    let found = checks::u22_updater_unlinked(&workspace);
+    assert!(
+        found.iter().any(|v| v.detail.contains("twinvpn-session")),
+        "U-22 did not fire on a transitive edge: {found:?}"
+    );
+    assert!(
+        found.iter().any(|v| v.detail.contains("transitively")),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn u22_fires_for_every_crate_class_the_rule_names() {
+    // The four ADR-0021 §11.9 enumerates -- tunnel engine, connection state
+    // machine, platform network adapter, policy engine -- one planted edge each,
+    // so no row of that mapping can be dropped without a test going red.
+    for linker in [
+        "twinvpn-tunnel",
+        "twinvpn-session",
+        "twinvpn-platform",
+        "twinvpn-platform-linux",
+        "twinvpn-enforce",
+        "twinvpn-dns",
+    ] {
+        let workspace = updater_workspace(linker, &["twinvpn-update"]);
+        let found = checks::u22_updater_unlinked(&workspace);
+        assert_eq!(rules(&found), vec!["U-22"], "U-22 missed `{linker}`");
+    }
+}
+
+#[test]
+fn u22_permits_the_updater_to_be_linked_from_above_the_composition_root() {
+    // U-22 denies INBOUND edges from four named places, not every edge: something
+    // has to drive the updater. A rule that denied all of them would forbid the
+    // feature rather than isolate it.
+    let workspace = updater_workspace("twinvpn-core", &["twinvpn-store", "twinvpn-update"]);
+    assert!(
+        checks::u22_updater_unlinked(&workspace).is_empty(),
+        "{:?}",
+        checks::u22_updater_unlinked(&workspace)
+    );
+}
+
+#[test]
+fn u22_does_not_count_a_dev_dependency_as_a_link() {
+    // The same reasoning as CD-I5 and `ownership.md` §10.8 M-5: U-22 is about
+    // what the SHIPPED artifact links, and a test binary is not that artifact.
+    let workspace = ws(vec![
+        dp("twinvpn-types", &[]),
+        dp("twinvpn-update", &["twinvpn-types"]),
+        dp_with_dev("twinvpn-session", &["twinvpn-types"], &["twinvpn-update"]),
+    ]);
+    assert!(
+        checks::u22_updater_unlinked(&workspace).is_empty(),
+        "{:?}",
+        checks::u22_updater_unlinked(&workspace)
+    );
+}
+
+#[test]
+fn u22_is_silent_on_a_workspace_with_no_updater() {
+    // Today's state, asserted rather than assumed. U-22 is a standing rule; it
+    // must not manufacture a violation out of the updater's absence, and it must
+    // not be quietly deleted for being inert either -- the tests above are what
+    // stop the second thing from being invisible.
+    let workspace = ws(vec![
+        dp("twinvpn-types", &[]),
+        dp("twinvpn-store", &["twinvpn-types"]),
+        dp("twinvpn-session", &["twinvpn-store"]),
+    ]);
+    assert!(checks::u22_updater_unlinked(&workspace).is_empty());
+}
+
+// ---------------------------------------------------------------------------
 // The real workspace
 // ---------------------------------------------------------------------------
 

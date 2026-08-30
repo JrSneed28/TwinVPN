@@ -1,0 +1,37 @@
+Mutant:      M-P18-3
+Proof:       P18
+Spec:        docs/adr/ADR-0019 §11.13 P18 mutant table; ADR-0019 §11.13 oracle 4; ADR-0015 §11.2 rule 5
+Description: an unknown code renders the constant "Unknown error" instead of its own DOMAIN's fallback, so all sixteen domains collapse to one sentence
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-diag oracle_4_an_unknown_code_degrades_to_its_own_domain
+Fails:       oracle_4_an_unknown_code_degrades_to_its_own_domain
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+#
+# The oracle asserts the sixteen renders are PAIRWISE DISTINCT rather than
+# comparing each against `domain_summary`. Comparing against the function under
+# mutation would move with the defect and assert nothing — which is why this
+# obligation stood as MISSING-NO-ORACLE while the product was already correct.
+
+diff --git a/core/crates/twinvpn-diag/src/resolve.rs b/core/crates/twinvpn-diag/src/resolve.rs
+--- a/core/crates/twinvpn-diag/src/resolve.rs
++++ b/core/crates/twinvpn-diag/src/resolve.rs
+@@ -369,11 +369,10 @@ fn lookup(key: &str) -> Option<&'static CatalogueEntry> {
+         .map(|i| &ENTRIES[i])
+ }
+
+-fn domain_summary(domain: Domain) -> &'static str {
+-    find(DOMAIN_SUMMARY, domain).unwrap_or(
+-        "TwinVPN reported a condition this version does not recognise. Create a diagnostic \
+-         report and share it with support.",
+-    )
++fn domain_summary(_domain: Domain) -> &'static str {
++    // MUTANT M-P18-3: an unknown code renders one constant instead of its own
++    // DOMAIN's fallback, so all sixteen domains collapse to the same sentence.
++    "Unknown error"
+ }
+
+ fn domain_next_action(domain: Domain) -> &'static str {

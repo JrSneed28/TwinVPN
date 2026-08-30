@@ -552,3 +552,101 @@ pub fn cd_i5_composition_root_wired(workspace: &Workspace) -> Vec<Violation> {
     }
     out
 }
+
+// ---------------------------------------------------------------------------
+// U-22 — the updater is never linked by the datapath or the state machine
+// ---------------------------------------------------------------------------
+
+/// The updater crate ADR-0021 places outside the datapath.
+///
+/// The spelling is ADR-0021's own: the `UPDATE` socket-registry class filter it
+/// requests in §11.18 (b) is already named `twinvpn-update` in this workspace,
+/// in `twinvpn-platform-windows`' WFP filter set.
+///
+/// Phase 1 ships no updater, so on today's workspace this check has nothing to
+/// deny. That is the intended state, not a gap: U-22 is a **standing**
+/// assertion, so that the moment the crate lands the denied edge is a build
+/// failure rather than a review comment. [`u22_updater_unlinked`] is exercised
+/// against a planted edge in `tests/lints_fire.rs`, which is what makes it a
+/// mechanism rather than a claim about itself.
+pub const UPDATER_CRATE: &str = "twinvpn-update";
+
+/// Whether U-22 denies `crate_name` an edge to the updater.
+///
+/// ADR-0021 §11.9 rule U-22: "The updater is a module with **no** inbound edge
+/// from the tunnel engine, the connection state machine, the platform network
+/// adapter, or the policy engine." Those four map onto this workspace's crate
+/// set by each crate's own manifest description:
+///
+/// | ADR-0021 §11.9 names | crate |
+/// |---|---|
+/// | the tunnel engine | `twinvpn-tunnel` — "L-DATA handshake driver, rekey scheduling, replay window, key state" |
+/// | the connection state machine | `twinvpn-session` — "the authoritative connection state machine" |
+/// | the platform network adapter | `twinvpn-platform` — "the platform adapter TRAIT only ... this crate is the seam" — and its `twinvpn-platform-*` implementations |
+/// | the policy engine | `twinvpn-enforce` — "kill-switch latch, reconciler and desired-ruleset computation" — and `twinvpn-dns`, which evaluates `DNSPolicy` |
+///
+/// The set is taken as the whole of [`DATA_PLANE`] plus the platform adapter
+/// crates rather than as four hand-picked names, because ADR-0021 §8 states the
+/// same rule more broadly — "§11.9 forbids **the datapath** and connection state
+/// machine from linking the updater module at all" — and [`DATA_PLANE`] is
+/// already this file's spelling of the datapath.
+#[must_use]
+pub fn u22_denies_the_edge(crate_name: &str) -> bool {
+    DATA_PLANE.contains(&crate_name)
+        || crate_name == "twinvpn-platform"
+        || crate_name.starts_with("twinvpn-platform-")
+}
+
+/// Runs U-22 over the workspace crate graph.
+///
+/// ADR-0021 §11.9 rule U-22 — the no-link assertion: "This is asserted at
+/// **build time** by extending the dependency-graph check that ADR-0002 §11.8
+/// step 3 already runs in T1: the data-plane and state-machine modules MUST NOT
+/// link the updater. A mutant that adds the edge exists and must fail the check
+/// (§11.17, `M-P20-7`)." This function is that extension, and `M-P20-7` is that
+/// mutant.
+///
+/// Like [`cd_i5`] this is a **graph** check rather than a manifest grep: U-22
+/// denies an *inbound edge*, and an edge laundered through one intermediate
+/// crate is still an inbound edge. A directly declared dependency is reported
+/// even when the updater is not a workspace member, because a path or registry
+/// dependency on it links exactly the same code.
+///
+/// Dev-dependencies are not edges here, for the reason
+/// [`Package::non_dev_dependencies`](crate::manifest::Package::non_dev_dependencies)
+/// gives for CD-I5: U-22 is about what the shipped artifact links, and a test
+/// binary is not the shipped artifact.
+#[must_use]
+pub fn u22_updater_unlinked(workspace: &Workspace) -> Vec<Violation> {
+    let mut out = Vec::new();
+
+    for package in &workspace.packages {
+        if !u22_denies_the_edge(&package.name) {
+            continue;
+        }
+        let direct = package
+            .non_dev_dependencies
+            .iter()
+            .any(|d| d == UPDATER_CRATE);
+        let transitive = workspace
+            .transitive_workspace_deps(&package.name)
+            .contains(UPDATER_CRATE);
+        if !direct && !transitive {
+            continue;
+        }
+        let how = if direct { "directly" } else { "transitively" };
+        out.push(Violation {
+            rule: "U-22",
+            location: package.manifest_path.clone(),
+            detail: format!(
+                "`{}` links `{UPDATER_CRATE}` {how}; ADR-0021 §11.9 U-22 gives the updater \
+                 no inbound edge from the tunnel engine, the connection state machine, the \
+                 platform network adapter or the policy engine, which is what makes an \
+                 unreachable update service structurally unable to affect a Session",
+                package.name
+            ),
+        });
+    }
+
+    out
+}

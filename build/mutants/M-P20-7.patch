@@ -1,0 +1,101 @@
+Mutant:      M-P20-7
+Proof:       P20
+Spec:        docs/adr/ADR-0021 §11.17 P20 mutant table; ADR-0021 §11.9 U-22, §8 C1
+Description: The updater module is linked from the connection state machine, which is the inbound edge ADR-0021 §11.9 U-22 denies. The mutant exists to prove the U-22 build-time dependency assertion is live.
+Workspace:   core
+Oracle:      cargo run -q -p xtask -- lint
+Fails:       U-22
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+#
+# WHY THIS PATCH ADDS A CRATE, WHICH NO OTHER MUTANT DOES
+#
+# ADR-0021 §11.17 enumerates the defect as "the updater module is linked from
+# the connection state machine", and the expected failure as "the §11.9 U-22
+# build-time dependency assertion fails in T1". The release commit ships NO
+# updater — ADR-0021 is a later phase, and build/proof/register.tsv's P20 row
+# says so — so the enumerated defect has no subject to inject unless the mutant
+# supplies one. It supplies the smallest thing that can be linked: a crate with
+# one const fn and no dependencies.
+#
+# That is stated here rather than left to be discovered, because it bounds what
+# this mutant is evidence FOR. It shows that the U-22 assertion rejects the
+# denied edge end to end, through `cargo run -p xtask -- lint`, exactly as
+# M-P15-7 shows for CD-I5. It shows NOTHING about an updater's behaviour, its
+# manifest handling, its rollback refusal or its apply sequence — those are
+# M-P20-1, -2, -4, -5 and -6, and they remain undischarged because no updater
+# exists to defect. register.tsv keeps P20 NOT-RUNNABLE for that reason.
+#
+# The other half of U-22's evidence is core/xtask/tests/lints_fire.rs, which
+# plants the same edge — plus the transitive form, the dev-dependency form and
+# each crate class the rule names — against the pure check function.
+
+diff --git a/core/Cargo.toml b/core/Cargo.toml
+--- a/core/Cargo.toml
++++ b/core/Cargo.toml
+@@ -30,6 +30,8 @@ members = [
+   "crates/twinvpn-enforce",
+   "crates/twinvpn-gateway",
+   "crates/twinvpn-session",
++  # MUTANT M-P20-7: the updater module ADR-0021 §11.9 U-22 isolates.
++  "crates/twinvpn-update",
+   "crates/twinvpn-diag",
+   "crates/twinvpn-mgmt",
+   "crates/twinvpn-core",
+diff --git a/core/crates/twinvpn-session/Cargo.toml b/core/crates/twinvpn-session/Cargo.toml
+--- a/core/crates/twinvpn-session/Cargo.toml
++++ b/core/crates/twinvpn-session/Cargo.toml
+@@ -15,6 +15,9 @@ repository.workspace   = true
+ description = "the authoritative connection state machine (docs/reliability.md §4)"
+
+ [dependencies]
++# MUTANT M-P20-7: the connection state machine links the updater module, which
++# is the inbound edge ADR-0021 §11.9 U-22 denies.
++twinvpn-update        = { path = "../twinvpn-update" }
+ twinvpn-types         = { workspace = true }
+ twinvpn-env           = { workspace = true }
+ twinvpn-schema        = { workspace = true }
+diff --git a/core/crates/twinvpn-update/Cargo.toml b/core/crates/twinvpn-update/Cargo.toml
+new file mode 100644
+--- /dev/null
++++ b/core/crates/twinvpn-update/Cargo.toml
+@@ -0,0 +1,16 @@
++# MUTANT M-P20-7 SCAFFOLD - NOT PRODUCT CODE.
++#
++# The release commit ships no updater (ADR-0021 is a later phase), so the defect
++# ADR-0021 §11.17 enumerates - "the updater module is linked from the connection
++# state machine" - has no subject to inject unless the mutant supplies one. This
++# is the smallest module that can be linked; it does nothing.
++[package]
++name    = "twinvpn-update"
++version.workspace      = true
++edition.workspace      = true
++rust-version.workspace = true
++license.workspace      = true
++repository.workspace   = true
++description = "MUTANT M-P20-7 scaffold: the updater module ADR-0021 §11.9 U-22 isolates"
++
++[dependencies]
+diff --git a/core/crates/twinvpn-update/src/lib.rs b/core/crates/twinvpn-update/src/lib.rs
+new file mode 100644
+--- /dev/null
++++ b/core/crates/twinvpn-update/src/lib.rs
+@@ -0,0 +1,15 @@
++//! MUTANT M-P20-7 scaffold: the updater module, doing nothing.
++//!
++//! ADR-0021 §11.9 rule U-22 gives this module no inbound edge from the tunnel
++//! engine, the connection state machine, the platform network adapter or the
++//! policy engine. The mutant adds exactly that edge, from `twinvpn-session`.
++
++#![forbid(unsafe_code)]
++#![warn(missing_docs)]
++
++/// The scheduled update check ADR-0021 §11.9 U-23 makes a task rather than a
++/// step in any connect, reconnect, migrate, rekey or teardown path.
++#[must_use]
++pub const fn is_scheduled_task() -> bool {
++    true
++}

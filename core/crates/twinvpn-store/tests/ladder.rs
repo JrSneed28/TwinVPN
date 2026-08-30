@@ -225,6 +225,162 @@ fn a_restored_older_vault_cannot_lower_the_trust_epoch() {
     store.close().expect("close");
 }
 
+/// Every file in `store_root`, as bytes. ADR-0020 §15 step 1 takes "a
+/// **byte-level** snapshot of A's `store_root` — every file in §11.5's file
+/// set", not one named file.
+fn snapshot_store_root(dir: &std::path::Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read store_root").flatten() {
+        if entry.path().is_file() {
+            let bytes = std::fs::read(entry.path()).expect("read file");
+            out.push((entry.file_name(), bytes));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Puts `snapshot` back verbatim, removing anything that was not in it.
+fn restore_store_root(dir: &std::path::Path, snapshot: &[(std::ffi::OsString, Vec<u8>)]) {
+    std::fs::remove_dir_all(dir).expect("clear store_root");
+    std::fs::create_dir_all(dir).expect("recreate store_root");
+    for (name, bytes) in snapshot {
+        std::fs::write(dir.join(name), bytes).expect("restore file");
+    }
+}
+
+/// **Proof test P19, variant 2 — ST-22 co-location, driven rather than assumed.**
+///
+/// ADR-0020 §15 step 3: "Stop A's daemon. Restore `store_root` verbatim from the
+/// `t0` snapshot. **Do not touch Tier 1.**" That instruction only means anything
+/// if the anchor is *not in* `store_root`: ST-22 co-locates it with the identity
+/// key in Tier 1, reached through `twinvpn_platform::SecureStore`, and
+/// `anchor.rs` says so — "Co-location is the shell's to provide — the core
+/// reaches Tier 1 only through `twinvpn_platform::SecureStore`".
+///
+/// So this restores the WHOLE store root, which is what a file-level backup
+/// actually does, and asserts the floor still stands at `e1`. `M-P19-4` puts the
+/// anchor in a plain file beside the vault; the same restore then carries the
+/// old anchor back with it and the device comes up at `e0`.
+///
+/// `a_restored_older_vault_cannot_lower_the_trust_epoch` cannot see that: it
+/// restores `vault.tv` alone, so an anchor moved to a sibling file survives its
+/// restore untouched and the test stays green against the defect.
+#[test]
+fn a_restored_store_root_cannot_lower_a_floor_because_the_anchor_is_not_in_it() {
+    let f = Fixture::new("p19-anchor-colocation");
+
+    // t0, at e0.
+    let mut store = f.open(true).expect("open");
+    drive(
+        store.commit(
+            Transaction::new()
+                .write(peer_key(), b"peer@e0".to_vec(), true, 1)
+                .advance_floor(FloorId::TrustEpoch, 5),
+        ),
+    )
+    .expect("commit e0");
+    store.close().expect("close");
+
+    let snapshot = snapshot_store_root(&f.dir);
+    assert!(
+        !snapshot.is_empty(),
+        "the snapshot is empty, so the restore below would assert nothing"
+    );
+
+    // The device advances to e1.
+    let mut store = f.open(true).expect("reopen");
+    drive(
+        store.commit(
+            Transaction::new()
+                .write(peer_key(), b"peer@e1".to_vec(), true, 2)
+                .advance_floor(FloorId::TrustEpoch, 9),
+        ),
+    )
+    .expect("commit e1");
+    assert_eq!(store.floors().get(&FloorId::TrustEpoch), 9);
+    store.close().expect("close");
+
+    // §15 step 3. Tier 1 is the mock's in-memory item map and is NOT touched.
+    restore_store_root(&f.dir, &snapshot);
+
+    let store = f.open(true).expect("open after the store_root restore");
+    assert_eq!(
+        store.floors().get(&FloorId::TrustEpoch),
+        9,
+        "ADR-0020 §15 variant 2: restoring store_root must not lower the floor. \
+         It can only fail to if the anchor lives OUTSIDE store_root, in Tier 1, \
+         which is what ST-22's co-location buys."
+    );
+    match store.outcome().state {
+        AnchorState::VaultRolledBack { .. } => {}
+        ref other => panic!("expected a rollback classification, got {other:?}"),
+    }
+    assert!(store.outcome().suspend_granted_authority);
+    store.close().expect("close");
+}
+
+/// **Proof test P19, oracle (b), through the ST-23 crash-injection point.**
+///
+/// ADR-0020 §15 oracle (b): "A's `effective_floor_set` after open shows
+/// `trust_epoch = e1`, **not** `e0`." ADR-0020 §11.17 lists the injection point
+/// itself as a P19 observable — "the ST-23 step number at which the process is
+/// killed" — and this is that observable, driven.
+///
+/// The commit is killed in the window **between the anchor write and the vault
+/// commit**. Under ST-23's order the anchor advanced first, so the new floor is
+/// already durable in Tier 1 when the process dies: ST-24 row 2 sees
+/// `anchor.store_seq > vault.store_seq`, classifies a rollback, and the
+/// anchor's floors win. Reverse steps 3 and 5 — which is exactly `M-P19-3` —
+/// and the same window leaves the vault ahead of an anchor still holding `e0`;
+/// ST-24 row 4 resolves that to `max(anchor, vault)`, and the vault-side floor
+/// mirror is empty, so the maximum is the OLD floor set and the advance is lost.
+///
+/// This is the assertion `a_restored_older_vault_cannot_lower_the_trust_epoch`
+/// cannot make: that test never interrupts a commit, so the ORDER of steps 3
+/// and 5 is invisible to it and a reordered build passes it unchanged.
+#[test]
+fn a_crash_between_the_anchor_and_the_vault_cannot_lose_the_advanced_floor() {
+    let f = Fixture::new("p19-crash-st23");
+
+    // e0 — the floor the attacker wants to come back to.
+    let mut store = f.open(true).expect("open");
+    let tx = Transaction::new()
+        .write(peer_key(), b"peer@e0".to_vec(), true, 1)
+        .advance_floor(FloorId::TrustEpoch, 5);
+    drive(store.commit(tx)).expect("commit e0");
+    store.close().expect("close");
+
+    // e1 — advanced by a commit that is killed at the ST-23 boundary.
+    let mut store = f.open(true).expect("reopen");
+    store.inject_commit_crash(Some(twinvpn_store::CommitCrash::BetweenAnchorAndVault));
+    let tx = Transaction::new()
+        .write(peer_key(), b"peer@e1".to_vec(), true, 2)
+        .advance_floor(FloorId::TrustEpoch, 9);
+    match drive(store.commit(tx)) {
+        Err(StoreError::CommitCrashInjected { .. }) => {}
+        other => panic!("the injected crash did not fire: {other:?}"),
+    }
+    // Release the single-opener lock and drop the handle. `close` writes
+    // nothing — it only releases the lock — so the ST-23 state left on disk is
+    // exactly what the kill left. It stands in for the lock being reaped after
+    // the process died, which is not what this test is about; whether a STALE
+    // lock is recovered is `STORE.LOCK_CONTENDED`'s own question.
+    store.close().expect("release the lock");
+    drop(store);
+
+    // The reopen is the oracle.
+    let store = f.open(true).expect("open after the injected crash");
+    assert_eq!(
+        store.floors().get(&FloorId::TrustEpoch),
+        9,
+        "ADR-0020 §15 oracle (b): the floor set after open must show e1, not e0. \
+         A crash between ST-23's steps must never lose an advanced floor — which \
+         is only true while the anchor is written BEFORE the vault."
+    );
+    store.close().expect("close");
+}
+
 /// **Attack test — ST-23 step 2.** A commit that would lower a floor is refused,
 /// and **nothing** is written: not the anchor, not the vault. A partial write
 /// here would be the split state ST-12b exists to prevent.

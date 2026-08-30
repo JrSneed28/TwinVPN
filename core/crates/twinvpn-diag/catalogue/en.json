@@ -56,6 +56,31 @@
     "UPDATE": "Try the update again, or install the latest release manually."
   },
 
+  "_comment_remediation_class": [
+    "ADR-0019 §11.13 oracle 1: 'Three non-empty parts are produced. Where",
+    "`user_actionable == false`, part 3 is the `remediation_class` sentence --",
+    "the field is never empty.'",
+    "",
+    "So a code an Owner cannot act on still gets a part 3, and it is sourced from",
+    "the SHAPE of the remediation rather than from the code. That is the same",
+    "reason ADR-0018 F-4 puts `remediation_class` in the resolved attribute set:",
+    "'so a surface can pick an affordance for a code it has never seen'. One",
+    "sentence per `twinvpn.v1.RemediationClass` value; the build script requires",
+    "all nine."
+  ],
+
+  "remediation_class": {
+    "NONE": "Nothing to do. This is information about what TwinVPN did, not a problem you need to fix.",
+    "WAIT": "Nothing to do. TwinVPN is already retrying and will recover on its own.",
+    "LOCAL_ACTION": "This needs an action on this device.",
+    "PEER_ACTION": "This needs an action on the other device, not on this one.",
+    "POLICY_CHANGE": "This needs a protection setting or a permission to be changed.",
+    "UPDATE_REQUIRED": "This needs TwinVPN to be updated on this device or on the other one.",
+    "NETWORK_CHANGE": "This network is the obstacle. Try a different network, or ask whoever runs this one.",
+    "PERMISSION_GRANT": "This needs a permission to be granted in this device's system settings.",
+    "REPORT_DEFECT": "This is a defect in TwinVPN. Create a diagnostic report and share it with support."
+  },
+
   "entries": {
     "reason.internal_core_panic.summary": {
       "text": "TwinVPN caught a defect in itself and stopped the affected component before it could do harm. Your protection rules are still in place."

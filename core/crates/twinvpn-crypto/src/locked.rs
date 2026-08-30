@@ -345,8 +345,15 @@ fn page_size() -> usize {
     }
 }
 
+/// Applies the three POSIX protections to `[ptr, ptr + len)` and reports what
+/// the kernel granted.
+///
+/// `pub(crate)` so [`crate::arena`] applies the SAME three calls to the whole
+/// arena at creation (ADR-0022 LC-30(1)) rather than growing a second, subtly
+/// different copy. There is one answer in this crate to "what did the kernel
+/// grant", and it is [`LockedMemoryReport`].
 #[cfg(unix)]
-fn apply_protections(ptr: *mut u8, len: usize) -> LockedMemoryReport {
+pub(crate) fn apply_protections(ptr: *mut u8, len: usize) -> LockedMemoryReport {
     // SAFETY: `ptr` is a live, page-aligned allocation of exactly `len` bytes.
     // `mlock` and `madvise` read no caller memory and only change kernel-side
     // attributes of that range. Every return value is checked; none of these
@@ -362,8 +369,9 @@ fn apply_protections(ptr: *mut u8, len: usize) -> LockedMemoryReport {
     }
 }
 
+/// Releases what [`apply_protections`] took. `pub(crate)` for the same reason.
 #[cfg(unix)]
-fn release_protections(ptr: *mut u8, len: usize) {
+pub(crate) fn release_protections(ptr: *mut u8, len: usize) {
     // SAFETY: as `apply_protections`. A failure is ignored: the region has
     // already been zeroed, and `dealloc` must proceed regardless.
     unsafe { libc::munlock(ptr.cast(), len) };
@@ -375,7 +383,7 @@ fn page_size() -> usize {
 }
 
 #[cfg(not(unix))]
-fn apply_protections(_ptr: *mut u8, _len: usize) -> LockedMemoryReport {
+pub(crate) fn apply_protections(_ptr: *mut u8, _len: usize) -> LockedMemoryReport {
     // No POSIX memory-advice API. The fact is *reported*, per CB-6a, rather
     // than the allocation being refused: refusing would make the core
     // unbuildable on a target the build matrix includes.
@@ -383,7 +391,7 @@ fn apply_protections(_ptr: *mut u8, _len: usize) -> LockedMemoryReport {
 }
 
 #[cfg(not(unix))]
-fn release_protections(_ptr: *mut u8, _len: usize) {}
+pub(crate) fn release_protections(_ptr: *mut u8, _len: usize) {}
 
 #[cfg(test)]
 mod tests {
