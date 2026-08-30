@@ -161,18 +161,27 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim >/dev/null
 #   sim    / full        what the integration suite links
 #   sim    / core-lite   so a simulator build of the APP links the same profile
 #                        the device build does, rather than silently the other
-echo "::group::compile the shared core (twinvpn-ffi: device + simulator, full + core-lite)"
+#
+# One `apple_build_step` per archive rather than one group around all four: the
+# output is captured for the diagnostics artifact AND, when a build fails, its
+# diagnostic is echoed again outside the group it failed inside. Run
+# 33286355061 is why — see `apple_show_failure`'s header in ci-common-apple.sh.
 core_ok=true
 for target in aarch64-apple-ios aarch64-apple-ios-sim; do
-  "$SHELL_DIR/Scripts/build-core.sh" --target "$target" --profile release || core_ok=false
-  "$SHELL_DIR/Scripts/build-core.sh" --target "$target" --profile release --features core-lite || core_ok=false
+  apple_build_step "compile twinvpn-ffi (full) for $target" \
+    "$LOGDIR/core-$target-full.log" \
+    "$SHELL_DIR/Scripts/build-core.sh" --target "$target" --profile release \
+    || core_ok=false
+  apple_build_step "compile twinvpn-ffi (core-lite) for $target" \
+    "$LOGDIR/core-$target-core-lite.log" \
+    "$SHELL_DIR/Scripts/build-core.sh" --target "$target" --profile release --features core-lite \
+    || core_ok=false
 done
 if [ "$core_ok" = true ]; then
   compiled=true
 else
-  notes="the shared core did not compile for aarch64-apple-ios and/or aarch64-apple-ios-sim"
+  notes="the shared core did not compile for aarch64-apple-ios and/or aarch64-apple-ios-sim; the failing build's diagnostic is echoed above and the whole log is in build/ci/logs/ios/core-*.log"
 fi
-echo "::endgroup::"
 
 # --- 1b. the size budget, which R-32 makes a blocker ------------------------
 #
@@ -188,8 +197,18 @@ fi
 if [ "$compiled" = true ]; then
   echo "::group::stage twinvpn.h and generate the project"
   "$SHELL_DIR/Scripts/stage-headers.sh"
-  ( cd "$SHELL_DIR" && xcodegen generate )
+  set +e
+  ( cd "$SHELL_DIR" && xcodegen generate ) 2>&1 | tee "$LOGDIR/xcodegen.log"
+  gen_rc=${PIPESTATUS[0]}
+  set -e
   echo "::endgroup::"
+  # Fatal — there is no project to build — but the generator's own complaint is
+  # echoed outside the group first. Before this, `set -e` killed the script
+  # mid-group and the reason stayed folded away.
+  if [ "$gen_rc" -ne 0 ]; then
+    apple_show_failure "xcodegen generate (exit $gen_rc)" "$LOGDIR/xcodegen.log"
+    exit "$gen_rc"
+  fi
 fi
 
 # --- 3. BUILD THE PRODUCTION TARGETS, for the real device SDK ---------------
@@ -220,6 +239,8 @@ if [ "$compiled" = true ]; then
   if [ "$build_rc" -eq 0 ]; then
     linked=true
   else
+    apple_show_failure "build TwinVPN.app + TwinVPNProvider.appex (exit $build_rc)" \
+      "$LOGDIR/build-products.log"
     notes="${notes:+$notes; }the iOS app and/or NetworkExtension did not link the shared core; see build/ci/logs/ios/build-products.log"
     exit_code=$build_rc
   fi
@@ -336,6 +357,7 @@ print(best[1])
     received=true
     shutdown=true
   else
+    apple_show_failure "XCTest ($SCHEME, exit $test_rc)" "$TEST_LOG"
     notes="${notes:+$notes; }the XCTest bundle failed; see $TEST_LOG"
     exit_code=$test_rc
   fi
@@ -388,6 +410,11 @@ cat > "$EVIDENCE" <<JSON
   "test_command": "${TEST_CMD:-<not reached>}",
   "test_exit_code": $exit_code,
   "artifacts": [
+    "build/ci/logs/ios/core-aarch64-apple-ios-full.log",
+    "build/ci/logs/ios/core-aarch64-apple-ios-core-lite.log",
+    "build/ci/logs/ios/core-aarch64-apple-ios-sim-full.log",
+    "build/ci/logs/ios/core-aarch64-apple-ios-sim-core-lite.log",
+    "build/ci/logs/ios/xcodegen.log",
     "build/ci/logs/ios/build-products.log",
     "build/ci/logs/ios/xctest.log",
     "build/ci/logs/ios/simulators.log"
