@@ -228,13 +228,29 @@ restores the machine. The checkpoint is that something.
 ### 1. Create the guest
 
 Two scripts do this; both must run **elevated**, one on the host and one in the
-guest. They exist because the ordering below is easy to get wrong in a way that
+guest.
+
+**Copy them out of the repository first.** They live in `scripts/`, but this
+repository is normally checked out inside WSL, and a script run from
+`\\wsl.localhost\...` is treated as the Internet zone — the default
+`RemoteSigned` execution policy then refuses it. Copy them to a local path and
+run from there:
+
+```powershell
+mkdir C:\Users\<you>\twinvpn-rig
+copy \\wsl.localhost\Ubuntu\home\<you>\TwinVPN\scripts\twinvpn-rig-*.ps1 C:\Users\<you>\twinvpn-rig
+cd C:\Users\<you>\twinvpn-rig
+```
+
+**Invoke them with a leading `.\`.** PowerShell reads an unprefixed
+`dir\name.ps1` as its `Module\Command` syntax, so `scripts\twinvpn-rig-host.ps1`
+fails with `The module 'scripts' could not be loaded`. They exist because the ordering below is easy to get wrong in a way that
 only shows up on the *second* run.
 
 On the Hyper-V host:
 
 ```powershell
-scripts\twinvpn-rig-host.ps1 -Action create -IsoPath C:\iso\Win11_24H2.iso
+.\twinvpn-rig-host.ps1 -Action create -IsoPath C:\iso\Win11_24H2.iso
 ```
 
 It defaults the VHDX to `C:\Hyper-V` and warns if the drive cannot hold the
@@ -247,7 +263,7 @@ exists to discard, and restoring to it would start the next run already dirty.
 Install Windows 11 24H2 or Server 2022+, then, **inside the guest**, elevated:
 
 ```powershell
-scripts\twinvpn-rig-guest.ps1 -Action verify
+.\twinvpn-rig-guest.ps1 -Action verify
 ```
 
 It checks each requirement against the machine and prints the fix for anything
@@ -272,7 +288,7 @@ runner**, download and extract the runner package to `C:\actions-runner` using
 the commands that page shows (its URL and hash change per release), then:
 
 ```powershell
-scripts\twinvpn-rig-guest.ps1 -Action register `
+.\twinvpn-rig-guest.ps1 -Action register `
     -RepoUrl https://github.com/<owner>/<repo> `
     -Token <TOKEN> `
     -RunnerAccount .\<admin-account> `
@@ -303,7 +319,7 @@ Back on the host, **after** the runner is registered, so a restore comes back
 with the runner already installed:
 
 ```powershell
-scripts\twinvpn-rig-host.ps1 -Action checkpoint
+.\twinvpn-rig-host.ps1 -Action checkpoint
 ```
 
 ### 5. Restore between runs
@@ -311,7 +327,7 @@ scripts\twinvpn-rig-host.ps1 -Action checkpoint
 The guest cannot restore itself.
 
 ```powershell
-scripts\twinvpn-rig-host.ps1 -Action watch
+.\twinvpn-rig-host.ps1 -Action watch
 ```
 
 restores to `golden` and restarts whenever the guest stops — which an ephemeral
