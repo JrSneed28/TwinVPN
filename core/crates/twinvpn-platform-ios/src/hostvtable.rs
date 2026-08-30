@@ -46,6 +46,42 @@
 //! §10.4 carves out (`shells/ios/Sources/TwinVPNBridge/include/twinvpn_ios_bridge.h`)
 //! so Swift can install them without writing them.
 //!
+//! # Why these are `pub` SAFE functions that take raw pointers
+//!
+//! `tw_host_vtable`'s three fields are `Option<extern "C" fn(…)>` — **safe** fn
+//! pointers — so an `unsafe fn` does not coerce into one and could not be
+//! installed at all. These three were declared `unsafe` until the
+//! `twinvpn-platform-android` owner hit exactly that compiler error writing the
+//! mirror module and reported it here. It was never a live fault on iOS, and
+//! that is precisely the trap: `shells/ios` installs them from **Swift**, which
+//! bridges the imported C declaration through an untyped C function pointer and
+//! performs no Rust coercion, so nothing on this platform would have failed
+//! until someone wrote a Rust-side installer — which `shells/android/jni`
+//! already is for Android. [`tests::the_entries_coerce_into_f_9_s_slot_types`]
+//! is that missing check, executed on this host rather than deferred to the
+//! shell that would have tripped over it.
+//!
+//! `clippy::not_unsafe_ptr_arg_deref` is right in general and is suppressed per
+//! function rather than per crate: a public safe function taking a raw pointer
+//! IS a trap for a Rust caller, and the only thing that makes it acceptable here
+//! is that the sole legitimate caller is the core across `twinvpn.h`, under a
+//! contract each function restates and then **guards** — every entry checks its
+//! out-parameter for null before any write, so the worst a broken caller gets is
+//! `TW_ERR`. Dropping `unsafe fn` drops the *marking*, not the pointer work:
+//! every dereference below is still an `unsafe` block carrying a `// SAFETY:`
+//! comment that names its invariant.
+//!
+//! # Why these ARE `#[no_mangle]`, where the Android three are not
+//!
+//! The one place this module deliberately differs from
+//! `twinvpn_platform_android::hostvtable`, and the reason is the shell's
+//! language. On iOS the installer is Swift, so the entries must be reachable as
+//! C symbols out of the one archive `shells/ios` links. On Android the installer
+//! is Rust — `shells/android/jni` is itself a crate — so it names the functions
+//! directly and an export there would be a third name resolved by load order
+//! rather than by the type system. `extern "C"` is on both, because F-9's fields
+//! are C function pointers; only the symbol export differs.
+//!
 //! # Why Rust and not Swift
 //!
 //! Swift *could* fill these three — they carry no TwinVPN domain fact, so CB-2
@@ -100,11 +136,18 @@ fn guarded(body: impl FnOnce() -> i32) -> i32 {
 /// instance's, which is why this entry needs no registration and works before
 /// `twinvpn_ios_bridge_register` has been called.
 ///
-/// # Safety
+/// # The caller's contract
 ///
-/// `out` must be writable for `len` bytes, or `len` must be zero.
+/// `out` must be writable for `len` bytes, or `len` must be zero. `twinvpn.h`
+/// states it; Rust cannot mark it, because `tw_host_vtable::os_csprng` is a
+/// **safe** `extern "C" fn` pointer and an `unsafe fn` does not coerce into one.
+/// The null check below is what makes the unmarked contract survive a shell that
+/// breaks it.
+// F-9 declares this slot as a SAFE fn pointer, so this cannot be an
+// `unsafe fn`. See the module note; the null guard below is the substitute.
 #[no_mangle]
-pub unsafe extern "C" fn twinvpn_ios_os_csprng(_ctx: *mut c_void, out: *mut u8, len: usize) -> i32 {
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn twinvpn_ios_os_csprng(_ctx: *mut c_void, out: *mut u8, len: usize) -> i32 {
     if len == 0 {
         return TW_OK;
     }
@@ -132,11 +175,15 @@ pub unsafe extern "C" fn twinvpn_ios_os_csprng(_ctx: *mut c_void, out: *mut u8, 
 /// host that never sleeps. [`crate::clock::ContinuousElapsedClock`] is the same
 /// reading through the [`twinvpn_env::ElapsedClock`] trait.
 ///
-/// # Safety
+/// # The caller's contract
 ///
-/// `out` must be a live, writable `uint64_t` slot.
+/// `out` must be a live, writable `uint64_t` slot. See [`twinvpn_ios_os_csprng`]
+/// on why this is prose rather than an `unsafe fn`.
+// F-9 declares this slot as a SAFE fn pointer, so this cannot be an
+// `unsafe fn`. See the module note; the null guard below is the substitute.
 #[no_mangle]
-pub unsafe extern "C" fn twinvpn_ios_elapsed_millis(_ctx: *mut c_void, out: *mut u64) -> i32 {
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn twinvpn_ios_elapsed_millis(_ctx: *mut c_void, out: *mut u64) -> i32 {
     if out.is_null() {
         return TW_ERR;
     }
@@ -165,11 +212,15 @@ pub unsafe extern "C" fn twinvpn_ios_elapsed_millis(_ctx: *mut c_void, out: *mut
 /// the answer for a platform that has no boot identity. A fabricated sixteen
 /// bytes would make "we rebooted" and "we did not" the same fact.
 ///
-/// # Safety
+/// # The caller's contract
 ///
-/// `out` must be writable for [`BOOT_ID_LEN`] bytes.
+/// `out` must be writable for [`BOOT_ID_LEN`] bytes. See
+/// [`twinvpn_ios_os_csprng`] on why this is prose rather than an `unsafe fn`.
+// F-9 declares this slot as a SAFE fn pointer, so this cannot be an
+// `unsafe fn`. See the module note; the null guard below is the substitute.
 #[no_mangle]
-pub unsafe extern "C" fn twinvpn_ios_boot_id(_ctx: *mut c_void, out: *mut u8) -> i32 {
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn twinvpn_ios_boot_id(_ctx: *mut c_void, out: *mut u8) -> i32 {
     if out.is_null() {
         return TW_ERR;
     }
@@ -203,29 +254,67 @@ mod tests {
     /// out-parameter must be a refusal rather than a store through null.
     #[test]
     fn every_entry_refuses_a_null_out_parameter() {
-        // SAFETY: null is checked before any write, which is what this asserts.
-        unsafe {
-            assert_eq!(
-                twinvpn_ios_os_csprng(core::ptr::null_mut(), core::ptr::null_mut(), 8),
-                TW_ERR
-            );
-            assert_eq!(
-                twinvpn_ios_elapsed_millis(core::ptr::null_mut(), core::ptr::null_mut()),
-                TW_ERR
-            );
-            assert_eq!(
-                twinvpn_ios_boot_id(core::ptr::null_mut(), core::ptr::null_mut()),
-                TW_ERR
-            );
-        }
+        // No `unsafe` block, and that is the point rather than an omission: the
+        // entries are SAFE `extern "C" fn`s because `tw_host_vtable`'s fields
+        // are, so the null handling below is the only thing standing between a
+        // shell's mistake and a store through null.
+        assert_eq!(
+            twinvpn_ios_os_csprng(core::ptr::null_mut(), core::ptr::null_mut(), 8),
+            TW_ERR
+        );
+        assert_eq!(
+            twinvpn_ios_elapsed_millis(core::ptr::null_mut(), core::ptr::null_mut()),
+            TW_ERR
+        );
+        assert_eq!(
+            twinvpn_ios_boot_id(core::ptr::null_mut(), core::ptr::null_mut()),
+            TW_ERR
+        );
+    }
+
+    /// The check that was missing while these were `unsafe fn`s, and the reason
+    /// the defect could sit here undetected: Swift installs them through an
+    /// untyped C function pointer, so no Rust coercion ever happened on the
+    /// shipped path.
+    ///
+    /// `tw_host_vtable`'s three W-7 fields are `Option<extern "C" fn(…)>`, and
+    /// the load-bearing half of assigning `Some(f)` into one is that `f` coerces
+    /// to the **bare** `extern "C" fn(…)` below — the `Option` adds a niche and
+    /// no coercion. The signatures are spelled out locally because CD-I5 forbids
+    /// this crate to name `twinvpn-ffi`; `twinvpn-ffi`'s own
+    /// `tests/header_matches_rust.rs` pins them against `twinvpn.h`.
+    ///
+    /// An `unsafe fn` does not coerce into any of these, so re-marking an entry
+    /// `unsafe` fails this file rather than the first Rust-side installer
+    /// somebody writes for `shells/ios`.
+    #[test]
+    fn the_entries_coerce_into_f_9_s_slot_types() {
+        let os_csprng: extern "C" fn(*mut c_void, *mut u8, usize) -> i32 = twinvpn_ios_os_csprng;
+        let elapsed_millis: extern "C" fn(*mut c_void, *mut u64) -> i32 =
+            twinvpn_ios_elapsed_millis;
+        let boot_id: extern "C" fn(*mut c_void, *mut u8) -> i32 = twinvpn_ios_boot_id;
+        // Called through the slot, so the coercion is exercised and not merely
+        // written: a null `out` is still refused on the far side of the pointer.
+        assert_eq!(
+            os_csprng(core::ptr::null_mut(), core::ptr::null_mut(), 8),
+            TW_ERR
+        );
+        assert_eq!(
+            elapsed_millis(core::ptr::null_mut(), core::ptr::null_mut()),
+            TW_ERR
+        );
+        assert_eq!(
+            boot_id(core::ptr::null_mut(), core::ptr::null_mut()),
+            TW_ERR
+        );
     }
 
     /// A zero-length draw asks for nothing and gets it. Refusing would make the
     /// core's own "fill this empty buffer" path an entropy failure.
     #[test]
     fn a_zero_length_draw_succeeds_without_touching_the_pointer() {
-        // SAFETY: `len` is zero, so the pointer is never read or written.
-        let rc = unsafe { twinvpn_ios_os_csprng(core::ptr::null_mut(), core::ptr::null_mut(), 0) };
+        // `len` is zero, so the pointer is never read or written.
+        let rc = twinvpn_ios_os_csprng(core::ptr::null_mut(), core::ptr::null_mut(), 0);
         assert_eq!(rc, TW_OK);
     }
 
@@ -239,22 +328,20 @@ mod tests {
         let mut byte = 0u8;
         let mut millis = 0u64;
         let mut id = [0u8; BOOT_ID_LEN];
-        // SAFETY: every out-parameter is a live local of the size the entry
-        // documents.
-        unsafe {
-            assert_eq!(
-                twinvpn_ios_os_csprng(core::ptr::null_mut(), core::ptr::addr_of_mut!(byte), 1),
-                TW_ERR
-            );
-            assert_eq!(
-                twinvpn_ios_elapsed_millis(core::ptr::null_mut(), core::ptr::addr_of_mut!(millis)),
-                TW_ERR
-            );
-            assert_eq!(
-                twinvpn_ios_boot_id(core::ptr::null_mut(), id.as_mut_ptr()),
-                TW_ERR
-            );
-        }
+        // Every out-parameter is a live local of the size the entry documents,
+        // which is exactly the contract the doc comments state.
+        assert_eq!(
+            twinvpn_ios_os_csprng(core::ptr::null_mut(), core::ptr::addr_of_mut!(byte), 1),
+            TW_ERR
+        );
+        assert_eq!(
+            twinvpn_ios_elapsed_millis(core::ptr::null_mut(), core::ptr::addr_of_mut!(millis)),
+            TW_ERR
+        );
+        assert_eq!(
+            twinvpn_ios_boot_id(core::ptr::null_mut(), id.as_mut_ptr()),
+            TW_ERR
+        );
         assert_eq!(millis, 0, "a refused reading must not be written");
         assert_eq!(
             id, [0u8; BOOT_ID_LEN],
