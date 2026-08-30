@@ -12,6 +12,13 @@
 //  silently empty route list is exactly the "silent default is how one side comes
 //  to believe a fact the other never supplied" failure the seam's own comments
 //  warn about.
+//
+//  `EnforcementProgramme` used to sit below `TunnelSettingsProgramme` here and
+//  now lives in `Sources/TwinVPNShared/EnforcementProgramme.swift` — the APP is
+//  what installs the profile carrying it, and this directory is not in the app
+//  target's `sources`. That file's header carries the whole reason. What stays
+//  here is what only the extension can use: `TunnelSettingsProgramme` decodes
+//  from a `tw_ios_slice` through `BridgeHost`, and the app target has neither.
 
 import Foundation
 import NetworkExtension
@@ -142,78 +149,5 @@ struct TunnelSettingsProgramme: Decodable {
         guard !route.isDefault else { return NEIPv6Route.default() }
         return NEIPv6Route(destinationAddress: route.address ?? "::",
                            networkPrefixLength: NSNumber(value: Int(route.prefixLength ?? "128") ?? 128))
-    }
-}
-
-// MARK: - the enforcement programme
-
-/// One rendered enforcement posture.
-///
-/// Mirrors `twinvpn_platform_ios::enforce::EnforcementProgramme`.
-struct EnforcementProgramme: Decodable {
-    /// The `providerConfiguration` key the programme travels under, verbatim.
-    ///
-    /// Verbatim so that `installed_enforcement` reads back the **same bytes**
-    /// Rust rendered: re-serialising would let the read-back differ from the
-    /// write, and W-24's whole point is that the assertion is a query rather
-    /// than a belief.
-    static let configurationKey = "net.twinvpn.enforcement.v0"
-
-    struct OnDemandRule: Decodable {
-        let kind: String
-        let interfaceType: String
-        let ssidMatch: [String]
-
-        enum CodingKeys: String, CodingKey {
-            case kind
-            case interfaceType = "interface_type"
-            case ssidMatch = "ssid_match"
-        }
-    }
-
-    let generation: UInt64
-    let ruleset: String
-    let includeAllNetworks: Bool
-    let excludeLocalNetworks: Bool
-    let disconnectOnDemandEnabled: Bool
-    let onDemandRules: [OnDemandRule]
-
-    enum CodingKeys: String, CodingKey {
-        case generation, ruleset
-        case includeAllNetworks = "include_all_networks"
-        case excludeLocalNetworks = "exclude_local_networks"
-        case disconnectOnDemandEnabled = "disconnect_on_demand_enabled"
-        case onDemandRules = "on_demand_rules"
-    }
-
-    static func decode(_ bytes: Data) -> EnforcementProgramme? {
-        try? JSONDecoder().decode(EnforcementProgramme.self, from: bytes)
-    }
-
-    /// Builds the on-demand rules.
-    ///
-    /// **Connect rules only.** ADR-0022 TN-5: `SSIDMatch` "MAY be used only in
-    /// `NEOnDemandRuleConnect` rules (biasing toward connecting — safe under
-    /// spoofed SSID) and MUST NOT be used in `Disconnect`/`Ignore` rules",
-    /// because the system evaluates these and we cannot inject a cryptographic
-    /// predicate into that evaluation.
-    ///
-    /// Rust's type can express no other kind, so a `kind` other than `"connect"`
-    /// here means the bytes did not come from this build — and it is **skipped**
-    /// rather than translated into whatever it names.
-    func makeOnDemandRules() -> [NEOnDemandRule] {
-        onDemandRules.compactMap { rule in
-            guard rule.kind == "connect" else { return nil }
-            let connect = NEOnDemandRuleConnect()
-            switch rule.interfaceType {
-            case "wifi": connect.interfaceTypeMatch = .wiFi
-            case "cellular": connect.interfaceTypeMatch = .cellular
-            default: connect.interfaceTypeMatch = .any
-            }
-            if !rule.ssidMatch.isEmpty {
-                connect.ssidMatch = rule.ssidMatch
-            }
-            return connect
-        }
     }
 }

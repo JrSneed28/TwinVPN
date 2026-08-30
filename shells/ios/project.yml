@@ -46,6 +46,17 @@ targets:
     sources:
       - path: Sources/TwinVPNApp
       - path: Sources/TwinVPNBridge
+      # `EnforcementProgramme`, and it is listed by BOTH production targets on
+      # purpose. Only the app can present the system consent sheet
+      # (`NEVPNManager.saveToPreferences`, ADR-0019 §11.10 (a)), so the app is
+      # what reads `includeAllNetworks` / `excludeLocalNetworks` /
+      # `makeOnDemandRules()` off a decoded programme; only the extension holds
+      # the bytes Rust rendered and writes them under `configurationKey` for
+      # W-24's read-back. ONE declaration compiled into two targets, because two
+      # declarations of that key and those `CodingKeys` are two things that can
+      # drift, and the drift reads as an enforcement posture the app installed
+      # and the extension cannot find.
+      - path: Sources/TwinVPNShared
     dependencies:
       - target: TwinVPNProvider
         embed: true
@@ -90,6 +101,8 @@ targets:
     sources:
       - path: Sources/TwinVPNProvider
       - path: Sources/TwinVPNBridge
+      # The other half of the pair — see the app target above.
+      - path: Sources/TwinVPNShared
     dependencies:
       - sdk: NetworkExtension.framework
       - sdk: Security.framework
