@@ -458,3 +458,55 @@ never with `doctor`:
 > `daemon status --all`, which reports false negatives.
 
 **Agent tool** handles execution (agents, files, code, git). **MCP tools** handle coordination (swarm, memory, hooks). **CLI** is the same via Bash.
+
+## Research → implementation pipeline
+
+Two agents, defined in `.claude/agents/research/technical-researcher.md` and
+`.claude/agents/implementation/research-coder.md`. This is not a second
+orchestration layer — Ruflo still owns routing, memory, and coordination; these
+are two ordinary Claude Code subagents that use it.
+
+**Trigger it automatically** when a request matches any of these shapes, and
+when a task requires understanding something not already established in this
+session — a library, framework, API, protocol, OS/network behaviour,
+dependency, configuration, migration, or an unfamiliar TwinVPN subsystem:
+
+```
+Research and fix this bug: <problem>
+Research how this works and implement it correctly: <technology/feature>
+Understand this subsystem before modifying it: <subsystem>
+Research the correct way to integrate: <library/API/protocol/platform>
+```
+
+Flow:
+
+```
+question / bug / unknown system
+  → local understanding (code, versions, config, docs, repro)
+  → Ruflo memory
+  → Context7
+  → official docs / specifications
+  → broad web research
+  → upstream GitHub / source
+  → evidence reconciliation
+  → TECHNICAL HANDOFF
+  → research-coder
+  → tests + gates
+  → validated Ruflo memory
+```
+
+Rules:
+
+- The researcher is **read-only for production source**. It has `Bash`, so this
+  is enforced by its instructions, not a sandbox — do not ask it to "just fix
+  it while you're in there".
+- The coder consumes a completed `TECHNICAL HANDOFF`. Never hand it raw or
+  contradictory research.
+- **Complex research mode** — for a hard question, launch parallel read-only
+  researchers in one message: A = Context7 + official docs, B = standards/specs
+  + broad web, C = upstream source/issues/PRs/commits/releases, D = TwinVPN
+  local architecture/code/version/runtime. **This session reconciles them into
+  one authoritative handoff** before invoking the coder. The coder must never
+  be made to choose between conflicting reports.
+- Skip the pipeline for anything already understood — a typo, a rename, a
+  one-line fix in code already traced this session. Research is for unknowns.
