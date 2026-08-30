@@ -87,7 +87,7 @@ android {
             // refusing `androidx.test`'s compile-only Error Prone annotations.
             // Naming the same file here is what makes that `-dontwarn` reach
             // the task that needs it.
-            testProguardFiles("proguard-rules.pro")
+            testProguardFiles("proguard-rules.pro", "proguard-test-rules.pro")
             // ADR-0018 §11.3: `panic = "unwind"` in every SHIPPED profile,
             // because F-7's containment needs `catch_unwind` at the boundary.
             // The Rust side sets it; this comment is here so a reader of the
