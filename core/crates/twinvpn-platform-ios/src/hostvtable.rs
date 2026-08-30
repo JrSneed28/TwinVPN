@@ -57,7 +57,7 @@
 //! bridges the imported C declaration through an untyped C function pointer and
 //! performs no Rust coercion, so nothing on this platform would have failed
 //! until someone wrote a Rust-side installer — which `shells/android/jni`
-//! already is for Android. [`tests::the_entries_coerce_into_f_9_s_slot_types`]
+//! already is for Android. `tests::the_entries_coerce_into_f_9_s_slot_types`
 //! is that missing check, executed on this host rather than deferred to the
 //! shell that would have tripped over it.
 //!
