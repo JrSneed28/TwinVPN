@@ -30,7 +30,15 @@ struct StatusView: View {
     @EnvironmentObject private var management: ManagementClient
 
     var body: some View {
-        NavigationStack {
+        // `NavigationView`, not `NavigationStack`. §11.9 row 1 fixes the
+        // deployment floor at iOS 15.0 and `NavigationStack` is iOS 16.0+, so it
+        // does not exist at the floor this product commits to. `.stack` is what
+        // makes the two behave alike: `NavigationView`'s default on a regular
+        // width is the two-column split, and `TARGETED_DEVICE_FAMILY` includes
+        // iPad — without it the same code is a single push on iPhone and a
+        // sidebar on iPad, which ADR-0019 §11.8's "iPadOS is not iOS scaled up"
+        // does not license as an accident.
+        NavigationView {
             List {
                 Section {
                     ProtectionIndicator(
@@ -67,6 +75,47 @@ struct StatusView: View {
                 // poll ADR-0017 §11.2.1's battery residual does not have to
                 // apologise for.
                 management.beginPolling()
+            }
+        }
+        .navigationViewStyle(.stack)
+    }
+}
+
+/// One peer, as the snapshot classified it.
+///
+/// # This row renders. It does not filter.
+///
+/// ADR-0015 §11.4 puts redaction at the EMITTER, "based on the schema
+/// classification", and states that "there is no 'scrub the log with regexes
+/// before sending' step". `PeerSummary`'s fields arrive already classified and,
+/// where the tier required it, pseudonymised — `id` at Tier 0 is a token, not a
+/// `DeviceIdentity` — so a filter here would be a second classifier that can
+/// disagree with the first.
+///
+/// # `reason_code`, never a sentence
+///
+/// MI-15 forbids rendered text on the channel, so `PeerSummary.reasonCode` is a
+/// code and the row resolves it through `tw_render_diagnostic` like every other
+/// string this app shows. A peer with nothing to report renders its identifier
+/// alone; there is no "OK" literal here, because that would be the one piece of
+/// user-facing English CB-4 keeps out of this file.
+struct PeerRow: View {
+    let peer: PeerSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // The token is opaque and can be long. Monospaced so two of them
+            // compare by eye, and `.middle` so the two ends — the parts that
+            // differ — survive a compact width.
+            Text(peer.id)
+                .font(.system(.body, design: .monospaced))
+                .truncationMode(.middle)
+                .lineLimit(1)
+            if let code = peer.reasonCode {
+                // The FULL three-part diagnostic, at every width. ADR-0019 §11.8:
+                // "a truncated part 2 is an R-33 violation", and a list row is
+                // not an exemption from that.
+                DiagnosticView(reasonCode: code, evidence: ["as_of_ms": String(peer.asOfMillis)])
             }
         }
     }

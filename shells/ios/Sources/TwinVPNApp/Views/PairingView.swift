@@ -53,7 +53,10 @@ struct PairingView: View {
     @StateObject private var model = PairingModel()
 
     var body: some View {
-        NavigationStack {
+        // `NavigationView` + `.stack`, not `NavigationStack`. See `StatusView`
+        // for why: `NavigationStack` is iOS 16.0+ and §11.9 row 1 fixes the floor
+        // at 15.0.
+        NavigationView {
             VStack(spacing: 24) {
                 if let offer = model.renderedOffer {
                     // The C-B ceremony where a camera and a screen exist
@@ -89,6 +92,7 @@ struct PairingView: View {
             .task { await model.begin() }
             .onDisappear { model.end() }
         }
+        .navigationViewStyle(.stack)
     }
 }
 

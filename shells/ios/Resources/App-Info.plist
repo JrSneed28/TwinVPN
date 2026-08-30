@@ -61,9 +61,14 @@
     <string>1</string>
 
     <!-- ADR-0018 §11.9 row 1, docs/networking.md §5.2's iOS row and ADR-0019's
-         iOS row all fix the minimum at iOS 15. -->
+         iOS row all fix the minimum at iOS 15, and `project.yml`'s
+         `deploymentTarget.iOS` is where that number is declared. Read from the
+         build setting rather than restated, so the app and the appex cannot
+         drift apart — a `MinimumOSVersion` mismatch between the two is an App
+         Store validation rejection at upload, not a build error, so nothing in
+         CI would report it. `Provider-Info.plist` carries the same expression. -->
     <key>MinimumOSVersion</key>
-    <string>15.0</string>
+    <string>$(IPHONEOS_DEPLOYMENT_TARGET)</string>
 
     <key>LSRequiresIPhoneOS</key>
     <true/>

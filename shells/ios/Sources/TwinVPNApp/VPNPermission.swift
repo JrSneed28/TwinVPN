@@ -163,4 +163,12 @@ enum ReasonCode {
     static let adapterUnavailable = "PLATFORM.ADAPTER_UNAVAILABLE"
     static let processRestarted = "PLATFORM.PROCESS_RESTARTED"
     static let suspended = "PLATFORM.SUSPENDED"
+    /// What `dispatch::disposition` answers for `diag.bundle.create` today —
+    /// "which needs `Core::open_store`". `CoreLite.assembleBundle` reports the
+    /// core's own code rather than inventing a shell-side one.
+    static let storeCustodyDegraded = "STORE.CUSTODY_DEGRADED"
+    /// What `twinvpn.h` says a name off ADR-0017 §11.9's catalogue produces:
+    /// "a name the catalogue does not contain is MGMT.OP_UNKNOWN". It is the
+    /// honest code for the contract-courier operations §11.14 (a) still owes.
+    static let operationUnknown = "MGMT.OP_UNKNOWN"
 }

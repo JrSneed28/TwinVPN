@@ -60,8 +60,15 @@
     <key>CFBundleVersion</key>
     <string>1</string>
 
+    <!-- The floor, read from `IPHONEOS_DEPLOYMENT_TARGET` rather than restated.
+         `project.yml`'s `deploymentTarget.iOS: "15.0"` is the one declaration
+         (ADR-0018 §11.9 row 1, docs/networking.md §5.2's iOS row, ADR-0019's iOS
+         row). A hardcoded literal here is a SECOND declaration of the same fact,
+         and the failure mode of the two disagreeing is not a build error: the
+         appex's `MinimumOSVersion` differing from the containing app's is an App
+         Store validation rejection, discovered at upload. -->
     <key>MinimumOSVersion</key>
-    <string>15.0</string>
+    <string>$(IPHONEOS_DEPLOYMENT_TARGET)</string>
 
     <key>NSExtension</key>
     <dict>

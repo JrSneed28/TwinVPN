@@ -52,7 +52,10 @@ struct DiagnosticsView: View {
     @State private var reasonCode: String?
 
     var body: some View {
-        NavigationStack {
+        // `NavigationView` + `.stack`, not `NavigationStack`. See `StatusView`
+        // for why: `NavigationStack` is iOS 16.0+ and §11.9 row 1 fixes the floor
+        // at 15.0.
+        NavigationView {
             List {
                 Section {
                     Button(CoreLite.shared.string("ui.diagnostics.assemble")) {
@@ -89,6 +92,7 @@ struct DiagnosticsView: View {
                 contentType: .data,
                 defaultFilename: bundle?.suggestedFilename ?? "twinvpn-diagnostics") { _ in }
         }
+        .navigationViewStyle(.stack)
     }
 
     /// Assembles the bundle.
@@ -109,7 +113,14 @@ struct DiagnosticsView: View {
         } catch {
             // A bundle that could not be assembled is reported as a registered
             // condition, not as an empty file the user might send anyway.
-            reasonCode = ReasonCode.adapterUnavailable
+            //
+            // `core-lite`'s own code where it gave one — today
+            // `STORE.CUSTODY_DEGRADED`, because `dispatch::disposition` still
+            // refuses `diag.bundle.create` — so the user is told what actually
+            // stopped it. `PLATFORM.ADAPTER_UNAVAILABLE` covers the other arm:
+            // a channel that could not carry the tail request at all
+            // (`ManagementChannelError`), which is a different fact.
+            reasonCode = (error as? CoreLiteRefusal)?.reasonCode ?? ReasonCode.adapterUnavailable
             bundle = nil
         }
     }

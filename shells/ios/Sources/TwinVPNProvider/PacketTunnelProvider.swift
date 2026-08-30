@@ -47,7 +47,28 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// entitlements rather than discovered (CD-2, ADR-0020 ST-12e).
     private enum Identity {
         static let appGroup = "group.net.twinvpn.client"
-        static let keychainAccessGroup = "$(AppIdentifierPrefix)group.net.twinvpn.client"
+        /// The SAME string as `appGroup`, and that is not a copy-paste slip.
+        ///
+        /// Apple, "Sharing access to keychain items among a collection of apps":
+        /// the system already treats every app-group identifier as a keychain
+        /// access group, and — unlike a keychain group — does NOT team-prefix it.
+        /// So `group.net.twinvpn.client` is the literal value
+        /// `kSecAttrAccessGroup` must carry.
+        ///
+        /// **This used to read `"$(AppIdentifierPrefix)group.net.twinvpn.client"`,
+        /// and that was a defect.** `$(AppIdentifierPrefix)` is an Xcode BUILD
+        /// SETTING, expanded when a `.entitlements` plist is processed and never
+        /// inside a Swift string literal — so every keychain call would have
+        /// carried those seventeen characters verbatim, matched no access group,
+        /// and returned `errSecMissingEntitlement`. It fails only on a signed
+        /// device: the simulator ignores keychain access groups entirely, so no
+        /// simulator run could have caught it.
+        ///
+        /// The two names are kept separate rather than folded into one constant
+        /// because they are two different facts that happen to share a value —
+        /// the container identifier and the keychain access group — and ST-22's
+        /// co-location is a claim about the second, not the first.
+        static let keychainAccessGroup = "group.net.twinvpn.client"
         static let keychainService = "net.twinvpn.client"
     }
 

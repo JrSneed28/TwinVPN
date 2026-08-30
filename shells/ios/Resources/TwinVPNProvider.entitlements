@@ -21,6 +21,22 @@
   "sole holder of the key handle" clause is "on HC-2 only, a declared residual
   rather than an enforceable property, tested as a declaration in P16."
 
+  ===========================================================================
+  THE SHARED KEYCHAIN GROUP IS THE APP GROUP, AND IS NOT LISTED SEPARATELY
+  ===========================================================================
+
+  The `keychain-access-groups` array that used to sit below carried
+  `$(AppIdentifierPrefix)group.net.twinvpn.client`, and was wrong the same two
+  ways the app's copy was — see `TwinVPN.entitlements`'s header for the citation.
+  Apple already treats an app-group identifier as a keychain access group, and
+  does not team-prefix it.
+
+  ST-22's co-location is unaffected and unchanged: the identity key, the SEK and
+  the S-53 anchor still live in ONE access group under ONE accessibility class.
+  That group is `group.net.twinvpn.client`, reached through the App Group
+  entitlement below, and `PacketTunnelProvider.Identity.keychainAccessGroup` is
+  the one place the Swift side spells it.
+
   STATUS: written, not compiled and not signed.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -36,15 +52,12 @@
         <string>allow-vpn</string>
     </array>
 
-    <!-- Shared with the app. ADR-0020 §11.3's iOS row and ST-22's co-location:
-         the identity key, the SEK and the S-53 anchor all live in ONE access
-         group, under ONE accessibility class. -->
-    <key>keychain-access-groups</key>
-    <array>
-        <string>$(AppIdentifierPrefix)group.net.twinvpn.client</string>
-    </array>
+    <!-- Shared with the app, and it is BOTH the container and the keychain
+         access group (see the header). ADR-0020 §11.3's iOS row and ST-22's
+         co-location: the identity key, the SEK and the S-53 anchor all live in
+         ONE access group, under ONE accessibility class.
 
-    <!-- ADR-0020 §11.9's iOS row: `store_root` is the App Group container,
+         ADR-0020 §11.9's iOS row: `store_root` is the App Group container,
          opened by THE PROVIDER ONLY (ST-30's single opener). The app has the
          same entitlement because it is one app identity, and refrains by
          discipline rather than by sandbox — which is exactly why ST-30 exists as

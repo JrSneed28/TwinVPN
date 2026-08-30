@@ -46,7 +46,12 @@ struct TwinVPNApp: App {
                     await permission.reload()
                 }
         }
-        .onChange(of: scenePhase) { _, phase in
+        // `onChange(of:perform:)` — ONE closure parameter, the new value. The
+        // two-parameter `onChange(of:initial:_:)` is iOS 17.0+, and ADR-0018
+        // §11.9 row 1 fixes this product's floor at iOS 15.0, so the newer
+        // spelling names nothing at the version this app is built for. Only the
+        // NEW phase is read either way; the old one was already discarded.
+        .onChange(of: scenePhase) { phase in
             // ADR-0022 LC-14: background is an APP-level fact, not a scene-level
             // one — "`EV_BACKGROUND` derived from ALL surfaces being background".
             // On iPadOS a single scene going background while another is visible

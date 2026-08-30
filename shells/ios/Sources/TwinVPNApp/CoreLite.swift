@@ -65,14 +65,28 @@ final class CoreLite {
     // `tw_core_create` is linkable here and `CoreInstance.swift` in the extension
     // is the working model for how to call it.
     //
-    // **Nothing in the app submits to it yet, so it is not created.** The two
-    // members that would — `verifySignedDocuments` and `assembleBundle` — need an
-    // operation that ADR-0017 §11.9's catalogue does not contain; see
-    // `ContractCourier.swift` for the full finding. An instance created here
-    // today would be a handle nothing holds a conversation with, and F-6 would
-    // oblige a serial queue and a drain thread to guard it — machinery for a
-    // conversation that cannot happen. It is left absent, and named, rather than
-    // built as scaffolding.
+    // **Nothing in the app submits to it, so it is not created.** Every member
+    // below is either F-10 (instance-free by construction) or a byte codec; the
+    // only member that would need an instance is `assembleBundle`, and the ABI
+    // cannot express what it needs:
+    //
+    //   * `twinvpn.h` makes `tw_core_submit` FIRE-AND-FORGET — "the ABI is
+    //     in-process and fire-and-forget, so there is no request to correlate and
+    //     no retry to deduplicate" — and every outcome arrives on the one ordered
+    //     event stream. A synchronous `assembleBundle(providerTail:) -> Bundle`
+    //     is a request/response call, and the only correlation this ABI offers is
+    //     the `op` string on a `command.completed` body: per-OPERATION, not
+    //     per-request.
+    //   * The operation the assembly needs is refused today regardless.
+    //     `twinvpn-core`'s `dispatch::disposition` answers `diag.bundle.create`
+    //     with `STORE.CUSTODY_DEGRADED`, "a Tier-1 bundle is written to an
+    //     agent-owned directory the vault vends (MI-D3), which needs
+    //     `Core::open_store`".
+    //
+    // An instance created here today would therefore be a handle nothing holds a
+    // conversation with, and F-6 would oblige a serial queue and a drain thread
+    // to guard it — machinery for a conversation the ABI cannot carry. It is left
+    // absent, and named, rather than built as scaffolding.
     //
     // Everything below this line is F-10, which is INSTANCE-FREE by construction,
     // and the MI request/response codec, which is bytes.
@@ -218,6 +232,47 @@ final class CoreLite {
         }
         return try? JSONDecoder().decode(StatusSnapshot.self, from: envelope.result)
     }
+
+    // MARK: - the Tier-1 bundle
+
+    /// Assembles the eight-part Tier-1 bundle ADR-0015 §11.8 requires.
+    ///
+    /// **It refuses, and the refusal is the honest answer for this build.** Two
+    /// independent things are missing and neither is this shell's to supply:
+    ///
+    ///   1. `twinvpn-core`'s `dispatch::disposition` marks `diag.bundle.create`
+    ///      `NotWired` and answers `STORE.CUSTODY_DEGRADED` — "a Tier-1 bundle is
+    ///      written to an agent-owned directory the vault vends (MI-D3), which
+    ///      needs `Core::open_store`". The operation NAME is in ADR-0017 §11.9's
+    ///      catalogue and in `twinvpn_mgmt::command::CoreCommand`, so nothing is
+    ///      invented here; what is absent is the core's implementation of it.
+    ///   2. `providerTail` has no encoding this shell can produce. `params` is
+    ///      F-8 bytes belonging to the operation, written by the core's own
+    ///      encoder, and this process has none — the same gap
+    ///      `makeRingTailRequest` names for `diag.log.tail`'s `since`.
+    ///
+    /// It FAILS CLOSED, which is the property that matters: the caller reports a
+    /// registered code and shows no bundle, rather than exporting an empty or
+    /// partial artifact that a user might send to support as if it were evidence.
+    /// ADR-0015 §11.8's bundle is "signed with `DeviceKey`" and expiring; a
+    /// half-assembled one is not a smaller bundle, it is a different thing
+    /// wearing the same name.
+    ///
+    /// The tail the provider handed over is DISCARDED here rather than held: it
+    /// is Tier-0 log bytes with nothing to assemble them into, and keeping them
+    /// alive in this process would be retention with no purpose.
+    func assembleBundle(providerTail: Data) throws -> DiagnosticBundle {
+        throw CoreLiteRefusal(reasonCode: ReasonCode.storeCustodyDegraded)
+    }
+}
+
+/// A refusal from `core-lite`, carrying the REGISTERED code that names it.
+///
+/// A code, never a sentence — `ownership.md` §6 rule 12 admits registered codes
+/// only, and CB-4 puts the rendering in the core. The surface that catches this
+/// hands `reasonCode` to `tw_render_diagnostic` and shows what comes back.
+struct CoreLiteRefusal: Error {
+    let reasonCode: String
 }
 
 /// What `tw_render_diagnostic` returns: three parts, all three always present.

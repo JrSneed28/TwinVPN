@@ -30,6 +30,32 @@
   sandbox: the app holds the App Group entitlement and MUST NOT open the vault.
   PS-24 condition 2's per-fact writer table is what makes that checkable.
 
+  ===========================================================================
+  THE SHARED KEYCHAIN GROUP IS THE APP GROUP, AND IS NOT LISTED SEPARATELY
+  ===========================================================================
+
+  This file used to carry
+
+      <key>keychain-access-groups</key>
+      <array><string>$(AppIdentifierPrefix)group.net.twinvpn.client</string></array>
+
+  and it was wrong twice over. Apple, "Sharing access to keychain items among a
+  collection of apps": the system ALREADY treats every app-group identifier as a
+  keychain access group, so listing one adds nothing; and app-group identifiers
+  are NOT team-prefixed the way keychain groups are, so the
+  `$(AppIdentifierPrefix)` was a prefix on a name that must not carry one.
+
+  The consequence was invisible to every check this repository runs. A simulator
+  build ignores entitlements, `swiftc -parse` never opens this file, and nothing
+  on a Linux host can sign anything — so it would have failed for the first time
+  on a signed device, as `errSecMissingEntitlement` from the first keychain call.
+
+  What the two processes share is therefore `com.apple.security.application-
+  groups` below, and that one entitlement carries both the container and the
+  keychain group. ADR-0016 §11.2's "shared keychain-access-groups and App Group
+  for app+extension" is satisfied by it, not weakened: the sharing is unchanged
+  and only its spelling is.
+
   STATUS: written, not compiled and not signed.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -45,11 +71,9 @@
         <string>packet-tunnel-provider</string>
     </array>
 
-    <key>keychain-access-groups</key>
-    <array>
-        <string>$(AppIdentifierPrefix)group.net.twinvpn.client</string>
-    </array>
-
+    <!-- The App Group. It is ALSO the shared keychain access group — see the
+         header: the system adds every app-group identifier to the keychain
+         access group list, un-prefixed, without it being declared. -->
     <key>com.apple.security.application-groups</key>
     <array>
         <string>group.net.twinvpn.client</string>
