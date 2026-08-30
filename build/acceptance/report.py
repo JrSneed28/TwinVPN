@@ -22,6 +22,17 @@ THE VOCABULARY
                 It is a separate word only so a reader can tell "we ran it and
                 it broke" from "we never ran it", which are different problems.
 
+  DEFERRED      not a verdict. A row's probe still runs and still reports PASS,
+                FAIL or NOT-EXECUTED truthfully; `deferred` records that the
+                row has been moved OUT OF WAVE-1 SCOPE by a named decision, so
+                it no longer counts toward eligibility. This is the ONE thing
+                in this file that a human sets by hand, and it is deliberately
+                not a verdict: a deferred row that fails still prints FAIL with
+                its real numbers, and the deferral reason prints beside it.
+                Deferring a row is a scope decision that must be recorded in
+                docs/implementation/ownership.md; it is NOT a way to make a red
+                row look green, and nothing here will make it look green.
+
 PHASE 5 ELIGIBILITY is the conjunction of every required row. It is computed on
 the last line of this file from the rows above it. Nothing sets it directly.
 
@@ -205,10 +216,15 @@ def probe_platform(platform: str, require_privileged: bool = False):
 def build_rows(run: bool):
     rows = []
 
-    def add(section, name, verdict, detail, required=True):
+    def add(section, name, verdict, detail, required=True, deferred=None):
+        # `deferred` is a reason string, not a verdict. It drops the row out of
+        # the eligibility conjunction and is carried into the JSON and the
+        # markdown so the reason travels with the row.
         rows.append({
             "section": section, "criterion": name,
-            "verdict": verdict, "detail": detail, "required": required,
+            "verdict": verdict, "detail": detail,
+            "required": required and deferred is None,
+            "deferred": deferred,
         })
 
     # -- F-1 ---------------------------------------------------------------
@@ -292,12 +308,33 @@ def build_rows(run: bool):
         and counts["b1_discharged"] == 22
     )
     have = all(v is not None for v in counts.values())
+    # DEFERRED past Wave 1 by integration-lead decision of 2026-08-30
+    # (docs/implementation/ownership.md, wave-1 gate decisions). B-1 is
+    # discharged only on a CONJUNCTION -- mutation-gate.sh §5 requires
+    # register.tsv STATUS `IMPLEMENTED` *and* every specified mutant killed --
+    # and no register row is IMPLEMENTED (21 PARTIAL, 1 NOT-RUNNABLE). So B-1
+    # is 0/22 on the oracle half independent of the mutant count, and killing
+    # all 144 mutants would still not discharge it. The remaining 120 mutants
+    # are capability-blocked, and the largest groups (three desktop GUIs for
+    # P17/P18, an updater crate that does not exist for P12/P20) are product
+    # builds, not test gaps. The row is not closable in Wave 1 under any
+    # sequencing, so it leaves the eligibility conjunction rather than holding
+    # a truthful report hostage.
+    #
+    # The probe is UNCHANGED and still runs. This row still prints its real
+    # verdict and its real counts. The threshold above is untouched -- it is
+    # absolute (missing == 0, executed == executable == specified == 144,
+    # b1_discharged == 22) and was deliberately not relaxed, because relaxing
+    # it would have made the row lie instead of making it out of scope.
     add("F-5", "mutation obligations discharged",
         (PASS if ok else FAIL) if have else NOT_EXECUTED,
         "specified={specified} executable={executable} executed={executed} "
         "discharged/killed={discharged} survived={survived} missing={missing} "
         "B-1 {b1_discharged}/{b1_specified}".format(**counts)
-        if have else "no machine-readable mutation report")
+        if have else "no machine-readable mutation report",
+        deferred="B-1 deferred past Wave 1 (2026-08-30): 0/22 register rows "
+                 "IMPLEMENTED, so the row is undischargeable regardless of "
+                 "mutant count")
     rows[-1]["counts"] = counts
 
     # -- Platforms ---------------------------------------------------------
@@ -351,6 +388,7 @@ def main() -> int:
 
     rows = build_rows(args.run)
     required = [r for r in rows if r["required"]]
+    deferred = [r for r in rows if r.get("deferred")]
     green = [r for r in required if r["verdict"] == PASS]
     eligible = len(green) == len(required)
 
@@ -368,6 +406,7 @@ def main() -> int:
         "rows": rows,
         "required_total": len(required),
         "required_pass": len(green),
+        "deferred_total": len(deferred),
         "phase_5_eligibility": PASS if eligible else FAIL,
     }
     args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -382,12 +421,21 @@ def main() -> int:
             section = r["section"]
             lines += ["", f"## {section}", "",
                       "| criterion | verdict | evidence |", "|---|---|---|"]
-        lines.append("| {} | **{}** | {} |".format(
+        lines.append("| {} | **{}**{} | {} |".format(
             r["criterion"], r["verdict"],
+            " — DEFERRED, not gating" if r.get("deferred") else "",
             r["detail"].splitlines()[0].replace("|", "\\|")))
     lines += ["", "## Phase 5 eligibility", "",
-              f"`{len(green)}` of `{len(required)}` required criteria are PASS.", "",
-              f"**Phase 5 eligibility: {doc['phase_5_eligibility']}**", ""]
+              f"`{len(green)}` of `{len(required)}` required criteria are PASS.", ""]
+    if deferred:
+        lines += [f"`{len(deferred)}` row(s) are DEFERRED and excluded from the "
+                  "conjunction. A deferred row still ran and still shows its real "
+                  "verdict above; it is out of Wave-1 SCOPE, which is not the same "
+                  "as passing:", ""]
+        lines += [f"- **{r['criterion']}** — {r['verdict']} — {r['deferred']}"
+                  for r in deferred]
+        lines.append("")
+    lines += [f"**Phase 5 eligibility: {doc['phase_5_eligibility']}**", ""]
     if not eligible:
         lines.append("Not eligible. The rows above that are not PASS are the reason; "
                      "`NOT-EXECUTED` counts against eligibility exactly as `FAIL` does, "
