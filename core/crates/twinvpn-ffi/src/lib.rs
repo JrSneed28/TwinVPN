@@ -68,7 +68,11 @@
 // `tw_host_vtable` slots (`os_csprng`, `elapsed_millis`, `boot_id`) that have
 // existed since minor 0, implemented over the INTERNAL, versionless bridge
 // §10.4 carves out. `TW_ABI_MINOR` does not move.
-#[cfg(target_os = "ios")]
+// `link_ios_adapter` is set by `build.rs` when the build target is iOS.
+// It is a linkage capability rather than an OS name on purpose: CB-3
+// forbids `cfg(target_os = …)` here, and this crate's behaviour does not
+// vary by target — only which objects the archiver keeps. See build.rs.
+#[cfg(link_ios_adapter)]
 extern crate twinvpn_platform_ios;
 
 pub mod abi;

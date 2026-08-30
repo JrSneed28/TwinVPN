@@ -24,6 +24,60 @@ fn main() -> ExitCode {
     }
 }
 
+/// The `core/Cargo.toml` this run must lint, resolved **at run time**.
+///
+/// # Why not `env!("CARGO_MANIFEST_DIR")`
+///
+/// That macro bakes the path at COMPILE time, and this repository shares one
+/// `CARGO_TARGET_DIR` across the main checkout, every agent worktree and the
+/// mutant rig. Cargo's fingerprint does not include `CARGO_MANIFEST_DIR`, so a
+/// binary compiled inside one tree is reused in another — and then lints the
+/// tree it was BUILT in rather than the tree it was RUN in.
+///
+/// That is not a cosmetic defect in a merge gate. It fails both ways: it
+/// reported a CD-CB3 violation against a `#[cfg(target_os = "ios")]` that had
+/// already been removed from the working tree, and it can equally report
+/// `all clean` over a tree that is dirty, which is the direction that ships a
+/// violation. The same mechanism has previously turned P15 red on a clean tree.
+///
+/// `CARGO_MANIFEST_DIR` is also set as an ENVIRONMENT variable by
+/// `cargo run`, and that one is correct for the current invocation — so it is
+/// preferred, with a walk up from the current directory as the fallback for a
+/// binary invoked directly.
+fn workspace_manifest() -> Result<PathBuf, String> {
+    // `core/xtask` -> `core`. The lints run over the core workspace, which is
+    // the exact crate set ADR-0018 §11.12 gives them.
+    if let Some(dir) = std::env::var_os("CARGO_MANIFEST_DIR") {
+        let dir = PathBuf::from(dir);
+        if let Some(root) = dir.parent() {
+            let manifest = root.join("Cargo.toml");
+            if manifest.is_file() {
+                return Ok(manifest);
+            }
+        }
+    }
+
+    let mut current =
+        std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
+    loop {
+        let candidate = current.join("Cargo.toml");
+        // The core workspace is the one whose `crates/` directory holds the
+        // members these lints are defined over. Matching on that rather than on
+        // the directory's name keeps a rename from silently selecting a
+        // different workspace.
+        if candidate.is_file() && current.join("crates").is_dir() {
+            return Ok(candidate);
+        }
+        if !current.pop() {
+            return Err(
+                "cannot locate the core workspace root: no ancestor of the current \
+                 directory has both a Cargo.toml and a crates/ directory"
+                    .to_owned(),
+            );
+        }
+    }
+}
+
 fn usage() {
     eprintln!("usage: cargo run -p xtask -- lint");
     eprintln!();
@@ -31,14 +85,13 @@ fn usage() {
 }
 
 fn lint() -> ExitCode {
-    // `core/xtask` -> `core`. The lints run over the core workspace, which is the
-    // exact crate set ADR-0018 §11.12 gives them.
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let Some(workspace_root) = manifest_dir.parent() else {
-        eprintln!("xtask: cannot locate the core workspace root");
-        return ExitCode::FAILURE;
+    let manifest = match workspace_manifest() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("xtask: {e}");
+            return ExitCode::FAILURE;
+        }
     };
-    let manifest = workspace_root.join("Cargo.toml");
 
     let violations = match xtask::run(&manifest) {
         Ok(v) => v,
