@@ -130,4 +130,12 @@ pub const ABI_MAJOR: u32 = 1;
 /// the prefix its `size` covers — the same state that shell already produced by
 /// declaring the entries null. Nothing was removed, no signature changed and no
 /// existing entry moved, so VR-1 makes it minor.
-pub const ABI_MINOR: u32 = 2;
+///
+/// `2 -> 3`: `tw_core_submit_response` was **added**, and the MI frame's
+/// `idempotency_key` is now honoured where the catalogue requires one.
+/// `tw_core_submit` keeps its name, its three parameters and its behaviour, so a
+/// shell compiled against minor 2 cannot observe either change — VR-1's "minor
+/// on addition". Carrying the response on `tw_core_submit` instead would have
+/// moved a shipped signature, which is the `abi_major` break VR-1 names.
+/// `core/ffi/include/twinvpn.h` states the full reasoning at `TW_ABI_MINOR`.
+pub const ABI_MINOR: u32 = 3;

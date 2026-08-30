@@ -95,9 +95,28 @@ impl TwSlice {
 /// Opaque to C by construction: the header declares `typedef struct tw_buf
 /// tw_buf;` with no definition, so a C caller can hold a pointer and nothing
 /// else.
-#[derive(Debug)]
 pub struct TwBuf {
     bytes: Vec<u8>,
+}
+
+/// Hand-written, and the reason is **ADR-0017 MI-P1 rule 2**.
+///
+/// `tw_core_submit_response`'s `*response_out` is a `TwBuf`, and for
+/// `pair.begin` its bytes are the one `SECRET` that crosses the management
+/// interface — which rule 2 forbids appearing in a log "at any level". A
+/// derived `Debug` renders those bytes, and a `{buf:?}` added to a trace line
+/// later is exactly how that happens by accident. `twinvpn_core::Outcome`
+/// closed the same hole on the core's side of the boundary for the same
+/// reason; this is that fix at the ABI's side, on the only type that can carry
+/// the value across.
+///
+/// The length is a debuggable fact and is kept. The bytes are not.
+impl core::fmt::Debug for TwBuf {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TwBuf")
+            .field("len", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl TwBuf {

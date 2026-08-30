@@ -10,7 +10,7 @@
 //!
 //! # The surface, function by function
 //!
-//! Twelve exported functions. F-1: *"the surface is small and coarse … Every
+//! Thirteen exported functions. F-1: *"the surface is small and coarse … Every
 //! exported function is a compatibility obligation forever; convenience added
 //! here is permanent."*
 //!
@@ -22,6 +22,7 @@
 //! | [`tw_render_diagnostic`] | **F-10** — pure, instance-free |
 //! | [`tw_core_create`] / [`tw_core_destroy`] | the instance (S-47) |
 //! | [`tw_core_submit`] | non-blocking command submission (F-5) |
+//! | [`tw_core_submit_response`] | the same, plus **F-5a**'s unicast body |
 //! | [`tw_core_next_event`] | the **one** blocking call (F-5) |
 //! | [`tw_core_wake`] | cancels it, from any thread |
 //! | [`tw_buf_bytes`] / [`tw_buf_free`] | core-allocated buffers (F-2) |
@@ -468,6 +469,15 @@ pub unsafe extern "C" fn tw_core_destroy(core: *mut TwCore) {
 
 /// `int32_t tw_core_submit(tw_core *, tw_slice, tw_buf **);`
 ///
+/// # This is [`tw_core_submit_response`] with the body declined
+///
+/// Not a shorthand and not a duplicate — the delegation is **how MI-P1 rule 2
+/// is held for this entry**. A `null` `response_out` is the *absence of a
+/// destination* for the unicast body, so the fire-and-forget entry cannot
+/// publish, log or leak a value it never receives; there is no second code path
+/// in which it could. It is also why the two entries can never drift on what
+/// `command` means (MI-20: one contract, two carriages).
+///
 /// # Safety
 ///
 /// `core` and `command` follow their `twinvpn.h` contracts.
@@ -477,30 +487,108 @@ pub unsafe extern "C" fn tw_core_submit(
     command: TwSlice,
     err_out: *mut *mut TwBuf,
 ) -> i32 {
+    // SAFETY: every pointer is forwarded unchanged under the caller's own
+    // `twinvpn.h` contract, and the one pointer this function originates is a
+    // null `response_out`, which `tw_core_submit_response` documents as
+    // declining the body.
+    unsafe { tw_core_submit_response(core, command, core::ptr::null_mut(), err_out) }
+}
+
+/// `int32_t tw_core_submit_response(tw_core *, tw_slice, tw_buf **, tw_buf **);`
+///
+/// **F-5a — the ABI's one unicast exit.** Added at ABI minor 3.
+///
+/// # Why a value has to leave here rather than on the event stream
+///
+/// ADR-0017 **MI-P1 rule 1** permits `pair.begin`'s offer — the one `SECRET`
+/// that crosses the management interface — *"only inside a `pair.begin`
+/// response"*. F-5 sends every completion out as a `command.completed` event on
+/// one stream, and that stream is a **broadcast**: every subscriber reads it and
+/// MI-9 retains the last body per topic. A value one caller may see therefore
+/// cannot leave through it, and until this entry existed the C ABI had no other
+/// exit — which is why `shells/ios` and `shells/android` could not reach the
+/// offer at all while `shells/linux`, an in-process Rust MI server calling
+/// [`twinvpn_core::Core::submit_response`], could.
+///
+/// # MI-P1 rules 2 and 3, structurally
+///
+/// Rule 2 (never logged) and rule 3 (never persisted) are not held here by
+/// convention:
+///
+/// - The body has **exactly one binding** in this function. It is moved from
+///   [`twinvpn_core::Core::submit_response`]'s return value into a [`TwBuf`] and
+///   out through `response_out`. It is never formatted, never cloned, never
+///   handed to a logger, and this crate owns no store to persist it in.
+/// - [`TwBuf`]'s `Debug` is hand-written and renders the length only, so a
+///   `{:?}` added later cannot open it.
+/// - [`encode_event`] — the only function that writes bytes onto the event
+///   stream — reads a [`twinvpn_core::CoreEvent`], and this value is not one.
+///   `Outcome::response` never becomes an event in the core, so no path from
+///   here to the stream exists to be closed.
+/// - A `null` `response_out` **drops** the body rather than allocating a
+///   `TwBuf` nothing would free. That keeps [`tw_core_submit`] leak-free by
+///   construction and keeps the secret's lifetime as short as the call.
+///
+/// # Safety
+///
+/// `core`, `command`, `response_out` and `err_out` follow their `twinvpn.h`
+/// contracts. `*response_out`, when written non-null, is the caller's to release
+/// with [`tw_buf_free`] and nothing else (F-2).
+#[no_mangle]
+pub unsafe extern "C" fn tw_core_submit_response(
+    core: *mut TwCore,
+    command: TwSlice,
+    response_out: *mut *mut TwBuf,
+    err_out: *mut *mut TwBuf,
+) -> i32 {
     // SAFETY: the caller's instance-pointer contract.
     let instance = unsafe { as_ref_opt(core.cast_const()) };
     // SAFETY: the caller's `tw_slice` contract.
     let bytes = unsafe { command.as_bytes() };
+    // Read BEFORE the submission, so the decision not to materialize the body
+    // is made without the body in hand.
+    let wanted = !response_out.is_null();
 
-    let (rc, err) = contained_on(
+    let (rc, response, err) = contained_on(
         instance,
-        || (TW_ERR, envelope_for(codes::INTERNAL_UNEXPECTED_STATE)),
+        || {
+            (
+                TW_ERR,
+                core::ptr::null_mut(),
+                envelope_for(codes::INTERNAL_UNEXPECTED_STATE),
+            )
+        },
         |tw| {
             // F-8: the command crosses as an encoded blob, and the name inside
             // it is looked up in the SAME catalogue the MI transport uses — one
             // contract, two carriages.
             let submission = match decode_submission(bytes) {
                 Ok(submission) => submission,
-                Err(reason) => return (TW_ERR, envelope_for(reason)),
+                Err(reason) => {
+                    return (TW_ERR, core::ptr::null_mut(), envelope_for(reason));
+                }
             };
-            match tw.core.submit(&submission) {
-                Ok(()) => (TW_OK, core::ptr::null_mut()),
-                Err(d) => (TW_ERR, envelope(&d)),
+            match tw.core.submit_response(&submission) {
+                Ok(body) => {
+                    let response = match body {
+                        // The one move. Nothing else touches these bytes.
+                        Some(body) if wanted => TwBuf::into_raw(body),
+                        // Either the operation answers with the published body
+                        // (every operation but `pair.begin`), or the caller
+                        // declined it. Dropping is the whole handling: there is
+                        // no slot to write it to and nowhere else it may go.
+                        _ => core::ptr::null_mut(),
+                    };
+                    (TW_OK, response, core::ptr::null_mut())
+                }
+                Err(d) => (TW_ERR, core::ptr::null_mut(), envelope(&d)),
             }
         },
     );
 
-    // SAFETY: the caller's `err_out` contract.
+    // SAFETY: the caller's out-parameter contracts.
+    unsafe { write_out(response_out, response) };
+    // SAFETY: as above.
     unsafe { write_out(err_out, err) };
     rc
 }
@@ -607,7 +695,12 @@ fn decode_submission(bytes: &[u8]) -> Result<twinvpn_mgmt::Submission, ReasonCod
     // would tell a shell "that operation does not exist" about bytes that named
     // no operation at all. MI-3's direction rule: a client may send `Hello`,
     // `Request` or `Goodbye`, and only the middle one is a command.
-    if let Ok(MgmtEnvelope { body, .. }) = twinvpn_mgmt::envelope::decode_frame(bytes) {
+    if let Ok(MgmtEnvelope {
+        body,
+        idempotency_key,
+        ..
+    }) = twinvpn_mgmt::envelope::decode_frame(bytes)
+    {
         let Body::Request(request) = body else {
             return Err(codes::PROTO_MALFORMED_MESSAGE);
         };
@@ -617,11 +710,20 @@ fn decode_submission(bytes: &[u8]) -> Result<twinvpn_mgmt::Submission, ReasonCod
         return Ok(twinvpn_mgmt::Submission {
             op,
             params: request.params,
-            // The ABI is in-process and fire-and-forget, so there is no retry to
-            // deduplicate and no key to carry one. Left absent rather than
-            // fabricated; `dispatch::disposition` refuses an operation whose
-            // catalogue row requires one, by name.
-            idempotency_key: None,
+            // ADR-0008's CEREMONY key, read from the frame exactly as
+            // `shells/linux`' MI server reads it — empty means absent, and the
+            // core checks the precondition once for both carriages.
+            //
+            // This used to be hard-coded `None`, on the ground that "the ABI is
+            // fire-and-forget, so there is no retry to deduplicate". The premise
+            // was right and the conclusion was not: `Idempotency::Key` is a
+            // PRECONDITION, not a retry token, and the catalogue requires one on
+            // `pair.begin`, `pair.confirm`, `device.revoke`, `key.rotate` and the
+            // three update operations. Dropping it here refused all seven as
+            // MGMT.PRECONDITION_FAILED across this ABI — including the one
+            // operation `tw_core_submit_response` exists to carry. Honouring it
+            // is MI-20 applied here: one contract, two carriages.
+            idempotency_key: (!idempotency_key.is_empty()).then_some(idempotency_key),
             if_version: request.if_version,
             // MI-18: the OS principal. There is no peer on this carriage to
             // attribute to, and inventing one would make "the tunnel went down"
@@ -1166,6 +1268,24 @@ mod tests {
         // SAFETY: live if non-null.
         unsafe { tw_buf_free(err) };
 
+        let mut response: *mut TwBuf = core::ptr::null_mut();
+        let mut err_r: *mut TwBuf = core::ptr::null_mut();
+        // SAFETY: null is handled.
+        assert_eq!(
+            unsafe {
+                tw_core_submit_response(
+                    core::ptr::null_mut(),
+                    TwSlice::empty(),
+                    &raw mut response,
+                    &raw mut err_r,
+                )
+            },
+            TW_ERR
+        );
+        assert!(response.is_null(), "TW_ERR writes no unicast body");
+        // SAFETY: live if non-null.
+        unsafe { tw_buf_free(err_r) };
+
         let mut event: *mut TwBuf = core::ptr::null_mut();
         let mut err2: *mut TwBuf = core::ptr::null_mut();
         // SAFETY: null is handled.
@@ -1311,5 +1431,148 @@ mod tests {
         // SAFETY: null is handled.
         let slice = unsafe { tw_buf_bytes(core::ptr::null()) };
         assert_eq!(slice.len, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // F-5a — the unicast return
+    // -----------------------------------------------------------------------
+
+    /// One MI frame, so the tests below read as the shell writes.
+    fn frame(operation: &str, params: Vec<u8>, idempotency_key: Vec<u8>) -> Vec<u8> {
+        use twinvpn_mgmt::envelope::{self, Body, MgmtEnvelope, Request};
+
+        envelope::encode_frame(&MgmtEnvelope {
+            mi_version: envelope::MI_VERSION,
+            request_id: Vec::new(),
+            correlation_id: Vec::new(),
+            seq: 0,
+            idempotency_key,
+            as_of_ms: 0,
+            body: Body::Request(Request {
+                operation: operation.to_owned(),
+                params,
+                if_version: None,
+            }),
+        })
+        .expect("within the cap")
+    }
+
+    /// The reason code inside an F-4 envelope buffer, which is then released.
+    fn reason_of(err: *mut TwBuf) -> String {
+        assert!(!err.is_null(), "F-4: a failure carries a NAME");
+        // SAFETY: `err` is non-null and this crate produced it.
+        let bytes = unsafe { tw_buf_bytes(err.cast_const()) };
+        // SAFETY: the slice borrows `err`, still live.
+        let decoded = <twinvpn_schema::v1::ErrorEnvelope as prost::Message>::decode(unsafe {
+            bytes.as_bytes()
+        })
+        .expect("decodes");
+        // SAFETY: live, unfreed, and released exactly once.
+        unsafe { tw_buf_free(err) };
+        decoded.reason_code
+    }
+
+    /// A NULL `*response_out` means *"the answer is the one the stream carried"*,
+    /// not *"there was no answer"* — and the completion event still arrives.
+    ///
+    /// This is the F-5/F-5a boundary at the entry point: `status.get` has no
+    /// unicast body, so the ABI returns none and publishes the result exactly as
+    /// it always did.
+    #[test]
+    fn an_operation_with_no_unicast_body_answers_on_the_stream_as_before() {
+        let mut tw = TwCore {
+            core: twinvpn_core::testing::core().expect("a mock-bound core"),
+        };
+        let command = frame("status.get", Vec::new(), Vec::new());
+        let mut response: *mut TwBuf = core::ptr::null_mut();
+        let mut err: *mut TwBuf = core::ptr::null_mut();
+
+        // SAFETY: `tw` is a live instance for the duration of the call, and the
+        // slice borrows `command`, which outlives it.
+        let rc = unsafe {
+            tw_core_submit_response(
+                &raw mut tw,
+                TwSlice::from_slice(&command),
+                &raw mut response,
+                &raw mut err,
+            )
+        };
+        assert_eq!(rc, TW_OK, "status.get is a read this build performs");
+        assert!(err.is_null());
+        assert!(
+            response.is_null(),
+            "F-5a: every operation but pair.begin answers on the stream"
+        );
+
+        // And the completion is still there, unchanged, which is the half F-5
+        // keeps.
+        let completed = std::iter::from_fn(|| tw.core.next_event(Duration::ZERO))
+            .any(|e| matches!(e.kind, twinvpn_core::CoreEventKind::CommandCompleted { .. }));
+        assert!(completed, "F-5: the completion is an event");
+    }
+
+    /// **The precondition, not a retry token.**
+    ///
+    /// `pair.begin` is the operation F-5a's unicast return exists for, and the
+    /// catalogue gives it `Idempotency::Key`. While this carriage discarded the
+    /// frame's key, the core refused every such submission as
+    /// `MGMT.PRECONDITION_FAILED` before reaching the operation at all — so the
+    /// unicast channel would have had nothing to carry. Honouring the key gets
+    /// past the precondition; what this core answers instead is a *different*
+    /// refusal, because `testing::core()` is deliberately not enrolled.
+    #[test]
+    fn a_ceremony_key_from_the_frame_clears_the_precondition_it_used_to_fail() {
+        let mut tw = TwCore {
+            core: twinvpn_core::testing::core().expect("a mock-bound core"),
+        };
+        let precondition = twinvpn_mgmt::codes::substituted("MGMT.PRECONDITION_FAILED")
+            .expect("the registry carries it");
+
+        for (key, expectation) in [
+            (Vec::new(), true),
+            (b"ceremony-key-1".to_vec(), false),
+            // An empty key is ABSENT, which is what the header has always told
+            // shells to send and what every pre-minor-3 caller sent.
+        ] {
+            let command = frame("pair.begin", vec![0], key);
+            let mut response: *mut TwBuf = core::ptr::null_mut();
+            let mut err: *mut TwBuf = core::ptr::null_mut();
+            // SAFETY: `tw` is live and the slice borrows `command`.
+            let rc = unsafe {
+                tw_core_submit_response(
+                    &raw mut tw,
+                    TwSlice::from_slice(&command),
+                    &raw mut response,
+                    &raw mut err,
+                )
+            };
+            assert_eq!(rc, TW_ERR, "an unenrolled core refuses either way");
+            assert!(response.is_null(), "TW_ERR writes no body");
+            assert_eq!(
+                reason_of(err) == precondition.as_str(),
+                expectation,
+                "the precondition is the blocker only when no key was sent"
+            );
+        }
+    }
+
+    /// MI-P1 rule 2, held by the type rather than by review.
+    ///
+    /// A derived `Debug` on [`TwBuf`] would render the `pair.begin` offer into
+    /// any `{:?}` a later change adds. `twinvpn_core::Outcome` closed the same
+    /// hole on the core's side; this is the ABI's side of it.
+    #[test]
+    fn a_buffers_debug_never_renders_its_bytes() {
+        let raw = TwBuf::into_raw(b"pairing-secret".to_vec());
+        // SAFETY: `raw` was just produced by `into_raw` and is live.
+        let borrowed = unsafe { as_ref_opt(raw.cast_const()) }.expect("live");
+        let rendered = format!("{borrowed:?}");
+        assert!(
+            !rendered.contains("pairing-secret") && !rendered.contains("112"),
+            "MI-P1 rule 2: {rendered}"
+        );
+        assert!(rendered.contains("len"), "the length is debuggable");
+        // SAFETY: `raw` came from `into_raw` and has not been released.
+        unsafe { TwBuf::release(raw) };
     }
 }

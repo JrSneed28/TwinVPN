@@ -37,10 +37,29 @@
  *        renders what it is given.
  *   F-5  SUBMIT + ONE ORDERED EVENT STREAM. No blocking call crosses the
  *        boundary except `tw_core_next_event`, which takes an explicit timeout
- *        and is cancellable via `tw_core_wake`. `tw_core_submit` is
- *        non-blocking. All state changes, INCLUDING THE COMPLETION OF A
- *        SUBMITTED COMMAND, arrive as events on EXACTLY ONE totally ordered
- *        stream per instance.
+ *        and is cancellable via `tw_core_wake`. `tw_core_submit` and
+ *        `tw_core_submit_response` are both non-blocking. All state changes,
+ *        INCLUDING THE COMPLETION OF A SUBMITTED COMMAND, arrive as events on
+ *        EXACTLY ONE totally ordered stream per instance.
+ *   F-5a THE ONE VALUE THAT STREAM MUST NOT CARRY. `tw_core_submit_response`'s
+ *        `*response_out` is NOT a state change and NOT the completion. The
+ *        completion still arrives on the stream, in order, exactly as F-5
+ *        says; `*response_out` is the answer to THIS call, delivered to THIS
+ *        caller, and to nothing else.
+ *
+ *        It exists because F-5 and ADR-0017 MI-P1 rule 1 are otherwise
+ *        jointly unsatisfiable. MI-P1 permits `pair.begin`'s offer -- the one
+ *        SECRET that crosses the management interface -- "only inside a
+ *        `pair.begin` response", and the event stream is a BROADCAST: every
+ *        subscriber reads it and MI-9 retains the last body per topic. A value
+ *        one connection may see therefore cannot leave through it. A RETURN
+ *        VALUE IS THE ONLY UNICAST EXIT, and F-6 guarantees a submission has
+ *        exactly one caller to return it to.
+ *
+ *        So the direction is normative and not stylistic: COPYING
+ *        `*response_out` ONTO THE EVENT STREAM, INTO A LOG, INTO A DIAGNOSTIC
+ *        BUNDLE OR INTO ANY STORE VIOLATES MI-P1 RULES 2 AND 3 AND DEFEATS THE
+ *        ONLY REASON THIS ENTRY EXISTS.
  *   F-6  THREADS AND REENTRANCY. A `tw_core*` is Send but NOT Sync for
  *        mutating calls: exactly one thread may hold it for mutation at a time
  *        (S-47). Read-only snapshot calls are safe from any thread. Host
@@ -127,8 +146,29 @@ extern "C" {
  * and every entry past it stays absent — which is the same state a shell that
  * declared them and left them null already produces. Nothing is removed, no
  * signature changes, and no existing entry moves; VR-1 therefore makes this a
- * MINOR bump and NOT an `abi_major` break. */
-#define TW_ABI_MINOR 2u
+ * MINOR bump and NOT an `abi_major` break.
+ *
+ * 2 -> 3: `tw_core_submit_response` was ADDED, and the MI frame's
+ * `idempotency_key` is now honoured where the catalogue requires one. VR-1's
+ * V-B row reads "major on removal or semantic change; minor on addition", and
+ * neither half removes or changes anything a shell compiled against minor 2
+ * can observe:
+ *
+ *   - The new entry is a NEW SYMBOL. `tw_core_submit` keeps its name, its
+ *     three parameters and its behaviour to the byte, so a shell that never
+ *     names the new symbol cannot tell it exists. Carrying the response on
+ *     `tw_core_submit` instead -- as a fourth parameter -- WOULD have been an
+ *     `abi_major` break, because every shipped shell holds a three-argument
+ *     prototype for a symbol whose argument count would have moved, and that
+ *     is a mismatch which links cleanly and corrupts at run time.
+ *   - `idempotency_key` was documented as ignored AND as something a caller
+ *     SHOULD leave empty, so the only submissions whose handling changes are
+ *     the ones this header told shells not to send; an empty key still yields
+ *     exactly the old behaviour. It has to be honoured now because the
+ *     catalogue requires one on `pair.begin` -- the very operation F-5a's
+ *     unicast return exists for -- and refusing it as MGMT.PRECONDITION_FAILED
+ *     would leave the new entry a channel with nothing to carry. */
+#define TW_ABI_MINOR 3u
 
 /* Opaque handles. F-8: no struct with product fields crosses. */
 typedef struct tw_core tw_core; /* one core instance (S-47)               */
@@ -479,12 +519,74 @@ void tw_core_destroy(tw_core *core);
  * contain is MGMT.OP_UNKNOWN. Both are TYPED rejections — never a parse error,
  * never a hang, never a generic failure (ADR-0017 11.7).
  *
- * `request_id`, `correlation_id` and `idempotency_key` are ignored on this
- * carriage and SHOULD be empty: the ABI is in-process and fire-and-forget, so
- * there is no request to correlate and no retry to deduplicate.
+ * `request_id` and `correlation_id` are ignored on this carriage and SHOULD be
+ * empty: there is no connection here, and nothing to correlate an answer
+ * against. THIS ENTRY RETURNS NO BODY -- a caller that wants one calls
+ * `tw_core_submit_response` below, which answers the call itself and so still
+ * needs no id.
+ *
+ * `idempotency_key` IS read, from the FRAME (form 1 only; a bare name carries
+ * none). An empty key means absent, which is what this entry has always seen
+ * and is still what a shell SHOULD send unless the catalogue requires one:
+ * ADR-0008 makes it the CEREMONY key for `pair.begin`, `pair.confirm`,
+ * `device.revoke`, `key.rotate` and the three update operations, and those are
+ * refused as MGMT.PRECONDITION_FAILED without it. It is NOT a retry token
+ * here; it is the precondition, checked in the core so both carriages check it
+ * once. Added at minor 3 -- see TW_ABI_MINOR.
  *
  * A rejected command still produces an EVENT; it is never a silent drop. */
 int32_t tw_core_submit(tw_core *core, tw_slice command, tw_buf **err_out);
+
+/* Submits one command AND HANDS BACK ITS UNICAST RESPONSE BODY. NON-BLOCKING.
+ *
+ * ADDED AT MINOR 3. `tw_core_submit` above is UNCHANGED and stays correct for
+ * every caller that wants no body. This is the same submission, decoded by the
+ * same code from the same two `command` forms -- MI-20's "one contract, two
+ * carriages" would be broken by a second parse -- with the one value F-5a
+ * describes returned to the caller that submitted it.
+ *
+ * ---------------------------------------------------------------------------
+ * *response_out. This paragraph is normative.
+ * ---------------------------------------------------------------------------
+ * On TW_OK, `*response_out` is EITHER
+ *
+ *   - NULL, which is what every operation but `pair.begin` produces today. It
+ *     does NOT mean "no answer". It means THE ANSWER IS THE ONE THE STREAM
+ *     ALREADY CARRIED: the `command.completed` event's `payload`. Read it
+ *     there, off `tw_core_next_event`, exactly as before.
+ *   - a core-owned `tw_buf` holding the operation's WHOLE response body, the
+ *     same bytes a Unix-socket, named-pipe or XPC client receives in its
+ *     `Response`. It is a SUPERSET of what the completion event carried, never
+ *     a substitute for reading the stream.
+ *
+ * OWNERSHIP IS `tw_render_diagnostic`'S, EXACTLY, and F-2 admits no second
+ * rule: the core allocated it, the caller releases it with `tw_buf_free`, and
+ * no other free is valid. The one difference is that this pointer MAY be NULL
+ * where `tw_render_diagnostic`'s never is -- and `tw_buf_free` is NULL-safe,
+ * so an unconditional free is still correct.
+ *
+ * Passing NULL for `response_out` DECLINES the body: the core drops it instead
+ * of allocating one that nothing will free. That is exactly what
+ * `tw_core_submit` does, and it is why the older entry CANNOT leak this value
+ * even by accident -- it is not a convention, it is the absence of a
+ * destination.
+ *
+ * ---------------------------------------------------------------------------
+ * MI-P1 RULES 2 AND 3 BECOME THE CALLER'S HERE
+ * ---------------------------------------------------------------------------
+ * Up to this pointer the core has held them structurally: the value never
+ * entered the event stream, a log line, the Tier-0 ledger, a `Diagnostic` or
+ * any store, and the core's own retained copy is zeroized when it is dropped.
+ * Past `tw_buf_free` the shell owns that obligation. THE BYTES MUST NOT BE
+ * LOGGED AT ANY LEVEL, MUST NOT BE PUT BACK ON THE EVENT STREAM, MUST NOT
+ * REACH A TIER-1 DIAGNOSTIC BUNDLE, AND MUST NOT BE PERSISTED BY EITHER SIDE.
+ * A `pair.begin` body additionally EXPIRES: drop it at the offer's
+ * `not_after_ms` (120 s), whether or not the user has finished with it.
+ *
+ * Errors are `tw_core_submit`'s, identically. On TW_ERR `*response_out` is set
+ * to NULL and *err_out holds the F-4 envelope. */
+int32_t tw_core_submit_response(tw_core *core, tw_slice command,
+                                tw_buf **response_out, tw_buf **err_out);
 
 /* Waits up to `timeout_ms` for the next event on the ONE ordered stream.
  *
