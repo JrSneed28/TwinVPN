@@ -75,6 +75,122 @@ GRADLE_DIR="$REPO/shells/android"
 JNILIBS="$GRADLE_DIR/app/src/main/jniLibs"
 mkdir -p "$(dirname "$EVIDENCE")" "$LOGDIR"
 
+# The Gradle assemble's captured output. Named here rather than at the call site
+# so `--reset`'s `rm -rf "$LOGDIR"/*` and the diagnostics artifact are talking
+# about the same file.
+GRADLE_LOG="$LOGDIR/gradle-assemble.log"
+
+# ---------------------------------------------------------------------------
+# WHY A GRADLE FAILURE HAS TO BE PRINTED A SECOND TIME
+#
+# In run 33288074040 this script refused with
+#
+#     the Gradle build failed; the native libraries built but the app did not
+#
+# and the actual cause -- `Could not find androidx.test:rules:1.6.2`, a
+# coordinate that has never been published -- was, in practice, unreadable.
+# THREE separate defects, all of them this script's:
+#
+#   1. Gradle writes its `* What went wrong:` report to STDERR and its task list
+#      to STDOUT. Un-tee'd, the two are buffered independently, so the block
+#      surfaced AFTER `BUILD FAILED in 3m 11s` and after `37 actionable tasks`
+#      -- below where a reader looking for the reason stops.
+#   2. All of it sat inside the step's collapsed `::group::`, between the task
+#      list and a Gradle-10 deprecation notice.
+#   3. NOTHING was captured. `build/ci/logs/android/` was empty on this path, so
+#      `diagnostics-android-link-run` uploaded zero files -- "No files were found
+#      with the provided path" -- and the artifact could not answer either.
+#
+# A proof script that refuses without saying why is not cheaper than no proof
+# script; it is one whole CI round trip more expensive, per iteration. This is
+# the same defect `ci-common-apple.sh` fixed for the Apple lanes, in the same
+# shape, with one deliberate difference: `apple_show_failure` re-states the
+# diagnostic in a `::group::` of its own, and a top-level group is still
+# COLLAPSED by default. Here it is printed ungrouped, in the clear.
+#
+# `awk` and not `grep`, because `grep` exits 1 when nothing matches and this
+# script runs under `set -o pipefail` with no `|| true` permitted anywhere on a
+# proof path. `awk` always exits 0 and reports for itself when it matched
+# nothing.
+# ---------------------------------------------------------------------------
+android_show_failure() {
+  local label="$1" log="$2"
+
+  echo
+  echo "=================================================================="
+  echo "FAILED: $label"
+  echo "=================================================================="
+  if [ ! -s "$log" ]; then
+    echo "(the step produced NO output at all; $log is empty or absent)"
+    echo "=================================================================="
+    echo
+    return 0
+  fi
+
+  echo "--- Gradle's own failure report, lifted out of $log ---"
+  # Three things in one pass, because Gradle spreads the answer over three
+  # places: the FAILED task line names WHERE, the `* What went wrong:` block
+  # names WHY along with its indented `> ` cause chain, and a `Caused by:` may
+  # appear on its own for a failure that carries no standard envelope.
+  awk '
+    /^> Task .* FAILED$/       { print; matched++; next }
+    /^\* What went wrong:/     { inblock = 1 }
+    inblock                    { print; matched++ }
+    /^\* Get more help/        { inblock = 0; next }
+    !inblock && /Caused by:/   { print; matched++ }
+    END {
+      if (!matched)
+        print "(this log carries no `* What went wrong:` block; the tail below and the diagnostics artifact carry the rest)"
+    }
+  ' "$log"
+
+  echo "--- last 40 lines of $log ---"
+  tail -n 40 "$log"
+  echo "--- the whole log is in the diagnostics artifact as ${log#"$REPO/"} ---"
+  echo "=================================================================="
+  echo
+}
+
+# ---------------------------------------------------------------------------
+# One build step: grouped, streamed, CAPTURED, and explained when it fails.
+#
+#   android_build_step "<label>" "<log>" "<workdir>" <command> [args...]
+#
+# `tee` rather than a plain redirect, so a PASSING run still shows progress live
+# and a reader is not left watching a silent runner for three minutes. The status
+# returned is the STEP's, taken from `PIPESTATUS`, never `tee`'s -- which is
+# always 0 and would turn every failure into a pass.
+#
+# `2>&1` is what puts Gradle's stderr failure report into the same stream as its
+# stdout task list, so the captured log holds both and their order is the pipe's
+# rather than two independently flushed buffers'.
+#
+# There is no `|| true`: a caller that wants to continue past a failure has to
+# say so with its own `||`, in the open.
+#
+# CALL IT FROM AN `if`, as the one call site below does. Like
+# `apple_build_step`, it re-enables `set -e` unconditionally after reading
+# `PIPESTATUS`, so the `set +e; android_build_step …; rc=$?` shape would abort
+# the script on the `return` instead of reaching the caller's error handling.
+# An `if` condition suppresses errexit for the whole compound and is correct.
+# ---------------------------------------------------------------------------
+android_build_step() {
+  local label="$1" log="$2" workdir="$3"
+  shift 3
+  local rc=0
+
+  mkdir -p "$(dirname "$log")"
+  echo "::group::$label"
+  set +e
+  ( cd "$workdir" && "$@" ) 2>&1 | tee "$log"
+  rc=${PIPESTATUS[0]}
+  set -e
+  echo "::endgroup::"
+
+  [ "$rc" -eq 0 ] || android_show_failure "$label (exit $rc)" "$log"
+  return "$rc"
+}
+
 # ---------------------------------------------------------------------------
 # Pins. Every one of these is a version this evidence is about.
 # ---------------------------------------------------------------------------
@@ -326,14 +442,15 @@ fi
 # ---------------------------------------------------------------------------
 release_abis=""
 if [ "$linked" = true ]; then
-  echo "::group::assemble the app, the test package and the release artifact"
-  if (cd "$GRADLE_DIR" && "$GRADLE" --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleRelease); then
+  if android_build_step "assemble the app, the test package and the release artifact" \
+       "$GRADLE_LOG" "$GRADLE_DIR" \
+       "$GRADLE" --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleRelease
+  then
     :
   else
     linked=false
-    notes="the Gradle build failed; the native libraries built but the app did not"
+    notes="the Gradle build failed; the native libraries built but the app did not. The reason is printed in the clear above and in build/ci/logs/android/gradle-assemble.log"
   fi
-  echo "::endgroup::"
 fi
 
 if [ "$linked" = true ]; then
@@ -539,7 +656,7 @@ cat > "$EVIDENCE" <<JSON
   "graceful_shutdown": $shutdown,
   "test_command": "$TEST_CMD",
   "test_exit_code": $exit_code,
-  "artifacts": ["build/ci/logs/android/instrumentation.log","build/ci/logs/android/logcat.txt","build/ci/logs/android/emulator.log"],
+  "artifacts": ["build/ci/logs/android/gradle-assemble.log","build/ci/logs/android/instrumentation.log","build/ci/logs/android/logcat.txt","build/ci/logs/android/emulator.log"],
   "notes": "$notes",
   "verdict": "$verdict",
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
