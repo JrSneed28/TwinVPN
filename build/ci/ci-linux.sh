@@ -148,6 +148,7 @@ cat > "$EVIDENCE" <<JSON
   "privileged": false,
   "github_run_id": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"$GITHUB_RUN_ID\"" || echo null),
   "github_run_attempt": $(twinvpn_run_attempt_json),
+  "repository": $(twinvpn_repository_json),
   "artifact_digests": {},
   "github_run_url": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/$GITHUB_RUN_ID\"" || echo null),
   "commit": "$(cd "$REPO" && git rev-parse HEAD)",

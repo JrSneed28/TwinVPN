@@ -204,11 +204,20 @@ class PageSize16kTest {
         val manager = context.getSystemService(ConnectivityManager::class.java)
             ?: error("ConnectivityManager is unavailable")
 
-        val vpnNetworks = manager.allNetworks.filter { network ->
+        // ONE snapshot, filtered twice. `allNetworks` is deprecated in API 31
+        // with no synchronous replacement -- `registerNetworkCallback` is
+        // asynchronous and would turn this assertion into a latch -- so the
+        // suppression matches the one on `serviceRunning` below. Reading it
+        // once also matters on its own: two calls are two moments, and a
+        // network appearing or dropping between them would leave the VPN set
+        // and the underlay set describing different states of the device.
+        @Suppress("DEPRECATION")
+        val networks = manager.allNetworks
+        val vpnNetworks = networks.filter { network ->
             manager.getNetworkCapabilities(network)
                 ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
         }
-        val underlay = manager.allNetworks.filter { network ->
+        val underlay = networks.filter { network ->
             val caps = manager.getNetworkCapabilities(network) ?: return@filter false
             // The adapter's own rule: a network is underlay only when it is NOT
             // a VPN. `NET_CAPABILITY_NOT_VPN` is the system's own answer to that

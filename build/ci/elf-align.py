@@ -11,7 +11,11 @@ Three different things can be true at once, and only this one covers the third:
     which is what every actual phone runs;
   * `zipalign -c -P 16` proves each `.so` is 16 KiB-aligned WITHIN THE ZIP, so
     the loader can mmap it straight out of the APK. That is a property of the
-    archive's layout;
+    archive's layout -- and only of its UNCOMPRESSED entries: AOSP's
+    `ZipAlign.cpp verify()` takes an `(OK - compressed)` branch for a DEFLATED
+    entry and never opens the ELF at all. So this file also asserts every `.so`
+    is STORED, because `useLegacyPackaging = true` would otherwise leave
+    zipalign green on an APK whose libraries cannot be mapped out of it;
   * this proves each `.so`'s own ELF PT_LOAD segments declare `p_align >=
     16384`, which is the property `-Wl,-z,max-page-size=16384` is supposed to
     produce and the one the kernel refuses on.
@@ -52,9 +56,10 @@ USAGE
 
 Prints a human-readable table to stderr and the evidence JSON to stdout:
 
-    {"arm64-v8a": {"aligned": true, "min_p_align": 16384, "libraries": 2}, ...}
+    {"arm64-v8a": {"aligned": true, "min_p_align": 16384, "libraries": 2,
+                   "stored": 2}, ...}
 
-Exit 0 when every ABI is >= 16384, 1 otherwise.
+Exit 0 when every ABI is >= 16384 and every `.so` is stored, 1 otherwise.
 """
 
 import argparse
@@ -114,6 +119,13 @@ def verdict(per_abi: dict) -> tuple[bool, list[str]]:
                 f"{abi}: the APK carries lib/{abi}/ but no readable .so in it, "
                 f"so nothing about its alignment was measured"
             )
+        elif info.get("stored", 0) != info["libraries"]:
+            problems.append(
+                f"{abi}: {info['libraries'] - info.get('stored', 0)} of "
+                f"{info['libraries']} .so entries are DEFLATED, so the loader "
+                f"cannot mmap them out of the APK and zipalign -c -P 16 passed "
+                f"on its compressed branch"
+            )
         elif not info.get("aligned"):
             problems.append(
                 f"{abi}: a PT_LOAD segment declares p_align "
@@ -139,8 +151,11 @@ def scan(apk: pathlib.Path) -> dict:
         for name in names:
             abi = name.split("/")[1]
             info = per_abi.setdefault(
-                abi, {"aligned": True, "min_p_align": None, "libraries": 0})
+                abi, {"aligned": True, "min_p_align": None, "libraries": 0,
+                      "stored": 0})
             info["libraries"] += 1
+            if z.getinfo(name).compress_type == zipfile.ZIP_STORED:
+                info["stored"] += 1
             aligns = load_aligns(z.read(name))
             if not aligns:
                 # A PARSE FAILURE IS A FAILURE. A truncated entry, a file that
@@ -210,17 +225,29 @@ def self_check() -> int:
     assert load_aligns(b"") == []
 
     # The minimum decides, not the maximum: one bad LOAD is a refused mapping.
-    good = {"arm64-v8a": {"aligned": True, "min_p_align": 16384, "libraries": 2}}
+    good = {"arm64-v8a": {"aligned": True, "min_p_align": 16384, "libraries": 2,
+                          "stored": 2}}
     assert verdict(good) == (True, [])
 
-    bad = {"arm64-v8a": {"aligned": False, "min_p_align": 4096, "libraries": 2}}
+    bad = {"arm64-v8a": {"aligned": False, "min_p_align": 4096, "libraries": 2,
+                         "stored": 2}}
     ok, problems = verdict(bad)
     assert not ok and "max-page-size" in problems[0]
 
     # An ABI directory with nothing readable in it is a problem, not a pass.
-    empty = {"x86_64": {"aligned": True, "min_p_align": None, "libraries": 0}}
+    empty = {"x86_64": {"aligned": True, "min_p_align": None, "libraries": 0,
+                        "stored": 0}}
     ok, problems = verdict(empty)
     assert not ok and "no readable .so" in problems[0]
+
+    # A COMPRESSED .so IS UNMAPPABLE AND PERFECTLY ALIGNED. `zipalign -c -P 16`
+    # takes an `(OK - compressed)` branch for a DEFLATED entry and never opens
+    # the ELF, so flipping `useLegacyPackaging` back to true would leave both of
+    # this lane's other checks green on an APK no 16 KiB device can load.
+    deflated = {"arm64-v8a": {"aligned": True, "min_p_align": 16384,
+                              "libraries": 2, "stored": 1}}
+    ok, problems = verdict(deflated)
+    assert not ok and "DEFLATED" in problems[0], problems
 
     # Several bad ABIs report several problems, not just the first.
     assert len(verdict({**bad, **empty})[1]) == 2

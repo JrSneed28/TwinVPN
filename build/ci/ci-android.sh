@@ -276,6 +276,18 @@ discover_ps16k_image() {
           sub(/android-/, "", part[2]);
           if (part[2] !~ /^[0-9]+$/) next;
           if (tolower(pkg) ~ /canary|preview|experimental/) next;
+          # THE TAG DIRECTORY, MATCHED EXACTLY. `[A-Za-z0-9_]*ps16k[A-Za-z0-9_]*`
+          # above also matches `google_apis_playstore_ps16k`, which sorts before
+          # `google_apis_ps16k` in `sdkmanager --list` and therefore wins the
+          # strict `>` below -- so the sweep silently selected the Play Store
+          # image. That is a `user` build: no `adb root`, and the app-compat
+          # properties this lane sets are refused on it. It still contains
+          # `ps16k`, so `adjudication.py` would have accepted the row.
+          #
+          # An exact match rather than one more exclusion: a deny-list is
+          # defeated by the next variant Google publishes, and naming the one
+          # image this criterion is about cannot be.
+          if (part[3] != "google_apis_ps16k") next;
           if (part[4] == abi && part[2] + 0 >= min && part[2] + 0 <= max && part[2] + 0 > best) {
             best = part[2] + 0; found = pkg;
           }
@@ -577,7 +589,24 @@ for entry in "${ABIS[@]}"; do
   export CC_${triple//-/_}="$cc"
   export AR_${triple//-/_}="$NDK_BIN/llvm-ar"
   export CARGO_TARGET_${triple_env}_LINKER="$cc"
-  export CARGO_TARGET_${triple_env}_RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384"
+  # BOTH PAGE-SIZE FLAGS. They control different properties of the output and
+  # only one of them is about `p_align`:
+  #
+  #   * `max-page-size` sets the PT_LOAD `p_align`, which is what the kernel
+  #     refuses on and what `elf-align.py` reads back;
+  #   * `common-page-size` sets the alignment lld rounds the END OF RELRO up to
+  #     (`lld/ELF/LinkerScript.cpp`: "If .relro_padding is present, round up the
+  #     end to a common-page-size boundary to protect the last page").
+  #
+  # Leaving the second at 4096 leaves writable data sharing the final 16 KiB
+  # page with RELRO, and bionic deliberately over-protects: it mprotects every
+  # page TOUCHED by the segment read-only (`linker/linker_phdr.cpp`: "We're
+  # going to be over-protective here"). The library then SIGSEGVs with
+  # `SEGV_ACCERR` on a 16 KiB device while `p_align` is correct and
+  # `zipalign -c -P 16` passes -- a crash neither of this lane's two alignment
+  # checks can see. lld clamps commonPageSize to <= maxPageSize, so 16384/16384
+  # is the pairing that holds.
+  export CARGO_TARGET_${triple_env}_RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
 
   rustup target add "$triple" >/dev/null
 
@@ -770,8 +799,9 @@ if [ "$linked" = true ] && [ -n "${release_apk:-}" ]; then
     # is this criterion's whole claim, and it is not the link/run lane's.
     if [ "$do_pagesize16k" = true ]; then
       linked=false
-      notes="a shipped ABI's .so declares PT_LOAD p_align below 16384, so it \
-cannot be mapped on a 16 KiB kernel however well the x86_64 emulator ran"
+      notes="a shipped ABI's .so cannot be mapped on a 16 KiB kernel -- either \
+its PT_LOAD p_align is below 16384 or it is DEFLATED in the APK, both of which \
+the x86_64 emulator can run past; see the ::error:: line above for which"
     else
       echo "::warning::a shipped ABI is not 16 KiB load-aligned; \
 ANDROID-16K-PAGE-SIZE would fail on it"
@@ -944,6 +974,46 @@ if [ "$linked" = true ]; then
     adb shell getprop ro.build.version.sdk | tr -d '\r' | sed 's/^/device API: /'
     adb shell getprop ro.product.cpu.abi | tr -d '\r' | sed 's/^/device ABI: /'
   fi
+  echo "::endgroup::"
+fi
+
+# ---------------------------------------------------------------------------
+# 3a. 16 KB APP COMPAT, TURNED OFF AND THEN READ BACK
+# ---------------------------------------------------------------------------
+#
+# THIS IS DIAGNOSIS, NOT CORRECTNESS. Android's 16 KB app-compat mode presents
+# 4096 to a process whose libraries are 4 KiB-aligned, so a run under compat
+# FAILS `PageSize16kTest.the_running_kernel_uses_16_kib_pages` -- that test asks
+# `Os.sysconf(_SC_PAGESIZE)` from INSIDE the app process, while the
+# `getconf PAGE_SIZE` below is toybox, outside it. The two disagreeing is the
+# signature of compat mode, and the lane already fails on it. What it does not
+# do is SAY so: the failure reads as "wrong image".
+#
+# So the properties are turned off before anything is installed, and then READ
+# BACK, because a `setprop` that was refused and a `setprop` that took look
+# identical from the exit code. On a `user` build there is no `adb root` and the
+# write may simply be ignored -- which is a fact about the run worth recording,
+# not a reason to fail here. The readback is what the evidence carries.
+#
+# THE `|| true` IS NOT A SWALLOWED FAILURE, and this is the one place in this
+# script where that is true. `setprop`'s exit code is not evidence of anything:
+# it reports whether the write was accepted, and a refusal is a legitimate
+# outcome on a `user` build. What the criterion is graded on is the GETPROP
+# below, and a failed write shows up there as the value it did not change.
+linker_16kb_app_compat="not attempted"
+pm_16kb_app_compat_disabled="not attempted"
+if [ "$do_pagesize16k" = true ] && [ "$device_ready" = true ]; then
+  echo "::group::16 KB app compat"
+  adb shell setprop bionic.linker.16kb.app_compat.enabled false 2>&1 || true
+  adb shell setprop pm.16kb.app_compat.disabled true 2>&1 || true
+  linker_16kb_app_compat="$(adb shell getprop bionic.linker.16kb.app_compat.enabled \
+    2>/dev/null | tr -d '\r')"
+  pm_16kb_app_compat_disabled="$(adb shell getprop pm.16kb.app_compat.disabled \
+    2>/dev/null | tr -d '\r')"
+  : "${linker_16kb_app_compat:=unset}"
+  : "${pm_16kb_app_compat_disabled:=unset}"
+  echo "bionic.linker.16kb.app_compat.enabled = $linker_16kb_app_compat"
+  echo "pm.16kb.app_compat.disabled = $pm_16kb_app_compat_disabled"
   echo "::endgroup::"
 fi
 
@@ -1259,11 +1329,14 @@ cat > "$EVIDENCE" <<JSON
     "emulator_version": "$emulator_version",
     "system_image_package": "$([ "$do_privileged" = true ] && echo "physical device" || echo "$EMULATOR_IMAGE")",
     "system_image_revision": "$image_revision",
+    "linker_16kb_app_compat": "$linker_16kb_app_compat",
+    "pm_16kb_app_compat_disabled": "$pm_16kb_app_compat_disabled",
     "emulator_image": "$([ "$do_privileged" = true ] && echo "physical device" || echo "$EMULATOR_IMAGE")"
   },
   "leak_oracle": null,
   "github_run_id": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"$GITHUB_RUN_ID\"" || echo null),
   "github_run_attempt": $(twinvpn_run_attempt_json),
+  "repository": $(twinvpn_repository_json),
   "artifact_digests": $ARTIFACT_DIGESTS,
   "github_run_url": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/$GITHUB_RUN_ID\"" || echo null),
   "commit": "$(cd "$REPO" && git rev-parse HEAD)",

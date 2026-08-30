@@ -36,6 +36,8 @@
 #   twinvpn_verify_digest "$ipa" "$expected"    # fatal on mismatch
 #   twinvpn_digest_json app-release.apk "$apk" TwinVPN.ipa "$ipa"
 #                                               # {"app-release.apk":"..",...}
+#   twinvpn_run_attempt_json                    # "2" or null
+#   twinvpn_repository_json                     # "owner/name" or null
 
 # NO `set -e` HERE. This file is sourced into scripts that set their own
 # options, and changing a caller's shell options from a helper is how a helper
@@ -126,6 +128,29 @@ run must not proceed to test bytes nobody named." >&2
 twinvpn_run_attempt_json() {
   if [ -n "${GITHUB_RUN_ATTEMPT:-}" ]; then
     printf '"%s"' "$GITHUB_RUN_ATTEMPT"
+  else
+    printf 'null'
+  fi
+}
+
+# THE REPOSITORY, as a JSON scalar for a heredoc: `"owner/name"` or `null`.
+#
+# `build/acceptance/adjudication.py`'s `check_run_binding` refuses evidence that
+# records no `repository` whenever the environment names one, and the
+# environment always names one under Actions. So an evidence file that omits it
+# is not merely thinner -- it cannot discharge any criterion at all, on any run
+# of this workflow.
+#
+# What it buys once present: a fork's run, or another repository's run, produces
+# evidence that cannot be passed off as this repository's. Commit and run id do
+# not separate those -- a fork carries the same commits and numbers its own runs
+# from the same series.
+#
+# `null` when unset, for the same reason as the attempt above: a local run is
+# not a run of any repository, and naming one would be an invention.
+twinvpn_repository_json() {
+  if [ -n "${GITHUB_REPOSITORY:-}" ]; then
+    printf '"%s"' "$GITHUB_REPOSITORY"
   else
     printf 'null'
   fi

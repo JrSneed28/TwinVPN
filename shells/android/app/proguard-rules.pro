@@ -34,6 +34,30 @@
 -dontwarn com.google.protobuf.**
 
 # ---------------------------------------------------------------------------
+# What only the instrumented tests reach.
+# ---------------------------------------------------------------------------
+#
+# R8 shrinks the APP without considering `androidTest` usages. The test APK is
+# kept whole and is given `-applymapping`, but a mapping cannot rename a member
+# R8 DELETED, so a member reached only from an instrumented test is removed from
+# the app and the call lands on nothing: `NoSuchMethodError` at run time.
+#
+# This bites only where the tests run against a release build --
+# `-Ptwinvpn.testBuildType=release`, which the 16 KiB lane sets and the ordinary
+# link/run lane does not. That is why the debug lane has always been green.
+#
+# `CoreClient.requestNetDown` has no caller in `src/main` at all: it exists for
+# the MI-K1 assertion in `NativeLinkRunTest`, so it is exactly the shape R8
+# removes.
+-keep class net.twinvpn.android.core.CoreClient { *; }
+
+# `TwinVpnService$Intents` is an object of two-line factory methods -- a prime
+# inlining candidate under `proguard-android-optimize.txt`. It has real callers
+# in `src/main`, so R8 may inline them all and drop the holder class, which the
+# instrumented tests then fail to resolve: `NoClassDefFoundError`.
+-keep class net.twinvpn.android.vpn.TwinVpnService$Intents { *; }
+
+# ---------------------------------------------------------------------------
 # What must NOT be kept
 # ---------------------------------------------------------------------------
 #

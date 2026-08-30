@@ -38,6 +38,10 @@ from gate_harness import GateCase  # noqa: E402
 # module's namespace, so the star import is what keeps one command running
 # every case after the environment tests moved to their own file.
 from test_environment_attestation import *  # noqa: E402,F401,F403
+# And the producer half: everything above grades the CHECKER against a fixture,
+# which is exactly why a writer that stopped emitting a required key went
+# unnoticed. `test_evidence_writers` renders the real writers and grades those.
+from test_evidence_writers import *  # noqa: E402,F401,F403
 
 
 class PositiveControls(GateCase):
