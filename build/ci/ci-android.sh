@@ -978,7 +978,11 @@ whole output is in build/ci/logs/android/preflight/." >&2
   # becomes the prefix `com.google.errorprone.annotations.`; a bare `-dontwarn`
   # names no prefix and is skipped, which can only make this gate stricter.
   {
-    printf '%s\n' android. java. javax. dalvik. org.w3c. org.xml. org.json. org.apache.http.
+    # `org.xmlpull.` is FRAMEWORK-PROVIDED, not missing: XmlSerializer ships in
+    # android.jar, so R8 resolves it and emits no keep rule, while apkanalyzer --
+    # which only ever sees the two APKs and never the framework -- reports it as
+    # referenced by neither. Run 33328620759 listed it for exactly that reason.
+    printf '%s\n' android. java. javax. dalvik. org.w3c. org.xml. org.xmlpull. org.json. org.apache.http.
     awk '$1=="-dontwarn" && NF>1 { p=$2; sub(/\**$/,"",p); if (p != "") print p }' \
       "$GRADLE_DIR/app/proguard-rules.pro" \
       "$GRADLE_DIR/app/proguard-androidtest-keep.pro"
