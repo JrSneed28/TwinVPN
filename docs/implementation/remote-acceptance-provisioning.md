@@ -21,6 +21,23 @@ under test, running `build/ci/leak-probe.sh sentinel` forever as a systemd unit
 against the oracle's `--sentinel-token-file` token. It holds no control-plane
 credential.
 
+**The hard constraint is an egress ADDRESS, not a machine count.** Its packets
+must reach the oracle from a source address that no device under test is ever
+observed egressing from — for all three lanes at once. This is what rules out
+every cheap answer: another runner in the same GitHub pool can present the same
+NAT address as the one running the probe; a second VM in the same Azure VNet
+shares the L1 host's outbound IP, and the L2 guest already NATs through L1; a
+container on the EC2 Mac *is* the DUT; and a second box in the same office
+shares the office's public IP. The oracle discards a beat arriving from a
+device-seen address, so **a sentinel that fails this is worse than no sentinel
+at all — it looks configured and proves nothing.** A small VM at a different
+provider, or in a separate cloud account with its own egress, is the reliable
+answer.
+
+It also needs working IPv6 to the oracle. A host without it leaves
+`ipv6_sentinel_continuous` false, which is `INCONCLUSIVE` for every criterion
+with an IPv6 leg. That is not a nice-to-have.
+
 It is the cheapest item on this list and it gates three of the five remaining
 rows: `WINDOWS-WFP-KILLSWITCH`, `MACOS-SYSEXT-LIFECYCLE` and
 `IOS-NE-FAIL-CLOSED`. All three lanes exit 2 without `TWINVPN_SENTINEL_HOST`
@@ -57,3 +74,22 @@ a runner.
 Oracle process flags, which no CI job sends because the device under test is the
 last party that should describe the deployment: `--sentinel-max-gap-ms`,
 repeatable `--resolver <ip>=<id>:<p|u>`, and `--sentinel-token-file`.
+
+## Known gaps in the probes themselves
+
+Two items are recorded rather than fixed, because neither can be closed without
+infrastructure that does not exist and both are visible in the evidence today.
+
+* **`ci-ios-corellium.sh` runs the probe on the ubuntu controller, not on the
+  iPhone.** It records this honestly as `environment.probe_host: "controller"`,
+  and the adjudicator refuses that value — `IOS-NE-FAIL-CLOSED` therefore cannot
+  go green until the probe runs on the device under test. A controller-side probe
+  produces an oracle report that is internally consistent and entirely about the
+  wrong machine, which is exactly the failure the `probe_host` key exists to
+  catch. It is caught, and it is not yet fixed.
+* **`build/ci/ci-android.sh` is 1303 lines** against the 500-line ceiling, as is
+  `build/acceptance/report.py` at 925. Both were already over before the
+  2026-08-30 pass (1104 and 803 respectively). Splitting the 16 KiB lane out of
+  the Android script would restructure the link/run lane with it, which is not
+  work to do at the end of a hardening pass; it is recorded as debt rather than
+  reported as clean.
