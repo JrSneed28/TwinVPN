@@ -56,11 +56,28 @@ pub mod wire;
 ///
 /// `cargo check`ed against the real bionic and `jni` crates by
 /// `make cross-check`; **never linked and never run** on this host.
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "jvm-bridge"))]
 pub mod jvm;
 
 /// The `Java_net_twinvpn_android_NativeBridge_*` symbols.
-#[cfg(target_os = "android")]
+///
+/// # Why a feature and not `cfg(target_os)` alone
+///
+/// This module's symbols are `#[no_mangle]`, and they belong to exactly one
+/// shared object: `libtwinvpn_platform_android.so`, which `NativeBridge`'s
+/// `init` loads first. `shells/android/jni` links this crate too — for
+/// [`crate::hostvtable`]'s three W-7 capabilities, and for nothing else — and
+/// with an unconditional `cfg` that second link would put a **duplicate**
+/// `Java_net_twinvpn_android_NativeBridge_nativeCreate` (and every sibling) into
+/// `libtwinvpn_android_jni.so`, carrying its own copy of this module's registry.
+/// Both `.so`s are loaded into one process (`build/ci/ci-android.sh` §1), so the
+/// JVM would then bind those names by **load order** rather than by design, and
+/// the adapter state Kotlin registered would sit in whichever copy happened to
+/// win.
+///
+/// `default = ["jvm-bridge"]` keeps the shipped `.so` byte-identical; the shell
+/// turns it off, and gets the capabilities without the symbols.
+#[cfg(all(target_os = "android", feature = "jvm-bridge"))]
 pub mod entry;
 
 use twinvpn_platform::{PlatformError, TunnelDevice};

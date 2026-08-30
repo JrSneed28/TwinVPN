@@ -32,6 +32,19 @@ description = "the Android implementation of the twinvpn-platform trait (CB-3 pe
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# The `Java_…` JNI symbols and the JVM-backed hostcalls, ON by default so the
+# shipped CDYLIB above is unchanged.
+#
+# It exists so `shells/android/jni` can link this crate with
+# `default-features = false` and get `hostvtable`'s three W-7 capabilities
+# WITHOUT a second copy of `bridge::entry`'s `#[no_mangle]` symbols. Both
+# libraries are loaded into one process, so a duplicate `Java_…` name would be
+# resolved by load order and would carry its own, separate adapter registry.
+# See `src/bridge/mod.rs` for the full note.
+[features]
+default    = ["jvm-bridge"]
+jvm-bridge = []
+
 [dependencies]
 twinvpn-types    = { workspace = true }
 twinvpn-env      = { workspace = true }

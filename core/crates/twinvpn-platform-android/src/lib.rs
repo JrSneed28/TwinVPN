@@ -101,6 +101,7 @@ pub mod clock;
 pub mod codes;
 pub mod custody;
 pub mod hostcall;
+pub mod hostvtable;
 pub mod iface;
 pub mod netcfg;
 pub mod netchange;
