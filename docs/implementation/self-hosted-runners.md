@@ -369,3 +369,109 @@ python3 -c "import json;d=json.load(open('build/ci/evidence/windows-privileged.j
 
 Then the gate's own import step picks it up for the same `$GITHUB_SHA` — see
 `ownership.md` §11.6 **G-22**, which is why a green run can flip the row at all.
+
+---
+
+## Cloud alternatives to the three remaining machines — 2026-08-30
+
+Researched because the machines are the wave's last blocker and buying four rigs
+is not the only option. **One row of three is solvable in the cloud, and it is
+not the cheapest way to solve it.**
+
+### macOS — POSSIBLE on AWS EC2 Mac, but buy the Mac mini
+
+The blocker everywhere else is SIP: `systemextensionsctl developer on` needs it
+configured, and no Mac host lets a customer reach Recovery mode. **AWS shipped an
+EC2 API in May 2025 that disables SIP on Apple silicon without physical access**
+— `aws ec2 create-mac-system-integrity-protection-modification-task`, polled with
+`describe-mac-modification-tasks`. That is the whole reason this row is open.
+
+Two facts decide how to use it:
+
+* **SIP state is volume-scoped**, not instance- or host-scoped. A stop/start
+  re-enables it, a replaced root volume does not inherit it, and it does **not**
+  transfer to snapshots or AMIs. So the golden-image trick does not carry SIP:
+  bake Xcode and the runner into an AMI if you like, but the SIP task re-runs on
+  every fresh root volume. Treat the runner as a long-lived instance that is
+  never stopped, and **assert `csrutil status` as a pre-flight step in the job** —
+  AWS notes SIP semantics can shift across macOS updates, and a silently
+  re-enabled SIP fails deep inside extension activation with a misleading error.
+* **Xcode 26.6 requires macOS Tahoe 26.2+.** The Xcode 26 line raised its floor
+  mid-series at 26.4. AWS's AMI page prose still says "macOS Sequoia (version
+  15)" and is **stale**; the changelog on the same page is authoritative and has
+  shipped Tahoe AMIs through 26.6.1 (release 2026.08.26). Launch a Tahoe AMI.
+  Xcode is not preinstalled on any of them — the AMIs carry Command Line Tools
+  only — so 26.6 is a manual install to `/Applications/Xcode_26.6.app`, which is
+  the path `build/ci/ci-common-apple.sh:90` expects.
+
+Other requirements: a one-time SSH prep granting `ec2-user` a secure token
+(`dscl . -passwd`, then `sysadminctl`, verified with
+`sysadminctl -secureTokenStatus`), passwords of 4–16 characters or the API
+rejects them, exactly one bootable volume, and **FileVault must stay off** — AWS
+warns the host then fails to boot. The instance is not stopped for the task; it
+goes unreachable for 60–90 minutes across a series of reboots.
+
+**Cost, and why it does not win.** Billing is per Dedicated Host with a
+**24-hour minimum allocation** — Apple's licence term, not an AWS choice, so no
+provider beats it. A nightly job cannot allocate for less than 24 h, so
+allocate-daily and run-continuously cost the same. us-east-1 On-Demand,
+2026-08-30: `mac2-m2.metal` $0.878/h → **~$641/month**; `mac-m4.metal` $1.23/h →
+~$898/month. No Spot, no Reserved; Savings Plans apply. EBS is extra and is not
+a rounding error at the 10,000 IOPS / 400 MiB/s AWS recommends.
+
+Against roughly **$600–800 once** for a Mac mini on a desk — which also carries
+`twinvpn-ios-device` with an attached iPhone, something no cloud can do. **Buy
+the Mac mini.** EC2 Mac is the answer to "we need this row before hardware can
+be purchased", not to "this is cheaper".
+
+### iOS — NOT POSSIBLE on any commercial device farm
+
+AWS Device Farm, BrowserStack, Sauce Labs and Firebase Test Lab all **re-sign
+the uploaded IPA**, which strips entitlements — `packet-tunnel-provider` is gone
+before the tunnel can start. None offers a **supervised** device, which
+ADR-0022 §11.10's iOS row needs for the always-on cases. The blocking capability
+is entitlement preservation, and it is stated in each provider's own current
+documentation. An iPhone attached to the Mac above is the only route.
+
+### Android — NOT POSSIBLE on mainstream farms; ONE open lead
+
+No mainstream farm will hand over a device booted on a **16 KiB kernel**: on a
+Pixel that requires an OEM-unlocked bootloader and a data wipe, which no farm
+does. Every farm device you can get is a 4 KiB device — and a 4 KiB device is
+worse than none, for the reason `self-hosted-runners.md` gives above and the
+workflow now hard-fails on.
+
+**The one lead worth 15 minutes: Samsung Remote Test Lab.** Samsung's 2025-07-07
+RTL blog states RTL offers 16 KB page-size testing on real devices and captions
+a figure "16KB page size devices in Remote Test Lab", and a category page exists
+at `developer.samsung.com/remotetestlab/devices/129/16kb-page-size`. Critically,
+RTL's Remote Debug Bridge gives a genuine `adb connect localhost:<port>` — **a
+real adb shell, not an instrumentation harness** — which is the only reason RTL
+is still open when every other farm is closed.
+
+The device list itself is a client-rendered SPA behind a Samsung account and
+could not be read; no public catalogue endpoint exists. **So someone must log in
+and look.** The check costs one RTL credit (15 minutes; the free tier is 20
+credits/day):
+
+1. Sign in, open the **16KB Page Size** category, reserve any device.
+2. `adb connect localhost:<port>` from a local machine.
+3. Run exactly the two commands the gate runs:
+   `adb shell getprop ro.product.cpu.abi` → want `arm64-v8a`;
+   `adb shell getconf PAGE_SIZE` → want `16384`.
+4. Note whether `adb shell` accepts an **arbitrary** command or only a fixed
+   set. That is the difference between a real shell and a harness, and it
+   decides whether `appops set <pkg> ACTIVATE_VPN allow` is available later for
+   M-19's tunnel half.
+
+Both values right and the Android row has a cloud path. Anything else and the
+question is closed for good, and the row needs a Pixel 8/9 you unlock yourself.
+
+### Terms
+
+Nothing forbids either arrangement. GitHub's self-hosted runner documentation
+cautions only that they be used with **private** repositories, which the
+workflow's absent `pull_request` trigger and fork guard already satisfy. Apple's
+macOS SLA gained a **"Leasing for Permitted Developer Services"** clause in Big
+Sur, which is what authorises cloud Mac hosting at all and is the source of the
+24-hour minimum; CI for your own apps is the permitted use.
