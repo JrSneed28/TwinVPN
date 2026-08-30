@@ -193,6 +193,21 @@ if [ "$compiled" = true ]; then
   echo "::endgroup::"
 fi
 
+# --- 1c. chrome strings stay off the reason-code path -----------------------
+#
+# Cheap, Linux-runnable, and it guards a defect that shipped: eleven UI chrome
+# strings were resolved as REASON CODES through tw_render_diagnostic, so
+# ObservedReasonCode::parse rejected the lowercase `ui`, the domain fell back
+# to INTERNAL, and every tab, title and button rendered "TwinVPN hit a defect
+# in itself." on a VPN. It is a PC-3 prohibited rendering and nothing in the
+# build caught it, because a wrong reason code is a valid string.
+#
+# This runs BEFORE the project is generated, so a regression costs seconds
+# rather than a full simulator round trip.
+echo "::group::chrome strings are not reason codes"
+"$SHELL_DIR/Scripts/check-chrome-strings.sh"
+echo "::endgroup::"
+
 # --- 2. stage the ABI of record and generate the project --------------------
 if [ "$compiled" = true ]; then
   echo "::group::stage twinvpn.h and generate the project"
