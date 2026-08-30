@@ -260,7 +260,27 @@ exists to discard, and restoring to it would start the next run already dirty.
 
 ### 2. Provision the guest
 
-Install Windows 11 24H2 or Server 2022+, then, **inside the guest**, elevated:
+**Getting an ISO.** Use the **Windows 11 Enterprise evaluation** — 90 days, no
+product key, currently offered as version 25H2 x64, which satisfies the 24H2
+floor. It needs a Microsoft account to register before the download.
+<https://www.microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise>
+
+The consumer multi-edition ISO at
+<https://www.microsoft.com/en-us/software-download/windows11> needs no sign-in
+but does need a licence key you already hold.
+
+The Hyper-V Quick Create gallery offers no ready-made image for this, so the ISO
+is the only route.
+
+**The evaluation expires on wall-clock date, not on VM uptime**, and restoring
+the golden checkpoint does not reset it — the checkpoint restores an early
+*state*, but Windows compares against the real date. An expired Enterprise
+evaluation shuts down roughly hourly, which presents as flaky CI rather than as
+a licensing problem. `slmgr /rearm` extends it up to three times (about a year
+in total); after that the rig has to be rebuilt or licensed. Budget for that
+rather than debugging it.
+
+Install Windows, then, **inside the guest**, elevated:
 
 ```powershell
 .\twinvpn-rig-guest.ps1 -Action verify
