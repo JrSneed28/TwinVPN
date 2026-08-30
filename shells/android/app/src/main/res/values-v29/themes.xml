@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  API 29+ only. `Theme.DeviceDefault.DayNight` is the platform's DayNight
+  family and was added in API 29; `values/themes.xml` carries the API 26-28
+  form and explains why the base cannot be unconditional.
+-->
+<resources>
+    <style name="Theme.TwinVPN" parent="android:Theme.DeviceDefault.DayNight.NoActionBar">
+        <item name="android:windowBackground">?android:attr/colorBackground</item>
+        <item name="android:statusBarColor">?android:attr/colorBackground</item>
+        <item name="android:navigationBarColor">?android:attr/colorBackground</item>
+    </style>
+</resources>

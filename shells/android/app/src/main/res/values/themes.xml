@@ -3,9 +3,31 @@
   The Activity theme. Compose owns everything visible; this exists so the window
   has a background and a status-bar treatment before the first frame, which is
   what stops a white flash on a dark device.
+
+  WHY THE BASE IS NOT A DayNight THEME.
+
+  `android:Theme.Material.DayNight` does not exist. The platform ships
+  `Theme.Material` and `Theme.Material.Light` from API 21, and the only
+  platform DayNight family is `Theme.DeviceDefault.DayNight`, added in API 29.
+  Referencing the non-existent name failed the resource link outright:
+
+      AAPT: error: resource android:style/Theme.Material.DayNight.NoActionBar
+      not found.
+
+  `minSdk` is 26, so the DayNight base cannot be unconditional. This file is
+  the API 26-28 form and `values-v29/themes.xml` overrides it with the real
+  DayNight theme where the platform has one. Both set the same three
+  attributes, so the pre-first-frame appearance is identical; only the
+  light/dark following differs, and it differs exactly where the platform
+  gained the ability.
+
+  The alternative was an AppCompat dependency for `Theme.AppCompat.DayNight`.
+  Not taken: the app is Compose, has no AppCompat dependency today, and adding
+  one to name a theme is a dependency-surface decision under ADR-0018 DP-3 for
+  a cosmetic gain on three API levels.
 -->
 <resources>
-    <style name="Theme.TwinVPN" parent="android:Theme.Material.DayNight.NoActionBar">
+    <style name="Theme.TwinVPN" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">?android:attr/colorBackground</item>
         <item name="android:statusBarColor">?android:attr/colorBackground</item>
         <item name="android:navigationBarColor">?android:attr/colorBackground</item>
