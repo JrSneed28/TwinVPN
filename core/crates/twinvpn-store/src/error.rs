@@ -131,6 +131,20 @@ pub enum StoreError {
         held: u64,
     },
 
+    /// The ST-23 crash-injection point fired (ADR-0020 §11.17's P19
+    /// observable), stopping `commit` at a named step boundary.
+    ///
+    /// Reachable **only** through `Store::inject_commit_crash`, which is behind
+    /// the `test-support` feature and is never enabled in a shipped build. It
+    /// maps to `INTERNAL.INVARIANT_VIOLATED` rather than to a `STORE.*` code
+    /// because a shipped build that produced it would be reporting on its own
+    /// defect, not on the store's condition.
+    #[error("ST-23 crash injected at {at:?}")]
+    CommitCrashInjected {
+        /// The step boundary at which the commit stopped.
+        at: crate::CommitCrash,
+    },
+
     /// The anchor is ahead of the vault: a restore, a rollback, or a crash
     /// between ST-23 steps 3 and 5. Rung L5.
     ///
@@ -286,9 +300,9 @@ impl StoreError {
             StoreError::SchemaTooNew { .. } => codes::STORE_SCHEMA_TOO_NEW,
             StoreError::SecureStoreUnavailable => codes::STORE_KEYSTORE_UNAVAILABLE,
             StoreError::CustodyDegraded { .. } => codes::STORE_CUSTODY_DEGRADED,
-            StoreError::UndeclaredNamespace | StoreError::CryptoInvariant { .. } => {
-                codes::INTERNAL_INVARIANT_VIOLATED
-            }
+            StoreError::UndeclaredNamespace
+            | StoreError::CryptoInvariant { .. }
+            | StoreError::CommitCrashInjected { .. } => codes::INTERNAL_INVARIANT_VIOLATED,
         }
     }
 
@@ -350,7 +364,10 @@ impl StoreError {
             | StoreError::AnchorMismatch { .. }
             | StoreError::AnchorMissing
             | StoreError::SecureStoreUnavailable
-            | StoreError::CustodyDegraded { .. } => {}
+            | StoreError::CustodyDegraded { .. }
+            // The crash-injection point is test scaffolding and cannot occur in
+            // a shipped build, so it attaches no evidence of its own.
+            | StoreError::CommitCrashInjected { .. } => {}
         }
         b.build()
     }

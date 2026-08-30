@@ -225,6 +225,67 @@ fn a_restored_older_vault_cannot_lower_the_trust_epoch() {
     store.close().expect("close");
 }
 
+/// **Proof test P19, oracle (b), through the ST-23 crash-injection point.**
+///
+/// ADR-0020 §15 oracle (b): "A's `effective_floor_set` after open shows
+/// `trust_epoch = e1`, **not** `e0`." ADR-0020 §11.17 lists the injection point
+/// itself as a P19 observable — "the ST-23 step number at which the process is
+/// killed" — and this is that observable, driven.
+///
+/// The commit is killed in the window **between the anchor write and the vault
+/// commit**. Under ST-23's order the anchor advanced first, so the new floor is
+/// already durable in Tier 1 when the process dies: ST-24 row 2 sees
+/// `anchor.store_seq > vault.store_seq`, classifies a rollback, and the
+/// anchor's floors win. Reverse steps 3 and 5 — which is exactly `M-P19-3` —
+/// and the same window leaves the vault ahead of an anchor still holding `e0`;
+/// ST-24 row 4 resolves that to `max(anchor, vault)`, and the vault-side floor
+/// mirror is empty, so the maximum is the OLD floor set and the advance is lost.
+///
+/// This is the assertion `a_restored_older_vault_cannot_lower_the_trust_epoch`
+/// cannot make: that test never interrupts a commit, so the ORDER of steps 3
+/// and 5 is invisible to it and a reordered build passes it unchanged.
+#[test]
+fn a_crash_between_the_anchor_and_the_vault_cannot_lose_the_advanced_floor() {
+    let f = Fixture::new("p19-crash-st23");
+
+    // e0 — the floor the attacker wants to come back to.
+    let mut store = f.open(true).expect("open");
+    let tx = Transaction::new()
+        .write(peer_key(), b"peer@e0".to_vec(), true, 1)
+        .advance_floor(FloorId::TrustEpoch, 5);
+    drive(store.commit(tx)).expect("commit e0");
+    store.close().expect("close");
+
+    // e1 — advanced by a commit that is killed at the ST-23 boundary.
+    let mut store = f.open(true).expect("reopen");
+    store.inject_commit_crash(Some(twinvpn_store::CommitCrash::BetweenAnchorAndVault));
+    let tx = Transaction::new()
+        .write(peer_key(), b"peer@e1".to_vec(), true, 2)
+        .advance_floor(FloorId::TrustEpoch, 9);
+    match drive(store.commit(tx)) {
+        Err(StoreError::CommitCrashInjected { .. }) => {}
+        other => panic!("the injected crash did not fire: {other:?}"),
+    }
+    // Release the single-opener lock and drop the handle. `close` writes
+    // nothing — it only releases the lock — so the ST-23 state left on disk is
+    // exactly what the kill left. It stands in for the lock being reaped after
+    // the process died, which is not what this test is about; whether a STALE
+    // lock is recovered is `STORE.LOCK_CONTENDED`'s own question.
+    store.close().expect("release the lock");
+    drop(store);
+
+    // The reopen is the oracle.
+    let store = f.open(true).expect("open after the injected crash");
+    assert_eq!(
+        store.floors().get(&FloorId::TrustEpoch),
+        9,
+        "ADR-0020 §15 oracle (b): the floor set after open must show e1, not e0. \
+         A crash between ST-23's steps must never lose an advanced floor — which \
+         is only true while the anchor is written BEFORE the vault."
+    );
+    store.close().expect("close");
+}
+
 /// **Attack test — ST-23 step 2.** A commit that would lower a floor is refused,
 /// and **nothing** is written: not the anchor, not the vault. A partial write
 /// here would be the split state ST-12b exists to prevent.

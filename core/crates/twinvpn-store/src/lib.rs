@@ -198,6 +198,44 @@ pub struct Store {
     vault: Vault,
     floors: FloorSet,
     outcome: OpenOutcome,
+    commit_crash: Option<CommitCrash>,
+}
+
+/// Where an injected crash stops [`Store::commit`].
+///
+/// ADR-0020 §11.17 lists the P19 observables, and one of them is
+/// "**Crash-injection point** | RQ-12 injected clock/step source | the ST-23
+/// step number at which the process is killed". This is that point, as a closed
+/// type rather than an integer, so a caller cannot name a boundary that does not
+/// exist.
+///
+/// # Why exactly one boundary
+///
+/// ST-23's whole crash argument is the ORDER of steps 3 and 5 — "a crash between
+/// them leaves `anchor.store_seq > vault.store_seq`, which ST-24 classifies as a
+/// rollback" — so the window between them is the one that decides whether an
+/// advanced floor survives. The other windows are already decided elsewhere and
+/// a knob for them would carry no assertion: a crash between steps 5 and 6
+/// leaves equal `store_seq`s with differing digests, which ST-24 row 3 makes
+/// `STORE.ANCHOR_MISMATCH` (FATAL) by design, and a crash before step 3 has
+/// written nothing at all.
+///
+/// The variant is deliberately named for the two WRITES rather than for a step
+/// number. It marks the source position between them, so a build that reorders
+/// them — which is `M-P19-3` — moves the window's meaning with the reorder
+/// instead of silently injecting somewhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitCrash {
+    /// Between the Tier-1 anchor write and the Tier-2 vault commit.
+    ///
+    /// In ST-23's order the anchor is already durable with the new floors and
+    /// the vault is not, so ST-24 row 2 classifies the reopen as a rollback and
+    /// **the anchor's floors win**. Reverse the two and the same window leaves
+    /// the vault ahead of an anchor still holding the old floors, which ST-24
+    /// row 4 resolves to `max(anchor, vault)` — and
+    /// [`vault_floors`] is empty, so that maximum is the OLD floor set and the
+    /// advance is lost.
+    BetweenAnchorAndVault,
 }
 
 impl Store {
@@ -351,9 +389,35 @@ impl Store {
             vault: vault_image,
             floors,
             outcome,
+            commit_crash: None,
         };
         store.derive_namespace_keys(store_id)?;
         Ok(store)
+    }
+
+    /// Arms the ST-23 crash-injection point (ADR-0020 §11.17's P19 observable).
+    ///
+    /// The next [`Self::commit`] stops at `at` with
+    /// [`StoreError::CommitCrashInjected`], having performed every earlier step
+    /// and no later one, and without publishing the new vault or floors into
+    /// this handle. Reopening from the same custody then sees exactly the
+    /// on-disk state a kill at that boundary would have left.
+    ///
+    /// Behind `test-support`, which is never enabled in a shipped build: the
+    /// field it sets exists unconditionally so `commit` reads one `Option` on
+    /// every path rather than compiling to two different functions, but nothing
+    /// in a shipped build can set it to anything but `None`.
+    #[cfg(feature = "test-support")]
+    pub const fn inject_commit_crash(&mut self, at: Option<CommitCrash>) {
+        self.commit_crash = at;
+    }
+
+    /// Whether an injected crash fires at `at`.
+    fn crashes_at(&self, at: CommitCrash) -> Result<()> {
+        if self.commit_crash == Some(at) {
+            return Err(StoreError::CommitCrashInjected { at });
+        }
+        Ok(())
     }
 
     /// What the open concluded.
@@ -463,6 +527,12 @@ impl Store {
 
         // Step 4: no hardware counter is available through this seam.
         let _ = proposal.advances_a_trust_floor();
+
+        // The ST-23 crash-injection point (ADR-0020 §11.17), between the two
+        // writes whose ORDER is the rule's entire argument. It sits here rather
+        // than beside either write so that a build reordering them moves this
+        // window with them.
+        self.crashes_at(CommitCrash::BetweenAnchorAndVault)?;
 
         // Step 5.
         vault::commit_vault(&self.paths, &image)?;

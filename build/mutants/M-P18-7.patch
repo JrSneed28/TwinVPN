@@ -1,0 +1,44 @@
+Mutant:      M-P18-7
+Proof:       P18
+Spec:        docs/adr/ADR-0019 §11.13 P18 mutant table; ADR-0019 §11.13 oracle 1
+Description: a code with user_actionable == false renders an empty part 3, so a condition an Owner cannot act on arrives with nothing in the action field
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-diag oracle_1_every_code_renders_a_non_empty_part_3
+Fails:       oracle_1_every_code_renders_a_non_empty_part_3
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+#
+# THIS MUTANT RESTORES A DEFECT THE PRODUCT SHIPPED.
+#
+# The arm below is what `render` did before this obligation was worked: a
+# registered code with `user_actionable == false` got `next_action: None`, for
+# 219 of the registry's codes. ADR-0019 §11.13 oracle 1 forbids exactly that —
+#
+#   "Three non-empty parts are produced. Where `user_actionable == false`,
+#    part 3 is the `remediation_class` sentence — the field is never empty."
+#
+# — so the defect M-P18-7 names was the shipped behaviour, and the mutant would
+# have been a no-op against it. That is why the obligation stood as
+# MISSING-NO-ORACLE: the honest reading is that the PRODUCT was wrong, not that
+# the oracle was too weak, and the product was fixed rather than the mutant
+# weakened. `lt_3c_…` could not have caught it either — it `continue`s past
+# precisely the non-actionable codes this drives.
+
+diff --git a/core/crates/twinvpn-diag/src/resolve.rs b/core/crates/twinvpn-diag/src/resolve.rs
+--- a/core/crates/twinvpn-diag/src/resolve.rs
++++ b/core/crates/twinvpn-diag/src/resolve.rs
+@@ -305,9 +305,7 @@ pub fn render(
+         // ADR-0018 F-4 put `remediation_class` in the attribute set for, "so a
+         // surface can pick an affordance for a code it has never seen".
+-        None if registered.is_some() => (
+-            Some(remediation_sentence(attributes.remediation_class).to_owned()),
+-            Some(FallbackRung::RemediationClass),
+-        ),
++        // MUTANT M-P18-7: `user_actionable == false` renders an empty part 3.
++        None if !attributes.user_actionable && registered.is_some() => (None, None),
+         // An unregistered code has no declared next action. Offering the domain
+         // fallback anyway is the right call: rule 5 requires a consumer meeting
+         // an unknown code to still be able to present something actionable, and

@@ -27,7 +27,7 @@ fn main() -> ExitCode {
 fn usage() {
     eprintln!("usage: cargo run -p xtask -- lint");
     eprintln!();
-    eprintln!("  lint   run the ADR-0018 T1 checks: CD-3, CD-I2, CD-I5, CD-CB3");
+    eprintln!("  lint   run the T1 checks: CD-3, CD-I2, CD-I5, CD-CB3 (ADR-0018), U-22 (ADR-0021)");
 }
 
 fn lint() -> ExitCode {
@@ -49,7 +49,7 @@ fn lint() -> ExitCode {
     };
 
     if violations.is_empty() {
-        println!("xtask lint: CD-3, CD-I2, CD-I5, CD-CB3 — all clean");
+        println!("xtask lint: CD-3, CD-I2, CD-I5, CD-CB3, U-22 — all clean");
         return ExitCode::SUCCESS;
     }
 
