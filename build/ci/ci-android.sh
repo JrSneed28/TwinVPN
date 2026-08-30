@@ -526,7 +526,26 @@ if [ "$linked" = true ]; then
       -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect \
       -camera-back none -camera-front none \
       > "$LOGDIR/emulator.log" 2>&1 &
-    adb wait-for-device
+    # BOUNDED. `adb wait-for-device` blocks forever by design -- it has no
+    # timeout flag and no equivalent -- so an emulator that dies at launch, or
+    # never registers with the daemon, hangs this script until the JOB's
+    # `timeout-minutes: 120` kills it. That is the worst failure this script can
+    # have: a job timeout is a CANCELLATION, `if: failure()` is false on one, and
+    # the step that uploads `emulator.log` is therefore skipped. Two hours, and
+    # the one artifact that says why.
+    #
+    # Run 33294161379 spent that way. The AVD was created -- "Auto-selecting
+    # single ABI x86_64" is `avdmanager`'s last line -- and nothing followed,
+    # which is only possible here: the boot poll below is bounded at 180 * 5s and
+    # would have reported itself.
+    #
+    # 300s is generous for ATTACHING, which is not booting: the device appears in
+    # `adb devices` long before `sys.boot_completed`, and the 15 minutes that
+    # takes are the poll's below. There is no `|| true` -- the failure falls
+    # through to `device_ready`, which reports it with the message it already has.
+    if ! timeout 300 adb wait-for-device; then
+      echo "the emulator did not attach to adb within 300s"
+    fi
   fi
 
   # Booted is not attached. `sys.boot_completed` is the property the framework

@@ -647,7 +647,10 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
-        if: failure()
+        # `always()`, not `failure()`. A `timeout-minutes` expiry is a
+        # CANCELLATION, on which `failure()` is false -- so the run that most
+        # needs `emulator.log` was exactly the run that would not upload it.
+        if: always()
         with:
           name: diagnostics-android-link-run
           path: |
