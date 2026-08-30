@@ -305,6 +305,11 @@ ANDROID_16K = "ANDROID-16K-PAGE-SIZE"
 # with 16 KiB pages, and the emulator is x86_64: it can never load the arm64
 # libraries the criterion is actually about. A map covering only x86_64, every
 # entry aligned, is a green row about the one ABI no customer runs.
+
+# The ABIs the 16 KiB criterion grades. Must stay identical to
+# `build/ci/elf-align.py`'s GATED_ABIS -- a producer and a checker that
+# disagree about scope is the exact defect the `repository` key already cost us.
+GATED_ABIS = ("arm64-v8a", "x86_64")
 REAL_DEVICE_ABI = "arm64-v8a"
 
 
@@ -328,7 +333,26 @@ def android_environment_problems(criterion: str, env: dict) -> list[str]:
         problems.append("`abi_load_alignment` is missing or empty, so no ABI's "
                         "load alignment was measured at all")
         return problems
-    unaligned = sorted(abi for abi, v in abis.items()
+    # ONLY THE 64-BIT ABIs ARE GRADED, AND A 32-BIT `false` IS NOT A DEFECT.
+    #
+    # Android's 16 KB page size is a 64-bit requirement, and the NDK's clang
+    # driver encodes that: it passes `-z max-page-size=16384` for android
+    # aarch64 and x86_64 and `-z max-page-size=4096` for android 32-bit ARM, on
+    # purpose, to reduce VMA usage. Run 33321779286 measured exactly that --
+    # arm64-v8a and x86_64 at 16384, armeabi-v7a and x86 at 4096 -- on a build
+    # that asks for 16384 on all four. Grading all four therefore failed the
+    # criterion for a property the platform does not ask for, on two ABIs that
+    # cannot be installed on a 16 KiB device at all.
+    #
+    # The 32-bit rows stay in the map and stay visible. They are measured and
+    # not graded, which is a different thing from absent, and `build/ci/elf-align.py`
+    # keeps the same split so the producer and this checker cannot drift.
+    graded = {abi: v for abi, v in abis.items() if abi in GATED_ABIS}
+    if not graded:
+        problems.append(f"`abi_load_alignment` names {', '.join(sorted(abis))} "
+                        f"but none of {', '.join(GATED_ABIS)}, so the criterion "
+                        f"measured no ABI it is actually about")
+    unaligned = sorted(abi for abi, v in graded.items()
                        if not isinstance(v, dict) or v.get("aligned") is not True)
     if unaligned:
         problems.append(f"`abi_load_alignment` is not true for: "

@@ -110,10 +110,33 @@ def load_aligns(blob: bytes) -> list[int]:
     return out
 
 
+# THE 16 KiB REQUIREMENT IS A 64-BIT REQUIREMENT, AND THE 32-BIT ABIs ARE NOT
+# FAILING WHEN THEY REPORT 4096 -- THEY ARE CORRECT.
+#
+# Android's 16 KB page size applies to 64-bit devices. The NDK's clang driver
+# encodes that deliberately: `clang/lib/Driver/ToolChains/Linux.cpp` pushes
+# `-z max-page-size=16384` for android aarch64 and x86_64, and pushes
+# `-z max-page-size=4096` for android 32-bit ARM "to reduce VMA usage", while
+# i386 gets no flag at all. Run 33321779286 is what that looks like from here:
+# arm64-v8a and x86_64 came back at 16384, armeabi-v7a and x86 at 4096, on a
+# build that passes `-Wl,-z,max-page-size=16384` to all four targets. The
+# driver's choice wins, and it is the right choice.
+#
+# So gating on all four ABIs failed the criterion for a property the platform
+# does not ask for, on the two ABIs that cannot be installed on a 16 KiB device
+# in the first place. The 32-bit ABIs are still MEASURED and still recorded in
+# the evidence -- a reader can see exactly what they are -- they are simply not
+# graded. Removing them from the map entirely would be worse: an absent
+# measurement and a measurement that came back 4096 must stay distinguishable.
+GATED_ABIS = ("arm64-v8a", "x86_64")
+
+
 def verdict(per_abi: dict) -> tuple[bool, list[str]]:
-    """Whether every ABI holds, and one sentence per ABI that does not."""
+    """Whether every 64-bit ABI holds, and one sentence per ABI that does not."""
     problems = []
     for abi, info in sorted(per_abi.items()):
+        if abi not in GATED_ABIS:
+            continue
         if info.get("libraries", 0) == 0:
             problems.append(
                 f"{abi}: the APK carries lib/{abi}/ but no readable .so in it, "

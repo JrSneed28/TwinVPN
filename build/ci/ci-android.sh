@@ -1070,12 +1070,22 @@ emulator_version=""
 image_revision=""
 if [ "$device_ready" = true ]; then
   echo "::group::what booted"
-  device_fingerprint="$(adb shell getprop ro.build.fingerprint 2>/dev/null | tr -d '\r')"
-  device_api_level="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r')"
-  device_kernel="$(adb shell uname -r 2>/dev/null | tr -d '\r')"
+  # `|| true` ON EVERY ONE OF THESE, AND IT IS NOT SLOPPINESS.
+  #
+  # These are MEASUREMENTS, and the code below already knows how to describe one
+  # that could not be taken: each has a `<unreadable>` fallback, and the 16 KiB
+  # lane then fails deliberately, by name, saying which fact is missing. Under a
+  # bare `set -e` an assignment whose command substitution exits non-zero kills
+  # the script instead -- and it kills it with the raw status and no message, so
+  # run 33321779286 reported `make: *** [ci-android] Error 127` and named
+  # nothing. An unreadable fact must reach the attestation as unreadable, not
+  # abort the run before the attestation is written.
+  device_fingerprint="$(adb shell getprop ro.build.fingerprint 2>/dev/null | tr -d '\r' || true)"
+  device_api_level="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
+  device_kernel="$(adb shell uname -r 2>/dev/null | tr -d '\r' || true)"
   if [ "$do_privileged" != true ] && [ -x "$sdk_root/emulator/emulator" ]; then
     emulator_version="$("$sdk_root/emulator/emulator" -version 2>/dev/null \
-      | tr -d '\r' | head -1)"
+      | tr -d '\r' | head -1 || true)"
   fi
   # The REVISION of the system image that is installed, from the package's own
   # `source.properties`. `EMULATOR_IMAGE` is a package PATH and carries no

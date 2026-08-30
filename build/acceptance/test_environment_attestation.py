@@ -109,6 +109,34 @@ class EnvironmentAttestation(GateCase):
                                                    "min_p_align": 16384}}))
         self.assertIn("arm64-v8a", detail)
 
+    def test_android_32_bit_abis_are_measured_but_not_graded(self):
+        # THE ONE THAT COST A CI RUN. Android's 16 KB page size is a 64-bit
+        # requirement, and the NDK clang driver passes `-z max-page-size=4096`
+        # for android 32-bit ARM deliberately, to reduce VMA usage. Run
+        # 33321779286 measured arm64-v8a and x86_64 at 16384 and armeabi-v7a
+        # and x86 at 4096, on a build asking for 16384 on all four -- and the
+        # row failed, for a property the platform does not ask for, on two ABIs
+        # that cannot be installed on a 16 KiB device at all.
+        #
+        # They stay in the map. Measured-and-not-graded is a different thing
+        # from absent, and a reader must still be able to see what they were.
+        self.assertGreen("android-16k", "ANDROID-16K-PAGE-SIZE", fx.android(
+            abi_load_alignment={
+                "arm64-v8a":   {"aligned": True,  "min_p_align": 16384},
+                "x86_64":      {"aligned": True,  "min_p_align": 16384},
+                "armeabi-v7a": {"aligned": False, "min_p_align": 4096},
+                "x86":         {"aligned": False, "min_p_align": 4096}}))
+
+    def test_android_alignment_naming_only_32_bit_abis_is_refused(self):
+        # The other side of the same rule: not grading the 32-bit ABIs must not
+        # become not grading anything. A map with no 64-bit ABI in it measured
+        # nothing the criterion is about.
+        detail = self.assertRefused("android-16k", "ANDROID-16K-PAGE-SIZE",
+                                    fx.android(abi_load_alignment={
+                                        "armeabi-v7a": {"aligned": True,
+                                                        "min_p_align": 16384}}))
+        self.assertIn("arm64-v8a", detail)
+
     def test_android_on_a_non_ps16k_system_image_is_refused(self):
         # A configured image is not a booted one: the package is read back from
         # what installed, so resolving `ps16k` and then booting something else

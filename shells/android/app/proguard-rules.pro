@@ -66,3 +66,17 @@
 # is a security rule, and a Keystore exception's own message can quote a key
 # alias. The core's `reason_code` is what a support case quotes, and it survives
 # obfuscation because it is data rather than a symbol.
+
+# `androidx.test` references Error Prone's annotations, which are COMPILE-ONLY
+# and are deliberately absent from the runtime classpath. R8 treats a missing
+# class as an error, so `minifyReleaseAndroidTestWithR8` fails with
+# "Compilation failed to complete" and, above it, "Missing class
+# com.google.errorprone.annotations.CanIgnoreReturnValue (referenced from
+# androidx.test.internal.util.Checks.checkNotNull)". Run 33321779286 is that
+# failure.
+#
+# Only the 16 KiB lane hits it, because only that lane builds the test APK
+# against the RELEASE variant (`-Ptwinvpn.testBuildType=release`), and only the
+# release variant is minified. Annotations are not needed at runtime, so
+# silencing them removes no check -- R8 keeps refusing every other missing class.
+-dontwarn com.google.errorprone.annotations.**
