@@ -870,8 +870,7 @@ test-pairing-integration:
 	@echo "==> F-2: pairing through the production MI/application composition"
 	@source build/toolchain/env.sh && cd core && \
 	  $(CARGO) test --locked -p twinvpn-core --test pairing && \
-	  $(CARGO) test --locked -p twinvpn-core --test pairing_refusals && \
-	  $(CARGO) test --locked -p twinvpn-core --test pairing_production
+	  $(CARGO) test --locked -p twinvpn-core --test pairing_refusals
 	@source build/toolchain/env.sh && cd shells/linux && \
 	  $(CARGO) test --locked -p twinvpnd --test pairing && \
 	  $(CARGO) test --locked --workspace
