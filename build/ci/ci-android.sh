@@ -543,7 +543,14 @@ if [ "$linked" = true ]; then
     # `adb devices` long before `sys.boot_completed`, and the 15 minutes that
     # takes are the poll's below. There is no `|| true` -- the failure falls
     # through to `device_ready`, which reports it with the message it already has.
-    if ! timeout 300 adb wait-for-device; then
+    #
+    # THE BINARY, NOT THE `adb` FUNCTION at the top of this file. `timeout`
+    # EXECS its argument, and a shell function is not an executable -- so
+    # `timeout 300 adb …` fails instantly with "timeout: failed to run command
+    # 'adb': No such file or directory", which reads like a missing SDK and is
+    # not one. Every other call site in this script wants the function, and this
+    # one call site cannot have it.
+    if ! timeout 300 "$sdk_root/platform-tools/adb" wait-for-device; then
       echo "the emulator did not attach to adb within 300s"
     fi
   fi
