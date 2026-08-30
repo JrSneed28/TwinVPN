@@ -726,6 +726,8 @@ Wave 2's X-register form, continued. `M-` for the mobile wave.
 | **M-17** ✅ | **defect — FIXED; W-39's third instance** | **Android could never send a usable IPv6 link-local address.** `NetworkCodec` wrote `Inet6Address.scopeId`, and AOSP's `LinkAddress` parcelling destroys it — `writeToParcel` (LinkAddress.java:525-531) writes only `address.getAddress()` and `createFromParcel` (:539-556) rebuilds via `InetAddress.getByAddress(byte[])`. So every `fe80::/64` from `LinkProperties` arrived with zone 0, `ZoneIndex::new(0)` is `None`, and `wire.rs:287` refused the whole payload. **M-14 declared W-39 fixed and it landed only half of it on Android**: the prefix half, so ordinary host addresses cross whole; the link-local half was fixed on *iOS*, where the platform supplies a scope id. Android cannot, and the residual sat one line below M-14's own fix. | **FIXED at the encoder**, the only layer that can hold `fe80::` both present and usable. `NetworkCodec` resolves the zone from the interface name it already has; `NetworkInterface.getIndex()` is `if_nametoindex`, which is what `v6_from_kernel` documents as its input, so `ZoneIndex` means the same thing on both sides. The decoder was NOT relaxed — `docs/protocol.md:546` makes the zone a MUST and `v6_from_kernel` is shared with the socket path where the kernel does supply an index — and link-locals were NOT dropped, which is W-39 itself. One fix covers the address and resolver loops, which share `read_address`. No wire change: the 4-byte BE zone field already existed, `WIRE_VERSION` stays 1, `contracts/` untouched. Verified on a device in run 33306033416. |
 | **M-18** | **defect — OPEN, latent** | **`jni` 0.21.1 makes JNI calls with an exception pending, which is UB.** The crate checks `ExceptionCheck` only AFTER issuing a call (`src/wrapper/macros.rs`), and `Error::JavaException` does not clear. So `.unwrap_or_default()` / `.map_or_else()` on a JNI `Result` discards the error, leaves the exception pending, and the next call is issued illegally — `throw_new` resolves its class through `FindClass`, and `take_buf` uses `NewByteArray`, neither on the JNI spec's exception-safe list. Six sites: `bridge/entry.rs`'s `convert_byte_array`, and five in `shells/android/jni/src/lib.rs` (`nativeCoreCreate:223`, `nativeCoreSubmit:299`, `nativeRenderDiagnostic:412-419`). Upstream agrees it was a wrong assumption — jni-rs **#731**, fixed by #733/#737/#738. | **The one site reachable from the crash is fixed** (`entry.rs` clears rather than decoding an empty payload). The remaining five are latent and low-probability. **Do not sell an upgrade as a crash fix**: 0.22.2+ closes the UB and changes nothing about a pending exception becoming a real Java exception on return. 0.22.0 and 0.22.1 are **YANKED**; 0.22.2 is the first usable release. Needs its own decision. |
 | **M-19** | **gap — OPEN** | **`ConnectivityWatcher` observes TwinVPN's own tunnel, and nothing has ever exercised that.** `removeCapability(NET_CAPABILITY_NOT_VPN)` lifts the `NOT_VPN` filter in `DEFAULT_CAPABILITIES` (NetworkCapabilities.java:381-384), so `Builder.establish()` fires a fresh `onAvailable` fan-out for the app's own network straight back into `nativeOnNetwork`. `bridge/mod.rs:188-192` documents observing VPN transports as deliberate, so the capability is right; what is unproven is the re-entrancy. AOSP additionally hands a **non-null but EMPTY** `LinkProperties` for the caller's own VPN on this path (`ConnectivityService.java:1722-1724`). | Not implicated in M-16/M-17 — logcat shows `NetReassign [no changes]`, so that crash was the pre-existing underlay at registration, before any `establish()`. It stays open because **no `establish()` has ever run**: `NativeLinkRunTest` asserts lifecycle only. The inline comment claiming "No capability filter" and crediting arrival+departure to `removeCapability` was false on both halves and is corrected; the behaviour is not. |
+| **M-20** | **gap — OPEN, decision owed** | **`ProtectionAssertion.State.blocked` is a fourth badge value the architecture does not have.** ADR-0019 §11.9(5) says the protection badge has *"exactly three values"*, UI-2 lists three, and `shells/android/app/src/main/res/values/strings.xml` ships three (`protection_protected`, `protection_unprotected`, `protection_unknown`). No contract enum defines the field at all — no producer exists yet; `family_v4_protected` appears only in iOS Swift. | The iOS badge renders `blocked` with §11.3's own words for `BLOCKED`, *"Traffic stopped — protected"*, and the carve-out is marked in the `.xcstrings` header. Mapping it to `Protected` would claim a posture and mapping it to `Not protected` would claim a leak, so neither was acceptable. **This is a flagged R-36 parity gap, not a silent one.** Whoever owns the MI decides: drop `blocked` from the enum, or add the fourth value to the ADR *and* to Android. |
+| **M-21** | **gap — OPEN** | **The per-family protection asymmetry has no iOS surface, and never did.** `renderProtection` passed `family_v4_protected` / `family_v6_protected` / `as_of_ms` to the core, but the `DomainFallback` rung returns `domain_summary(domain).to_owned()` and never calls `substitute()` — so that evidence was discarded before it reached a user. ADR-0010 R1 requires the asymmetry be reportable. | Nothing regressed: deleting the dead call made an existing gap visible rather than creating one. The correct channel is `POLICY.LEAK.FAMILY_GRANT_MISSING` / `POLICY.LEAK.IPV6_UNPROTECTED` / `ROUTE.FAMILY_ASYMMETRY` rendered whole through `DiagnosticView`; nothing wires those to the assertion today. |
 
 ### 10.6 Concurrency
 
@@ -1128,3 +1130,43 @@ every device in the fleet. The fourth and smallest gap, the absent
 `PairingLedger`, is unaffected and still stands. **`pair.begin` is therefore no longer refused for want of a ruling**, and
 the gate clause **CONTROL PLANE *pairing*** moves only when the four producers
 exist and are wired — not on this decision.
+
+### 11.5 Gate decisions taken by the integration lead — 2026-08-30
+
+One decision, and it is a **scope** decision rather than a technical one. It is
+recorded here because §6 rule 14 puts it out of an implementation agent's reach,
+and because the analysis that produced it declined — correctly — to make it by
+editing anything.
+
+| # | Question | Decision |
+|---|---|---|
+| **D-9** | **B-1 (mutation proof) is the last red gate row. Is it closable in Wave 1?** | **No, and it is DEFERRED past Wave 1. The `needs:` edge from `first-wave-acceptance` to `mutation-proof` is cut, and `report.py`'s F-5 row leaves the Phase 5 eligibility conjunction.** The row was being read as a 120-mutant shortfall. It is not. `build/proof/mutation-gate.sh` §5 discharges a proof test only on a **conjunction** — `register.tsv` STATUS must be `IMPLEMENTED` **and** every specified mutant killed — and `cut -f2 build/proof/register.tsv \| sort \| uniq -c` returns **21 PARTIAL and 1 NOT-RUNNABLE, zero IMPLEMENTED**. So B-1 is **0/22 on the oracle half independently of the mutant count**, and killing all 144 mutants would still discharge nothing. `register.tsv`'s own header says as much: *"No row is IMPLEMENTED today."* The remaining 120 mutants are capability-blocked, and the two largest groups are product builds wearing test-gap clothing — P17/P18 need **three desktop GUI applications that do not exist** (macOS ships `main.swift` plus a system-extension installer; Windows and Linux ship a CLI), and P12/P20 need an **updater crate that does not exist at all**. There is no sequencing under which this row goes green inside Wave 1. |
+
+**What was deliberately NOT done, because it was the tempting thing.** The
+gate's criterion is absolute — `report.py` requires `missing == 0`,
+`executed == executable == specified == 144`, and `b1_discharged == 22`, with no
+ratio, percentage or tunable constant anywhere in it or in `mutation-gate.sh`.
+It was searched for specifically. **No threshold was relaxed**, because a
+relaxed threshold makes the row *lie*; a deferral makes it *out of scope*, and
+those are different claims. Accordingly:
+
+- `mutation-proof` **still runs**, still goes red, and still uploads its report.
+  It lost a gating edge, not its execution.
+- F-5's **probe is unchanged**. The row still prints its true verdict and its
+  true numbers — `specified=144 executable=24 executed=24 killed=24 survived=0
+  missing=120 B-1 0/22` — annotated `DEFERRED, not gating`, with the reason
+  printed beside it in the eligibility section.
+- `report.py` gained a `deferred` field, which is **not a verdict**. It is the
+  one value in that file a human sets by hand, and the docstring says so, so
+  that the next reader cannot mistake the mechanism for a way to paint a row
+  green.
+
+**The debt this creates, stated plainly.** Wave 1 ships with its mutation
+obligations undischarged: 22 register rows at PARTIAL or NOT-RUNNABLE, 120
+specified mutants with no patch on disk. Nothing above reduces that; it only
+stops an unclosable row from holding a truthful report hostage. The cheapest
+real progress identified is a **rootful network-namespace rig** — P01/P05/P07/
+P08/P11, 23 mutants across 5 proof tests, runnable on hosted `ubuntu-24.04`
+with privileged Docker and needing none of the self-hosted runners. It is the
+only group whose cost is a CI harness rather than product work. It belongs to
+Wave 2.

@@ -125,60 +125,29 @@ final class CoreLite {
         return RenderedDiagnostic.decode(rendered)
     }
 
-    /// `renderDiagnostic`'s summary alone, for a key that carries no evidence.
-    ///
-    /// **NOT FOR CHROME.** Tab labels, navigation titles, button labels and
-    /// accessibility labels are the SHELL's, and live in
-    /// `Resources/Localizable.xcstrings`. They were routed through here once, on
-    /// a comment claiming a "sibling entry point" to `tw_render_diagnostic` that
-    /// `core/ffi/include/twinvpn.h` does not have; what actually happened is that
-    /// `ObservedReasonCode::parse` rejected each lowercase key, `render` degraded
-    /// to `Domain::Internal`, and every one of them displayed the INTERNAL
-    /// fallback — "TwinVPN hit a defect in itself." — as its label.
-    ///
-    /// The one remaining caller is `StatusView`'s protection indicator, with
-    /// `ui.protection.unknown`. That key is NOT chrome — it is a sentence about
-    /// security posture, ADR-0019 §11.4's territory rather than a tab label — and
-    /// it is left routed here, still unresolved, until it is decided whether it
-    /// deserves a registered reason code. It has the same defect today; moving it
-    /// into the shell's catalogue would decide that question by accident.
-    func string(_ key: String) -> String {
-        renderDiagnostic(reasonCode: key,
-                         evidence: [:],
-                         locale: Locale.current.identifier,
-                         platformContext: PlatformContext.current()).summary
-    }
-
-    /// The protection indicator's sentence.
-    ///
-    /// ADR-0015 §11.6 rule 1: the indicator is "a PURE FUNCTION of the most
-    /// recent assertion, NEVER of the agent's belief" — so every input is a field
-    /// of the assertion and nothing here consults any other state.
-    ///
-    /// CB-4 splits the work: the SHELL picks which condition it is rendering (a
-    /// presentation choice, the same one `StatusView` already makes when it asks
-    /// for `ui.protection.unknown` on an absent assertion), and the CORE resolves
-    /// that into a sentence. LT-3a's rule — variant selection "made in core from
-    /// `platform_ctx`, never a shell choosing among returned keys" — is about
-    /// choosing among the keys a render RETURNED, which this does not do.
-    ///
-    /// Both families travel as evidence because ADR-0015 §11.6 requires the
-    /// assertion "for BOTH address families": a render that saw only one could not
-    /// say "v4 is protected and v6 is not", which is ADR-0010 R1's forbidden
-    /// asymmetry going unreported.
-    func renderProtection(_ assertion: ProtectionAssertion) -> String {
-        renderDiagnostic(
-            reasonCode: "ui.protection.\(assertion.state.rawValue)",
-            evidence: [
-                "family_v4_protected": String(assertion.familyV4Protected),
-                "family_v6_protected": String(assertion.familyV6Protected),
-                // MI-16's stamp, carried so the render can say how old the fact
-                // is. The freshness JUDGEMENT is the core's; this is the input.
-                "as_of_ms": String(assertion.asOfMillis),
-            ],
-            locale: Locale.current.identifier,
-            platformContext: PlatformContext.current()).summary
-    }
+    // THERE IS DELIBERATELY NO `string(_:)` AND NO `renderProtection(_:)` HERE.
+    //
+    // Both existed to turn a `ui.*` key into a sentence, and both were defects.
+    // `tw_render_diagnostic` resolves REGISTERED reason codes; a `ui.*` key is
+    // not one. `ObservedReasonCode::parse` rejects its lowercase bytes, `render`
+    // degrades an unparseable code to `Domain::Internal` (ADR-0015 §11.2 rule 5,
+    // behaving exactly as specified), and every caller got the INTERNAL domain
+    // sentence — "TwinVPN hit a defect in itself." First the tab labels and
+    // navigation titles, then, after those were moved out, the protection badge,
+    // which read that sentence even in its `protected` state.
+    //
+    // Chrome lives in `Resources/Localizable.xcstrings`. So does the protection
+    // badge: ADR-0019 §11.3 rides it ALONGSIDE the status and UI-2 models it as
+    // the enum `PROTECTED|UNPROTECTED_ANNOUNCED|UNKNOWN`, so it is a projected
+    // enum label, not a `Diagnostic`, and §11.4 does not reach it. `StatusView`
+    // labels it from the catalogue with Android's `protection_*` keys (R-36).
+    //
+    // A real condition — including why a posture is what it is, and any
+    // per-family asymmetry — arrives as a REGISTERED code (`POLICY.KILLSWITCH.*`,
+    // `POLICY.LEAK.*`) and renders through `renderDiagnostic` above, whole, with
+    // its declared evidence. `Scripts/check-chrome-strings.sh` fails the build on
+    // any `ui.*` literal reaching the core, which is what keeps this comment from
+    // being the only thing standing between here and a third recurrence.
 
     // MARK: - the management interface, as a client of the extension
     //

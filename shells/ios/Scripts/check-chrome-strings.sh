@@ -20,22 +20,22 @@
 #      KEY, so a typo ships a tab labelled "nav_stauts".
 #   2. Every catalogue key is used. An unused chrome string is either dead or a
 #      call site that quietly went back to a literal.
-#   3. The only `ui.*` keys still routed to the core as reason codes are the
-#      three `ui.protection.*` ones. Those are NOT chrome — a sentence about
-#      security posture is ADR-0019 §11.4's territory, not a tab label — and
-#      they are deliberately left where they are until it is decided whether
-#      they deserve registered reason codes. They have the same defect today.
-#      Anything else appearing on that path is the original defect returning.
+#   3. NO `ui.*` key is routed to the core as a reason code. Not one. The
+#      `ui.protection.*` exception this check used to carve out is gone: the
+#      protection badge is not a `Diagnostic` and has no `reason_code` —
+#      ADR-0019 §11.3 rides it ALONGSIDE the status, and UI-2 models it as the
+#      enum `protection.indicator: PROTECTED|UNPROTECTED_ANNOUNCED|UNKNOWN`, so
+#      §11.4 (what a surface does with a `Diagnostic`) never reached it. It is a
+#      projected enum label, it is labelled from `protection_*` in the shell
+#      catalogue with Android's spelling (R-36), and until that landed the badge
+#      read "TwinVPN hit a defect in itself." even when it was PROTECTED.
+#      Anything on that path now is the original defect returning.
 #
 # Pure text analysis: no Xcode, no Swift toolchain, no Darwin. It runs on the
 # Linux build host, which is the point — the defect it pins was invisible to
 # `swiftc -parse`, and a check that needs a Mac would not have caught it either.
 #
-# WHO CALLS THIS TODAY: NOBODY, AND THAT IS RECORDED RATHER THAN HIDDEN.
-# `build/ci/ci-ios.sh` is owned by the CI owner and adding a line to it is not
-# this shell's to do. Run it by hand, or ask for it to be wired next to
-# `Scripts/stage-headers.sh`. Exits non-zero on any failure so wiring it is one
-# line when someone does.
+# `build/ci/ci-ios.sh` runs this. Exits non-zero on any failure.
 
 set -euo pipefail
 
@@ -81,15 +81,15 @@ if unused:
         "the catalogue carries %d key(s) no call site uses: %s"
         % (len(unused), ", ".join(unused)))
 
-# `ui.protection.\(assertion.state.rawValue)` is one interpolated literal
-# covering the three states, so it is matched by its prefix rather than spelled
-# out three times.
-allowed = {"ui.protection.unknown", "ui.protection.\\(assertion.state.rawValue)"}
-stray = sorted(routed - allowed)
+# Empty on purpose, and it is the whole point of assertion 3. Every `ui.*` key
+# this app ever routed to `tw_render_diagnostic` rendered the INTERNAL domain
+# sentence, because none of them is a registered reason code. There is no key
+# for which that is acceptable, so there is no allow-list to add one to.
+stray = sorted(routed)
 if stray:
     failures.append(
-        "%d `ui.*` key(s) are still handed to the core as reason codes and will "
-        "render \"TwinVPN hit a defect in itself.\": %s"
+        "%d `ui.*` key(s) are handed to the core as reason codes and will render "
+        "\"TwinVPN hit a defect in itself.\": %s"
         % (len(stray), ", ".join(stray)))
 
 if failures:
@@ -99,6 +99,6 @@ if failures:
     sys.exit(1)
 
 print("==> chrome strings                        OK "
-      "(%d catalogue keys, all used; %d deliberate ui.protection.* routings)"
-      % (len(declared), len(routed)))
+      "(%d catalogue keys, all used; 0 ui.* keys routed to the core)"
+      % len(declared))
 PY

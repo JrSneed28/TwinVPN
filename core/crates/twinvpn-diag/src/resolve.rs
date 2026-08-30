@@ -867,6 +867,56 @@ mod tests {
         assert_eq!(r.domain, Domain::Internal);
     }
 
+    /// A `ui.*` key is NOT a reason code, and the shells learned that the hard
+    /// way — twice.
+    ///
+    /// The iOS app routed `ui.tab.status`, and later `ui.protection.<state>`,
+    /// into [`render`] as `reason_code`s. `ObservedReasonCode::parse` rejects
+    /// their lowercase bytes (ADR-0015 §11.2 rule 7), so each degraded to
+    /// [`Domain::Internal`] and the surface displayed the INTERNAL domain
+    /// sentence — "TwinVPN hit a defect in itself." — first as a tab label, then
+    /// as the protection badge, including in its PROTECTED state.
+    ///
+    /// **The behaviour asserted here is correct and must not be "fixed".** Rule 5
+    /// requires an unknown code to degrade with attributes rather than fail, and
+    /// `INTERNAL` is the truthful domain for a string this build cannot parse.
+    /// Making `parse` lenient — accepting lowercase, or guessing a domain from a
+    /// `ui.` prefix — would turn every future caller's mistake into a
+    /// plausible-looking sentence, which is strictly worse than a loud one. The
+    /// fix belongs in the caller, and `shells/ios/Scripts/check-chrome-strings.sh`
+    /// is the mechanical form of it.
+    #[test]
+    fn a_ui_pseudo_code_degrades_to_internal_rather_than_being_guessed_at() {
+        for code in [
+            "ui.protection.protected",
+            "ui.protection.blocked",
+            "ui.protection.unprotected",
+            "ui.protection.unknown",
+            "ui.tab.status",
+        ] {
+            let r = render(code, &[], "en", &neutral());
+            assert!(
+                !r.registered,
+                "{code} must not resolve to a registered code"
+            );
+            assert_eq!(
+                r.domain,
+                Domain::Internal,
+                "{code} must degrade to INTERNAL, not to a guessed domain"
+            );
+            assert_eq!(
+                r.summary_rung,
+                FallbackRung::DomainFallback,
+                "{code} must reach the domain rung"
+            );
+            // The sentence a caller gets for doing this, asserted verbatim so the
+            // trap is legible from the test alone.
+            assert_eq!(r.summary, "TwinVPN hit a defect in itself.");
+            // The raw pseudo-code is still reported as data, never as prose.
+            assert_eq!(r.reason_code, code);
+        }
+    }
+
     #[test]
     fn render_is_pure_for_the_same_inputs() {
         let a = render("NET.NO_ROUTE", &[], "en", &neutral());

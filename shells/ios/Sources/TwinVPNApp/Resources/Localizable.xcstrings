@@ -11,7 +11,24 @@
     "",
     "A string in this file that described a TwinVPN condition would be a second",
     "message catalogue outside the registry, which is R-31's defect class and the",
-    "reason `twinvpnctl` rendered catalogue keys (R-15)."
+    "reason `twinvpnctl` rendered catalogue keys (R-15).",
+    "",
+    "THE `protection_*` KEYS ARE NOT AN EXCEPTION TO THAT. The protection badge",
+    "is not a `Diagnostic` and has no `reason_code`: ADR-0019 \u00a711.3 lists it under",
+    "'two facts ride ALONGSIDE the status', UI-2 models it as the three-valued",
+    "enum `protection.indicator: PROTECTED|UNPROTECTED_ANNOUNCED|UNKNOWN`, and",
+    "\u00a711.4 -- the reason-code presentation contract -- governs what a surface does",
+    "with a `Diagnostic`, which this is not. Labelling a projected enum is exactly",
+    "what this catalogue is for; the WHY behind a posture still arrives as a",
+    "registered code (POLICY.KILLSWITCH.*, POLICY.LEAK.*) through",
+    "`tw_render_diagnostic`, and that is where the family-asymmetry detail lives.",
+    "",
+    "These keys were previously handed to `tw_render_diagnostic` AS reason codes.",
+    "`ObservedReasonCode::parse` rejects a lowercase byte, `render` degrades an",
+    "unparseable code to `Domain::Internal`, and the badge -- including the",
+    "PROTECTED one, next to a green shield -- read 'TwinVPN hit a defect in",
+    "itself.' `Scripts/check-chrome-strings.sh` now fails on any `ui.*` literal",
+    "reaching the core, so it cannot come back a third time."
   ],
   "_comment_why_a_catalogue" : [
     "WHY A CATALOGUE AND NOT SWIFT LITERALS.",
@@ -33,7 +50,16 @@
     "Every key that Android already carries is spelled the SAME here, and copied",
     "from `shells/android/app/src/main/res/values/strings.xml` rather than",
     "reinvented: nav_status, nav_pairing, nav_diagnostics, pairing_title,",
-    "pairing_qr_description, diagnostics_title.",
+    "pairing_qr_description, diagnostics_title, protection_protected,",
+    "protection_unprotected, protection_unknown.",
+    "",
+    "`protection_blocked` is the ONE key here with no Android counterpart, and it",
+    "is a KNOWN PARITY GAP rather than an oversight. ADR-0019 \u00a711.9(5) gives the",
+    "protection badge EXACTLY THREE values and Android carries exactly those",
+    "three; `ProtectionAssertion.State` in `SupportTypes.swift` carries a fourth,",
+    "`blocked`, which no contract enum defines. Rendering it as `Protected` would",
+    "claim a posture, and rendering it as `Not protected` would claim a leak, so",
+    "it gets \u00a711.3's own words for `BLOCKED` until the vocabulary is reconciled.",
     "",
     "`nav_status` labels the Status tab AND the Status screen's navigation title,",
     "because Android carries no separate status-screen title to copy. The three",
@@ -147,6 +173,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Pair a device"
+          }
+        }
+      }
+    },
+    "protection_blocked" : {
+      "comment" : "Protection badge. ADR-0019 \u00a711.3 renders BLOCKED as \"Traffic stopped \u2014 protected\": I3 made visible, never an error the user caused. NO ANDROID COUNTERPART \u2014 that shell carries only O-18's three values, and \u00a711.9(5) says the badge has exactly three. See the header's parity note.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Traffic stopped \u2014 protected"
+          }
+        }
+      }
+    },
+    "protection_protected" : {
+      "comment" : "Protection badge, O-18's first value. Copied verbatim from Android: protection_protected.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Protected"
+          }
+        }
+      }
+    },
+    "protection_unknown" : {
+      "comment" : "Protection badge, O-18's third value, and what an ABSENT assertion renders as \u2014 never \"protected\". Distinct wording from protection_unprotected because \"unknown\" and \"not protected\" are different facts. Copied verbatim from Android: protection_unknown.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Protection status unknown"
+          }
+        }
+      }
+    },
+    "protection_unprotected" : {
+      "comment" : "Protection badge, O-18's second value (UNPROTECTED_ANNOUNCED). Copied verbatim from Android: protection_unprotected.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not protected"
           }
         }
       }

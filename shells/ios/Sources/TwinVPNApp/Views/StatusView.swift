@@ -162,11 +162,38 @@ struct ProtectionIndicator: View {
         }
     }
 
+    /// The badge's text, from the SHELL's catalogue.
+    ///
+    /// # Why this is not a `tw_render_diagnostic` call
+    ///
+    /// It used to be one, with `"ui.protection.\(state)"` passed as a
+    /// `reason_code`. That is not a reason code: `ObservedReasonCode::parse`
+    /// rejects a lowercase byte, `render` degrades an unparseable code to
+    /// `Domain::Internal` (ADR-0015 §11.2 rule 5, working as designed), and the
+    /// badge rendered the INTERNAL domain sentence — "TwinVPN hit a defect in
+    /// itself." — in all four cases, including `protected`, next to a green
+    /// shield. The core was right; the caller was sending it a non-code.
+    ///
+    /// The badge is not a `Diagnostic` and has no `reason_code`. ADR-0019 §11.3
+    /// puts it among the "two facts [that] ride ALONGSIDE the status", and UI-2
+    /// models it as the enum `protection.indicator:
+    /// PROTECTED|UNPROTECTED_ANNOUNCED|UNKNOWN`. §11.4 — the reason-code
+    /// presentation contract — is about what a surface does with a `Diagnostic`.
+    /// So this is a projected enum label, which is chrome, and R-36 makes it
+    /// Android's `protection_*` keys spelled the same way.
+    ///
+    /// The WHY behind a posture is still the core's: `POLICY.KILLSWITCH.*` and
+    /// `POLICY.LEAK.*` are registered codes and arrive through `DiagnosticView`,
+    /// which is also where the per-family detail belongs — a three-valued badge
+    /// was never able to say "v4 is protected and v6 is not".
     private var label: String {
-        guard let assertion else {
-            return CoreLite.shared.string("ui.protection.unknown")
+        // O-18 fixes which way an absence rounds, and it is not toward green.
+        guard let assertion else { return String(localized: "protection_unknown") }
+        switch assertion.state {
+        case .protected: return String(localized: "protection_protected")
+        case .blocked: return String(localized: "protection_blocked")
+        case .unprotected: return String(localized: "protection_unprotected")
         }
-        return CoreLite.shared.renderProtection(assertion)
     }
 }
 
