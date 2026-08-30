@@ -1,0 +1,68 @@
+Mutant:      M-P19-4
+Proof:       P19
+Spec:        docs/adr/ADR-0020 §15 P19 mutant table; ADR-0020 ST-22 (co-location), §15 procedure step 3
+Description: the anchor is stored in a plain file beside the vault instead of co-located in Tier 1, so a file-level restore of store_root carries the old anchor back with it and the device comes up at the previous trust epoch
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-store --test ladder a_restored_store_root_cannot_lower_a_floor_because_the_anchor_is_not_in_it
+Fails:       a_restored_store_root_cannot_lower_a_floor_because_the_anchor_is_not_in_it
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+#
+# WHY THE EXISTING RESTORE TEST DOES NOT CATCH THIS
+#
+# `a_restored_older_vault_cannot_lower_the_trust_epoch` restores ONE named file,
+# `f.paths().vault()`. ADR-0020 §15 step 1 snapshots something larger — "a
+# **byte-level** snapshot of A's `store_root` — every file in §11.5's file set" —
+# and step 3 restores that whole set while saying "**Do not touch Tier 1.**"
+# Those two sentences only carry weight if the anchor is not IN `store_root`,
+# which is exactly what ST-22's co-location buys and exactly what this mutant
+# takes away. Against a one-file restore an anchor moved to a sibling file is
+# never overwritten, so the existing test stays green and the obligation stood
+# as MISSING-NO-ORACLE.
+#
+# The oracle snapshots and restores the whole store root, leaving the mock's
+# Tier-1 item map untouched, and reads the floor set. Measured: 5 where 9 is
+# required — "A comes up with a working identity at e0", which is the §15
+# variant 2 failure the mutant table names.
+
+diff --git a/core/crates/twinvpn-store/src/lib.rs b/core/crates/twinvpn-store/src/lib.rs
+index 319447b..3d5e8f7 100644
+--- a/core/crates/twinvpn-store/src/lib.rs
++++ b/core/crates/twinvpn-store/src/lib.rs
+@@ -267,9 +267,12 @@ impl Store {
+         // Tier 1 first: the SEK and the anchor are what the ladder recovers
+         // *from*, so a failure here is not something a vault rebuild can fix.
+         let (sek, store_id_from_sek) = Self::load_or_create_sek(&env, &*custody, &sek_key).await?;
+-        let stored_anchor = match custody.secure_item_read(&anchor_key).await? {
+-            Some(item) => Some(Anchor::decode(item.as_bytes())?),
+-            None => None,
++        // MUTANT M-P19-4: the anchor is read from a plain file beside the vault
++        // instead of from Tier 1, so it lives inside `store_root`.
++        let _ = &anchor_key;
++        let stored_anchor = match std::fs::read(paths.vault().with_file_name("anchor.tv")) {
++            Ok(bytes) => Some(Anchor::decode(&bytes)?),
++            Err(_) => None,
+         };
+ 
+         // Tier 2.
+@@ -579,9 +582,15 @@ impl Store {
+     }
+ 
+     async fn write_anchor(&self, key: &SecureItemKey, a: &Anchor) -> Result<()> {
++        // MUTANT M-P19-4: the anchor is written to a plain file beside the
++        // vault instead of being co-located with the identity key in Tier 1.
++        let _ = key;
+         let bytes = a.encode()?;
+-        let item = SecureItem::new(bytes);
+-        self.custody.secure_item_write_atomic(key, &item).await?;
++        std::fs::write(self.paths.vault().with_file_name("anchor.tv"), bytes).map_err(|_| {
++            StoreError::VaultIo {
++                detector: "anchor write",
++            }
++        })?;
+         Ok(())
+     }
+ 
