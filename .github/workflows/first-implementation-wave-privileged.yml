@@ -1,0 +1,455 @@
+name: First Implementation Wave — privileged lifecycle
+
+# ===========================================================================
+# WHY THIS IS A SEPARATE WORKFLOW, AND NOT FOUR MORE JOBS IN THE GATE
+# ===========================================================================
+# These four jobs run on SELF-HOSTED runners. A job whose runner label is not
+# registered does not fail -- it QUEUES, for up to twenty-four hours.
+#
+# While they lived in first-implementation-wave-gate.yml that queue deadlocked
+# the gate against itself: the gate's concurrency group does not cancel in
+# progress on a push, so every later push waited behind a run that could never
+# finish because its self-hosted jobs would never start. Observed directly --
+# run 33283744937 sat `queued` and held the group until it was cancelled by
+# hand, and the run behind it stayed `pending` with zero jobs dispatched.
+#
+# Splitting them costs nothing, because the gate never depended on them through
+# `needs:` in the first place. The requirement is enforced by EVIDENCE instead:
+# each job writes its own file with `privileged: true`, and
+# build/acceptance/report.py has a required row per file that reads NOT-EXECUTED
+# when the file is absent -- which counts against Phase 5 eligibility exactly as
+# a failure does. No runner still means no pass; it just no longer means no gate.
+#
+# ===========================================================================
+# WHAT THESE PROVE THAT A HOSTED RUNNER CANNOT
+# ===========================================================================
+# WFP/driver/service activation on Windows, a signed NetworkExtension on macOS,
+# an on-device packet tunnel on iOS, and the arm64-v8a library actually loading
+# on real silicon. A hosted simulator or emulator run is DIFFERENT EVIDENCE and
+# must never stand in for one of these.
+#
+# Each starts from a resettable environment, never echoes signing secrets,
+# cleans tunnel/route/firewall state on EVERY exit path (`if: always()`), and
+# uploads diagnostics on failure. A failed lifecycle test must not leave the
+# runner's networking stack corrupted for the next workflow.
+# ===========================================================================
+
+on:
+  # Deliberately NOT on pull_request: a fork PR must not reach a self-hosted
+  # runner. Manual, plus the integration branch, plus a nightly.
+  workflow_dispatch:
+  push:
+    branches: [main, master, 'fix/wave1-final-review-register']
+  schedule:
+    - cron: '0 5 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  # Its own group, so a queued self-hosted job can never hold up the hosted gate.
+  group: first-wave-privileged-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  windows-privileged-lifecycle:
+    name: windows-privileged-lifecycle
+    runs-on: [self-hosted, Windows, twinvpn-vpn-lifecycle]
+    # Shorter than the hosted job on purpose: the rig keeps a warm cargo cache,
+    # and a privileged run that hangs is a runner left with filters installed.
+    # Timing out is how it gets to `--cleanup`.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    # A fork's pull request must never reach a self-hosted runner: the job would
+    # execute unreviewed code as a privileged account on a machine inside the
+    # network. This is the standard guard and it is not optional here.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+          rustc -vV | grep '^host:'
+          cmd //c ver
+          sc.exe query state= all | grep -i twinvpn || echo "no TwinVPN service registered"
+
+      # A privileged run that starts dirty proves nothing: filters left by the
+      # previous run would make "the ruleset was reclaimed" true for the wrong
+      # reason. `--reset` FAILS rather than cleaning, because a rig that needs
+      # cleaning at the start was not restored and its state is unknown.
+      - name: reset to a known-clean state
+        run: build/ci/ci-windows.sh --reset
+
+      - name: privileged WFP, driver and service lifecycle
+        run: build/ci/ci-windows.sh --privileged
+
+      # EVERY exit path, including a timeout and a cancelled run. A failed
+      # lifecycle test must not leave the runner's networking stack blocked for
+      # the next workflow. `--cleanup` never fails the job, so it cannot mask
+      # the real failure above it.
+      - name: tear down tunnel, routes and firewall state
+        if: always()
+        run: build/ci/ci-windows.sh --cleanup
+
+      # DIAGNOSTICS ON FAILURE ONLY, and enumerated rather than globbed.
+      #
+      # `wfp-state-after.xml` is `netsh wfp show state`: filter and provider
+      # definitions plus the host's own addresses. It carries NO private device
+      # key, NO pairing secret, NO authentication token, NO tunnel plaintext and
+      # NO packet capture -- this job captures no traffic and establishes no
+      # session. The evidence file is deliberately NOT uploaded under an
+      # `evidence-*` name: `build/acceptance/report.py` reads exactly
+      # `build/ci/evidence/windows.json`, and two jobs uploading that name would
+      # let whichever finished last decide what the report says.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-windows-privileged
+          path: |
+            build/ci/logs/windows/lifecycle.log
+            build/ci/logs/windows/windows-host.log
+            build/ci/logs/windows/wfp-state-after.xml
+          if-no-files-found: ignore
+
+      # The privileged evidence, under its own name so it can be read beside the
+      # hosted file without replacing it.
+      - name: publish the privileged evidence under its own name
+        if: always()
+        run: |
+          if [ -f build/ci/evidence/windows.json ]; then
+            mv build/ci/evidence/windows.json build/ci/evidence/windows-privileged.json
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-windows-privileged
+          path: build/ci/evidence/windows-privileged.json
+          if-no-files-found: ignore
+
+  macos-privileged-lifecycle:
+    name: macos-privileged-lifecycle
+    runs-on: [self-hosted, macOS, twinvpn-vpn-lifecycle]
+    # A privileged run programs the host firewall and activates a system
+    # extension. If it has not finished in 60 minutes something is wedged, and a
+    # wedged privileged job holding a machine's firewall is worse than a failed
+    # one.
+    timeout-minutes: 60
+    # Never two of these on one machine at once: ADR-0016 PS-1 admits exactly one
+    # authority per host, and a second would be refused mid-run in a way that
+    # looks like a product defect.
+    concurrency:
+      group: twinvpn-macos-privileged-lifecycle
+      cancel-in-progress: false
+    steps:
+      # `clean: true` matters more here than on a hosted runner: a self-hosted
+      # workspace persists, and rule C-5 binds a verdict to an exact commit
+      # rather than to a commit plus whatever the last run left in the tree.
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - name: select the pinned Xcode and print every toolchain version
+        run: |
+          # RESOLVED FIRST, into a variable. Inlining the command substitution
+          # into `xcode-select -s "$(...)"` discards the resolver's exit status
+          # and hands `xcode-select` an empty string, which fails with
+          # `invalid developer directory ''` instead of with the resolver's own
+          # message naming the pin and every Xcode the machine does have.
+          XCODE_DEV_DIR="$(build/ci/ci-macos.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
+          xcodebuild -version
+          swift --version
+          xcrun --sdk macosx --show-sdk-version
+          rustc --version
+          sw_vers
+          # The machine preconditions this job cannot create for itself, printed
+          # so a failure report says which one was missing.
+          systemextensionsctl list || true
+          sudo -n pfctl -s info >/dev/null && echo "pfctl: reachable"
+
+      - name: reset to a known-clean state
+        # BEFORE anything is built. Removes a stale generated project, stale
+        # staged archives, a stale evidence file, a leftover system extension,
+        # an owner-tagged pf anchor and a leftover utun. A privileged run that
+        # started from the previous run's firewall would be measuring the
+        # previous run.
+        run: build/ci/ci-macos.sh --reset
+
+      - name: privileged lifecycle
+        run: build/ci/ci-macos.sh --privileged
+
+      - name: collect crash reports and firewall state
+        if: failure()
+        # The three things that explain a privileged failure and none of which
+        # survives the cleanup step below. `pfctl -sr` prints the RULES, which
+        # are our own rendered ruleset and carry no secret; it does NOT print
+        # packets, and no capture is taken anywhere in this job.
+        run: |
+          mkdir -p build/ci/logs/macos/crashes
+          cp -R ~/Library/Logs/DiagnosticReports/* build/ci/logs/macos/crashes/ 2>/dev/null \
+            || echo "no crash reports"
+          sudo -n pfctl -sr    > build/ci/logs/macos/pf-rules.txt   2>&1 || true
+          sudo -n pfctl -s Anchors > build/ci/logs/macos/pf-anchors.txt 2>&1 || true
+          systemextensionsctl list > build/ci/logs/macos/sysext.txt 2>&1 || true
+          netstat -rn              > build/ci/logs/macos/routes.txt 2>&1 || true
+
+      - name: return the machine to a known state
+        if: always()
+        # UNCONDITIONAL. A self-hosted Mac left with our system extension
+        # active and an owner-tagged pf anchor installed is a machine whose next
+        # job — and whose owner — inherits our firewall. `--cleanup` removes the
+        # anchor through `twinvpn-unblock`, which is KS-20a's sanctioned removal
+        # path, so the teardown and the supported recovery are the same code.
+        run: build/ci/ci-macos.sh --cleanup
+
+      # TWO uploads, split the way `build/ci/jobs/android-link-run.yml` splits
+      # its own, because they are not the same claim. The evidence is the
+      # acceptance gate's input and stays `error`: a run that reached the end
+      # without writing evidence must go red rather than be read as a pass. The
+      # diagnostics are `failure()` + `ignore`, so a job that died in its FIRST
+      # step (selecting Xcode, say) does not stack a second, misleading
+      # "No files were found" red on top of the real failure.
+      #
+      # NOTE FOR THE INTEGRATION OWNER: this renames the evidence half from
+      # `diagnostics-macos-privileged` to `evidence-macos-privileged`. The gate
+      # job collects `pattern: evidence-*`, and `build/acceptance/report.py`
+      # probes `build/ci/evidence/macos-privileged.json` — so under the old name
+      # this job's evidence was uploaded but never collected, and that row could
+      # only ever read NOT_EXECUTED. The new name is what
+      # `android-device-lifecycle.yml` already does (`evidence-android-device`).
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-macos-privileged
+          # ENUMERATED. NEVER a signing identity, a keychain, a provisioning
+          # profile, a pairing secret, an authentication token, tunnel plaintext
+          # or a packet capture — this job takes no capture at all, precisely so
+          # there is none to leak.
+          path: |
+            build/ci/evidence/macos-privileged.json
+            build/ci/logs/macos/lifecycle-native.log
+            build/ci/logs/macos/xctest.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-macos-privileged
+          # ENUMERATED to this job's own log tree, under the same prohibition as
+          # above.
+          path: |
+            build/ci/logs/macos/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  ios-device-lifecycle:
+    name: ios-device-lifecycle
+    runs-on: [self-hosted, macOS, twinvpn-ios-device]
+    # A device run installs, activates and tears down a VPN profile on real
+    # hardware. If it has not finished in 75 minutes the device is wedged and
+    # holding it is worse than failing.
+    timeout-minutes: 75
+    # One at a time per device. Two `xcodebuild -destination id=` runs against
+    # one iPhone interleave in ways that look like product defects.
+    concurrency:
+      group: twinvpn-ios-device-lifecycle
+      cancel-in-progress: false
+    env:
+      # Set on the runner, not here. Named so a missing value fails with the
+      # message `ci-ios.sh` writes rather than an opaque xcodebuild error.
+      TWINVPN_IOS_DEVICE_UDID: ${{ vars.TWINVPN_IOS_DEVICE_UDID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - name: select the pinned Xcode and print every toolchain version
+        run: |
+          # RESOLVED FIRST, into a variable. Inlining the command substitution
+          # into `xcode-select -s "$(...)"` discards the resolver's exit status
+          # and hands `xcode-select` an empty string, which fails with
+          # `invalid developer directory ''` instead of with the resolver's own
+          # message naming the pin and every Xcode the machine does have.
+          XCODE_DEV_DIR="$(build/ci/ci-ios.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
+          xcodebuild -version
+          swift --version
+          xcrun --sdk iphoneos --show-sdk-version
+          rustc --version
+          sw_vers
+          # The device, by identifier. `devicectl list devices` prints model,
+          # OS version and pairing state — not a serial-numbered inventory of
+          # anyone else's hardware, because a device runner holds one device.
+          xcrun devicectl list devices
+
+      - name: reset to a known-clean state
+        # Removes a stale generated project, stale staged archives, a stale
+        # evidence file, a booted simulator, and any previously installed
+        # TwinVPN app — which is what removes its VPN profile, since no API
+        # removes our own profile (TwinVPNTests' own header).
+        run: build/ci/ci-ios.sh --reset
+
+      - name: on-device lifecycle
+        run: build/ci/ci-ios.sh --device
+
+      - name: collect device diagnostics
+        if: failure()
+        # Crash reports for OUR bundles only, copied off the device. NOT the
+        # device syslog (it is the whole device's, not ours) and NOT a packet
+        # capture (none is taken).
+        run: |
+          mkdir -p build/ci/logs/ios/crashes
+          xcrun devicectl device info files \
+            --device "$TWINVPN_IOS_DEVICE_UDID" \
+            --domain-type appDataContainer \
+            --domain-identifier net.twinvpn.client \
+            --username mobile / 2>&1 \
+            | tee build/ci/logs/ios/device-container-listing.txt || true
+          find ~/Library/Logs/CrashReporter/MobileDevice \
+            -name '*TwinVPN*' -type f -exec cp {} build/ci/logs/ios/crashes/ \; 2>/dev/null \
+            || echo "no device crash reports"
+
+      - name: return the device to a known state
+        if: always()
+        # UNCONDITIONAL. Uninstalls the container app, which takes the extension
+        # and the VPN configuration with it, and shuts down any simulator the
+        # run happened to boot. A device left holding our tunnel is a device the
+        # next job — and its owner — inherits.
+        run: build/ci/ci-ios.sh --cleanup
+
+      # TWO uploads, split the way `build/ci/jobs/android-link-run.yml` splits
+      # its own, because they are not the same claim. The evidence is the
+      # acceptance gate's input and stays `error`: a run that reached the end
+      # without writing evidence must go red rather than be read as a pass. The
+      # diagnostics are `failure()` + `ignore`, so a job that died in its FIRST
+      # step (selecting Xcode, say) does not stack a second, misleading
+      # "No files were found" red on top of the real failure.
+      #
+      # NOTE FOR THE INTEGRATION OWNER: this renames the evidence half from
+      # `diagnostics-ios-device` to `evidence-ios-device`. The gate job collects
+      # `pattern: evidence-*`, and `build/acceptance/report.py` probes
+      # `build/ci/evidence/ios-device.json` — so under the old name this job's
+      # evidence was uploaded but never collected, and that row could only ever
+      # read NOT_EXECUTED. The new name is what `android-device-lifecycle.yml`
+      # already does (`evidence-android-device`).
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-ios-device
+          # ENUMERATED. NEVER a provisioning profile, a signing identity, a
+          # keychain, a pairing secret, an authentication token, tunnel
+          # plaintext, or a packet capture.
+          path: |
+            build/ci/evidence/ios-device.json
+            build/ci/logs/ios/xctest-device.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-ios-device
+          # ENUMERATED to this job's own log tree, under the same prohibition as
+          # above. NEVER the CoreSimulator tree and NEVER the device syslog.
+          path: |
+            build/ci/logs/ios/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  android-device-lifecycle:
+    name: android-device-lifecycle
+    runs-on: [self-hosted, Linux, twinvpn-android-device]
+    # The rig keeps warm cargo and Gradle caches and boots no emulator, so this
+    # is shorter than the hosted job. Timing out is how a wedged `adb` reaches
+    # the cleanup step instead of leaving the device with a test package on it.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    # A fork's pull request must never reach a self-hosted runner attached to a
+    # real device: the job would install and execute unreviewed code on it.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+          java -version
+          gradle --version | sed -n '1,8p'
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -1
+          # The device this evidence is about. Named in the log before anything
+          # is installed, so a reader can tell which silicon answered.
+          if [ -z "${ANDROID_SERIAL:-}" ]; then
+            echo "::error::ANDROID_SERIAL is unset; the rig must name the attached device"
+            exit 1
+          fi
+          adb devices -l
+          adb shell getprop ro.product.model
+          adb shell getprop ro.build.version.release
+          adb shell getprop ro.product.cpu.abi
+          echo "page size: $(adb shell getconf PAGE_SIZE | tr -d '\r')"
+
+      # A device carrying the previous run's install would let a stale APK
+      # answer. `--reset` removes both packages and clears the local evidence
+      # and logs.
+      - name: reset to a known-clean state
+        run: build/ci/ci-android.sh --reset --privileged
+
+      - name: on-device native bridge and application lifecycle
+        run: build/ci/ci-android.sh --privileged
+
+      # EVERY exit path, including a timeout and a cancelled run. A device left
+      # with the test package installed and the service running is a device the
+      # next run cannot trust.
+      - name: uninstall the packages and release the device
+        if: always()
+        run: build/ci/ci-android.sh --cleanup --privileged
+
+      # DIAGNOSTICS ON FAILURE ONLY, and enumerated rather than globbed.
+      #
+      # `logcat.txt` carries reason codes, package names and stack traces from a
+      # REAL user device. It carries NO private device key, NO pairing secret,
+      # NO authentication token, NO tunnel plaintext and NO packet capture:
+      # `NativeLinkRunTest` never calls `VpnService.establish()`, the identity
+      # key never leaves the Keystore (ADR-0018 §11.16 (c)), and ADR-0015 §11.4
+      # classes an address SENSITIVE so nothing in this shell logs one.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-android-device
+          path: |
+            build/ci/logs/android/instrumentation.log
+            build/ci/logs/android/logcat.txt
+          if-no-files-found: ignore
+
+      # The device evidence, under its own name. `build/acceptance/report.py`
+      # reads exactly `build/ci/evidence/android.json`, so uploading this as
+      # `evidence-android` would let whichever job finished last decide what the
+      # report says -- and a hosted emulator PASS must never be readable as a
+      # physical-device PASS, nor the reverse.
+      - name: publish the device evidence under its own name
+        if: always()
+        run: |
+          if [ -f build/ci/evidence/android.json ]; then
+            mv build/ci/evidence/android.json build/ci/evidence/android-device.json
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-android-device
+          path: build/ci/evidence/android-device.json
+          if-no-files-found: ignore
