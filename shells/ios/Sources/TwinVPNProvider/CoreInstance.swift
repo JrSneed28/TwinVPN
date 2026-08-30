@@ -14,6 +14,12 @@
 //  F-1: "Every exported function is a compatibility obligation forever." Nothing
 //  in this shell adds to it; `core-composition` owns it.
 //
+//  The one place the two meet is `hostVTable` below: the STRUCT is `twinvpn.h`'s
+//  `tw_host_vtable` and the three function pointers put into it are the internal
+//  bridge's, exported by `twinvpn-platform-ios`. That adds no entry to F-9 —
+//  all three slots have existed since `TW_ABI_MINOR` 0 — and moves no version
+//  number. See that property's own note for why exactly three.
+//
 //  F-5's async model is "submit + one ordered event stream": `tw_core_submit` is
 //  non-blocking, and the only blocking call is `tw_core_next_event` with an
 //  explicit timeout, cancellable via `tw_core_wake`. That is why every `submit*`
@@ -29,6 +35,11 @@
 
 import Foundation
 import os
+// The ABI of record, and the INTERNAL bridge. Both, and they stay two modules:
+// `TwinVPNCore` is `twinvpn.h`, a compatibility obligation forever (F-1);
+// `TwinVPNBridge` is `ownership.md` §10.4's versionless per-platform bridge,
+// and it is where this file gets the three vtable entries below.
+import TwinVPNBridge
 import TwinVPNCore
 
 /// One core instance.
@@ -39,6 +50,65 @@ final class CoreInstance {
     private var drainThread: Thread?
     private let log = Logger(subsystem: "net.twinvpn.provider", category: "core")
 
+    /// The host vtable this provider hands `tw_core_create`.
+    ///
+    /// **This used to be `nil`, and that was the defect.** The comment that
+    /// justified it — "the adapter is linked in-process, so the core reaches the
+    /// platform through `twinvpn-platform-ios` rather than back out through
+    /// F-9" — is true of the INTERNAL bridge (`twinvpn_ios_bridge_register`) and
+    /// false of `tw_core_create`, which has no such path: it refuses a null
+    /// vtable with `PLATFORM.ADAPTER_UNAVAILABLE`, and `twinvpn-ffi`'s own
+    /// `create_refuses_a_null_vtable_by_name` pins the refusal. So the
+    /// production provider could never create a core.
+    ///
+    /// Three entries are filled and every other one is deliberately NULL:
+    ///
+    /// - `os_csprng`, `elapsed_millis` and `boot_id` are W-7's three
+    ///   shell-supplied capabilities. They carry a byte buffer, a count and a
+    ///   `u64` — no structured data — and `twinvpn-platform-ios` implements all
+    ///   three against the Darwin primitives ADR-0022 LC-8's table names. **This
+    ///   file installs them; it does not write them.** LC-8's trap is that
+    ///   Darwin's `CLOCK_MONOTONIC` is suspend-*inclusive*, the reverse of
+    ///   Linux's, and picking the wrong primitive "compiles, passes every test
+    ///   that does not suspend, and fails only on a device that actually
+    ///   sleeps". The Rust half is checked for both iOS triples and its refusal
+    ///   path is executed on Linux; every line in this file is `written, not
+    ///   compiled` (README §1). `ownership.md` §10.3.
+    /// - Sockets and interface enumeration are not on F-9 **at all** — §11.2
+    ///   G-11 and `twinvpn.h`'s "WHAT IS DELIBERATELY ABSENT". PB-1 budgets zero
+    ///   FFI crossings per packet, and `contracts/` holds no message that can
+    ///   carry `InterfaceFacts`.
+    /// - Every remaining entry carries F-8 structured data, which
+    ///   `twinvpn-platform-ios` cannot encode: CD-I5 keeps it free of
+    ///   `twinvpn-schema`. Those capabilities are reached in-process through
+    ///   `IosPlatformAdapter` over the internal bridge, which is exactly what
+    ///   §10.4 rules and what `BridgeHost.register()` wires up before this runs.
+    ///
+    /// F-9 reads a NULL entry as NOT ATTACHED, never as a silent success, so the
+    /// absences above are a **declared posture** rather than a hole.
+    ///
+    /// Heap-allocated once and never freed, on purpose: `twinvpn.h` says
+    /// "`host` must outlive the instance", and a stack temporary would satisfy
+    /// that only because `twinvpn-ffi` happens to copy the struct. One
+    /// allocation for the life of the extension makes the contract literally
+    /// true instead of incidentally true.
+    private static let hostVTable: UnsafePointer<tw_host_vtable> = {
+        let storage = UnsafeMutablePointer<tw_host_vtable>.allocate(capacity: 1)
+        var vtable = tw_host_vtable()
+        // F-9's whole compatibility mechanism: `sizeof` AS THIS SHELL COMPILED
+        // IT, so a longer core reads only the prefix this build declares.
+        vtable.size = UInt32(MemoryLayout<tw_host_vtable>.size)
+        // No context. All three entries are platform capabilities rather than
+        // provider-instance ones — which is why they answer before
+        // `twinvpn_ios_bridge_register` has run — and Rust never dereferences it.
+        vtable.ctx = nil
+        vtable.os_csprng = { ctx, out, len in twinvpn_ios_os_csprng(ctx, out, len) }
+        vtable.elapsed_millis = { ctx, out in twinvpn_ios_elapsed_millis(ctx, out) }
+        vtable.boot_id = { ctx, out in twinvpn_ios_boot_id(ctx, out) }
+        storage.initialize(to: vtable)
+        return UnsafePointer(storage)
+    }()
+
     /// PB-5 budgets this at **<= 50 ms at p95** on the iOS/iPadOS extension —
     /// "the tightest, because the OS starts the extension on demand while the
     /// user waits."
@@ -47,13 +117,7 @@ final class CoreInstance {
         let config = CoreConfiguration.encoded()
         let handle = config.withUnsafeBytes { raw -> OpaquePointer? in
             let slice = tw_slice(ptr: raw.bindMemory(to: UInt8.self).baseAddress, len: raw.count)
-            // The host vtable is `nil`: on this platform the adapter is linked
-            // in-process as a Rust crate (ownership.md §10.4), so the core
-            // reaches the platform through `twinvpn-platform-ios` directly
-            // rather than back out through F-9. That is the whole substance of
-            // the §10.4 ruling, and it is why W-24 and W-25 do not block this
-            // shell — while remaining OPEN as ABI defects.
-            tw_core_create(tw_abi_major(), nil, slice, &error)
+            return tw_core_create(tw_abi_major(), hostVTable, slice, &error)
         }
         guard let handle else {
             // F-4: the failure is an encoded `{reason_code, evidence, resolved}`,

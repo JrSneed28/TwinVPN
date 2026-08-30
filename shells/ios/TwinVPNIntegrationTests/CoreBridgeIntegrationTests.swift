@@ -30,32 +30,36 @@
 //  claim lives and it is a different job on different hardware.
 //
 //  ===========================================================================
-//  WHY THIS TARGET SUPPLIES ITS OWN HOST VTABLE
+//  THE HOST VTABLE IS THE PRODUCTION ONE — AND THAT IS A FIX
 //  ===========================================================================
 //  `tw_core_create` REFUSES a null `tw_host_vtable` with
 //  `PLATFORM.ADAPTER_UNAVAILABLE` — `twinvpn-ffi`'s own
 //  `create_refuses_a_null_vtable_by_name` asserts exactly that. So a core
-//  instance cannot exist without one, and on a simulator the only honest one is
-//  a TEST binding: there is no NetworkExtension flow to create an interface on,
-//  no keychain access group, and no pf/nftables equivalent.
+//  instance cannot exist without one.
 //
-//  So this file supplies the three entries `twinvpn-ffi`'s `env::assemble`
-//  requires — `os_csprng`, `elapsed_millis`, and `boot_id` for W-7's third
-//  clock — and leaves every other entry NULL. F-9's rule is that a NULL entry
-//  reads as NOT ATTACHED, never as a silent success, so what the core then does
-//  with a `net.up` is a REAL refusal computed by real core code, and that is
-//  precisely the result this suite reads back.
-//
-//  **FINDING, recorded here because this is where it was found.**
-//  `Sources/TwinVPNProvider/CoreInstance.swift` passes `nil` for that vtable
-//  and comments that the adapter is reached in-process through
+//  **The finding this file used to carry is CLOSED.**
+//  `Sources/TwinVPNProvider/CoreInstance.swift` passed `nil` for that vtable,
+//  commenting that the adapter is reached in-process through
 //  `twinvpn-platform-ios`. That is true of the INTERNAL bridge
-//  (`twinvpn_ios_bridge_register`) and NOT of `tw_core_create`, which has no
-//  such path: with `nil` it can only ever return NULL. The production provider
-//  therefore cannot create a core today. Fixing it means binding F-9 to
-//  `twinvpn-platform-ios`, which is a design change for `mobile-ios` and
-//  `core-composition` together — it is reported, not patched here, and
-//  `shells/ios/README.md` §8 carries it.
+//  (`twinvpn_ios_bridge_register`) and was NOT true of `tw_core_create`, which
+//  has no such path: with `nil` it could only ever return NULL, so the shipping
+//  provider could never create a core.
+//
+//  It now installs three entries backed by `twinvpn_platform_ios::hostvtable` —
+//  `os_csprng`, `elapsed_millis` and `boot_id`, W-7's three shell-supplied
+//  capabilities and exactly what `twinvpn-ffi`'s `env::assemble` requires — and
+//  leaves every other entry NULL for a RULED reason: sockets and interface
+//  enumeration are not on F-9 at all (§11.2 G-11), and every remaining entry
+//  carries F-8 structured data that `twinvpn-platform-ios` has no
+//  `twinvpn-schema` dependency to encode (CD-I5). F-9's rule is that a NULL
+//  entry reads as NOT ATTACHED, never as a silent success, so what the core then
+//  does with a `net.up` is a REAL refusal computed by real core code, and that
+//  is precisely the result this suite reads back.
+//
+//  **This suite now exercises that same vtable**, out of the same archive, over
+//  the same internal bridge. It previously built its own from three Swift
+//  functions, which made it green over a path the product did not take.
+//  NO F-9 ENTRY WAS ADDED AND `TW_ABI_MINOR` DID NOT MOVE.
 //
 //  ===========================================================================
 //  THE TRANSITION MARKERS
@@ -78,79 +82,51 @@ import XCTest
 // that can drift from it.
 import TwinVPNCore
 
+// The INTERNAL bridge (`ownership.md` §10.4) — versionless, no compatibility
+// obligation, and in the SAME archive as `twinvpn.h`'s symbols. It is where the
+// three `tw_host_vtable` entries `twinvpn-platform-ios` backs are declared.
+import TwinVPNBridge
+
 // ===========================================================================
-// MARK: - The test host binding
+// MARK: - The host binding — THE PRODUCTION ONE
 // ===========================================================================
 
-/// Suspend-inclusive elapsed milliseconds.
+/// The vtable this suite hands `tw_core_create`, and it is **the same one the
+/// shipping provider hands it**.
 ///
-/// ADR-0018 CD-1 requires three non-interchangeable clocks and `std` has none
-/// that survives suspend, which is gap W-7. `CLOCK_MONOTONIC_RAW` is not it
-/// either — Darwin's suspend-inclusive clock is `mach_continuous_time`, and
-/// `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)` is its documented public
-/// spelling. Used here rather than `Date`, which is the WALL clock and is
-/// evidence only (CD-1a).
-private func continuousMillis() -> UInt64 {
-    clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1_000_000
-}
-
-private func hostCsprng(_ ctx: UnsafeMutableRawPointer?,
-                        _ out: UnsafeMutablePointer<UInt8>?,
-                        _ len: Int) -> Int32 {
-    guard let out, len > 0 else { return len == 0 ? TW_OK : TW_ERR }
-    // The platform CSPRNG, never a weaker source: `twinvpn.h` is explicit that
-    // "a silent downgrade here is indistinguishable from working". `SecRandom`
-    // would pull in Security.framework for one call; `arc4random_buf` is the
-    // same kernel entropy through libSystem and is available in the simulator.
-    arc4random_buf(out, len)
-    return TW_OK
-}
-
-private func hostElapsedMillis(_ ctx: UnsafeMutableRawPointer?,
-                               _ out: UnsafeMutablePointer<UInt64>?) -> Int32 {
-    guard let out else { return TW_ERR }
-    out.pointee = continuousMillis()
-    return TW_OK
-}
-
-/// One stable identifier per boot (W-7's third interface).
+/// This file used to build its own: three Swift functions over
+/// `clock_gettime_nsec_np`, `arc4random_buf` and `kern.bootsessionuuid`. That
+/// made the suite green while `Sources/TwinVPNProvider/CoreInstance.swift`
+/// passed `nil` and could not create a core at all — a link/run job proving a
+/// path the product does not take, which is the shape of evidence the
+/// acceptance gate exists to reject.
 ///
-/// A per-process value would be wrong: the core uses a `boot_id` change to route
-/// a resume through `COLD_START` rather than the resume path (ADR-0022 P21
-/// oracle 7), so a value that changed on every launch would make every start
-/// look like a reboot. `kern.bootsessionuuid` is the OS's own per-boot value.
-private func hostBootId(_ ctx: UnsafeMutableRawPointer?,
-                        _ out: UnsafeMutablePointer<UInt8>?) -> Int32 {
-    guard let out else { return TW_ERR }
-    var size = 0
-    guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 0 else {
-        // TW_ERR, not a fabricated value. `twinvpn.h`: "or TW_ERR where the
-        // platform has none". Inventing 16 bytes here would tell the core that
-        // this boot is distinguishable from the last when it is not.
-        return TW_ERR
-    }
-    var text = [CChar](repeating: 0, count: size)
-    guard sysctlbyname("kern.bootsessionuuid", &text, &size, nil, 0) == 0 else { return TW_ERR }
-    guard let uuid = UUID(uuidString: String(cString: text)) else { return TW_ERR }
-    withUnsafeBytes(of: uuid.uuid) { raw in
-        out.update(from: raw.bindMemory(to: UInt8.self).baseAddress!, count: 16)
-    }
-    return TW_OK
-}
-
-/// The vtable this suite hands `tw_core_create`.
+/// The three entries below are now `twinvpn_platform_ios::hostvtable`'s,
+/// resolved out of the same `libtwinvpn_core.a` this target links, over the
+/// internal bridge. `CoreInstance.hostVTable` installs the identical three
+/// symbols; nothing here stands in for them, and if the Rust half regresses,
+/// this suite is what goes red.
 ///
-/// `size` is `sizeof(tw_host_vtable)` AS THIS TARGET COMPILED IT, which is what
-/// F-9's first field means and what lets the core read only the entries a
-/// shorter shell declared. Everything except the three clocks/entropy entries is
-/// NULL and is meant to be: F-9 reads a NULL entry as NOT ATTACHED.
-private func testHostVTable() -> tw_host_vtable {
+/// **The duplication is of the INSTALLATION, never of the IMPLEMENTATION.** It
+/// is unavoidable for the reason the `Frame` type below records: an
+/// app-extension target cannot be linked into a test bundle and there is no
+/// framework target to share.
+///
+/// Everything except the three is NULL and is meant to be. F-9 reads a NULL
+/// entry as NOT ATTACHED, so what the core then does with a `net.up` is a REAL
+/// refusal computed by real core code, which is precisely the result this suite
+/// reads back — and `CoreInstance.hostVTable` documents why each absence is a
+/// ruling (G-11, F-8, CD-I5) rather than a gap.
+private func productionHostVTable() -> tw_host_vtable {
     var vtable = tw_host_vtable()
+    // `size` is `sizeof(tw_host_vtable)` AS THIS TARGET COMPILED IT, which is
+    // what F-9's first field means and what lets the core read only the entries
+    // a shorter shell declared.
     vtable.size = UInt32(MemoryLayout<tw_host_vtable>.size)
     vtable.ctx = nil
-    vtable.os_csprng = hostCsprng
-    vtable.elapsed_millis = hostElapsedMillis
-    vtable.boot_id = hostBootId
+    vtable.os_csprng = { ctx, out, len in twinvpn_ios_os_csprng(ctx, out, len) }
+    vtable.elapsed_millis = { ctx, out in twinvpn_ios_elapsed_millis(ctx, out) }
+    vtable.boot_id = { ctx, out in twinvpn_ios_boot_id(ctx, out) }
     return vtable
 }
 
@@ -293,7 +269,7 @@ final class CoreBridgeIntegrationTests: XCTestCase {
     /// Every step asserts, and the transition markers are printed only from the
     /// event stream — see this file's header.
     func test_the_core_accepts_and_completes_every_lifecycle_phase() throws {
-        var vtable = testHostVTable()
+        var vtable = productionHostVTable()
         var createError: UnsafeMutablePointer<tw_buf>?
 
         // CONFIG IS EMPTY, and that is CD-2 rather than laziness: configuration
@@ -375,7 +351,7 @@ final class CoreBridgeIntegrationTests: XCTestCase {
     /// test above: without it, a core that accepted anything would look
     /// identical to one that decoded the selector.
     func test_an_unrecognised_lifecycle_phase_is_refused_by_name() throws {
-        var vtable = testHostVTable()
+        var vtable = productionHostVTable()
         var createError: UnsafeMutablePointer<tw_buf>?
         let core = withUnsafePointer(to: &vtable) { host in
             tw_core_create(tw_abi_major(), host, tw_slice(ptr: nil, len: 0), &createError)

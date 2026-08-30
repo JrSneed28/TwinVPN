@@ -38,6 +38,21 @@ twinvpn-mgmt          = { workspace = true }
 futures-core          = { workspace = true }
 prost                 = { workspace = true }
 
+# The iOS adapter, LINKED rather than called. `ownership.md` §10.4 puts the
+# Swift bridge in `twinvpn-platform-ios`, and `shells/ios/Scripts/build-core.sh`
+# builds exactly ONE archive — this crate's `staticlib`, renamed
+# `libtwinvpn_core.a`. Without this edge every `twinvpn_ios_*` symbol the Swift
+# side calls (`twinvpn_ios_bridge_register`, `twinvpn_ios_sink_push`, and the
+# three `tw_host_vtable` entries in `twinvpn_platform_ios::hostvtable`) is
+# undefined at the shell's link step.
+#
+# The direction is the composition root naming a platform implementation, which
+# is the one CD-I5 permits; the inverse — a `twinvpn-platform-*` crate naming
+# `twinvpn-core` — is what CD-I5 forbids and is not what this is. Target-gated,
+# so no other target pays for it.
+[target.'cfg(target_os = "ios")'.dependencies]
+twinvpn-platform-ios  = { workspace = true }
+
 [dev-dependencies]
 twinvpn-core          = { workspace = true, features = ["test-support"] }
 # For the one M-1 test that reads the ABI's event frame the way a NON-RUST shell

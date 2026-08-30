@@ -95,6 +95,7 @@ pub mod cmsg;
 pub mod custody;
 pub mod enforce;
 pub mod host;
+pub mod hostvtable;
 pub mod iface;
 pub mod keychain;
 pub mod lifecycle;
