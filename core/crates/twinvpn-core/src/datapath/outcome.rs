@@ -328,6 +328,27 @@ pub enum Step {
     /// adapter is refusing" are different facts in the counters. Rounding them
     /// together is how a failing adapter comes to look like an idle link.
     Deferred,
+    /// One datagram was recognised as **not** L-DATA traffic and handed to the
+    /// component that owns it, rather than carried or discarded.
+    ///
+    /// Today that is exactly one thing: an ADR-0001 §7.3.2 `ResumeSession`,
+    /// moved into the pump's resume inbox for
+    /// [`crate::execute::carriage::step`] to hand to
+    /// `SessionRuntime::resume_on_wire`.
+    ///
+    /// # Why this is neither `Moved` nor `Rejected`
+    ///
+    /// `Moved` carries a plaintext byte count and increments the *packet*
+    /// counter, and no packet crossed. `Rejected` means discarded, and this
+    /// datagram was not discarded — reporting it as one would put a genuine
+    /// resume into the same counter as a forgery, and that counter is a
+    /// security signal. The pump continues either way; what differs is what an
+    /// operator reads afterwards.
+    ///
+    /// **A `Diverted` datagram is still unauthenticated.** Nothing has verified
+    /// it at this point; the diversion is a demux, and the MAC check happens in
+    /// `crate::resume`.
+    Diverted,
     /// One datagram was discarded. The pump continues.
     Rejected(Reject),
     /// The loop should end.
@@ -359,6 +380,12 @@ pub struct Counters {
     pub rejected_replay: u64,
     /// Retryable adapter refusals absorbed under the backoff regime.
     pub adapter_transient: u64,
+    /// Datagrams handed to another component — see [`Step::Diverted`].
+    ///
+    /// Deliberately outside [`Counters::rejected_total`]: a diverted datagram
+    /// was not discarded, and folding it into the reject total would make a
+    /// roaming peer look like an attacker.
+    pub diverted: u64,
 }
 
 impl Counters {
@@ -372,6 +399,11 @@ impl Counters {
             Reject::Replay => &mut self.rejected_replay,
         };
         *slot = slot.saturating_add(1);
+    }
+
+    /// Records one datagram handed to another component.
+    pub fn record_diverted(&mut self) {
+        self.diverted = self.diverted.saturating_add(1);
     }
 
     /// Records one carried packet.

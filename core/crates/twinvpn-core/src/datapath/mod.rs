@@ -86,8 +86,9 @@ use twinvpn_tunnel::{Tunnel, TunnelError};
 
 pub use cancel::{race, Cancel, Cancelled, Race, Raced};
 pub use frame::{
-    Budget, Buffers, DataHeader, ReceiverIndex, DATAGRAM_CEILING, HEADER_BYTES, OVERHEAD_BYTES,
-    OVERLAY_MTU_FLOOR, TAG_BYTES, TYPE_TRANSPORT_DATA,
+    Budget, Buffers, DataHeader, ReceiverIndex, ResumeHeader, DATAGRAM_CEILING, HEADER_BYTES,
+    OVERHEAD_BYTES, OVERLAY_MTU_FLOOR, RESUME_HEADER_BYTES, TAG_BYTES, TYPE_RESUME,
+    TYPE_TRANSPORT_DATA,
 };
 pub use outcome::{Counters, Fault, Refused, Reject, Report, Step, Stop, COMPONENT};
 
@@ -140,6 +141,9 @@ pub struct Pump {
     peer_receiver: ReceiverIndex,
     budget: Budget,
     cancel: Cancel,
+    /// The one datagram the inbound direction recognised as a resume and did
+    /// not carry. See [`Pump::take_resume`].
+    resume: Mutex<Option<Vec<u8>>>,
 }
 
 impl Pump {
@@ -167,7 +171,42 @@ impl Pump {
             peer_receiver: parts.peer_receiver,
             budget,
             cancel: parts.cancel,
+            resume: Mutex::new(None),
         })
+    }
+
+    /// **Takes** the resume datagram the inbound direction set aside, if any.
+    ///
+    /// [`crate::execute::carriage::step`] drains this every tick and hands what
+    /// it finds to `SessionRuntime::resume_on_wire`. It is a take, not a read:
+    /// one datagram is delivered to the state machine exactly once.
+    ///
+    /// # Why the pump does not handle it itself
+    ///
+    /// A resume ends in a **transition** — `docs/reliability.md` §4.5 T35 — and
+    /// ADR-0015 O-05 makes `SessionRuntime` the only object permitted to move
+    /// the machine. The pump holds a `Tunnel` and a socket and has no route to
+    /// the session table, deliberately: giving the datapath one would put the
+    /// state machine underneath it. So the pump recognises and sets aside, and
+    /// the layer that already owns both the `Core` and the runtime dispatches.
+    ///
+    /// # One slot, and why that is enough
+    ///
+    /// A second resume arriving before the first is claimed **replaces** it. A
+    /// resume is a rare, idempotent-in-effect event and RS-4 makes `path_epoch`
+    /// the arbiter regardless: of two offers the older one would be refused as
+    /// replayed the moment the newer was accepted. An unbounded queue here
+    /// would instead be a memory sink an off-path attacker fills for free, since
+    /// nothing at this point has authenticated anything.
+    #[must_use]
+    pub fn take_resume(&self) -> Option<Vec<u8>> {
+        // A poisoned slot holds an unauthenticated datagram, not key material.
+        // Refusing to take it back would mean one panic elsewhere permanently
+        // disabled resumption on this `Session`.
+        self.resume
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// The bounds every buffer is sized from.
@@ -291,6 +330,16 @@ impl Pump {
             return Step::Rejected(Reject::Oversize);
         }
 
+        // The demux, before the data path sees anything. ADR-0001 §7.2 permits
+        // "multiplexing a small disco message type on the same socket", and a
+        // resume is exactly that: a datagram on this socket that is not L-DATA
+        // traffic and must not be measured against L-DATA's rules. Selected on
+        // the type octet alone, so nothing below accepts one byte more than it
+        // did before.
+        if buffers.wire.first() == Some(&TYPE_RESUME) {
+            return self.divert_resume(&buffers.wire[..datagram.len]);
+        }
+
         let (header, record_len) = match DataHeader::parse(&buffers.wire[..datagram.len]) {
             Ok((header, record)) => (header, record.len()),
             Err(reject) => return Step::Rejected(reject),
@@ -341,6 +390,36 @@ impl Pump {
         }
     }
 
+    /// Sets one recognised resume datagram aside for the session layer.
+    ///
+    /// **Nothing here authenticates anything, and nothing here may.** The
+    /// resumption MAC is keyed by a secret this module does not hold and must
+    /// not; `crate::resume::ResumeState::accept` verifies it, and commits the
+    /// `path_epoch` only afterwards. So the two checks below are the same two
+    /// the data path makes before *its* AEAD, and for the same reason: they
+    /// shed obvious noise cheaply, and getting either wrong costs a dropped
+    /// datagram and nothing else.
+    ///
+    /// The L-DATA replay window is not touched on this path. A resume frame is
+    /// never opened under the transport keys, so no quantity of forged resumes
+    /// can advance the window the data frames depend on.
+    fn divert_resume(&self, datagram: &[u8]) -> Step {
+        let Ok((header, payload)) = ResumeHeader::parse(datagram) else {
+            return Step::Rejected(Reject::Malformed);
+        };
+        if header.receiver != self.local_receiver {
+            return Step::Rejected(Reject::ForeignReceiver);
+        }
+        // Bounded by the receive buffer, which was sized from the MTU budget
+        // before this datagram existed: §6 rule 10's "no allocation driven by a
+        // declared length".
+        *self
+            .resume
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(payload.to_vec());
+        Step::Diverted
+    }
+
     /// Runs the outbound direction until it is stopped.
     pub async fn run_outbound(&self) -> Report {
         let mut buffers = self.buffers();
@@ -373,6 +452,12 @@ impl Pump {
         match step {
             Step::Moved(bytes) => {
                 counters.record_moved(bytes);
+                None
+            }
+            Step::Diverted => {
+                counters.record_diverted();
+                // No backoff: a datagram arrived, so the socket is live and the
+                // next one may already be waiting.
                 None
             }
             Step::Rejected(reject) => {
