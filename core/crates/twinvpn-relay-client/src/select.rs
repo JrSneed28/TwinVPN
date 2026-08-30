@@ -16,7 +16,7 @@
 //! whole admissible set** — never a subset, and never empty while the map is
 //! non-empty.
 
-use twinvpn_types::RelayId;
+use twinvpn_types::{RegionId, RelayId};
 
 use crate::map::HealthState;
 
@@ -227,6 +227,153 @@ impl Selection {
     #[must_use]
     pub fn is_total_over(&self, admissible_count: usize) -> bool {
         self.order.len() == admissible_count
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §11.16 (b) — the selection audit record
+// ---------------------------------------------------------------------------
+
+/// One entry of [`RelaySelected::top_k`].
+///
+/// The wire form is `twinvpn.v1.RelayCandidateScore`, which carries exactly
+/// these two fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CandidateScore {
+    /// The candidate.
+    pub relay_id: RelayId,
+    /// The score it was given.
+    pub score: i32,
+}
+
+/// The input vector behind one selection — §11.16 (b)'s `inputs{…}`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectionInputs {
+    /// The EWMA RTT that produced the measurement term.
+    pub measured_rtt_ms: u32,
+    /// The map's advisory ranking hint for the chosen relay.
+    pub server_rank: u32,
+    /// The reported health.
+    pub health: HealthState,
+    /// The reported load class.
+    pub load_class: u32,
+    /// §11.16 (b)'s `breaker_state`, spelled the way [`Scored`] already spells
+    /// it: a second name for the same fact would be a second thing to keep in
+    /// step.
+    pub breaker_open: bool,
+}
+
+/// ADR-0006 §11.16 (b)'s audit record — "selection is auditable, not a black
+/// box".
+///
+/// The clause states the shape: "a `RelaySelected{session_id, relay_id, region,
+/// failure_domain, score, rank, top_k[]{relay_id, score}, map_version,
+/// map_age_ms, inputs{measured_rtt_ms, server_rank, health, load_class,
+/// breaker_state}}` event is emitted — selection is auditable, not a black box
+/// (RQ12, R-23)". §7 puts the same obligation in prose: "Every selection emits a
+/// structured `RelaySelected` event carrying the full input vector (§11.16).
+/// Support can answer 'why this relay' from the event stream without a debug
+/// build, which is R-23's actual requirement."
+///
+/// # Why `top_k` is the WHOLE order
+///
+/// RQ12 is the binding sentence: "Every selection and every failover MUST be
+/// **reconstructable** after the fact from a structured event." A truncated list
+/// is not reconstructable — the ranking below the cut is gone — and ADR-0006
+/// fixes no value of `k` anywhere. So this build emits the whole ordered
+/// admissible set, which is a superset of any `k` a later revision might pick
+/// and is the only form that satisfies the word "reconstructable". The set is
+/// bounded by the relay map, which §7 describes as fleet inventory.
+///
+/// # Why there is no `session_id` field
+///
+/// The frozen contract nests this record inside `twinvpn.v1.RelayBound`, whose
+/// `RelayBinding` already carries the session identity
+/// (`contracts/proto/twinvpn/v1/diagnostics.proto`). Restating it here would be
+/// a second copy of a fact the envelope owns, and this crate does not hold a
+/// session in any case.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelaySelected {
+    /// The relay selection chose.
+    pub relay_id: RelayId,
+    /// Its region.
+    pub region: RegionId,
+    /// Its correlated-failure label.
+    pub failure_domain: String,
+    /// Its score.
+    pub score: i32,
+    /// Its position in the order, zero-based. The chosen relay is normally 0;
+    /// it is recorded rather than assumed so a half-open probe or a
+    /// standby promotion is visible as the rank it actually had.
+    pub rank: u32,
+    /// The map version selection ran against.
+    pub map_version: u64,
+    /// How stale that map was.
+    pub map_age_ms: u64,
+    /// The measured and reported terms behind the score.
+    pub inputs: SelectionInputs,
+    /// The whole ordered candidate set, best first. See the type docs.
+    pub top_k: Vec<CandidateScore>,
+}
+
+impl RelaySelected {
+    /// Builds the audit record for `chosen` out of the selection that produced
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` when `chosen` does not appear in `selection.order`. An
+    /// audit record describing a relay the selection did not rank would be
+    /// worse than none: it would answer "why this relay" with a fabrication.
+    #[must_use]
+    pub fn for_selection(
+        selection: &Selection,
+        chosen: &Relay,
+        chosen_obs: Observations,
+        map_version: u64,
+        map_age_ms: u64,
+    ) -> Option<Self> {
+        let rank = selection.order.iter().position(|s| s.id == chosen.id)?;
+        let scored = selection.order[rank];
+        Some(Self {
+            relay_id: chosen.id,
+            region: chosen.region.clone(),
+            failure_domain: chosen.failure_domain.clone(),
+            score: scored.score,
+            rank: u32::try_from(rank).unwrap_or(u32::MAX),
+            map_version,
+            map_age_ms,
+            inputs: SelectionInputs {
+                measured_rtt_ms: chosen_obs.ewma_rtt_ms,
+                server_rank: chosen.server_rank,
+                health: chosen_obs.health,
+                load_class: chosen.load_class,
+                breaker_open: scored.breaker_open,
+            },
+            top_k: selection
+                .order
+                .iter()
+                .map(|s| CandidateScore {
+                    relay_id: s.id,
+                    score: s.score,
+                })
+                .collect(),
+        })
+    }
+
+    /// Whether this record reconstructs `selection` exactly (RQ12).
+    ///
+    /// RQ12 asks that the selection be "reconstructable after the fact from a
+    /// structured event", and this is that word made decidable: the recorded
+    /// candidate list must be the ordering, entry for entry, in order.
+    #[must_use]
+    pub fn reconstructs(&self, selection: &Selection) -> bool {
+        self.top_k.len() == selection.order.len()
+            && self
+                .top_k
+                .iter()
+                .zip(selection.order.iter())
+                .all(|(c, s)| c.relay_id == s.id && c.score == s.score)
     }
 }
 
