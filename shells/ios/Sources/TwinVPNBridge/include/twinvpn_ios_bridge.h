@@ -194,6 +194,62 @@ tw_ios_status twinvpn_ios_bridge_register(const tw_ios_host_vtable *vtable);
 /* Forgets the registered provider. Call at provider teardown. */
 void twinvpn_ios_bridge_unregister(void);
 
+/* ---------------------------------------------------------------------------
+ * THE THREE `tw_host_vtable` ENTRIES THIS ADAPTER BACKS
+ * ---------------------------------------------------------------------------
+ *
+ * `tw_core_create` REFUSES a null `tw_host_vtable` with
+ * PLATFORM.ADAPTER_UNAVAILABLE -- `twinvpn-ffi`'s own
+ * `create_refuses_a_null_vtable_by_name` pins it -- so the shell must supply
+ * one. These three functions are what it installs into it. They are declared
+ * HERE, on the internal bridge, and not in `twinvpn.h`:
+ *
+ *   - the SIGNATURES are `twinvpn.h`'s, verbatim, because they are assigned to
+ *     `tw_host_vtable::os_csprng`, `::elapsed_millis` and `::boot_id` and a
+ *     mismatch is undefined behaviour rather than a type error;
+ *   - the SYMBOLS are this bridge's, and acquire no compatibility obligation.
+ *     NOTHING IS ADDED TO `twinvpn.h` AND `TW_ABI_MINOR` DOES NOT MOVE: all
+ *     three vtable slots have existed since minor 0. What is new is an
+ *     implementation of them, in Rust, in `twinvpn_platform_ios::hostvtable`.
+ *
+ * WHY RUST AND NOT SWIFT. Nothing here carries a TwinVPN domain fact, so CB-2
+ * would permit a Swift implementation. ADR-0022 LC-8 is why there is not one:
+ * "Darwin's CLOCK_MONOTONIC is suspend-inclusive, reverse of Linux's", and the
+ * wrong primitive "compiles, passes every test that does not suspend, and fails
+ * only on a device that actually sleeps". Swift in this shell is `written, not
+ * compiled` (README §1); the Rust is checked for both iOS triples and its
+ * refusal path is executed on Linux. ownership.md §10.3's design rule.
+ *
+ * WHY ONLY THREE. Sockets and interface enumeration are not on F-9 at all
+ * (ownership.md §11.2 G-11 / `twinvpn.h`'s "WHAT IS DELIBERATELY ABSENT"), and
+ * every remaining entry carries F-8 STRUCTURED DATA -- a blob generated from an
+ * ADR-0003 contract artifact. `twinvpn-platform-ios` has no `twinvpn-schema`
+ * dependency and must not grow one (CD-I5), so it cannot honestly back those
+ * entries; the core reaches them in-process through `IosPlatformAdapter` over
+ * the vtable ABOVE instead. F-9 reads a NULL entry as NOT ATTACHED, so leaving
+ * them null is a declared posture and not a hole.
+ *
+ * `ctx` is ignored by all three: the capability belongs to the platform, not to
+ * one provider instance, so they answer before `twinvpn_ios_bridge_register`
+ * has been called and after `..._unregister`.
+ *
+ * Each returns TW_OK (0) or TW_ERR (1) from `twinvpn.h`. NONE fabricates a
+ * reading on failure: a substituted clock, a weaker entropy source or an
+ * invented boot id would each be indistinguishable from working.
+ */
+
+/* tw_host_vtable::os_csprng -- Darwin `getentropy(2)`. */
+int32_t twinvpn_ios_os_csprng(void *ctx, uint8_t *out, size_t len);
+
+/* tw_host_vtable::elapsed_millis -- Darwin `mach_continuous_time()`, which is
+ * the SUSPEND-INCLUSIVE clock (W-7, ADR-0022 LC-8). */
+int32_t twinvpn_ios_elapsed_millis(void *ctx, uint64_t *out);
+
+/* tw_host_vtable::boot_id -- `sysctl kern.boottime`. TW_ERR where it is
+ * unreachable, which is what `twinvpn.h` names for a platform with no boot
+ * identity. */
+int32_t twinvpn_ios_boot_id(void *ctx, uint8_t out[16]);
+
 #ifdef __cplusplus
 }
 #endif

@@ -57,6 +57,20 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::module_name_repetitions)]
 
+// The iOS adapter is LINKED, not called. `ownership.md` §10.4 puts the Swift
+// bridge in `twinvpn-platform-ios` and `shells/ios` links exactly one archive —
+// this crate's `staticlib`. Nothing in this crate references that one, so
+// `extern crate` is what pulls its objects in; without it every `twinvpn_ios_*`
+// symbol the Swift side calls is undefined at the shell's link step, which is a
+// link failure and not a runtime one.
+//
+// This adds NO surface to `twinvpn.h`: the entries it carries are the three
+// `tw_host_vtable` slots (`os_csprng`, `elapsed_millis`, `boot_id`) that have
+// existed since minor 0, implemented over the INTERNAL, versionless bridge
+// §10.4 carves out. `TW_ABI_MINOR` does not move.
+#[cfg(target_os = "ios")]
+extern crate twinvpn_platform_ios;
+
 pub mod abi;
 pub mod env;
 pub mod vtable;

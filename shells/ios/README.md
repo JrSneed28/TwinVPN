@@ -60,14 +60,20 @@ and all three are exactly the kind only a link-and-run finds:
    reading all bounced. Sleep and wake are **fixed**; the other two have no
    carriage on this ABI at all and are recorded as findings in the source and in
    §8 below.
-3. **`CoreInstance.create()` can never succeed.** It passes `nil` for
+3. **`CoreInstance.create()` could never succeed.** It passed `nil` for
    `tw_core_create`'s host vtable, and `twinvpn-ffi` refuses a null vtable with
    `PLATFORM.ADAPTER_UNAVAILABLE` — its own
-   `create_refuses_a_null_vtable_by_name` asserts it. The comment there is right
+   `create_refuses_a_null_vtable_by_name` asserts it. The comment there was right
    about the INTERNAL bridge (`twinvpn_ios_bridge_register`) and wrong about
-   `tw_core_create`, which has no such path. **Not fixed here**: binding F-9 to
-   `twinvpn-platform-ios` is a design change for `mobile-ios` and
-   `core-composition` together. It is §8's first row.
+   `tw_core_create`, which has no such path. **Now fixed** — see §8.1's first
+   row for the binding and for what it deliberately does not do.
+
+A fourth, found while fixing the third and of the same family: **nothing linked
+`twinvpn-platform-ios` at all.** `Scripts/build-core.sh` builds one archive,
+`twinvpn-ffi`'s, and no crate in the tree named the iOS adapter — so every
+`twinvpn_ios_*` symbol `BridgeHost.swift` calls was undefined at the shell's link
+step, and `xcodebuild` would have said so on the first run. `twinvpn-ffi` now
+carries a `cfg(target_os = "ios")` dependency on it. See §8.1.
 
 ---
 
@@ -277,7 +283,54 @@ The three scripts §3 names now exist. What does not:
 
 | Finding | Where | Status |
 |---|---|---|
-| `CoreInstance.create()` passes `nil` for `tw_core_create`'s host vtable, which is refused with `PLATFORM.ADAPTER_UNAVAILABLE`. The production provider cannot create a core. | `Sources/TwinVPNProvider/CoreInstance.swift` | **OPEN.** Needs F-9 bound to `twinvpn-platform-ios` — a design change for `mobile-ios` + `core-composition`. `TwinVPNIntegrationTests` supplies a test host binding so the boundary can be exercised meanwhile. |
+| `CoreInstance.create()` passed `nil` for `tw_core_create`'s host vtable, which is refused with `PLATFORM.ADAPTER_UNAVAILABLE`. The production provider could not create a core. | `Sources/TwinVPNProvider/CoreInstance.swift` | **CLOSED**, and §8.1.1 says exactly what was and was not bound. The provider installs three F-9 entries backed by `twinvpn_platform_ios::hostvtable`; `TwinVPNIntegrationTests` now exercises **that** vtable rather than a test-only one. |
+| Nothing in the tree linked `twinvpn-platform-ios`, so every `twinvpn_ios_*` symbol `BridgeHost.swift` calls was an undefined symbol at link. | `core/crates/twinvpn-ffi/Cargo.toml` | **CLOSED.** `twinvpn-ffi` gained a `cfg(target_os = "ios")` dependency on the adapter, which is the composition root naming a platform implementation (the direction CD-I5 permits). Unproven on this host: no Darwin SDK, so no archive can be produced to inspect. |
 | `host.lifecycle` has no parameter that can carry an `NEProviderStopReason`, and none that can carry a resident-byte reading. Both submissions were being refused as malformed. | `Sources/TwinVPNProvider/CoreProtocol.swift` | **OPEN**, reported rather than re-encoded: inventing a params shape here would be the second vocabulary MI-20 forbids. Needs an ADR-0017 §11.9 row. |
 | The three documents describing the fetch/verify split still disagree (§5). | `ContractCourier.swift` | **OPEN**, unchanged. |
 | No UI catalogue plumbing, so nothing here can render a core-supplied string. | `Views/` | **OPEN**, unchanged. |
+
+### 8.1.1 What the host-vtable binding is, and the one thing it is not
+
+**Three F-9 entries are filled and every other one is deliberately NULL.**
+`CoreInstance.hostVTable` installs `os_csprng`, `elapsed_millis` and `boot_id` —
+W-7's three shell-supplied capabilities, and exactly what `twinvpn-ffi`'s
+`env::assemble` requires — from `twinvpn_platform_ios::hostvtable`, declared on
+the internal bridge in `Sources/TwinVPNBridge/include/twinvpn_ios_bridge.h`.
+They are Rust, not Swift, because ADR-0022 LC-8's trap ("Darwin's
+`CLOCK_MONOTONIC` is suspend-inclusive, reverse of Linux's") is invisible in a
+shell that is `written, not compiled`, and the Rust half's refusal path executes
+on this host.
+
+**No F-9 entry was added, moved or removed, `TW_ABI_MINOR` stays at 2, and
+`contracts/` is untouched.** All three slots have existed since minor 0; what is
+new is an implementation of them. The remaining entries are absent for a *ruled*
+reason rather than by omission:
+
+- **sockets and interface enumeration** are not on this ABI at all — §11.2
+  **G-11** and `twinvpn.h`'s "WHAT IS DELIBERATELY ABSENT". PB-1 budgets zero FFI
+  crossings per packet; interface enumeration is blocked on F-8 because
+  `contracts/` holds no message that can carry `InterfaceFacts`;
+- **every other entry** (`create_interface`, `apply`, `set_ruleset`,
+  `identity_*`, `secure_item_*`, `store_root`, the W-24 read-backs) carries F-8
+  structured data — a blob generated from an ADR-0003 contract artifact.
+  `twinvpn-platform-ios` has no `twinvpn-schema` dependency and CD-I5 says it
+  must not grow one, so it cannot honestly back them. F-9 reads a NULL entry as
+  NOT ATTACHED, so this is a declared posture and not a hole.
+
+**What this does NOT do, stated because it is the next finding rather than a
+detail.** The adapter the core ends up holding is `twinvpn-ffi`'s `HostAdapter`,
+assembled from the vtable — **not** `IosPlatformAdapter`. `HostAdapter` carries
+`NoSockets` and `NoInterfaces` *structurally* (`PLATFORM.OS_UNSUPPORTED`, per
+G-11), so a core created through `tw_core_create` cannot do NAT traversal on any
+platform, and nothing in the tree yet constructs `IosPlatformAdapter` for a
+running provider. Closing that is the shape `shells/macos/twinvpn-bridge` already
+has — a Rust composition root in the shell that names both `twinvpn-core` and the
+platform crate and calls `Core::create` directly — and it is a design change for
+`mobile-ios` + `core-composition`, not a shell patch. `shells/android/jni` has
+the identical gap and passes a null vtable besides.
+
+| Row | Status |
+|---|---|
+| the provider can create a core at all | **fixed** |
+| the vtable is production, Rust-backed, and the simulator suite exercises it | **fixed** |
+| the adapter behind that core is `IosPlatformAdapter` | **OPEN** — needs a Rust composition root in this shell, per X-7 and the macOS precedent |

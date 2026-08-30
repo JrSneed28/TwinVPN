@@ -1715,6 +1715,7 @@ dependencies = [
  "twinvpn-env",
  "twinvpn-mgmt",
  "twinvpn-platform",
+ "twinvpn-platform-ios",
  "twinvpn-schema",
  "twinvpn-types",
 ]
