@@ -41,7 +41,11 @@ name: First Implementation Wave — acceptance gate
 on:
   pull_request:
   push:
-    branches: [main, master]
+    # The integration branch is this repository's DEFAULT branch right now, so
+    # listing only main/master would mean no push to the branch under test ever
+    # triggered this gate -- it would have run on workflow_dispatch alone and
+    # looked configured while proving nothing on merge.
+    branches: [main, master, 'fix/wave1-final-review-register']
   workflow_dispatch:
 
 # Minimal token. Nothing here writes to the repository.
