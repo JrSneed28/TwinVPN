@@ -272,7 +272,10 @@ mod tests {
             elapsed_millis(core::ptr::null_mut(), core::ptr::null_mut()),
             TW_ERR
         );
-        assert_eq!(boot_id(core::ptr::null_mut(), core::ptr::null_mut()), TW_ERR);
+        assert_eq!(
+            boot_id(core::ptr::null_mut(), core::ptr::null_mut()),
+            TW_ERR
+        );
     }
 
     /// A zero-length draw asks for nothing and gets it. Refusing would make the
