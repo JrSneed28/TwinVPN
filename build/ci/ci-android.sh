@@ -251,6 +251,46 @@ sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
 adb() { "$sdk_root/platform-tools/adb" "$@"; }
 
 # ---------------------------------------------------------------------------
+# WHERE THE AVD LIVES, said out loud, because the two tools disagree by default
+# ---------------------------------------------------------------------------
+#
+# `avdmanager` and `emulator` resolve the AVD directory by DIFFERENT rules, and
+# on a GitHub-hosted `ubuntu-24.04` runner those rules land in different places.
+# Run 33297181847 is what that looks like: `avdmanager create avd` exits 0, and
+# the emulator then reports
+#
+#     ERROR | Unknown AVD name [twinvpn-ci-api30]
+#     ERROR | HOME is defined but there is no file twinvpn-ci-api30.ini
+#             in $HOME/.android/avd
+#
+# **The AVD was created.** It went to `$XDG_CONFIG_HOME/.android/avd`, which the
+# runner image sets to `/home/runner/.config`. cmdline-tools 12.0 -- the version
+# that image pins -- resolves its `.android` folder in
+# `AbstractAndroidLocations.computeAndroidFolder()` as
+#
+#     singlePathOf(ANDROID_USER_HOME, ANDROID_PREFS_ROOT, ANDROID_SDK_HOME)
+#       ?: firstPathOf(TEST_TMPDIR, XDG_CONFIG_HOME, USER_HOME, HOME)/.android
+#
+# with `XDG_CONFIG_HOME` AHEAD OF `HOME`. The emulator's
+# `ConfigDirs::getAvdRootDirectory()` consults `ANDROID_AVD_HOME`,
+# `$ANDROID_SDK_HOME/avd` and `$HOME/.android/avd`, and never `XDG_CONFIG_HOME`
+# -- which is exactly the three-entry list emulator 37.1.11 printed above.
+#
+# `ANDROID_AVD_HOME` is the ONE variable both tools honour, so it is the one
+# that makes them agree. It is set here rather than in the workflow so that the
+# `--cleanup` re-entry -- a separate process, which deletes the AVD -- resolves
+# the same directory the create used.
+#
+# **THE `mkdir` IS LOAD-BEARING, NOT TIDINESS.** `ANDROID_AVD_HOME` carries
+# `mustExist = true` in both implementations: `PathLocator.handlePath()` returns
+# null for a directory that is absent and then drops the variable entirely, and
+# the emulator's own read is guarded by `pathIsDir`. Exporting it at a path that
+# does not exist yet is therefore SILENTLY IGNORED by both halves, which fails
+# exactly as it does today while looking like the fix is in place.
+export ANDROID_AVD_HOME="$HOME/.android/avd"
+mkdir -p "$ANDROID_AVD_HOME"
+
+# ---------------------------------------------------------------------------
 # cleanup -- runs with `if: always()`, so it must not fail the job
 # ---------------------------------------------------------------------------
 if [ "$do_cleanup" = true ]; then
@@ -545,11 +585,20 @@ if [ "$linked" = true ]; then
     #
     # The exit code is therefore not evidence and is not treated as any. This
     # asks the EMULATOR -- the consumer, whose search path is the one that
-    # matters -- whether the AVD it is about to be told to boot exists. The two
-    # binaries disagreeing about where an AVD lives is a known shape (avdmanager
-    # writes `$ANDROID_SDK_HOME/.android/avd`, the emulator reads
-    # `$ANDROID_SDK_HOME/avd`), and a name check here catches that as well as an
-    # outright non-creation.
+    # matters -- whether the AVD it is about to be told to boot exists.
+    #
+    # It is kept now that `ANDROID_AVD_HOME` is exported above, because the check
+    # is what proves the export WORKED. That variable is silently ignored when
+    # its directory is absent, so a regression in the `mkdir` would reinstate the
+    # original defect with no other symptom until the boot poll times out fifteen
+    # minutes later. This says so in one line instead.
+    #
+    # A NOTE ON READING `avdmanager`'s LOG, because it misled once: a SUCCESSFUL
+    # create prints nothing after "Do you wish to create a custom hardware
+    # profile? [no]". `AvdManagerCli.createAvd()` has no success line, and
+    # `AvdManager` carries only "AVD '%s' moved." and "AVD '%s' deleted." -- the
+    # "Created AVD" string belongs to the retired `android create avd`. Silence
+    # there is not evidence of anything.
     if ! "$sdk_root/emulator/emulator" -list-avds | grep -qx "$AVD_NAME"; then
       echo "::error::avdmanager exited 0 but the emulator cannot see $AVD_NAME" >&2
       echo "--- avdmanager said ---" >&2
