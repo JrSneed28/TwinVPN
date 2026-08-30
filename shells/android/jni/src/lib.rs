@@ -71,11 +71,88 @@ use jni::sys::{jbyteArray, jint, jlong};
 use jni::JNIEnv;
 
 use twinvpn_ffi::abi::{TwBuf, TwSlice};
-use twinvpn_ffi::vtable::TW_OK;
+use twinvpn_ffi::vtable::{vtable_size, TwHostVtable, TW_OK};
 use twinvpn_ffi::{
     tw_abi_major, tw_buf_bytes, tw_buf_free, tw_core_create, tw_core_destroy, tw_core_next_event,
     tw_core_submit, tw_core_wake, TwCore,
 };
+use twinvpn_platform_android::hostvtable;
+
+/// The `twinvpn.h` result codes, pinned across the two crates that mirror them.
+///
+/// CD-I5 forbids `twinvpn-platform-android` to name `twinvpn-ffi`, so it carries
+/// its own copy of `TW_OK` and `TW_ERR` — and **this crate is the only one that
+/// can see both**. Asserting it in a `const` makes a divergence a build failure
+/// on every ABI rather than a vtable whose entries report success as failure.
+const _: () = assert!(hostvtable::TW_OK == TW_OK);
+const _: () = assert!(hostvtable::TW_ERR == twinvpn_ffi::vtable::TW_ERR);
+
+/// The host vtable this shell hands `tw_core_create`.
+///
+/// **This used to be `std::ptr::null()`, and that was the defect.** The comment
+/// that justified it — "the adapter is linked in-process, so the core reaches
+/// the platform directly rather than back out through F-9" — is true of the
+/// INTERNAL bridge (`NativeBridge`'s `nativeCreate`, in
+/// `libtwinvpn_platform_android.so`) and false of `tw_core_create`, which has no
+/// such path: it refuses a null vtable with `PLATFORM.ADAPTER_UNAVAILABLE`, and
+/// `twinvpn-ffi`'s own `create_refuses_a_null_vtable_by_name` pins the refusal.
+/// `twinvpn_ffi::env::assemble` refuses a second time if `os_csprng` or
+/// `elapsed_millis` is absent. So `nativeCoreCreate` returned `0` every time,
+/// the envelope naming why was freed unread, and `TwinVpnService` never had a
+/// core.
+///
+/// Three entries are filled and every other one is deliberately NULL — see
+/// [`twinvpn_platform_android::hostvtable`] for the ruling behind each absence
+/// (G-11 keeps sockets and interface enumeration off F-9 entirely; everything
+/// else carries F-8 structured data the adapter has no `twinvpn-schema` to
+/// encode). F-9 reads a NULL entry as **not attached**, never as a silent
+/// success, so what is left out is a declared posture rather than a hole.
+///
+/// **This function installs the entries; it does not write them.** Each is
+/// assigned to its `tw_host_vtable` field, so the compiler checks all three
+/// signatures — the shell adds no implementation and therefore no second answer
+/// to "what time is it".
+///
+/// Rebuilt per call rather than cached: `twinvpn.h` says the vtable must outlive
+/// the instance, and `twinvpn-ffi` satisfies that by COPYING the struct in
+/// `HostFns::copy_from` before `tw_core_create` returns. A local is therefore
+/// correct and owns nothing that has to be freed.
+fn host_vtable() -> TwHostVtable {
+    TwHostVtable {
+        // F-9's whole compatibility mechanism: `sizeof` AS THIS SHELL COMPILED
+        // IT, so a longer core reads only the prefix this build declares.
+        size: vtable_size(),
+        // No context. All three entries are platform capabilities rather than
+        // service-instance ones — which is why they answer before `nativeCreate`
+        // has registered anything — and none of them dereferences it.
+        ctx: std::ptr::null_mut(),
+
+        os_csprng: Some(hostvtable::os_csprng),
+        elapsed_millis: Some(hostvtable::elapsed_millis),
+        boot_id: Some(hostvtable::boot_id),
+
+        buf_bytes: None,
+        buf_free: None,
+        create_interface: None,
+        apply: None,
+        rollback: None,
+        set_link: None,
+        set_ruleset: None,
+        query_link_facts: None,
+        destroy_interface: None,
+        identity_public: None,
+        identity_sign: None,
+        identity_agree: None,
+        identity_attestation: None,
+        secure_item_read: None,
+        secure_item_write_atomic: None,
+        secure_item_delete: None,
+        store_root: None,
+        record_aead_custody: None,
+        installed_ruleset: None,
+        current_generation: None,
+    }
+}
 
 /// Turns a core handle back into a pointer.
 ///
@@ -126,12 +203,11 @@ fn take_buf(env: &mut JNIEnv<'_>, buf: *mut TwBuf) -> jbyteArray {
 /// way. Carrying the code would still be better than not, and it needs a
 /// second entry point rather than a reinterpretation of this one's return.
 ///
-/// # The host vtable is null, deliberately
+/// # The host vtable
 ///
-/// On Android the adapter is linked in-process as a Rust crate
-/// (`twinvpn-platform-android`), so the core reaches the platform directly
-/// rather than back out through F-9. That is `ownership.md` §10.4's ruling, and
-/// it is the same shape `shells/ios` uses.
+/// Real, and backed by `twinvpn-platform-android`. See [`host_vtable`] for what
+/// is filled, what is deliberately NULL, and why passing null here was a defect
+/// rather than the §10.4 posture the previous comment claimed.
 ///
 /// # Safety
 ///
@@ -150,11 +226,19 @@ pub unsafe extern "system" fn Java_net_twinvpn_android_NativeBridge_nativeCoreCr
             ptr: bytes.as_ptr(),
             len: bytes.len(),
         };
-        // SAFETY: `slice` borrows `bytes`, which outlives the call; the vtable
-        // is null, which `tw_core_create` checks before any read; `&raw mut
-        // error` is a live writable slot.
-        let core =
-            unsafe { tw_core_create(tw_abi_major(), std::ptr::null(), slice, &raw mut error) };
+        let host = host_vtable();
+        // SAFETY: `slice` borrows `bytes`, which outlives the call; `host` is a
+        // live, fully-initialised `tw_host_vtable` whose `size` truthfully
+        // reports what this shell compiled, and `tw_core_create` COPIES it
+        // before returning; `&raw mut error` is a live writable slot.
+        let core = unsafe {
+            tw_core_create(
+                tw_abi_major(),
+                std::ptr::from_ref(&host),
+                slice,
+                &raw mut error,
+            )
+        };
         if !error.is_null() {
             // SAFETY: non-null and unfreed. The envelope is discarded on this
             // entry point by contract — see the doc comment.

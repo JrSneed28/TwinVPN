@@ -48,6 +48,29 @@ crate-type = ["cdylib"]
 # for DP-1. See core/Cargo.toml for the full note.
 twinvpn-ffi = { version = "0.1.0", path = "../../../core/crates/twinvpn-ffi", default-features = false }
 
+# The ADAPTER, for the three `tw_host_vtable` entries and nothing else.
+#
+# `tw_core_create` refuses a NULL host vtable by name, so this crate has to hand
+# it a real one; `twinvpn_platform_android::hostvtable` is where W-7's three
+# capabilities already live, over the primitives ADR-0022 LC-8's Android row
+# names. Naming the crate here rather than re-implementing them keeps ONE
+# `CLOCK_BOOTTIME` and ONE `/dev/urandom` in the product, and lets the compiler
+# check each function against the `tw_host_vtable` field it fills.
+#
+# The arrow is the permitted one. CD-I5 forbids a `twinvpn-platform-*` crate to
+# name `twinvpn-core`; it says nothing about a SHELL naming the adapter, which is
+# what every other Rust shell in this repo already does
+# (`shells/macos/twinvpn-bridge`, `shells/linux/twinvpnd`,
+# `shells/windows/twinvpnsvc`). This crate was the only one that did not.
+#
+# `default-features = false` turns OFF `jvm-bridge`, and that is load-bearing
+# rather than tidy: with it on, `bridge::entry`'s `#[no_mangle] Java_…` symbols
+# would be linked into `libtwinvpn_android_jni.so` as well as into
+# `libtwinvpn_platform_android.so`, and the JVM would bind `nativeCreate` by load
+# order across two copies with two separate registries. Off, this crate links the
+# capabilities and none of the symbols.
+twinvpn-platform-android = { version = "0.1.0", path = "../../../core/crates/twinvpn-platform-android", default-features = false }
+
 jni = "0.21"
 
 # The core's PROFILE, forwarded through `twinvpn-ffi`. CB-2 means nothing here

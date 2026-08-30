@@ -743,6 +743,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndk-context"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1329,6 +1335,7 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
+ "bytes",
  "libc",
  "mio",
  "pin-project-lite",
@@ -1374,6 +1381,7 @@ version = "0.1.0"
 dependencies = [
  "jni",
  "twinvpn-ffi",
+ "twinvpn-platform-android",
 ]
 
 [[package]]
@@ -1556,6 +1564,25 @@ dependencies = [
  "futures-core",
  "thiserror 2.0.20",
  "twinvpn-env",
+ "twinvpn-types",
+ "zeroize",
+]
+
+[[package]]
+name = "twinvpn-platform-android"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "jni",
+ "libc",
+ "ndk-context",
+ "serde_json",
+ "socket2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "twinvpn-env",
+ "twinvpn-platform",
  "twinvpn-types",
  "zeroize",
 ]
