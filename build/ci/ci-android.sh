@@ -497,8 +497,25 @@ if [ "$linked" = true ]; then
     echo "a device is already attached; not booting an emulator"
   else
     echo "booting the pinned emulator: $EMULATOR_IMAGE"
-    yes | "$sdk_root/cmdline-tools/latest/bin/sdkmanager" --install \
-      "$EMULATOR_IMAGE" "platform-tools" "emulator" >/dev/null
+    # NOT `yes |`. This script runs under `set -o pipefail`, and an INFINITE
+    # writer into a command that exits is a guaranteed pipeline failure rather
+    # than an occasional one: `sdkmanager` closes its end as soon as the install
+    # is done, and the pipeline then takes `yes`'s status -- 141 where SIGPIPE
+    # kills it, 1 where SIGPIPE is ignored and the write returns EPIPE. Run
+    # 33292510333 recorded the second form, "yes: standard output: Broken pipe",
+    # as the only line between "booting the pinned emulator" and `make`'s
+    # Error 1. The install had already succeeded; `sdkmanager` printed no
+    # diagnostic of its own, and the emulator was never reached.
+    #
+    # A BOUNDED writer cannot reach that state. 64 lines is ~128 bytes and a
+    # pipe buffer is 64 KiB, so `printf` completes its single write and exits 0
+    # before `sdkmanager` reads anything, whatever `sdkmanager` then does. The
+    # prompt is one `y` per package whose licence is not already accepted and
+    # there are three packages here, so 64 is a ceiling with room in it rather
+    # than a count that has to be kept in step with the list.
+    printf 'y\n%.0s' $(seq 64) \
+      | "$sdk_root/cmdline-tools/latest/bin/sdkmanager" --install \
+        "$EMULATOR_IMAGE" "platform-tools" "emulator" >/dev/null
     echo no | "$sdk_root/cmdline-tools/latest/bin/avdmanager" create avd \
       -n "$AVD_NAME" -k "$EMULATOR_IMAGE" --force
     # `-no-snapshot`: every run starts from the freshly created image, so a run
