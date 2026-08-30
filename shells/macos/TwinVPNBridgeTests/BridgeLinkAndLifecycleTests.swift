@@ -70,7 +70,7 @@ private func withSlice<R>(_ bytes: [UInt8], _ body: (tvb_slice) -> R) -> R {
 
 /// Reads a bridge-owned buffer and frees it. F-2: the bridge allocated it, the
 /// bridge frees it, and there is no path out of here that skips the free.
-private func consume(_ buffer: UnsafeMutablePointer<tvb_buf>?) -> Data {
+private func consume(_ buffer: OpaquePointer?) -> Data {
     defer { tvb_buf_free(buffer) }
     let slice = tvb_buf_bytes(buffer)
     guard let base = slice.ptr, slice.len > 0 else { return Data() }
@@ -120,7 +120,7 @@ final class BridgeLinkAndLifecycleTests: XCTestCase {
     /// here, across the real boundary, rather than trusted.
     func test_an_empty_slice_crosses_without_undefined_behaviour() {
         var ext: OpaquePointer?
-        var error: UnsafeMutablePointer<tvb_buf>?
+        var error: OpaquePointer?
         // An empty config AND an empty correlation id. The call must return a
         // shape, not crash; which shape is asserted by the lifecycle test below.
         let rc = withSlice([]) { config in
@@ -142,7 +142,7 @@ final class BridgeLinkAndLifecycleTests: XCTestCase {
         let correlation = Array("ci-macos-link-run".utf8)
 
         var ext: OpaquePointer?
-        var startError: UnsafeMutablePointer<tvb_buf>?
+        var startError: OpaquePointer?
         let rc = withSlice(config) { config in
             withSlice(correlation) { correlation in
                 tvb_ext_start(config, correlation, &ext, &startError)
@@ -180,8 +180,8 @@ final class BridgeLinkAndLifecycleTests: XCTestCase {
         // failure and not a deadline guarantee, so a timeout here is reported
         // rather than asserted against: what is asserted is that a document, if
         // one arrives, is the core's own bytes and not something Swift built.
-        var document: UnsafeMutablePointer<tvb_buf>?
-        var settingsError: UnsafeMutablePointer<tvb_buf>?
+        var document: OpaquePointer?
+        var settingsError: OpaquePointer?
         let settingsRc = tvb_ext_next_settings(instance, 1_000, &document, &settingsError)
         XCTAssertNotEqual(settingsRc, TVB_ERR, String(decoding: consume(settingsError), as: UTF8.self))
         if settingsRc == TVB_OK {
@@ -235,9 +235,9 @@ final class BridgeLinkAndLifecycleTests: XCTestCase {
     /// if it is not. Keeps the free on the error path in ONE place.
     private func assertOk(
         _ call: String,
-        _ body: (UnsafeMutablePointer<UnsafeMutablePointer<tvb_buf>?>) -> Int32
+        _ body: (UnsafeMutablePointer<OpaquePointer?>) -> Int32
     ) throws {
-        var error: UnsafeMutablePointer<tvb_buf>?
+        var error: OpaquePointer?
         let rc = body(&error)
         let envelope = consume(error)
         XCTAssertEqual(rc, TVB_OK,

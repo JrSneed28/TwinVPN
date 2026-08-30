@@ -55,6 +55,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var core: CoreInstance?
     private let log = Logger(subsystem: "net.twinvpn.provider", category: "lifecycle")
 
+    /// ADR-0022 LC-31's trigger. Held so `stopTunnel` can cancel it: a live
+    /// dispatch source keeps firing into a provider whose core has been
+    /// destroyed, and `submitMemoryPressure` on a torn-down handle is exactly
+    /// the use-after-free F-6 forbids.
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private let memoryPressureQueue = DispatchQueue(label: "net.twinvpn.provider.memory")
+
     // MARK: - start
 
     override func startTunnel(options: [String: NSObject]?) async throws {
@@ -92,6 +99,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         core.startDraining { [weak self] event in
             self?.handle(event)
         }
+        armMemoryPressureMonitor()
     }
 
     // MARK: - stop
@@ -110,6 +118,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         // ADR-0022 §11.4's iOS row gives roughly five seconds and requires the
         // flush inside one. LC-25: pre-sleep is FLUSH, never teardown.
         core?.flush(withinMilliseconds: 1_000)
+
+        // Before the core is destroyed — see `memoryPressureSource`.
+        memoryPressureSource?.cancel()
+        memoryPressureSource = nil
 
         PacketPump.shared.detach()
         host?.stopObservingPath()
@@ -163,14 +175,38 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - memory and thermal posture
 
-    /// Called by the OS under memory pressure, and by `PacketPump` at the
-    /// LC-31 threshold.
+    /// Arms the OS memory-pressure notification for ADR-0022 LC-31's ladder.
     ///
     /// ADR-0022 §11.4's iOS row: jetsam gives **no notice** — a bare `SIGKILL`.
     /// So the response is pre-emptive, and LC-7's write-ahead journal is what
     /// makes the next start a resume rather than a mystery.
-    override func didReceiveMemoryWarning() {
-        core?.submitMemoryPressure(residentBytes: MemoryReporter.residentBytes())
+    ///
+    /// # Why a `DispatchSource` and NOT `didReceiveMemoryWarning()`
+    ///
+    /// `didReceiveMemoryWarning()` is `UIViewController`'s — UIKit's responder
+    /// chain — and `NEPacketTunnelProvider` does not inherit it. Its chain is
+    /// `NSObject` -> `NEProvider` -> `NETunnelProvider` ->
+    /// `NEPacketTunnelProvider`, none of which declares that method, so an
+    /// `override` of it does not compile and a plain definition of it would
+    /// never be called by anything. A NetworkExtension provider has no UIKit
+    /// responder chain at all; `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` is the
+    /// mechanism that does deliver this to a non-UIKit process, and it works
+    /// inside an app extension.
+    ///
+    /// `.warning` and `.critical` only. `.normal` is the pressure LIFTING, and
+    /// submitting the resident size on that edge would tell the core to shed at
+    /// the moment it no longer needs to.
+    private func armMemoryPressureMonitor() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical], queue: memoryPressureQueue)
+        source.setEventHandler { [weak self] in
+            // The THRESHOLDS are Rust's (`twinvpn_platform_ios::lifecycle`).
+            // This reports the number; it does not decide what it means — CB-2
+            // keeps that branch out of the shell.
+            self?.core?.submitMemoryPressure(residentBytes: MemoryReporter.residentBytes())
+        }
+        source.resume()
+        memoryPressureSource = source
     }
 
     // MARK: - draining

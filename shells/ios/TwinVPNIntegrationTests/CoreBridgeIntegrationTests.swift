@@ -246,7 +246,7 @@ final class CoreBridgeIntegrationTests: XCTestCase {
     func test_a_diagnostic_renders_with_no_instance_in_existence() {
         let code = Array("PLATFORM.VPN_PERMISSION_DENIED".utf8)
         let locale = Array("en-GB".utf8)
-        let rendered: UnsafeMutablePointer<tw_buf>? = code.withUnsafeBufferPointer { c in
+        let rendered: OpaquePointer? = code.withUnsafeBufferPointer { c in
             locale.withUnsafeBufferPointer { l in
                 tw_render_diagnostic(
                     tw_slice(ptr: c.baseAddress, len: c.count),
@@ -270,7 +270,7 @@ final class CoreBridgeIntegrationTests: XCTestCase {
     /// event stream — see this file's header.
     func test_the_core_accepts_and_completes_every_lifecycle_phase() throws {
         var vtable = productionHostVTable()
-        var createError: UnsafeMutablePointer<tw_buf>?
+        var createError: OpaquePointer?
 
         // CONFIG IS EMPTY, and that is CD-2 rather than laziness: configuration
         // is injected at construction and the core validates the blob against
@@ -305,7 +305,7 @@ final class CoreBridgeIntegrationTests: XCTestCase {
         // ADR-0018 §11.16 (e)'s four phases, each submitted and each confirmed
         // by its own `command.completed` before its marker is printed.
         for phase in Phase.allCases {
-            var submitError: UnsafeMutablePointer<tw_buf>?
+            var submitError: OpaquePointer?
             let framed = Frame.request("host.lifecycle", params: [phase.rawValue])
             let rc = framed.withUnsafeBytes { raw -> Int32 in
                 tw_core_submit(
@@ -327,7 +327,7 @@ final class CoreBridgeIntegrationTests: XCTestCase {
         // going away does not drop protection. It is the last transition this
         // suite drives and the one that makes the shutdown below graceful rather
         // than abrupt.
-        var downError: UnsafeMutablePointer<tw_buf>?
+        var downError: OpaquePointer?
         let down = Frame.request("net.down")
         let downRc = down.withUnsafeBytes { raw -> Int32 in
             tw_core_submit(
@@ -352,7 +352,7 @@ final class CoreBridgeIntegrationTests: XCTestCase {
     /// identical to one that decoded the selector.
     func test_an_unrecognised_lifecycle_phase_is_refused_by_name() throws {
         var vtable = productionHostVTable()
-        var createError: UnsafeMutablePointer<tw_buf>?
+        var createError: OpaquePointer?
         let core = withUnsafePointer(to: &vtable) { host in
             tw_core_create(tw_abi_major(), host, tw_slice(ptr: nil, len: 0), &createError)
         }
@@ -361,7 +361,7 @@ final class CoreBridgeIntegrationTests: XCTestCase {
         defer { tw_core_destroy(instance) }
         drainEvents(instance, upTo: 8)
 
-        var submitError: UnsafeMutablePointer<tw_buf>?
+        var submitError: OpaquePointer?
         // 0x62 is 'b' — the first byte of the string "background", which is what
         // `CoreProtocol.swift` sends today. It is NOT a valid selector.
         let framed = Frame.request("host.lifecycle", params: [0x62])
@@ -411,8 +411,8 @@ final class CoreBridgeIntegrationTests: XCTestCase {
     /// One event, decoded from the MI frame `tw_core_next_event` documents:
     /// a 4-byte big-endian length prefix and that many bytes of UTF-8 JSON.
     private func nextEventBody(_ core: OpaquePointer?) -> [String: Any]? {
-        var event: UnsafeMutablePointer<tw_buf>?
-        var error: UnsafeMutablePointer<tw_buf>?
+        var event: OpaquePointer?
+        var error: OpaquePointer?
         let rc = tw_core_next_event(core, 500, &event, &error)
         defer {
             tw_buf_free(event)

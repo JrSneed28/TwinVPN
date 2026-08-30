@@ -340,7 +340,7 @@ struct CoreEvent {
     /// that crashed on a body a newer core added would make every additive
     /// change a breaking one, which is the opposite of what the discriminator is
     /// for.
-    static func decode(_ buffer: UnsafeMutablePointer<tw_buf>?) -> CoreEvent {
+    static func decode(_ buffer: OpaquePointer?) -> CoreEvent {
         guard let buffer else { return .unreadable }
         let slice = tw_buf_bytes(buffer)
         guard let ptr = slice.ptr else { return .unreadable }

@@ -43,6 +43,19 @@ import TwinVPNBridge
 import TwinVPNCore
 
 /// One core instance.
+///
+/// # Every `tw_core *` and `tw_buf *` in this file is an `OpaquePointer`
+///
+/// `twinvpn.h` declares both as INCOMPLETE C types — `typedef struct tw_core
+/// tw_core;` and `typedef struct tw_buf tw_buf;`, with no definition anywhere,
+/// which is what makes them opaque to a C caller by construction. Swift does
+/// not import an incomplete C struct as a named type at all, so `tw_buf` is not
+/// a Swift type and `UnsafeMutablePointer<tw_buf>` does not name anything;
+/// Swift imports a pointer to such a type as `OpaquePointer` instead. Writing
+/// the named form is what failed run 33287265563 with `cannot find type
+/// 'tw_buf' in scope`. `shells/macos`'s `CoreBridge.swift` states the same rule
+/// for `tvb_ext`, and it is the reason `handle` below was already spelled this
+/// way while the `tw_buf` out-parameters were not.
 final class CoreInstance {
     private let handle: OpaquePointer
     /// F-6/S-47: exactly one thread may hold the handle for mutation.
@@ -113,7 +126,7 @@ final class CoreInstance {
     /// "the tightest, because the OS starts the extension on demand while the
     /// user waits."
     static func create() throws -> CoreInstance {
-        var error: UnsafeMutablePointer<tw_buf>?
+        var error: OpaquePointer?
         let config = CoreConfiguration.encoded()
         let handle = config.withUnsafeBytes { raw -> OpaquePointer? in
             let slice = tw_slice(ptr: raw.bindMemory(to: UInt8.self).baseAddress, len: raw.count)
@@ -164,7 +177,7 @@ final class CoreInstance {
 
     private func submit(_ command: Data) {
         queue.async { [handle] in
-            var error: UnsafeMutablePointer<tw_buf>?
+            var error: OpaquePointer?
             _ = command.withUnsafeBytes { raw in
                 tw_core_submit(
                     handle,
@@ -199,8 +212,8 @@ final class CoreInstance {
     func startDraining(_ handler: @escaping (CoreEvent) -> Void) {
         let thread = Thread { [handle] in
             while !Thread.current.isCancelled {
-                var event: UnsafeMutablePointer<tw_buf>?
-                var error: UnsafeMutablePointer<tw_buf>?
+                var event: OpaquePointer?
+                var error: OpaquePointer?
                 let rc = tw_core_next_event(handle, 1_000, &event, &error)
                 if let event {
                     handler(CoreEvent.decode(event))
@@ -236,7 +249,7 @@ enum CoreError: Error {
     /// turned into a sentence here.
     case creationRefused(Data)
 
-    static func decode(_ buffer: UnsafeMutablePointer<tw_buf>?) -> Data {
+    static func decode(_ buffer: OpaquePointer?) -> Data {
         guard let buffer else { return Data() }
         defer { tw_buf_free(buffer) }
         let slice = tw_buf_bytes(buffer)
