@@ -1683,6 +1683,7 @@ dependencies = [
  "proptest",
  "serde_json",
  "thiserror 2.0.20",
+ "twinvpn-crypto",
  "twinvpn-dns",
  "twinvpn-env",
  "twinvpn-platform",
