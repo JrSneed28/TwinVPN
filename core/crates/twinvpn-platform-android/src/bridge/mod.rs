@@ -143,12 +143,37 @@ impl AndroidBridge {
     /// reaches Kotlin as a `reason_code`.
     pub fn on_network(&self, payload: &[u8]) -> Result<(), PlatformError> {
         let network = wire::decode_network(payload)?;
+        // **An empty transport set is "not told yet", not "no transports".**
+        //
+        // `NetworkCallback.onAvailable(Network)` runs before either half of the
+        // network's description has been delivered, so the first observation of
+        // the fan-out carries `transportBits(null) == 0`. The underlying-network
+        // set is selected by `!transports.has(VPN)`
+        // (`netcfg::refresh_underlying_networks`), and an observation whose
+        // transports were never observed reads there as "not a VPN".
+        //
+        // After `Builder.establish()` that unclassified observation is OUR OWN
+        // TUNNEL — the watcher removes `NET_CAPABILITY_NOT_VPN`, so the app's
+        // own network fans straight back in here — and it was handed to
+        // `VpnService.setUnderlyingNetworks` as one of the networks the tunnel
+        // runs over. That is the platform being asked to account for a loop, and
+        // `bridge::tests::reentrancy` is the reproduction.
+        let classified = network.transports.bits() != 0;
         self.interfaces().ingest(network)?;
         // The underlying-network set follows every change, so a handoff does not
         // leave the system accounting against the underlay we have left
         // (`docs/networking.md` §5.4). A failure here is not fatal to the
         // ingest: the fact is recorded either way.
-        let _ = self.network().refresh_underlying_networks();
+        //
+        // Deferred, never dropped: the *fact* is in the snapshot above whatever
+        // happens here, and the next callback of the same fan-out carries the
+        // capabilities and recomputes the set. Holding the previous, classified
+        // answer for those microseconds is the fail-safe direction — a set that
+        // is briefly stale costs accounting, a set naming our own tunnel costs
+        // correctness.
+        if classified {
+            let _ = self.network().refresh_underlying_networks();
+        }
         Ok(())
     }
 

@@ -4,6 +4,13 @@
 //! five entry points are exercised here, and the last test in this file asserts
 //! over the module's own source that no sixth entry has grown a TwinVPN domain
 //! fact.
+//!
+//! [`reentrancy`] is the one case that needs a *sequence* rather than a single
+//! call: the `establish()` fan-out arriving back at `on_network`, which is
+//! M-19's question.
+
+/// The `establish()` fan-out, delivered back to the process that made it.
+mod reentrancy;
 
 use std::sync::Arc;
 

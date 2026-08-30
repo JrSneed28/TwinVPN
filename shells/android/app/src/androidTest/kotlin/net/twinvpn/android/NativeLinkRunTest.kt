@@ -2,6 +2,11 @@ package net.twinvpn.android
 
 import android.app.ActivityManager
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -54,13 +59,34 @@ import org.junit.runner.RunWith
  * `build/ci/ci-android.sh` reads the lifecycle transitions out of logcat rather
  * than hard-coding them — see [transition].
  *
- * # What is NOT here, deliberately
+ * # What is NOT here, and exactly why (M-19)
  *
- * No `VpnService.establish()`. It needs the user's consent dialog, which an
- * unattended emulator cannot grant, and a test that faked consent would be
- * asserting a permission the product does not have. The tunnel half stays with
- * the device farm; the **core boundary** is what this file proves, and that is
- * what the First Implementation Wave asks for.
+ * No `VpnService.establish()`, and consent is only half the reason.
+ *
+ * Consent is grantable without a dialog — `appops set <package> ACTIVATE_VPN
+ * allow` is what the system records when the dialog is accepted, and
+ * `ci-android.sh` could run it over `adb shell`. What is missing is the thing to
+ * establish *with*. `VpnService.Builder` is an inner class of a **running
+ * `VpnService` instance**, and the only one this package declares is
+ * [`TwinVpnService`], which establishes when the core applies a
+ * `NetworkContract` — i.e. after pairing, which an emulator has no peer for. A
+ * test-owned `VpnService` cannot substitute: `src/androidTest/` is packaged as
+ * `net.twinvpn.android.test`, a **separate package with its own uid**, and the
+ * platform redacts what it hands a caller about a VPN it does not own — so
+ * observing that tunnel would answer a different question.
+ *
+ * So the re-entrancy is proved in two halves. The **adapter** half runs on a
+ * Linux host: `bridge::tests::reentrancy` drives the whole `establish()`
+ * fan-out through the real decoder, the real snapshot and the real
+ * `setUnderlyingNetworks` call. The **platform** half is
+ * [`the_watchers_own_request_is_accepted_and_onAvailable_arrives_first`] below —
+ * what an emulator can measure without a tunnel: that the request
+ * `ConnectivityWatcher` registers is accepted, and that the first callback of a
+ * fan-out really does arrive before the network has been described, which is the
+ * window in which an observation cannot be classified.
+ *
+ * Closing the remaining half needs a `<service>` in **`src/main/`**'s manifest
+ * plus the `appops` grant in CI, or a device farm. Neither is this file's.
  */
 @RunWith(AndroidJUnit4::class)
 class NativeLinkRunTest {
@@ -343,6 +369,84 @@ class NativeLinkRunTest {
         assertTrue(
             "libtwinvpn_android_jni.so is missing (CD-I5 makes it a SECOND library): $libraries",
             "libtwinvpn_android_jni.so" in libraries,
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. the watcher's own request, on the real ConnectivityManager
+    // -----------------------------------------------------------------------
+
+    /**
+     * **M-19's platform half.** The request `ConnectivityWatcher` registers is
+     * accepted by the real `ConnectivityManager`, and the first callback of a
+     * fan-out arrives **before** the network has been described.
+     *
+     * `ConnectivityWatcher.start()` removes `NET_CAPABILITY_NOT_VPN`, which
+     * lifts the `NOT_VPN` filter `NetworkRequest.Builder` applies by default —
+     * so a competing VPN, and our own tunnel once `establish()` runs, match as
+     * ordinary observations. The request is rebuilt here verbatim rather than
+     * reached through the watcher, because the watcher publishes into a bridge
+     * handle this test does not own.
+     *
+     * The assertion that matters is the **order**. `onAvailable(Network)` is
+     * delivered first, with neither `NetworkCapabilities` nor `LinkProperties`
+     * yet cached, so `NetworkCodec.encode(network, null, null, isUp = true)`
+     * writes an empty transport bitset and the name `"unknown"`. That
+     * observation cannot be classified, and after `establish()` the
+     * unclassifiable one is **our own tunnel** — which
+     * `AndroidBridge::on_network` must not let redefine the underlay. If a
+     * future Android stops delivering the bare `onAvailable` first, this fails
+     * and the adapter's guard becomes dead weight rather than silently wrong.
+     */
+    @Test
+    fun the_watchers_own_request_is_accepted_and_onAvailable_arrives_first() {
+        val manager = context.getSystemService(ConnectivityManager::class.java)
+            ?: error("ConnectivityManager is unavailable")
+        val request = NetworkRequest.Builder()
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
+
+        val order = mutableListOf<String>()
+        fun record(entry: String) = synchronized(order) { order += entry }
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = record("available")
+
+            override fun onCapabilitiesChanged(
+                network: Network,
+                caps: NetworkCapabilities,
+            ) = record("capabilities:vpn=${caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)}")
+
+            override fun onLinkPropertiesChanged(network: Network, link: LinkProperties) =
+                record("link:name=${link.interfaceName ?: "none"}")
+        }
+
+        manager.registerNetworkCallback(request, callback)
+        try {
+            // Two, not three: `onAvailable` and `onCapabilitiesChanged` are what
+            // the assertions below read, and requiring the `LinkProperties`
+            // callback as well would make this fail on timing rather than on the
+            // property under test.
+            assertTrue(
+                "the emulator delivered no fan-out at all; either it has no " +
+                    "network or the watcher's request matched nothing",
+                await { synchronized(order) { order.size } >= 2 },
+            )
+        } finally {
+            manager.unregisterNetworkCallback(callback)
+        }
+
+        val delivered = synchronized(order) { order.toList() }
+        Log.i(TAG, "the watcher's request delivered: $delivered")
+        assertEquals(
+            "onAvailable is delivered before the network is described; the " +
+                "observation it produces carries no transports and no addresses",
+            "available",
+            delivered.first(),
+        )
+        assertTrue(
+            "no capabilities callback followed onAvailable: an observation that " +
+                "can never be classified would never rejoin the underlay set",
+            delivered.any { it.startsWith("capabilities:") },
         )
     }
 
