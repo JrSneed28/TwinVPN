@@ -100,8 +100,14 @@
 //      accepts catalogue operations only, so a local `core-lite` verify is
 //      reachable exactly when the catalogue row above exists — not before.
 //
-//  This is the same class of gap as `PairingView`'s `PairingModel`, and it is
-//  reported the way `CoreProtocol.swift` reports `stopReason` and
+//  **`PairingModel` used to be cited here as the same class of gap, and it no
+//  longer is.** That one was a MISSING ABI EXIT — MI-P1 rule 1 permits
+//  `pair.begin`'s offer "only inside a `pair.begin` response" and F-5's stream is
+//  a broadcast — and ABI minor 3's `tw_core_submit_response` closed it, so the
+//  model is written and submits `pair.begin` for real. This gap is a different
+//  and larger one: a missing CATALOGUE ROW, which no ABI entry can supply.
+//
+//  It is reported the way `CoreProtocol.swift` reports `stopReason` and
 //  `memoryPressure`: named, with the amendment it needs, rather than papered over
 //  with an invented operation name that the core would refuse.
 

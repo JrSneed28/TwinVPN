@@ -191,7 +191,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         //
         // The envelope is opaque here. Parsing it would put the management
         // interface's vocabulary in a shell.
-        core?.handleManagementRequest(messageData)
+        //
+        // `guard let` rather than `core?.…`: awaiting an optional chain yields
+        // `Data??`, and flattening it would make "there is no core" and "the
+        // core answered nothing" the same value. They are different facts, and
+        // only one of them is a state this provider can be in.
+        guard let core else { return nil }
+        return await core.handleManagementRequest(messageData)
     }
 
     // MARK: - memory and thermal posture

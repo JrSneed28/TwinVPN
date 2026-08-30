@@ -197,9 +197,87 @@ final class CoreInstance {
     ///
     /// MI-15 forbids rendered text on this channel, and this method could not
     /// produce any if it wanted to: it moves bytes.
-    func handleManagementRequest(_ request: Data) -> Data? {
-        submit(CoreCommand.managementRequest(request))
-        return nil
+    ///
+    /// # It used to move them to the WRONG PLACE, and return nothing
+    ///
+    /// This submitted `CoreCommand.managementRequest(request)` — the app's whole
+    /// MI frame wrapped as the `params` of a `diag.report` — and answered `nil`.
+    /// Two defects in one line. The wrapping made every app request arrive as a
+    /// different operation from the one the app asked for, which is exactly the
+    /// "second vocabulary" MI-20 forbids; and the `nil` made
+    /// `handleAppMessage` answer nothing at all, which is why
+    /// `CoreLite.decodeStatus` could truthfully say "no byte stream has ever met
+    /// this decoder".
+    ///
+    /// The frame is now forwarded **verbatim**. `twinvpn.h` takes the same two
+    /// command forms on this ABI that the Unix socket, the named pipe and XPC
+    /// take, "decoded by the same code from the same two `command` forms —
+    /// MI-20's 'one contract, two carriages' would be broken by a second parse".
+    /// The app already built a valid one; re-encoding it here would be that
+    /// second parse.
+    ///
+    /// # `tw_core_submit_response`, not `tw_core_submit`
+    ///
+    /// F-5a. `pair.begin`'s response carries ADR-0017 MI-P1's one `SECRET`, and
+    /// it is the one value the event stream must not carry — so the app's
+    /// `pair.begin` can only be answered by an entry that RETURNS a body to the
+    /// caller that submitted it. Every other operation's `*response_out` is NULL,
+    /// which "does NOT mean 'no answer'" but "the answer is the one the stream
+    /// already carried"; those come back as `ok` with an empty `result`, and the
+    /// app reads the fact it wanted off the status snapshot as before.
+    ///
+    /// MI-P1 rules 2 and 3 hold across this hop: the body is copied out of the
+    /// core's buffer straight into the response frame, it is never logged (there
+    /// is no log line in this method), never put on the event stream, and never
+    /// written to the App Group container or any store. The app drops it at the
+    /// offer's `not_after_ms` — see `PairingModel`.
+    func handleManagementRequest(_ request: Data) async -> Data? {
+        await withCheckedContinuation { continuation in
+            queue.async { [handle] in
+                var response: OpaquePointer?
+                var error: OpaquePointer?
+                let rc = request.withUnsafeBytes { raw in
+                    tw_core_submit_response(
+                        handle,
+                        tw_slice(ptr: raw.bindMemory(to: UInt8.self).baseAddress, len: raw.count),
+                        &response,
+                        &error)
+                }
+                // F-2: the core allocated both, the core frees both, on every
+                // path. `tw_buf_free` is NULL-safe, so the frees are
+                // unconditional and the `TW_OK` path — where `*err_out` is
+                // "untouched" — is covered by the same two lines.
+                defer {
+                    tw_buf_free(response)
+                    tw_buf_free(error)
+                }
+                if rc == TW_OK {
+                    continuation.resume(
+                        returning: MIFrame.response(
+                            ok: true, result: Self.bytes(response) ?? Data()))
+                } else {
+                    // `TW_TIMEOUT` is `tw_core_next_event`'s alone, so anything
+                    // that is not `TW_OK` here is `TW_ERR` with an F-4 envelope.
+                    // Only its `reason_code` is readable in this target — see
+                    // `ErrorEnvelope` — and an envelope this build cannot read is
+                    // reported as exactly that rather than as a guess at which
+                    // refusal it was.
+                    let code = Self.bytes(error).flatMap(ErrorEnvelope.reasonCode)
+                    continuation.resume(
+                        returning: MIFrame.response(
+                            ok: false,
+                            reasonCode: code ?? ErrorEnvelope.unreadableCode))
+                }
+            }
+        }
+    }
+
+    /// Copies a `tw_buf`'s bytes out before it is freed.
+    private static func bytes(_ buffer: OpaquePointer?) -> Data? {
+        guard let buffer else { return nil }
+        let slice = tw_buf_bytes(buffer)
+        guard let ptr = slice.ptr, slice.len > 0 else { return nil }
+        return Data(bytes: ptr, count: slice.len)
     }
 
     // MARK: - drain

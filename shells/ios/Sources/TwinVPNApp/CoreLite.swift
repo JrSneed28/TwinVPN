@@ -55,7 +55,7 @@ import UIKit
 final class CoreLite {
     static let shared = CoreLite()
 
-    // MARK: - the `tw_core` instance, and why there is not one yet
+    // MARK: - the `tw_core` instance, and why there is still not one
     //
     // ADR-0019 X3(5) and ADR-0016 PS-24 both describe this process as hosting a
     // `core-lite` instance, and `twinvpn-ffi` exports the whole `twinvpn.h`
@@ -65,28 +65,25 @@ final class CoreLite {
     // `tw_core_create` is linkable here and `CoreInstance.swift` in the extension
     // is the working model for how to call it.
     //
-    // **Nothing in the app submits to it, so it is not created.** Every member
-    // below is either F-10 (instance-free by construction) or a byte codec; the
-    // only member that would need an instance is `assembleBundle`, and the ABI
-    // cannot express what it needs:
+    // **Nothing in the app submits to one, so none is created.** The old note
+    // here gave the reason as the ABI's — "there is no request to correlate" —
+    // and ABI minor 3's `tw_core_submit_response` made that half FALSE. The
+    // reason was therefore RE-MEASURED rather than inherited, and what is left is
+    // sharper and is not about the ABI at all:
     //
-    //   * `twinvpn.h` makes `tw_core_submit` FIRE-AND-FORGET — "the ABI is
-    //     in-process and fire-and-forget, so there is no request to correlate and
-    //     no retry to deduplicate" — and every outcome arrives on the one ordered
-    //     event stream. A synchronous `assembleBundle(providerTail:) -> Bundle`
-    //     is a request/response call, and the only correlation this ABI offers is
-    //     the `op` string on a `command.completed` body: per-OPERATION, not
-    //     per-request.
-    //   * The operation the assembly needs is refused today regardless.
-    //     `twinvpn-core`'s `dispatch::disposition` answers `diag.bundle.create`
-    //     with `STORE.CUSTODY_DEGRADED`, "a Tier-1 bundle is written to an
-    //     agent-owned directory the vault vends (MI-D3), which needs
-    //     `Core::open_store`".
-    //
-    // An instance created here today would therefore be a handle nothing holds a
-    // conversation with, and F-6 would oblige a serial queue and a drain thread
-    // to guard it — machinery for a conversation the ABI cannot carry. It is left
-    // absent, and named, rather than built as scaffolding.
+    //   * **`core-lite` performs NO command.** `twinvpn-core`'s
+    //     `Core::submit_response` refuses under `#[cfg(not(feature = "full"))]`
+    //     with `PLATFORM.ADAPTER_UNAVAILABLE` — "core-lite carries no data-plane
+    //     crate, so it performs NO command. Refusing by name is the honest
+    //     answer; returning Ok would be the same false success this dispatcher
+    //     exists to remove." `pub mod dispatch` and `pub mod pairing` are both
+    //     `#[cfg(feature = "full")]`, and `project.yml` links this target against
+    //     `-ltwinvpn_core_lite`. An instance here would be a handle that refuses
+    //     everything, with an F-6 serial queue to guard it.
+    //   * So the app reaches the FULL core the way ADR-0017 §11.2.1 says it
+    //     does — `NETunnelProviderSession.sendProviderMessage`, "full
+    //     request/response, byte-identical framing" — and `PairingModel` is the
+    //     first caller that needs an answer rather than a poll.
     //
     // Everything below this line is F-10, which is INSTANCE-FREE by construction,
     // and the MI request/response codec, which is bytes.
@@ -250,8 +247,8 @@ final class CoreLite {
 
     /// Assembles the eight-part Tier-1 bundle ADR-0015 §11.8 requires.
     ///
-    /// **It refuses, and the refusal is the honest answer for this build.** Two
-    /// independent things are missing and neither is this shell's to supply:
+    /// **It refuses, and the refusal is the honest answer for this build.** Three
+    /// independent things are missing and none is this shell's to supply:
     ///
     ///   1. `twinvpn-core`'s `dispatch::disposition` marks `diag.bundle.create`
     ///      `NotWired` and answers `STORE.CUSTODY_DEGRADED` — "a Tier-1 bundle is
@@ -263,6 +260,21 @@ final class CoreLite {
     ///      F-8 bytes belonging to the operation, written by the core's own
     ///      encoder, and this process has none — the same gap
     ///      `makeRingTailRequest` names for `diag.log.tail`'s `since`.
+    ///   3. **There is no core in this process to ask.** ADR-0018 §11.12 grants
+    ///      `core-lite` `Capability::Bundle`, but `Core::submit_response` refuses
+    ///      every command under `#[cfg(not(feature = "full"))]` — see the note on
+    ///      the missing instance above — so the capability is declared and not yet
+    ///      performed. Sending `diag.bundle.create` to the EXTENSION instead, over
+    ///      §11.2.1's channel the way `PairingModel` does, would reach a core that
+    ///      can dispatch it and still get (1) back; and it would put a Tier-1
+    ///      bundle's assembly in the process ADR-0018 §11.12 deliberately moved it
+    ///      out of, "to satisfy C-3: the iOS/iPadOS app process PARSES, VERIFIES
+    ///      AND RENDERS".
+    ///
+    /// Closing it is therefore two core changes and then one here, in order:
+    /// `diag.bundle.create` implemented, `core-lite` able to perform the commands
+    /// its capability set already claims, and a `params` encoder for the tail.
+    /// None is a longer function here.
     ///
     /// It FAILS CLOSED, which is the property that matters: the caller reports a
     /// registered code and shows no bundle, rather than exporting an empty or

@@ -171,4 +171,22 @@ enum ReasonCode {
     /// "a name the catalogue does not contain is MGMT.OP_UNKNOWN". It is the
     /// honest code for the contract-courier operations §11.14 (a) still owes.
     static let operationUnknown = "MGMT.OP_UNKNOWN"
+    /// An ADR-0015 §11.2 envelope whose `reason_code` this build could not read.
+    ///
+    /// `CoreProtocol.swift` already reports a frame it could not decode with
+    /// this code; `CoreLiteInstance` reports an `err_out` envelope it could not
+    /// read with the same one. It says what happened without claiming to know
+    /// WHICH refusal it was, which a substituted code would.
+    static let unparseableEnvelope = ErrorEnvelope.unreadableCode
+    /// A call that succeeded and produced something this build cannot proceed
+    /// from — `PairingModel` uses it for a `pair.begin` that returned `TW_OK`
+    /// with no offer to render. It names the state rather than borrowing a
+    /// refusal code the core did not send.
+    static let unexpectedState = "INTERNAL.UNEXPECTED_STATE"
+    /// ADR-0017 §11.2.1's channel refusing to carry a request in the current
+    /// state. The registry entry names this exact case: "the platform channel
+    /// cannot carry this operation in the current state (iOS stopped session,
+    /// Android disarm)". `PairingModel` reports it when `sendProviderMessage`
+    /// cannot be used because the session is not connected.
+    static let channelUnsupported = "MGMT.CHANNEL_UNSUPPORTED"
 }

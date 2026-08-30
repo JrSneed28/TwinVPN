@@ -199,13 +199,19 @@ enum CoreCommand {
             params: Data((acrossWake ? "wake:" : "live:").appending(json).utf8))
     }
 
-    /// The management channel's opaque request.
-    ///
-    /// MI-15 forbids rendered text here and this could not produce any if it
-    /// wanted to: it moves bytes.
-    static func managementRequest(_ request: Data) -> Data {
-        Self.request("diag.report", params: request)
-    }
+    // `managementRequest` WAS HERE, AND IT WAS A DEFECT RATHER THAN A HELPER.
+    //
+    // It wrapped the app's whole MI frame as the `params` of a `diag.report`, so
+    // every request the app sent over `sendProviderMessage` arrived at the core
+    // as a DIFFERENT operation from the one the app asked for. MI-20 — "one
+    // contract, two carriages, NEVER two contracts" — is what that broke: the
+    // app had already built a valid `tw_core_submit` command, and re-encoding it
+    // was the second parse that rule exists to forbid.
+    //
+    // `CoreInstance.handleManagementRequest` now forwards the frame verbatim to
+    // `tw_core_submit_response` and answers with a `Response` frame. There is
+    // nothing left for this member to do, so it is gone rather than left as an
+    // unused encoder someone could reach for again.
 
     /// `net.down` — ADR-0022 LC-25's pre-sleep is a FLUSH, never a teardown,
     /// and the core's own `net.down` keeps the rules installed (CB-6).
