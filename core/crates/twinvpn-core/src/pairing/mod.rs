@@ -138,6 +138,23 @@
 //!   `decode_pairing_attestation` and `check_attestation_pair` and **no**
 //!   `emit_pairing_attestation`. It stays refused, with that re-measured reason
 //!   stated in `crate::dispatch`.
+//!
+//!   **Why the emitter is absent is not what it looks like** (G-26).
+//!   `contracts/cddl/twinvpn/v1/signed_statements.cddl` line 140 specifies
+//!   `pairing-attestation` completely — six labels, `4: digest256` — so writing
+//!   the emitter is a small inverse of the decoder and invents nothing at *that*
+//!   level. What is missing is one layer down: **`transcript_hash` has no
+//!   defined preimage.** ADR-0007 §7.4 gives its construction in a single
+//!   sentence of §7 *rationale* which §11.1 never restates as a rule, and that
+//!   sentence leaves the domain separator, the length framing, the ordering and
+//!   grouping of three paired members, two field encodings, the spelling of "the
+//!   ceremony method", `anchor_version`'s width, and "`Capability` hashes" all
+//!   undecided. Each choice yields a different digest, and
+//!   `check_attestation_pair` can only check that two halves **agree** — so an
+//!   invented format is invisible here and surfaces as a ceremony that never
+//!   completes between a Rust and a Swift peer. Raised for ADR-0007's owner in
+//!   `docs/implementation/pair-confirm-attestation-defect.md`; deliberately not
+//!   guessed.
 //! - **A durable TK.** D-6 (a) puts the sealed `TK` in Tier 2 `identity/` and
 //!   (b) makes its wrapping key the Tier-1 item; `tk::TK_RECORD_KEY` and
 //!   `tk::TK_WRAP_ITEM` name both. Nothing provisions the Tier-1 wrapping key,

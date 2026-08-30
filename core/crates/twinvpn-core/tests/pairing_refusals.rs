@@ -426,6 +426,13 @@ fn the_offer_never_crosses_the_management_interface() {
 /// `PairingAttestation`s — and this build can produce neither half. If somebody
 /// later writes an emitter for this device's own and a rendezvous for the
 /// peer's, this test is what tells them the dispatcher still says otherwise.
+///
+/// **The assertion is on the ROOT cause, not on a symbol name** (G-26). It used
+/// to require the string `emit_pairing_attestation`, which pinned the *symptom*
+/// — a missing function — and would have gone green the moment somebody added
+/// one, whatever transcript it hashed. Both blockers are named instead: `W-12`
+/// for the peer's half, and `transcript_hash`'s absent preimage for this
+/// device's own. A reason that stops naming either has been re-measured wrongly.
 #[test]
 fn pair_confirm_still_refuses_and_says_why() {
     let h = enrolled();
@@ -433,8 +440,13 @@ fn pair_confirm_still_refuses_and_says_why() {
         twinvpn_core::dispatch::Disposition::NotWired { code, why } => {
             assert_eq!(code, codes::CONTROL_UNREACHABLE);
             assert!(
-                why.contains("emit_pairing_attestation"),
-                "the reason must name what is missing, re-measured: {why}"
+                why.contains("W-12"),
+                "the reason must still name the peer half's blocker: {why}"
+            );
+            assert!(
+                why.contains("transcript_hash") && why.contains("no defined preimage"),
+                "the reason must name why THIS device's half cannot be built — the \
+                 preimage, not merely a missing function: {why}"
             );
         }
         twinvpn_core::dispatch::Disposition::Executes => {

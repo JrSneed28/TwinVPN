@@ -181,15 +181,29 @@ pub const fn disposition(op: CoreCommand) -> Disposition {
         // ledger, and it never was waiting on SPAKE2 — G-17: "W-22 blocks C-A
         // and nothing else". It is waiting on TWO attestations that this build
         // can produce neither of.
+        //
+        // G-26 re-measured the second half again, and the earlier reading was
+        // one layer too shallow. The missing emitter was reported as "a crate
+        // the pairing wiring may not write to" — an OWNERSHIP fact, which would
+        // make this a wiring problem. It is not. `signed_statements.cddl:140`
+        // specifies the statement COMPLETELY, so an emitter is a small inverse
+        // of `decode_pairing_attestation`; what has no specification is the
+        // `transcript_hash` it would carry. Handing the emitter to whoever owns
+        // the crate would therefore not produce one — it would produce an
+        // invented transcript format. See `pair-confirm-attestation-defect.md`.
         C::PairConfirm => Disposition::NotWired {
             code: codes::CONTROL_UNREACHABLE,
             why: "N-18 confirms a ceremony on both devices or on neither, so it needs BOTH \
                   PairingAttestations, and this build can produce neither half. The peer's \
                   crosses the rendezvous, which has no transport (W-12). This device's own \
-                  has no emitter at all: twinvpn_crypto::statements carries \
-                  decode_pairing_attestation and check_attestation_pair and NO \
-                  emit_pairing_attestation, so there is nothing to sign — a producer gap in \
-                  a crate the pairing wiring may not write to, reported rather than filled",
+                  cannot be BUILT: signed_statements.cddl specifies the statement in full, \
+                  but transcript_hash — the value both devices must agree on — has no \
+                  defined preimage. ADR-0007 §7.4 states it in one sentence of rationale \
+                  that §11.1 never made a rule, leaving nine encoding decisions open, each \
+                  of which yields a different digest. check_attestation_pair can only test \
+                  that two halves AGREE, never that either is right, so a guess would \
+                  surface as a cross-platform ceremony that never completes. Raised as a \
+                  defect for ADR-0007's owner (G-26), not filled",
         },
         C::DeviceRevoke | C::KeyRotate => Disposition::NotWired {
             code: codes::CONTROL_UNREACHABLE,
