@@ -1,0 +1,51 @@
+Mutant:      M-P02-5
+Proof:       P02
+Spec:        docs/testing-strategy.md §4 P02 mutant table; ADR-0006 §11.16 (b), RQ12, R-23
+Description: the RelaySelected audit record is emitted without top_k[], so the event names the chosen relay but not the candidates it beat, and "why this relay" stops being answerable
+Workspace:   core
+Oracle:      cargo test -q -p twinvpn-relay-client --test device_leg r_23_the_selection_is_reconstructable_from_the_relay_selected_event
+Fails:       r_23_the_selection_is_reconstructable_from_the_relay_selected_event
+
+# Everything above this line is metadata read by build/proof/run-mutants.sh.
+# Everything below it is the patch, which `git apply` reads and the preamble
+# does not disturb. Rule PT-1: this is a real, buildable, version-controlled
+# patch against the release commit, not a thought experiment.
+#
+# WHY THE ORACLE ASSERTS RECONSTRUCTION AND NOT PRESENCE
+#
+# This mutant leaves a well-formed event behind. `relay_id`, `score`, `rank`,
+# `map_version`, `map_age_ms` and the whole `inputs{}` block are still populated,
+# so any check of the form "a RelaySelected was emitted" passes against it — and
+# the defect ships. RQ12 is the sentence that makes the difference decidable:
+# "Every selection and every failover MUST be **reconstructable** after the fact
+# from a structured event." So the oracle reconstructs: the recorded candidate
+# list must reproduce the ordering entry for entry, and the four candidates are
+# given distinct measured RTTs so that a record which cannot separate them
+# cannot pass by coincidence.
+#
+# Measured: top_k held 0 of 4 candidates.
+
+diff --git a/core/crates/twinvpn-relay-client/src/select.rs b/core/crates/twinvpn-relay-client/src/select.rs
+index 8498401..b863844 100644
+--- a/core/crates/twinvpn-relay-client/src/select.rs
++++ b/core/crates/twinvpn-relay-client/src/select.rs
+@@ -350,14 +350,11 @@ impl RelaySelected {
+                 load_class: chosen.load_class,
+                 breaker_open: scored.breaker_open,
+             },
+-            top_k: selection
+-                .order
+-                .iter()
+-                .map(|s| CandidateScore {
+-                    relay_id: s.id,
+-                    score: s.score,
+-                })
+-                .collect(),
++            // MUTANT M-P02-5: the record is emitted without `top_k[]`. The
++            // chosen relay and its score are still there, so the event exists
++            // and looks well formed; what is gone is every other candidate, and
++            // with it the answer to "why this relay rather than that one".
++            top_k: Vec::new(),
+         })
+     }
+ 
