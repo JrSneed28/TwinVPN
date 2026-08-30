@@ -349,12 +349,20 @@ jobs:
       # `TWINVPN_XCODE_VERSION` in build/ci/ci-common-apple.sh.
       # - uses: maxim-lobanov/setup-xcode@v1
       #   with:
-      #     xcode-version: '16.4'
+      #     xcode-version: '26.6'
 
       - name: select the pinned Xcode and print every toolchain version
         run: |
           # The pin lives in build/ci/ci-common-apple.sh and nowhere else.
-          sudo xcode-select -s "$(build/ci/ci-macos.sh --print-xcode-path)"
+          #
+          # RESOLVED FIRST, into a variable. Inlining the command substitution
+          # into `xcode-select -s "$(...)"` discards the resolver's exit status
+          # and hands `xcode-select` an empty string, so the job died with
+          # `invalid developer directory ''` instead of with the resolver's own
+          # message naming the pin and every Xcode the runner does have.
+          # `bash -e` fails the assignment when the resolver fails.
+          XCODE_DEV_DIR="$(build/ci/ci-macos.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
           xcodebuild -version
           swift --version
           xcrun --sdk macosx --show-sdk-version
@@ -390,6 +398,8 @@ jobs:
           cp -R ~/Library/Logs/DiagnosticReports/* build/ci/logs/macos/crashes/ 2>/dev/null \
             || echo "no crash reports"
 
+      # The gate's input. `error` is deliberate and stays: a run that reached
+      # the end without evidence must not be read as a pass.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -398,8 +408,22 @@ jobs:
           # uploaded from an Apple runner.
           path: |
             build/ci/evidence/macos.json
-            build/ci/logs/macos/**
+            build/ci/logs/macos/lifecycle-native.log
+            build/ci/logs/macos/xctest.log
           if-no-files-found: error
+          retention-days: 14
+
+      # The diagnostics, on failure only, and `ignore` so a job that died before
+      # producing any cannot stack a second red on the real failure.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-macos-link-run
+          # ENUMERATED to the log tree this job writes. Never `path: .`, never
+          # `~/Library/Keychains`, never `~/Library/MobileDevice`.
+          path: |
+            build/ci/logs/macos/**
+          if-no-files-found: ignore
           retention-days: 14
 
   # =========================================================================
@@ -426,11 +450,18 @@ jobs:
       # Keep the version in step with build/ci/ci-common-apple.sh.
       # - uses: maxim-lobanov/setup-xcode@v1
       #   with:
-      #     xcode-version: '16.4'
+      #     xcode-version: '26.6'
 
       - name: select the pinned Xcode and print every toolchain version
         run: |
-          sudo xcode-select -s "$(build/ci/ci-ios.sh --print-xcode-path)"
+          # RESOLVED FIRST, into a variable. Inlining the command substitution
+          # into `xcode-select -s "$(...)"` discards the resolver's exit status
+          # and hands `xcode-select` an empty string, so the job died with
+          # `invalid developer directory ''` instead of with the resolver's own
+          # message naming the pin and every Xcode the runner does have.
+          # `bash -e` fails the assignment when the resolver fails.
+          XCODE_DEV_DIR="$(build/ci/ci-ios.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
           xcodebuild -version
           swift --version
           xcrun --sdk iphoneos --show-sdk-version
@@ -474,6 +505,8 @@ jobs:
         # nothing booted.
         run: build/ci/ci-ios.sh --cleanup
 
+      # The gate's input. `error` is deliberate and stays: a run that reached
+      # the end without evidence must not be read as a pass.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -481,8 +514,21 @@ jobs:
           # ENUMERATED, never `path: .`. See the header.
           path: |
             build/ci/evidence/ios.json
-            build/ci/logs/ios/**
+            build/ci/logs/ios/xctest.log
           if-no-files-found: error
+          retention-days: 14
+
+      # The diagnostics, on failure only, and `ignore` so a job that died before
+      # producing any cannot stack a second red on the real failure.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-ios-link-run
+          # ENUMERATED to the log tree this job writes. NEVER the CoreSimulator
+          # tree — see the header.
+          path: |
+            build/ci/logs/ios/**
+          if-no-files-found: ignore
           retention-days: 14
 
   # =========================================================================
@@ -718,7 +764,13 @@ jobs:
 
       - name: select the pinned Xcode and print every toolchain version
         run: |
-          sudo xcode-select -s "$(build/ci/ci-macos.sh --print-xcode-path)"
+          # RESOLVED FIRST, into a variable. Inlining the command substitution
+          # into `xcode-select -s "$(...)"` discards the resolver's exit status
+          # and hands `xcode-select` an empty string, which fails with
+          # `invalid developer directory ''` instead of with the resolver's own
+          # message naming the pin and every Xcode the machine does have.
+          XCODE_DEV_DIR="$(build/ci/ci-macos.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
           xcodebuild -version
           swift --version
           xcrun --sdk macosx --show-sdk-version
@@ -764,18 +816,45 @@ jobs:
         # path, so the teardown and the supported recovery are the same code.
         run: build/ci/ci-macos.sh --cleanup
 
+      # TWO uploads, split the way `build/ci/jobs/android-link-run.yml` splits
+      # its own, because they are not the same claim. The evidence is the
+      # acceptance gate's input and stays `error`: a run that reached the end
+      # without writing evidence must go red rather than be read as a pass. The
+      # diagnostics are `failure()` + `ignore`, so a job that died in its FIRST
+      # step (selecting Xcode, say) does not stack a second, misleading
+      # "No files were found" red on top of the real failure.
+      #
+      # NOTE FOR THE INTEGRATION OWNER: this renames the evidence half from
+      # `diagnostics-macos-privileged` to `evidence-macos-privileged`. The gate
+      # job collects `pattern: evidence-*`, and `build/acceptance/report.py`
+      # probes `build/ci/evidence/macos-privileged.json` — so under the old name
+      # this job's evidence was uploaded but never collected, and that row could
+      # only ever read NOT_EXECUTED. The new name is what
+      # `android-device-lifecycle.yml` already does (`evidence-android-device`).
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: diagnostics-macos-privileged
+          name: evidence-macos-privileged
           # ENUMERATED. NEVER a signing identity, a keychain, a provisioning
           # profile, a pairing secret, an authentication token, tunnel plaintext
           # or a packet capture — this job takes no capture at all, precisely so
           # there is none to leak.
           path: |
             build/ci/evidence/macos-privileged.json
-            build/ci/logs/macos/**
+            build/ci/logs/macos/lifecycle-native.log
+            build/ci/logs/macos/xctest.log
           if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-macos-privileged
+          # ENUMERATED to this job's own log tree, under the same prohibition as
+          # above.
+          path: |
+            build/ci/logs/macos/**
+          if-no-files-found: ignore
           retention-days: 14
 
   ios-device-lifecycle:
@@ -801,7 +880,13 @@ jobs:
 
       - name: select the pinned Xcode and print every toolchain version
         run: |
-          sudo xcode-select -s "$(build/ci/ci-ios.sh --print-xcode-path)"
+          # RESOLVED FIRST, into a variable. Inlining the command substitution
+          # into `xcode-select -s "$(...)"` discards the resolver's exit status
+          # and hands `xcode-select` an empty string, which fails with
+          # `invalid developer directory ''` instead of with the resolver's own
+          # message naming the pin and every Xcode the machine does have.
+          XCODE_DEV_DIR="$(build/ci/ci-ios.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
           xcodebuild -version
           swift --version
           xcrun --sdk iphoneos --show-sdk-version
@@ -847,17 +932,43 @@ jobs:
         # next job — and its owner — inherits.
         run: build/ci/ci-ios.sh --cleanup
 
+      # TWO uploads, split the way `build/ci/jobs/android-link-run.yml` splits
+      # its own, because they are not the same claim. The evidence is the
+      # acceptance gate's input and stays `error`: a run that reached the end
+      # without writing evidence must go red rather than be read as a pass. The
+      # diagnostics are `failure()` + `ignore`, so a job that died in its FIRST
+      # step (selecting Xcode, say) does not stack a second, misleading
+      # "No files were found" red on top of the real failure.
+      #
+      # NOTE FOR THE INTEGRATION OWNER: this renames the evidence half from
+      # `diagnostics-ios-device` to `evidence-ios-device`. The gate job collects
+      # `pattern: evidence-*`, and `build/acceptance/report.py` probes
+      # `build/ci/evidence/ios-device.json` — so under the old name this job's
+      # evidence was uploaded but never collected, and that row could only ever
+      # read NOT_EXECUTED. The new name is what `android-device-lifecycle.yml`
+      # already does (`evidence-android-device`).
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: diagnostics-ios-device
+          name: evidence-ios-device
           # ENUMERATED. NEVER a provisioning profile, a signing identity, a
           # keychain, a pairing secret, an authentication token, tunnel
           # plaintext, or a packet capture.
           path: |
             build/ci/evidence/ios-device.json
-            build/ci/logs/ios/**
+            build/ci/logs/ios/xctest-device.log
           if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-ios-device
+          # ENUMERATED to this job's own log tree, under the same prohibition as
+          # above. NEVER the CoreSimulator tree and NEVER the device syslog.
+          path: |
+            build/ci/logs/ios/**
+          if-no-files-found: ignore
           retention-days: 14
 
   android-device-lifecycle:
