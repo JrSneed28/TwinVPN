@@ -7,6 +7,7 @@ import android.os.Build
 import java.io.ByteArrayOutputStream
 import java.net.Inet4Address
 import java.net.Inet6Address
+import java.net.NetworkInterface
 import java.nio.ByteBuffer
 
 /**
@@ -103,6 +104,37 @@ internal object NetworkCodec {
 
         out.writeIntBe(link?.mtu ?: 0)
 
+        // The RFC 4007 zone Rust needs for `fe80::/10`, resolved ONCE from the
+        // interface NAME rather than read off each address.
+        //
+        // `Inet6Address.getScopeId()` is always `0` here and cannot be anything
+        // else: `LinkAddress.writeToParcel` writes only `address.getAddress()`
+        // and `createFromParcel` rebuilds through
+        // `InetAddress.getByAddress(byte[])`, which has nowhere to put a scope.
+        // So every address out of `LinkProperties` — link-locals included —
+        // arrives here unscoped, and the Rust decoder refuses a link-local with
+        // no interface index. That refusal was `PLATFORM.ADAPTER_UNAVAILABLE` on
+        // every ordinary Wi-Fi network, because every one of them has an
+        // `fe80::/64`.
+        //
+        // `NetworkInterface.getIndex()` is `if_nametoindex(name)` — libcore fills
+        // it from `getifaddrs()`, a netlink call, not `/proc/net` — which is
+        // exactly the kernel index `sock::addr::v6_from_kernel` documents as its
+        // input, so `ZoneIndex` means the same thing on both sides. The API-30
+        // restriction on this class (a non-system app sees only interfaces
+        // associated with an `InetAddress`) cannot bite: the interface being
+        // encoded has addresses by definition.
+        //
+        // Residual, stated rather than papered over: a `LinkProperties` with no
+        // interface name leaves this `0`, and its link-local addresses are still
+        // refused. The system does deliver that shape — a `CALLBACK_AVAILABLE`
+        // for our own tunnel carries an empty `LinkProperties` — and it is
+        // harmless there, because a `LinkProperties` with no interface name
+        // carries no addresses either.
+        val zone = link?.interfaceName
+            ?.let { runCatching { NetworkInterface.getByName(it)?.index }.getOrNull() }
+            ?: 0
+
         val addresses = link?.linkAddresses.orEmpty()
         out.write(addresses.size)
         for (address in addresses) {
@@ -111,14 +143,16 @@ internal object NetworkCodec {
             // the host address the core actually needs.
             out.write(familyTag(address.address).toInt())
             out.write(address.prefixLength)
-            out.writeAddress(address.address)
+            out.writeAddress(address.address, zone)
         }
 
         val resolvers = link?.dnsServers.orEmpty()
         out.write(resolvers.size)
         for (resolver in resolvers) {
             out.write(familyTag(resolver).toInt())
-            out.writeAddress(resolver)
+            // The same parcelling loses the resolvers' scope ids too, and both
+            // loops share `read_address` on the Rust side.
+            out.writeAddress(resolver, zone)
         }
 
         val nat64 = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) link?.nat64Prefix else null
@@ -158,16 +192,19 @@ internal object NetworkCodec {
         if (address is Inet4Address) FAMILY_V4 else FAMILY_V6
 
     /**
-     * Writes the octets, and for IPv6 the scope zone.
+     * Writes the octets, and for IPv6 the interface's zone.
      *
      * The zone matters for one case and one only: a link-local address is
      * unusable on a multi-homed host without it, and Rust refuses one that
-     * arrives with `0`. On any other address the platform's `scopeId` is
-     * metadata and Rust drops it, per RFC 4007.
+     * arrives with `0`. On any other address it is metadata and Rust drops it,
+     * per RFC 4007.
+     *
+     * `zone` is the **interface's** index, not `Inet6Address.scopeId` — the
+     * scope id does not survive `LinkProperties`' parcelling. See [encode].
      */
-    private fun ByteArrayOutputStream.writeAddress(address: java.net.InetAddress) {
+    private fun ByteArrayOutputStream.writeAddress(address: java.net.InetAddress, zone: Int) {
         write(address.address)
-        if (address is Inet6Address) writeIntBe(address.scopeId)
+        if (address is Inet6Address) writeIntBe(zone)
     }
 
     private fun ByteArrayOutputStream.writeShortBe(value: Int) {

@@ -69,8 +69,14 @@ internal object NativeBridge {
      * `onLinkPropertiesChanged` — Android delivers whole current states, and the
      * *diff* that turns them into deltas is Rust's.
      *
-     * @throws IllegalStateException carrying a registered `reason_code` if the
-     *   payload violates a bound. The message is a **code**, never a sentence.
+     * **Never throws**, and neither does any other `nativeOn…` method here.
+     * Every one of them is called from a platform callback — this one from
+     * `ConnectivityManager.NetworkCallback` on the process-wide
+     * `ConnectivityThread`, whose `handleMessage` has no `try`/`catch` — so an
+     * exception crossing back out of JNI is process death rather than a report.
+     * A payload that violates a bound is refused, logged with its `reason_code`
+     * on the Rust side, and dropped; Android re-delivers whole current state on
+     * the next callback. See `bridge::entry` for the whole argument.
      */
     external fun nativeOnNetwork(handle: Long, payload: ByteArray)
 

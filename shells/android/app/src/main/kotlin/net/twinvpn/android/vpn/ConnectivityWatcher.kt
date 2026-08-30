@@ -31,8 +31,10 @@ import net.twinvpn.android.NativeBridge
  * `onAvailable(cellular)` with no `onLost(wifi)`, and the core loses the fact
  * that the Wi-Fi underlay went away — which is exactly what
  * `docs/networking.md` §5.4's roaming row turns into `MIGRATING`.
- * `registerNetworkCallback` with an empty capability set reports every network,
- * so both halves of the handoff arrive.
+ * `registerNetworkCallback` is a **listen**: it reports every network that
+ * matches the request as it appears and stops matching, so both halves of the
+ * handoff arrive. The request's capability set is not empty and has nothing to
+ * do with this — see [start].
  *
  * # Nothing here classifies
  *
@@ -100,8 +102,18 @@ internal class ConnectivityWatcher(
 
     /** Starts watching. Idempotent at the manager's level. */
     fun start() {
-        // No capability filter: every network, so a handoff delivers both the
-        // arrival and the departure. See the class documentation.
+        // `NetworkRequest.Builder()` does NOT start empty: its default
+        // capability set is NOT_RESTRICTED | TRUSTED | NOT_VPN, and removing
+        // NOT_VPN leaves the other two in place. What it buys is exactly one
+        // thing — VPN networks match, so a competing VPN (and our own tunnel,
+        // once `Builder.establish()` runs) arrives as an ordinary observation
+        // for Rust to classify `Tunnel`. `bridge::AndroidBridge::on_revoked`
+        // documents why that is deliberate.
+        //
+        // Getting BOTH halves of a handoff is not this call's doing: it comes
+        // from `registerNetworkCallback` reporting every matching network,
+        // rather than `registerDefaultNetworkCallback` reporting only the
+        // chosen default. See the class documentation.
         val request = NetworkRequest.Builder()
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             .build()

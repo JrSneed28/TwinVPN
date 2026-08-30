@@ -734,6 +734,47 @@ if [ "$device_ready" = true ]; then
     notes="the instrumentation run failed; see build/ci/logs/android/instrumentation.log and logcat.txt"
   fi
 
+  # A CONTAINED REFUSAL IS INVISIBLE TO THE INSTRUMENTATION TEST.
+  #
+  # `bridge::entry` no longer throws. It cannot: every entry there is a platform
+  # callback, and a Java exception crossing back out of one is
+  # `Process.killProcess`, not a report. A refused Android fact is therefore
+  # logged and the entry returns -- which is correct, and is exactly why this
+  # check has to exist. `NativeLinkRunTest` asserts LIFECYCLE ONLY; it says
+  # nothing about network facts reaching the core. So a run in which the bridge
+  # refused every observation still produces `startForegroundService`, every
+  # transition, and `OK (n tests)`. Without the grep below, green would mean the
+  # process SURVIVED not working, and the loud `FATAL EXCEPTION` this replaced
+  # would have become a silent PASS.
+  #
+  # Same reasoning as the `am instrument` exit-code check above, one layer down:
+  # the verdict is in the stream, not in the status. `tr -d '\r'` for the same
+  # reason it is done there, and `awk` rather than `grep` because grep exits 1 on
+  # no match under `set -o pipefail` -- masking that with `|| true` would be the
+  # swallowed failure this file's header forbids.
+  #
+  # `received` is the boolean this flips, and it is the honest one: a refusal at
+  # the bridge means the fact did NOT reach the core. `TWINVPN_BRIDGE_REFUSED`
+  # and its tag are an interface with the Rust side, not a detail -- see
+  # `bridge::entry`'s `LOG_TAG`.
+  tr -d '\r' < "$LOGDIR/logcat.txt" > "$LOGDIR/logcat.norm"
+  refusals="$(
+    awk 'match($0, /TWINVPN_BRIDGE_REFUSED [A-Za-z]+ [A-Z0-9_.]+/) {
+           print substr($0, RSTART, RLENGTH)
+         }' "$LOGDIR/logcat.norm" | sort -u | paste -sd';' -
+  )"
+  if [ -n "$refusals" ]; then
+    received=false
+    exit_code=1
+    echo "::error::the Rust bridge refused an Android fact, so it never reached the core: $refusals" >&2
+    refusal_note="the bridge refused an Android fact ($refusals); the instrumentation suite asserts lifecycle only and cannot see this"
+    if [ -z "$notes" ]; then
+      notes="$refusal_note"
+    else
+      notes="$notes; $refusal_note"
+    fi
+  fi
+
   # THE TRANSITIONS ARE READ OUT OF THE TEST, NOT WRITTEN HERE.
   #
   # The test logs each marker as it OBSERVES the transition, so logcat is the

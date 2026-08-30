@@ -131,6 +131,58 @@ fn a_network_observation_reaches_the_snapshot() {
         .is_empty());
 }
 
+/// A **populated** address set survives `on_network`, link-local and all.
+///
+/// Every other test in this file uses [`network`], whose `addresses` is empty,
+/// so the address loop in [`wire::decode_network`] had never run through
+/// `on_network` at all — decoded in isolation by `wire::tests`, never on the
+/// path the JNI entry actually takes. That is the gap the CI crash fell into:
+/// the first two callbacks of an `onAvailable` fan-out carry no
+/// `LinkProperties`, so only the third has addresses, and only the third died.
+///
+/// The fixture is what a real Wi-Fi interface reports — a v4 host address with
+/// its host bits, a global v6, and an `fe80::/64` carrying the interface index.
+#[test]
+fn a_populated_address_set_reaches_the_snapshot_intact() {
+    let mut octets = [0u8; 16];
+    octets[0] = 0xfe;
+    octets[1] = 0x80;
+    octets[15] = 1;
+    let link_local = twinvpn_types::V6Addr::new(octets, twinvpn_types::ZoneIndex::new(24))
+        .expect("a link-local carries its interface index");
+
+    let mut global = [0u8; 16];
+    global[0] = 0x2a;
+    global[1] = 0x00;
+    global[15] = 0x0a;
+    let global = twinvpn_types::V6Addr::new(global, None).expect("a global v6 carries no zone");
+
+    let mut original = network(3, TransportSet::WIFI);
+    original.addresses = vec![
+        twinvpn_types::InterfaceAddress::new(
+            twinvpn_types::IpAddr::V4(twinvpn_types::V4Addr::from_octets([192, 168, 1, 10])),
+            24,
+        )
+        .expect("v4 host"),
+        twinvpn_types::InterfaceAddress::new(twinvpn_types::IpAddr::V6(global), 64)
+            .expect("global v6"),
+        twinvpn_types::InterfaceAddress::new(twinvpn_types::IpAddr::V6(link_local), 64)
+            .expect("link-local v6"),
+    ];
+
+    let bridge = bridge();
+    bridge
+        .on_network(&wire::encode_network(&original))
+        .expect("a real interface's addresses cross the bridge");
+
+    let snapshot = bridge
+        .adapter()
+        .interface_provider()
+        .snapshot()
+        .expect("snapshot");
+    assert_eq!(snapshot.networks()[0].addresses, original.addresses);
+}
+
 #[test]
 fn a_malformed_payload_is_refused_and_changes_nothing() {
     let bridge = bridge();
@@ -212,6 +264,74 @@ fn a_competing_vpn_arrives_as_a_fact_and_never_as_a_verdict() {
     );
     // And it does not count as an underlay default route.
     assert!(!snapshot.underlay_has_default(twinvpn_types::AddressFamily::V4));
+}
+
+/// **No entry point throws into the JVM.** A NEW requirement, not a repair.
+///
+/// Nothing in the corpus obliged `bridge::entry` to contain a refusal before
+/// this, and the two rules that look like they do, do not:
+///
+/// * **ADR-0019 X3(5)** — *"a core fault MUST NOT abort the UI process"* —
+///   records Android as discharged *"because the UI process does not load the
+///   core at all, so the fault is in another process"*. That premise does not
+///   hold in this tree: `AndroidManifest.xml` declares no `android:process` on
+///   any component, so `MainActivity` and `TwinVpnService` are one process, and
+///   the crash names it — `Process: net.twinvpn.android`.
+/// * **ADR-0018 F-7** contains a **panic**. What `entry` threw was a typed
+///   `PlatformError` refusal, which F-7 does not reach.
+///
+/// So this test is the requirement rather than a check on one. It is also the
+/// only host-runnable form of it: `entry` is `#[cfg(target_os = "android")]`, so
+/// `make cross-check` compiles it for `aarch64-linux-android` and nothing on any
+/// host runs it. The property is a source property, and it is checked as one.
+///
+/// Why it must hold: JNI `ThrowNew` does not unwind the native frame, it sets a
+/// pending exception that becomes a real Java exception the instant the entry
+/// returns — into `CallbackHandler.handleMessage`, which has no `try`/`catch`,
+/// under a `Looper` that rethrows, under a `KillApplicationHandler` that ends in
+/// `Process.killProcess`. Reporting a refusal as a throw was therefore process
+/// death: `FATAL EXCEPTION: ConnectivityThread` /
+/// `java.lang.IllegalStateException: PLATFORM.ADAPTER_UNAVAILABLE`.
+#[test]
+fn no_bridge_entry_point_throws_into_the_jvm() {
+    let source = include_str!("entry.rs");
+    // Comment lines are stripped: the module documentation explains at length
+    // why throwing here is fatal, and a scan that could not tell the rule from a
+    // violation would forbid stating it.
+    let code: String = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for forbidden in ["throw", "Throw", "THROWABLE", "exception_occurred"] {
+        assert!(
+            !code.contains(forbidden),
+            "`{forbidden}` appears in `bridge::entry`: every entry there is a \
+             platform callback, and a Java exception crossing back out of one \
+             is process death, not a report"
+        );
+    }
+
+    // The rule is a RULE, not a special case for the entry that happened to
+    // crash. Each of the five is named, because three of the other four are on
+    // the same fatal threads and were only ever latent — `nativeOnNetworkLost`
+    // on `ConnectivityThread`, `nativeOnPower` and `nativeOnLockdownReport` on
+    // the main `Looper`. `nativeCreate` and `nativeDestroy` are absent by
+    // design: our own Kotlin calls those, and they already return sentinels.
+    for entry in [
+        "nativeOnNetwork",
+        "nativeOnNetworkLost",
+        "nativeOnPower",
+        "nativeOnRevoked",
+        "nativeOnLockdownReport",
+    ] {
+        assert!(
+            code.contains(&format!("guard(\"{entry}\"")),
+            "`{entry}` does not route through `guard`: a platform callback that \
+             can still kill the process"
+        );
+    }
 }
 
 /// **§10.4's prohibition, asserted over this module's own source.**
