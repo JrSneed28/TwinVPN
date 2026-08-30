@@ -340,6 +340,7 @@ apple_transitions_from() {
   # reached the XCTest step still has a native log worth reading, and the empty
   # array a fully-failed run produces is the CORRECT evidence for it.
   local present=()
+  local found=0
   local log
   for log in "$@"; do
     # `if`, not `[ -f ] &&`. Under `set -e` a `for` loop's exit status is its
@@ -348,9 +349,19 @@ apple_transitions_from() {
     # not exist yet.
     if [ -f "$log" ]; then
       present+=("$log")
+      found=$((found + 1))
     fi
   done
-  if [ "${#present[@]}" -eq 0 ]; then
+  # A COUNTER, not `${#present[@]}`.
+  #
+  # macOS ships bash 3.2.57, where an empty array under `set -u` is an unbound
+  # variable -- the same trap that killed every `full`-profile core build until
+  # build-core.sh got `${FEATURE_ARGS[@]+...}`. `${#present[@]}` on an empty
+  # array is that trap a second time, and it fires on exactly the path this
+  # function exists to serve: a run where none of the named logs was written.
+  # A plain integer has no such edge, and the expansion below is guarded the
+  # same way build-core.sh's is.
+  if [ "$found" -eq 0 ]; then
     echo '[]'
     return 0
   fi
@@ -370,7 +381,7 @@ apple_transitions_from() {
   #
   # An empty array is the CORRECT evidence for a run that reached no
   # transition. It must be produced, not thrown.
-  cat "${present[@]}" \
+  cat ${present[@]+"${present[@]}"} \
     | tr -d '\r' \
     | awk '/^TWINVPN_LIFECYCLE_TRANSITION [A-Z_]+->[A-Z_]+$/ { print $2 }' \
     | sort -u \
