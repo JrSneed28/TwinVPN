@@ -561,3 +561,9 @@ Rules:
   with `--research-only` to stop at the handoff and `--deep` for the parallel
   A/B/C/D mode. Neither the phrasings nor the command are required — the
   mid-task escalation above is the primary path, and it fires on its own.
+- **A bare `/research` is not missing an argument.** It means "research whatever
+  is blocking", and you derive that from session state — the most recent
+  failure, a fix or refactor that keeps breaking the same thing, an unanswered
+  RESEARCH REQUEST, the in-flight task's biggest unconfirmed assumption, then
+  recorded blockers. Name the derived question in one line and run it. Ask only
+  when all of those are genuinely empty.
