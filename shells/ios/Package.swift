@@ -36,6 +36,20 @@ let package = Package(
         // compatibility status; see `include/module.modulemap`.
         .systemLibrary(name: "TwinVPNBridge", path: "Sources/TwinVPNBridge"),
 
+        // `Sources/TwinVPNShared` IS DELIBERATELY NOT A TARGET HERE.
+        //
+        // `project.yml` lists that directory under BOTH production targets, so
+        // in the Xcode build of record `EnforcementProgramme` is compiled into
+        // the app's module and into the extension's module, and neither needs an
+        // `import`. SwiftPM cannot express that: two targets whose source sets
+        // intersect is an overlapping-sources error, and making it a third
+        // module instead would need an `import TwinVPNShared` in the consuming
+        // files — a line the Xcode build would reject, because there is no such
+        // module there. So the sharing is stated in `project.yml`, which is what
+        // `build/ci/ci-ios.sh` builds, and this package carries the app and the
+        // extension only. Do not "complete" this list without changing the
+        // consuming files at the same time.
+
         .target(
             name: "TwinVPNProvider",
             dependencies: ["TwinVPNBridge"],

@@ -99,6 +99,11 @@ shells/ios/
       ManagementClient.swift        ADR-0017's iOS subset channel
       ContractCourier.swift         the corrected fetch split (§5)
       Views/                        Status, Pairing, Diagnostics
+    TwinVPNShared/                  compiled into BOTH production targets
+      EnforcementProgramme.swift    the app installs the profile, the extension
+                                    writes and reads back the bytes — one
+                                    declaration, so `configurationKey` and the
+                                    CodingKeys cannot drift apart
   TwinVPNTests/                     device-bound. WRITTEN, NOT EXECUTED, and
                                     every case skips itself on the simulator
   TwinVPNIntegrationTests/          SIMULATOR-runnable. Crosses twinvpn.h,
