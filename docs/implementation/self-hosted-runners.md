@@ -227,98 +227,97 @@ restores the machine. The checkpoint is that something.
 
 ### 1. Create the guest
 
+Two scripts do this; both must run **elevated**, one on the host and one in the
+guest. They exist because the ordering below is easy to get wrong in a way that
+only shows up on the *second* run.
+
+On the Hyper-V host:
+
 ```powershell
-$VM = 'twinvpn-rig'
-New-VM -Name $VM -Generation 2 -MemoryStartupBytes 8GB `
-       -NewVHDPath "D:\Hyper-V\$VM.vhdx" -NewVHDSizeBytes 128GB
-Set-VM -Name $VM -ProcessorCount 4 -AutomaticCheckpointsEnabled $false
-Add-VMDvdDrive -VMName $VM -Path 'D:\iso\Win11_24H2.iso'
-Start-VM -Name $VM
+scripts\twinvpn-rig-host.ps1 -Action create -IsoPath C:\iso\Win11_24H2.iso
 ```
 
-`AutomaticCheckpointsEnabled $false` matters: an automatic checkpoint taken
-mid-run would capture the dirty state you are trying to discard.
+It defaults the VHDX to `C:\Hyper-V` and warns if the drive cannot hold the
+disk. It sets `-AutomaticCheckpointsEnabled $false`, which is not tidiness: an
+automatic checkpoint taken mid-run captures exactly the dirty state the rig
+exists to discard, and restoring to it would start the next run already dirty.
 
 ### 2. Provision the guest
 
-Inside the guest, as an administrator:
+Install Windows 11 24H2 or Server 2022+, then, **inside the guest**, elevated:
 
-* Windows 11 24H2 or Server 2022+, x86_64.
-* Rust **1.90.0** via rustup, on the machine PATH so a service can see it.
-* Visual Studio Build Tools with the MSVC C++ toolset. The job locates it with
-  `vswhere.exe` at
-  `C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe`, so an
-  installation the installer does not know about will not be found.
-* Git for Windows — the job sets `shell: bash` and uses `cmd //c ver`, which
-  needs MSYS path translation.
-* `wintun.dll` beside the build.
-* A local account in **Administrators**; the runner service runs as this
-  account. The spec permits LocalSystem or a local Administrator, and the
-  Administrator route is the one `config.cmd` documents a flag for.
-* Prime the cargo cache once — `cargo fetch` plus one full build. None of the
-  three jobs has an `actions/cache` step, and the 60-minute timeout assumes a
-  warm cache.
+```powershell
+scripts\twinvpn-rig-guest.ps1 -Action verify
+```
+
+It checks each requirement against the machine and prints the fix for anything
+missing: Rust 1.90.0 with an `x86_64-pc-windows-msvc` host, cargo on the
+**machine** PATH so a service can see it, MSVC build tools discoverable through
+the installer's own `vswhere.exe` (the job locates them exactly that way, so a
+Visual Studio the installer does not know about will not be found), Git for
+Windows for `bash` and `cygpath`, `wintun.dll`, and a running Base Filtering
+Engine.
+
+It also checks the two pieces of state `ci-windows.sh --reset` refuses to start
+on — a leftover `TwinVPNService` or a `TwinVPN*` overlay adapter. Those are not
+hygiene warnings; the job exits 1 and says the rig was not restored.
+
+Prime the cargo cache once before going further. No job here has an
+`actions/cache` step and the 60-minute timeout assumes a warm cache.
 
 ### 3. Register the runner, ephemeral
 
 Get a registration token from **Settings → Actions → Runners → New self-hosted
-runner** (or `gh api -X POST repos/:owner/:repo/actions/runners/registration-token`).
-In the guest:
+runner**, download and extract the runner package to `C:\actions-runner` using
+the commands that page shows (its URL and hash change per release), then:
 
 ```powershell
-mkdir C:\actions-runner; cd C:\actions-runner
-# download + extract the runner package per the page's own instructions
-./config.cmd --url https://github.com/<owner>/<repo> --token <TOKEN> `
-             --name twinvpn-rig `
-             --labels self-hosted,Windows,twinvpn-vpn-lifecycle `
-             --ephemeral --unattended `
-             --runasservice `
-             --windowslogonaccount "<VM>\<admin-account>" `
-             --windowslogonpassword "<password>"
+scripts\twinvpn-rig-guest.ps1 -Action register `
+    -RepoUrl https://github.com/<owner>/<repo> `
+    -Token <TOKEN> `
+    -RunnerAccount .\<admin-account> `
+    -RunnerPassword (Read-Host -AsSecureString)
 ```
 
-**`--ephemeral` is the load-bearing flag.** The runner takes exactly one job and
-then deregisters and exits, which gives the host a defined moment to restore the
-checkpoint. Without it the runner would take a second job on a machine still
-carrying the first job's filters, and that run fails at `--reset` — correctly,
-but confusingly.
+It re-runs `verify` first and **refuses to register** if anything is unmet — a
+runner that accepts a job it cannot run turns a missing prerequisite into a red
+gate row, which is strictly worse than no runner.
 
-The labels must be exactly `self-hosted, Windows, twinvpn-vpn-lifecycle`;
-`runs-on` matches all three.
+**`--ephemeral` is the load-bearing flag** and the script always passes it. The
+runner takes exactly one job, then deregisters and exits, which is what gives
+the host a defined moment to restore. Without it the runner picks up a second
+job on a machine still carrying the first run's WFP filters, and that run fails
+at `--reset` — correctly, but the error reads as a rig misconfiguration rather
+than a missing restore.
+
+The labels are exactly `self-hosted, Windows, twinvpn-vpn-lifecycle`; `runs-on`
+matches all three.
+
+The service account may be LocalSystem or a local Administrator. The scripts
+take the Administrator route because it is the one `config.cmd` documents a flag
+for.
 
 ### 4. Take the golden checkpoint
 
-With the runner configured and the guest otherwise idle, on the host:
+Back on the host, **after** the runner is registered, so a restore comes back
+with the runner already installed:
 
 ```powershell
-Checkpoint-VM -Name 'twinvpn-rig' -SnapshotName 'golden'
+scripts\twinvpn-rig-host.ps1 -Action checkpoint
 ```
-
-Take it **after** registering the runner, so a restore comes back with the
-runner already installed.
 
 ### 5. Restore between runs
 
-The guest cannot restore itself. Drive it from the host — a scheduled task, or
-this loop:
+The guest cannot restore itself.
 
 ```powershell
-$VM = 'twinvpn-rig'
-while ($true) {
-  if ((Get-VM -Name $VM).State -ne 'Running') {
-    Restore-VMCheckpoint -Name 'golden' -VMName $VM -Confirm:$false
-    Start-VM -Name $VM
-  }
-  Start-Sleep -Seconds 30
-}
+scripts\twinvpn-rig-host.ps1 -Action watch
 ```
 
-An ephemeral runner exits after its job, so shut the guest down at the end of a
-run (a `shutdown /s /t 0` in a job-completed hook, or simply let the loop notice
-the runner service has stopped) and the loop restores and restarts it. Pair this
-with the 05:00 nightly in
-`.github/workflows/first-implementation-wave-privileged.yml`: the guest needs to
-be up and registered before 05:00.
+restores to `golden` and restarts whenever the guest stops — which an ephemeral
+runner causes it to do after each job. Pair it with the 05:00 nightly in
+`.github/workflows/first-implementation-wave-privileged.yml`: the guest must be
+up and registered before then.
 
 ### 6. Confirm it actually flipped the row
 
