@@ -222,11 +222,21 @@ fn every_declared_function_is_exported_and_every_export_is_declared() {
 #[test]
 fn the_surface_is_f1_sized() {
     // F-1: "roughly a dozen functions … every exported function is a
-    // compatibility obligation FOREVER". Twelve, counted, so a thirteenth is a
+    // compatibility obligation FOREVER". Counted, so the next one is a
     // deliberate act with a test to change and a reviewer to convince.
+    //
+    // Raised 12 -> 13 at ABI minor 3 for `tw_core_submit_response`. The entry
+    // was convinced rather than waved through: F-5 puts every completion on one
+    // BROADCAST stream, ADR-0017 MI-P1 rule 1 permits `pair.begin`'s offer only
+    // in a `pair.begin` response, and the two are jointly unsatisfiable while
+    // the ABI has no unicast exit — `shells/ios` and `shells/android` could not
+    // reach the offer at all. The alternative was a fourth parameter on
+    // `tw_core_submit`, which VR-1 makes an `abi_major` break; this costs one
+    // permanent entry instead of breaking every shipped shell. Thirteen is still
+    // F-1's "roughly a dozen".
     assert_eq!(
         header_functions().len(),
-        12,
+        13,
         "the ABI surface changed size: {:?}",
         header_functions()
     );
@@ -400,9 +410,18 @@ fn the_unsafe_block_count_is_pinned() {
     // `copy_nonoverlapping` of only the declared bytes. The block it replaced
     // (`let v = unsafe { *ptr }`) read all 24 fn-pointer fields unconditionally,
     // so this is one more block covering strictly less memory.
+    //
+    // Raised 24 -> 26 for `tw_core_submit_response`. The new entry carries four
+    // blocks — the instance pointer, the command slice, and the two
+    // out-parameter writes — and each is one of `abi.rs`'s existing helpers
+    // under the caller's own `twinvpn.h` contract, so no new KIND of pointer
+    // work enters the crate. Two come straight back: `tw_core_submit` now
+    // delegates to it with a null `response_out` instead of repeating the same
+    // three blocks, which is also what makes the fire-and-forget entry unable to
+    // receive the MI-P1 body at all. Net +2 for a whole new entry point.
     let count = unsafe_blocks().len();
     assert_eq!(
-        count, 24,
+        count, 26,
         "the `unsafe` block count in twinvpn-ffi changed to {count}. A net increase \
          requires a security reviewer (DP-4)."
     );
