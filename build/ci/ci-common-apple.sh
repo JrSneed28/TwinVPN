@@ -246,6 +246,84 @@ apple_require_xcodegen() {
 }
 
 # ---------------------------------------------------------------------------
+# WHY A FAILURE HAS TO BE ECHOED A SECOND TIME
+#
+# In run 33286355061 the iOS job refused with "the shared core did not compile
+# for aarch64-apple-ios and/or aarch64-apple-ios-sim" and the reason — one line
+# from bash — sat inside a collapsed `::group::`, between four hundred
+# `Downloaded` lines and a `::error::` annotation emitted twenty-four seconds
+# later that named only the verdict. The macOS job printed its `E0463` in the
+# clear and was diagnosable in one round trip; the iOS job was not, and cost a
+# whole one. A proof script that refuses without saying why is not cheaper than
+# no proof script — it is more expensive, once per iteration.
+#
+# So the failure path re-states the diagnostic in a group of ITS OWN, opened
+# after the step's group has been closed: GitHub does not nest groups, and a
+# diagnostic reachable only by expanding the group it drowned in is the failure
+# this function exists to prevent. The full output stays in `$log` for the
+# diagnostics artifact — this is in ADDITION to the capture, never instead of it.
+#
+# `awk` and not `grep`, because `grep` exits 1 when nothing matches and these
+# scripts forbid `|| true`; `awk` always exits 0 and can say so itself.
+# ---------------------------------------------------------------------------
+apple_show_failure() {
+  local label="$1" log="$2"
+
+  echo "::group::FAILED: $label — the diagnostic, repeated"
+  if [ -s "$log" ]; then
+    echo "--- lines matching a diagnostic pattern, from $log ---"
+    # The `(^|[^a-z])` prefix is what keeps `Compiling thiserror v2.0.20` out of
+    # a list that is supposed to be only the reasons the step failed.
+    awk '
+      tolower($0) ~ /(^|[^a-z])(error|fatal|panicked|cannot find|could not compile|undefined symbol|unbound variable|no such file|not installed|linker command failed|ld: )/ {
+        print; matched++
+      }
+      END {
+        if (!matched)
+          print "(nothing matched; the tail below and the diagnostics artifact carry the rest)"
+      }
+    ' "$log" | tail -n 100
+    echo "--- last 40 lines of $log ---"
+    tail -n 40 "$log"
+  else
+    echo "(the step produced NO output at all; $log is empty or absent)"
+  fi
+  echo "::endgroup::"
+}
+
+# ---------------------------------------------------------------------------
+# One build step: grouped, streamed, CAPTURED, and explained when it fails.
+#
+#   apple_build_step "<label>" "<log>" <command> [args...]
+#
+# `tee` rather than a plain redirect, so a PASSING run still shows progress live
+# and a reader is not left watching a silent runner for two minutes. The status
+# returned is the STEP's, taken from `PIPESTATUS`, never `tee`'s — which is
+# always 0 and would turn every failure into a pass.
+#
+# There is no `|| true`: a caller that wants to continue past a failure has to
+# say so with its own `||`, in the open.
+# ---------------------------------------------------------------------------
+apple_build_step() {
+  local label="$1" log="$2"
+  shift 2
+  local rc=0
+
+  mkdir -p "$(dirname "$log")"
+  echo "::group::$label"
+  set +e
+  "$@" 2>&1 | tee "$log"
+  rc=${PIPESTATUS[0]}
+  set -e
+  echo "::endgroup::"
+
+  if [ "$rc" -ne 0 ]; then
+    apple_show_failure "$label (exit $rc)" "$log"
+  fi
+  return "$rc"
+}
+
+# ---------------------------------------------------------------------------
 # The transitions a suite actually observed, as a JSON array.
 #
 # READ OUT OF THE TEST'S OWN OUTPUT, never written by the caller. A script that

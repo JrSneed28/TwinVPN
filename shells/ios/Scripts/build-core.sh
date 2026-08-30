@@ -81,8 +81,20 @@ elif [ -n "$FEATURES" ]; then
 fi
 
 echo "==> cargo build twinvpn-ffi --target $TARGET --profile $PROFILE ${FEATURE_ARGS[*]:-(full)}"
+# `${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"}` and NOT a bare `"${FEATURE_ARGS[@]}"`.
+#
+# macOS ships bash 3.2 as /bin/bash, and `/usr/bin/env bash` finds it on a
+# GitHub `macos-26` runner. In every bash before 4.4, expanding an EMPTY array
+# under `set -u` is an "unbound variable" error — so on Linux (bash 5) this line
+# was fine and on the runner it killed BOTH `full` builds outright:
+#
+#   shells/ios/Scripts/build-core.sh: line 84: FEATURE_ARGS[@]: unbound variable
+#
+# Neither `libtwinvpn_core.a` was ever produced, `ci-ios.sh` set compiled=false,
+# and the job refused (run 33286355061). The `[@]+` form expands to nothing when
+# the array is empty and to the elements otherwise, on 3.2 and on 5.x alike.
 ( cd "$REPO/core" && cargo build --locked -p twinvpn-ffi \
-    --profile "$PROFILE" --target "$TARGET" "${FEATURE_ARGS[@]}" )
+    --profile "$PROFILE" --target "$TARGET" ${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"} )
 
 # `--profile dev` writes to `debug/`; every other profile writes to its own
 # name. The target directory itself is asked for rather than assumed: this

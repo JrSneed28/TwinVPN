@@ -189,6 +189,17 @@ SCHEME="TwinVPNBridge"
 RESULT_BUNDLE="$LOGDIR/TwinVPNBridgeTests.xcresult"
 TEST_CMD="xcodebuild test -project shells/macos/TwinVPN.xcodeproj -scheme $SCHEME -destination platform=macOS"
 
+# The Rust targets §11.9 row 5 needs. `rustup target add` is idempotent.
+#
+# BOTH, and this is not optional: row 5 ships universal 2, `build-bridge.sh`
+# builds `aarch64-apple-darwin` and `x86_64-apple-darwin` and `lipo`s them, and a
+# `macos-26` runner is arm64 and installs only its own host target. Run
+# 33286355061 is what that costs — the arm64 slice built in 68 seconds and the
+# x86_64 one died on the first crate with
+# `error[E0463]: can't find crate for core … the x86_64-apple-darwin target may
+# not be installed`.
+rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null
+
 # --- 1. compile the shared core for this target -----------------------------
 #
 # ADR-0018 §11.9 row 5 is universal 2, so BOTH slices are built. This is the
@@ -196,13 +207,17 @@ TEST_CMD="xcodebuild test -project shells/macos/TwinVPN.xcodeproj -scheme $SCHEM
 # `full` profile: `make cross-check` can only reach `core-lite` on Linux,
 # because `ring` (via twinvpn-cp-client -> quinn -> rustls) needs an Apple SDK.
 # So a failure here is genuinely new information.
-echo "::group::compile the shared core (twinvpn-bridge, universal 2, release)"
-if "$SHELL_DIR/Scripts/build-bridge.sh" --profile release; then
+#
+# Through `apple_build_step`, so the output is captured for the diagnostics
+# artifact AND the compiler's own diagnostic is echoed outside the group when
+# the build fails — see `apple_show_failure`'s header in ci-common-apple.sh.
+if apple_build_step "compile the shared core (twinvpn-bridge, universal 2, release)" \
+     "$LOGDIR/build-core.log" \
+     "$SHELL_DIR/Scripts/build-bridge.sh" --profile release; then
   compiled=true
 else
-  notes="the shared core did not compile for aarch64-apple-darwin / x86_64-apple-darwin"
+  notes="the shared core did not compile for aarch64-apple-darwin / x86_64-apple-darwin; the diagnostic is echoed above and the whole log is in build/ci/logs/macos/build-core.log"
 fi
-echo "::endgroup::"
 
 # --- 1b. the size budget, which R-32 makes a blocker ------------------------
 if [ "$compiled" = true ]; then
@@ -228,6 +243,8 @@ if [ "$compiled" = true ]; then
   set -e
   echo "::endgroup::"
   if [ "$native_rc" -ne 0 ]; then
+    apple_show_failure "native macOS lifecycle test (exit $native_rc)" \
+      "$LOGDIR/lifecycle-native.log"
     notes="${notes:+$notes; }the native macOS lifecycle test failed; see build/ci/logs/macos/lifecycle-native.log"
     exit_code=$native_rc
   fi
@@ -246,8 +263,18 @@ fi
 # in the privileged job and not here.
 if [ "$compiled" = true ]; then
   echo "::group::xcodegen generate"
-  ( cd "$SHELL_DIR" && xcodegen generate )
+  set +e
+  ( cd "$SHELL_DIR" && xcodegen generate ) 2>&1 | tee "$LOGDIR/xcodegen.log"
+  gen_rc=${PIPESTATUS[0]}
+  set -e
   echo "::endgroup::"
+  # Fatal — there is no project to build — but the generator's own complaint is
+  # echoed outside the group first. Before this, `set -e` killed the script
+  # mid-group and the reason stayed folded away.
+  if [ "$gen_rc" -ne 0 ]; then
+    apple_show_failure "xcodegen generate (exit $gen_rc)" "$LOGDIR/xcodegen.log"
+    exit "$gen_rc"
+  fi
 
   echo "::group::build TwinVPN.app + TwinVPNTunnel.systemextension"
   set +e
@@ -265,6 +292,8 @@ if [ "$compiled" = true ]; then
   if [ "$build_rc" -eq 0 ]; then
     linked=true
   else
+    apple_show_failure "build TwinVPN.app + TwinVPNTunnel.systemextension (exit $build_rc)" \
+      "$LOGDIR/build-products.log"
     notes="${notes:+$notes; }the system extension did not link the shared core; see build/ci/logs/macos/build-products.log"
     exit_code=$build_rc
   fi
@@ -297,6 +326,7 @@ if [ "$linked" = true ]; then
     shutdown=true
     exit_code=${exit_code:-0}
   else
+    apple_show_failure "XCTest ($SCHEME, exit $test_rc)" "$LOGDIR/xctest.log"
     notes="${notes:+$notes; }the XCTest bundle failed; see build/ci/logs/macos/xctest.log"
     exit_code=$test_rc
   fi
@@ -352,6 +382,8 @@ cat > "$EVIDENCE" <<JSON
   "test_command": "$TEST_CMD",
   "test_exit_code": $exit_code,
   "artifacts": [
+    "build/ci/logs/macos/build-core.log",
+    "build/ci/logs/macos/xcodegen.log",
     "build/ci/logs/macos/lifecycle-native.log",
     "build/ci/logs/macos/build-products.log",
     "build/ci/logs/macos/xctest.log",
