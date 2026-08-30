@@ -46,12 +46,36 @@
 
 import Foundation
 import TwinVPNCore
+// `UIDevice`, for `PlatformContext.current()` at the bottom of this file. It was
+// missing: `import Foundation` does not vend UIKit, and neither does
+// `TwinVPNCore`, so `UIDevice.current.userInterfaceIdiom` named nothing.
+import UIKit
 
 @MainActor
 final class CoreLite {
     static let shared = CoreLite()
 
-    private var instance: OpaquePointer?
+    // MARK: - the `tw_core` instance, and why there is not one yet
+    //
+    // ADR-0019 X3(5) and ADR-0016 PS-24 both describe this process as hosting a
+    // `core-lite` instance, and `twinvpn-ffi` exports the whole `twinvpn.h`
+    // surface in the `core-lite` profile as well as in `full` — its own manifest
+    // says so: "F-1 makes the ABI a permanent obligation, so the surface is the
+    // same either way; what differs is which core sits behind it." So
+    // `tw_core_create` is linkable here and `CoreInstance.swift` in the extension
+    // is the working model for how to call it.
+    //
+    // **Nothing in the app submits to it yet, so it is not created.** The two
+    // members that would — `verifySignedDocuments` and `assembleBundle` — need an
+    // operation that ADR-0017 §11.9's catalogue does not contain; see
+    // `ContractCourier.swift` for the full finding. An instance created here
+    // today would be a handle nothing holds a conversation with, and F-6 would
+    // oblige a serial queue and a drain thread to guard it — machinery for a
+    // conversation that cannot happen. It is left absent, and named, rather than
+    // built as scaffolding.
+    //
+    // Everything below this line is F-10, which is INSTANCE-FREE by construction,
+    // and the MI request/response codec, which is bytes.
 
     // MARK: - rendering (F-10, instance-free)
 
@@ -99,6 +123,100 @@ final class CoreLite {
                          evidence: [:],
                          locale: Locale.current.identifier,
                          platformContext: PlatformContext.current()).summary
+    }
+
+    /// The protection indicator's sentence.
+    ///
+    /// ADR-0015 §11.6 rule 1: the indicator is "a PURE FUNCTION of the most
+    /// recent assertion, NEVER of the agent's belief" — so every input is a field
+    /// of the assertion and nothing here consults any other state.
+    ///
+    /// CB-4 splits the work: the SHELL picks which condition it is rendering (a
+    /// presentation choice, the same one `StatusView` already makes when it asks
+    /// for `ui.protection.unknown` on an absent assertion), and the CORE resolves
+    /// that into a sentence. LT-3a's rule — variant selection "made in core from
+    /// `platform_ctx`, never a shell choosing among returned keys" — is about
+    /// choosing among the keys a render RETURNED, which this does not do.
+    ///
+    /// Both families travel as evidence because ADR-0015 §11.6 requires the
+    /// assertion "for BOTH address families": a render that saw only one could not
+    /// say "v4 is protected and v6 is not", which is ADR-0010 R1's forbidden
+    /// asymmetry going unreported.
+    func renderProtection(_ assertion: ProtectionAssertion) -> String {
+        renderDiagnostic(
+            reasonCode: "ui.protection.\(assertion.state.rawValue)",
+            evidence: [
+                "family_v4_protected": String(assertion.familyV4Protected),
+                "family_v6_protected": String(assertion.familyV6Protected),
+                // MI-16's stamp, carried so the render can say how old the fact
+                // is. The freshness JUDGEMENT is the core's; this is the input.
+                "as_of_ms": String(assertion.asOfMillis),
+            ],
+            locale: Locale.current.identifier,
+            platformContext: PlatformContext.current()).summary
+    }
+
+    // MARK: - the management interface, as a client of the extension
+    //
+    // ADR-0017 §11.2.1's channel: `NETunnelProviderSession.sendProviderMessage`,
+    // request/response, app-initiated, only while the session is connected. The
+    // CONTRACT is not a subset — "same operations, same scopes, same schema, same
+    // reason codes" — so these are §11.9 operations in §11.3 envelopes, built by
+    // the one `MIFrame` in `Sources/TwinVPNShared`, which the extension also
+    // compiles. `ManagementClient` moves the bytes; it never builds or reads one.
+
+    /// `status.get`'s request.
+    ///
+    /// §11.9's first row: "Derived `TwinNet`-scope `ConnectionState` …
+    /// enforcement mode, `ProtectionAssertion` + its freshness". Read-only,
+    /// `mgmt.status`, no parameters and no `if_version`.
+    func makeStatusRequest() -> Data { MIFrame.request("status.get") }
+
+    /// `diag.log.tail`'s request — the provider's bounded Tier-0 tail.
+    ///
+    /// ADR-0022 LC-17 leaves the provider "diagnostic ring beyond bounded 64 KB
+    /// tail"-free and puts assembly in this process; this is the ask for the tail
+    /// the provider does hold.
+    ///
+    /// **§11.9 gives this row a `since` parameter and none is sent, because none
+    /// can be honestly encoded from here** — `params` is F-8 bytes produced by the
+    /// core's own encoder, and this shell has no encoder for them (see the note in
+    /// `DiagnosticsView`'s partner finding). It is submitted as the whole tail;
+    /// `twinvpn-core`'s `dispatch::disposition` refuses the operation today with
+    /// `STORE.CUSTODY_DEGRADED` regardless, so the frame is what is being pinned
+    /// here, not a working read.
+    func makeRingTailRequest() -> Data { MIFrame.request("diag.log.tail") }
+
+    /// One `status.get` response, decoded.
+    ///
+    /// The ENVELOPE decode is normative and is `MIFrame`/`MIResponse`'s:
+    /// `twinvpn.h` fixes the 4-byte big-endian prefix and the UTF-8 JSON
+    /// `MgmtEnvelope`, and `body.kind` is the discriminator.
+    ///
+    /// **The RESULT decode is not, and this is a stated limitation rather than a
+    /// silent assumption.** `Response::result` is `Vec<u8>` — F-8 bytes whose
+    /// encoding belongs to the operation. `twinvpn-core` encodes its own results
+    /// with `prost`; `StatusSnapshot` is a JSON `Decodable` declared by this shell,
+    /// and it is the same shape `StatusRecord.read()` already requires of the App
+    /// Group record, so within this shell there is exactly one spelling rather
+    /// than two. What does NOT yet exist is a provider that answers
+    /// `sendProviderMessage` at all — `PacketTunnelProvider.handleAppMessage`
+    /// returns `nil` today — so no byte stream has ever met this decoder.
+    ///
+    /// It FAILS CLOSED, which is the property that matters until it does: a
+    /// response this build cannot read yields `nil`, `ManagementClient` leaves
+    /// `snapshot` unset, and ADR-0015 O-18's direction — "an unrenewed assertion →
+    /// the indicator becomes UNKNOWN, never PROTECTED" — is what the view already
+    /// does with an absence. A wrong guess here shows UNKNOWN; it cannot show
+    /// PROTECTED.
+    func decodeStatus(_ response: Data) -> StatusSnapshot? {
+        guard let envelope = MIResponse.decode(response), envelope.ok else {
+            // `ok == false` carries a registered code, not a snapshot. The code is
+            // the channel's to report and the core's to render; there is no
+            // partial snapshot to salvage from a refusal.
+            return nil
+        }
+        return try? JSONDecoder().decode(StatusSnapshot.self, from: envelope.result)
     }
 }
 

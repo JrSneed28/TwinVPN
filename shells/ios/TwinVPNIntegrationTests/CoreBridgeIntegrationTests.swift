@@ -140,13 +140,21 @@ private func productionHostVTable() -> tw_host_vtable {
 /// as the Unix socket, the named pipe and XPC carry it (MI-20: one contract,
 /// several carriages).
 ///
-/// This deliberately duplicates `Sources/TwinVPNProvider/CoreProtocol.swift`'s
-/// `MIFrame`/`CoreCommand`, because an app-extension target cannot be linked
-/// into a test bundle and there is no framework target to share. The duplication
-/// is a real cost and it is named rather than hidden: if `CoreProtocol.swift`
-/// and this file ever disagree about the frame, the core rejects one of them
-/// with `PROTO.MALFORMED_MESSAGE` and the suite goes red, which is the failure
-/// mode worth having.
+/// This deliberately duplicates `Sources/TwinVPNShared/MIWire.swift`'s `MIFrame`
+/// and `Sources/TwinVPNProvider/CoreProtocol.swift`'s `CoreCommand`, because an
+/// app-extension target cannot be linked into a test bundle and there is no
+/// framework target to share. The duplication is a real cost and it is named
+/// rather than hidden: if `MIWire.swift` and this file ever disagree about the
+/// frame, the core rejects one of them with `PROTO.MALFORMED_MESSAGE` and the
+/// suite goes red, which is the failure mode worth having.
+///
+/// **The frame half of that cost is now removable.** `MIFrame` moved out of the
+/// extension target and into `Sources/TwinVPNShared`, which is a SOURCE LIST and
+/// not a framework — so this bundle can list that directory in `project.yml` and
+/// delete the `request` below. It is left as-is in the change that made the move,
+/// because taking it would edit a suite that produces the `build/ci/evidence`
+/// link/run record, and that belongs in its own reviewed change rather than as a
+/// side effect of one.
 private enum Frame {
     static func request(_ operation: String, params: [UInt8] = []) -> Data {
         let object: [String: Any] = [
