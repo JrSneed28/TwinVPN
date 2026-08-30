@@ -158,3 +158,40 @@ struct DiagnosticView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 }
+
+/// Part 3 of the diagnostic: what to do, and — where the core supplied one — the
+/// deep link that does it.
+///
+/// # This view makes exactly one decision, and it is a presentation one
+///
+/// LT-3a: the choice of WHICH next-action variant applies is "made in core from
+/// `platform_ctx`, never a shell choosing among returned keys", and LT-3's iOS
+/// row is what the core is choosing between — `App-prefs:General&path=VPN`
+/// "where available; otherwise instructions only". So by the time an action
+/// reaches here the question "is there a link?" has already been answered, and
+/// `NextAction.deepLink` is that answer. The only thing left is whether tapping
+/// opens it, which is CB-4's "presentation" column.
+///
+/// **A missing link is not an error and is not a disabled button.** LT-3's
+/// "otherwise instructions only" means the label alone IS the whole next action
+/// on that variant, so it renders as text. A dead control would tell the user
+/// something is broken when nothing is.
+///
+/// `Link` is SwiftUI's own control for opening a URL and needs no UIKit and no
+/// `UIApplication`. It handles a non-`http` scheme — which `App-prefs:` is —
+/// through the same `openURL` action the environment vends.
+struct NextActionButton: View {
+    let action: NextAction
+
+    var body: some View {
+        if let destination = action.deepLink {
+            Link(action.label, destination: destination)
+        } else {
+            // Instructions only. Still part 3, still rendered in full: ADR-0019
+            // §11.8 requires the FULL three-part diagnostic at every width, and
+            // "a truncated part 2 is an R-33 violation" applies no less to a
+            // dropped part 3.
+            Text(action.label)
+        }
+    }
+}

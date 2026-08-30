@@ -59,6 +59,42 @@
 //  and floor enforcement happen at the writer, never at the courier". So whatever
 //  this app verifies, it does not WRITE: it returns the verified result over
 //  ADR-0017 and the provider commits.
+//
+//  ===========================================================================
+//  BLOCKED: THE THREE OPERATIONS THIS FILE NEEDS ARE NOT IN THE CATALOGUE
+//  ===========================================================================
+//
+//  `makeFetchRequest`, `verifySignedDocuments` and `makeCommitRequest` are NOT
+//  implemented in `CoreLite`, and this file therefore does not compile. That is
+//  deliberate: there is no honest way to write them today, and writing them
+//  anyway would mint a second vocabulary.
+//
+//    * **The fetch and the commit have no operation to name.** ADR-0017 §11.9's
+//      table is the whole catalogue and `twinvpn_mgmt::command::CoreCommand` is
+//      its verbatim mirror ("MI MUST NOT rename, re-shape, merge, split, or
+//      reorder a core command"). Neither contains a row that hands verbatim
+//      signed octets in either direction. `policy.get` returns the EFFECTIVE
+//      `AccessPolicy`/`DNSPolicy` snapshot, not the signed document, and
+//      ADR-0018 §11.14's ADR-0017 row (d) forbids "a method that returns raw
+//      store contents". `twinvpn.h` is explicit about what a name off the
+//      catalogue produces: "a name the catalogue does not contain is
+//      MGMT.OP_UNKNOWN".
+//
+//    * **The gap is a KNOWN, OPEN amendment obligation, not an oversight.**
+//      ADR-0018 §11.14 lists what ADR-0017 still owes, first item: "(a) A method
+//      that hands **verbatim signed octets** to the daemon for verification and
+//      commit (ST-31)." ST-31a then reversed the courier direction without adding
+//      the operation. Until §11.9 carries that row and `CoreCommand` gains it,
+//      this shell has nothing to submit.
+//
+//    * **`verifySignedDocuments` has no ABI path either.** `tw_core_submit`
+//      accepts catalogue operations only, so a local `core-lite` verify is
+//      reachable exactly when the catalogue row above exists — not before.
+//
+//  This is the same class of gap as `PairingView`'s `PairingModel`, and it is
+//  reported the way `CoreProtocol.swift` reports `stopReason` and
+//  `memoryPressure`: named, with the amendment it needs, rather than papered over
+//  with an invented operation name that the core would refuse.
 
 import Foundation
 import os

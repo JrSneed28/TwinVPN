@@ -39,50 +39,25 @@ import TwinVPNCore
 // MARK: - The MI frame
 // ===========================================================================
 
-/// The length-prefixed JSON frame both directions of this ABI carry.
-///
-/// `twinvpn.h` is normative about it: *"a 4-byte BIG-ENDIAN length prefix
-/// followed by that many bytes of UTF-8 JSON … a shell in another language
-/// decodes the JSON and links NOTHING."* This is that decoder and that encoder,
-/// and it is the whole of what this shell knows about the wire.
-enum MIFrame {
-    /// The cap `twinvpn_mgmt::envelope::MAX_ENVELOPE_BYTES` declares.
-    ///
-    /// Checked **before** anything proportional to the declared length is
-    /// allocated: `ownership.md` §6 rule 9 makes an over-cap value a typed
-    /// refusal, "never a truncation, never a pad, never a silent accept".
-    static let maxBytes = 1 << 20
-
-    static let prefixBytes = 4
-
-    /// Wraps a JSON object as a frame.
-    static func encode(_ object: [String: Any]) -> Data? {
-        guard let body = try? JSONSerialization.data(withJSONObject: object),
-              body.count <= maxBytes,
-              let length = UInt32(exactly: body.count) else {
-            return nil
-        }
-        var out = Data(capacity: body.count + prefixBytes)
-        out.append(contentsOf: withUnsafeBytes(of: length.bigEndian, Array.init))
-        out.append(body)
-        return out
-    }
-
-    /// Reads a frame's JSON object.
-    ///
-    /// `nil` for anything malformed. The caller treats that as a frame it
-    /// cannot read rather than as an event that did not happen — the two are
-    /// different, and only the first is safe to ignore.
-    static func decode(_ data: Data) -> [String: Any]? {
-        guard data.count > prefixBytes else { return nil }
-        let declared = data.prefix(prefixBytes).reduce(0) { ($0 << 8) | Int($1) }
-        // The cap, before the slice.
-        guard declared > 0, declared <= maxBytes,
-              data.count >= prefixBytes + declared else { return nil }
-        let body = data.subdata(in: prefixBytes ..< (prefixBytes + declared))
-        return (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
-    }
-}
+// MOVED, to `Sources/TwinVPNShared/MIWire.swift`.
+//
+// `MIFrame` was declared here, in a directory only the EXTENSION target
+// compiles — `project.yml`'s `TwinVPN` target lists `Sources/TwinVPNApp`,
+// `Sources/TwinVPNBridge` and `Sources/TwinVPNShared`, and not this one. The APP
+// needs the identical frame to reach the extension over
+// `NETunnelProviderSession.sendProviderMessage` (ADR-0017 §11.2.1), whose first
+// table row is "full request/response, byte-identical framing".
+//
+// A SECOND COPY IN THE APP WOULD BE THE WRONG FIX. The 4-byte prefix, the
+// endianness, the 1 MiB cap and the envelope's member names are the spelling
+// both processes must agree on, and two declarations of them are two things that
+// can drift. MI-20 — "one contract, two carriages, NEVER two contracts" — is the
+// rule, and a shell that spelled the frame twice would be where a third contract
+// first appeared. `Sources/TwinVPNShared` is already listed by both production
+// targets for exactly this, per `EnforcementProgramme.swift`'s header.
+//
+// No `import` follows from the move: a file under a target's `sources` compiles
+// into that target's own module.
 
 // ===========================================================================
 // MARK: - CoreCommand
@@ -237,24 +212,13 @@ enum CoreCommand {
     static var flush: Data { request("net.down") }
 
     /// One `Request` body in an MI frame.
+    ///
+    /// The envelope itself is `MIFrame.request`'s, in `Sources/TwinVPNShared` —
+    /// one declaration compiled into both targets, so the extension and the app
+    /// cannot spell the same request two ways. This member is kept so that every
+    /// call site above still reads as the operation it submits.
     private static func request(_ operation: String, params: Data = Data()) -> Data {
-        let object: [String: Any] = [
-            "mi_version": 1,
-            "request_id": [],
-            "correlation_id": [],
-            "seq": 0,
-            "idempotency_key": [],
-            "as_of_ms": 0,
-            "body": [
-                "kind": "request",
-                "operation": operation,
-                "params": [UInt8](params),
-            ],
-        ]
-        // A frame that will not encode must not silently become a DIFFERENT
-        // command. The bare-name form is the same operation with no parameters,
-        // which the core still accepts and which is never a different one.
-        return MIFrame.encode(object) ?? Data(operation.utf8)
+        MIFrame.request(operation, params: params)
     }
 }
 
