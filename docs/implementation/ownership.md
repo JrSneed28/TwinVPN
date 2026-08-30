@@ -1207,3 +1207,144 @@ C-12 exists to prevent occurs only on a 16 KiB kernel. **A vacuous pass is
 worse than a red row, because nothing downstream can tell it from a real one.**
 The Android job now hard-fails unless the attached device reports
 `getconf PAGE_SIZE` = 16384 and `arm64-v8a`.
+
+---
+
+## 12. The four hardware rows, replaced — 2026-08-30
+
+**The paragraph immediately above is now wrong in its conclusion, and right in
+every step that led to it.** It ends "all four rows nonetheless stay blocked on
+hardware, and no hosted substitute is honest", and each rejection it lists was
+correct at the time. The ruling that followed is not a correction of the
+reasoning; it is a change to the constraint the reasoning was solving under.
+
+**Ruling (integration lead, 2026-08-30).** The First Implementation Wave gate
+stays evidence-based, and **local or user-owned physical hardware is no longer an
+acceptable dependency for it.** A blocker that can only be closed by someone
+with a machine in a room is a purchasing decision wearing an engineering
+costume, and three of the four rows had been open on that basis alone.
+
+Each row is replaced by a remotely executable, environment-attested probe. Every
+one of them is **stricter** than the row it replaces, not weaker.
+
+| Was | Is | Why the substitution is honest |
+|---|---|---|
+| `windows-privileged` on a Windows rig restored by snapshot | `windows-killswitch` on an **Azure L1 controller** driving a **disposable nested Hyper-V guest** over PowerShell Direct | The rig existed because a correct fail-closed run leaves the machine off the network (CB-6). The guest is destroyed per run, so the snapshot discipline someone had to keep is gone — and the L1 runner is outside the filters, so correct product behaviour can no longer look like flaky infrastructure. |
+| `macos-privileged` on a Mac mini | `macos-sysext` **plus** `macos-signature` on an **AWS EC2 Mac** | EC2 Mac is the only Mac host exposing SIP configuration through an API, which is what developer mode needs. And the ONE row became TWO: developer mode accepts an extension a customer's Mac would refuse, so while both claims shared an evidence file a green lifecycle read as a verified signature. |
+| `ios-device` on a provisioned iPhone | `ios-corellium` on a **non-jailbroken Corellium virtual iPhone** | The 2026-08-30 survey closed iOS because every commercial farm re-signs the IPA and strips `packet-tunnel-provider`. Corellium does not re-sign. The survey did not consider it. |
+| `android-device` on a 16 KiB-page phone | `android-16k` on **Google's official 16 KB emulator image** | The survey's Android conclusion — no farm hands over a 16 KiB kernel — is still true and now irrelevant. `getconf PAGE_SIZE` asks the RUNNING kernel, so it cannot tell an emulated 16 KiB kernel from a physical one; that is what makes the substitution sound rather than convenient. The refusal is unchanged: a 4096 still hard-fails. |
+
+### 12.1 Two mechanisms neither the old rows nor G-22 had
+
+* **The environment attestation.** Every boolean a platform job writes describes
+  what the TEST did; none describes whether the MACHINE was capable of the
+  claim. `report.py`'s `PREREQUISITES` table names, per criterion, the
+  `environment` keys that must have been measured and must hold — and checks
+  them **before** any test result is read. An unmeasured prerequisite fails
+  exactly as a false one does, because absence is what a job that forgot
+  produces. `build/acceptance/test_report_prerequisites.py` is the runnable
+  proof, one case per hole, including the case this whole mechanism exists for:
+  *every test green, every boolean true, and a 4096-byte page.*
+* **The external leak oracle.** No criterion that makes an egress claim is
+  adjudicated by the platform under test. `lab/twinoracle` runs off-device and
+  is reachable only by a packet that actually left; `first-wave-acceptance`
+  fetches the verdict **from the oracle**, not from anything a platform job
+  uploaded. An oracle verdict of `INCONCLUSIVE` — what it returns when the
+  session never proved it could observe the device — is not a pass.
+
+### 12.2 What this does to G-22 and G-23
+
+Both are **closed by removal of their mechanism**, which is better than the
+fixes they received.
+
+* **G-22** was "the four privileged rows could not be flipped by any machine",
+  and its fix was a cross-run artifact import that re-checked each file's own
+  commit. A cross-run import is a place where evidence from a different run can
+  arrive; the re-check existed precisely because the mechanism could not
+  guarantee otherwise. Every criterion now runs in
+  `first-implementation-wave-gate.yml`, so `actions/download-artifact` reads
+  this run and only this run, and the import is deleted.
+* **G-23** was "the privileged workflow could never complete a run", and its fix
+  was a time-based join: privileged at 05:00, gate at 07:00, with the warning
+  that "moving either cron breaks the join silently". There is one workflow and
+  one nightly now. Nothing to join.
+
+The self-hosted jobs that remain (`windows-killswitch`, `macos-sysext`,
+`macos-signature`) are gated on repository variables rather than on `needs:`
+alone. An unregistered runner makes them **skip**, not queue for twenty-four
+hours — so the gate still returns a verdict promptly, and the skipped job wrote
+no evidence, so its row reads `NOT-EXECUTED` and counts against eligibility
+exactly as a failure does.
+
+### 12.3 The iOS profile-removal criterion was wrong and is corrected
+
+The wave's iOS row required TwinVPN to keep blocking after the user removes the
+VPN configuration. **No implementation could have satisfied that honestly.** On
+consumer iOS the configuration *is* TwinVPN's authority to intercept traffic;
+removing it revokes that authority, and no API at any entitlement level
+available outside MDM continues filtering afterwards. A product claiming
+otherwise would be claiming a capability the OS does not grant, and the only way
+to pass a test of it would be to make the test lie.
+
+The corrected consumer criterion, `IOS-PROFILE-REMOVAL-HONESTY`, is about
+honesty rather than enforcement: TwinVPN reports NOT PROTECTED, a green shield
+is impossible, connected state is cleared, the user gets an actionable
+protection-lost state, and **no continued kill-switch claim is made** —
+`blocked` being as wrong as `protected`, since both assert TwinVPN is still
+deciding what leaves. It carries no leak-oracle session and `report.py` requires
+none: egress after removal is expected and correct.
+
+`IOS-SUPERVISED-ALWAYS-ON` is the stronger criterion for supervised/managed
+devices, where the payload cannot be removed and "zero egress, ever" is both
+true and testable. It is non-required (a criterion for an unbuilt product mode
+must not hold the wave) and reads its own evidence file pinned to
+`product_mode: supervised`, while the consumer file is pinned to `consumer`, so
+a consumer pass can never be recorded as the supervised one.
+
+The specification is
+`shells/ios/TwinVPNTests/ProfileRemovalAcceptanceTests.swift`; the deployment
+detail for all five criteria is
+[`remote-acceptance-infrastructure.md`](remote-acceptance-infrastructure.md).
+
+### 12.4 The probes were hardened, and five of the holes were in the machinery — 2026-08-30
+
+§12.1 claimed two mechanisms the old rows did not have. Both were real and both
+were incomplete, and the pass that hardened them found the same defect five more
+times: **a check that runs, returns true, and is about the wrong thing.** That is
+worth recording as a pattern rather than as five incidents, because it is what
+this gate is for and it kept recurring inside the gate itself.
+
+* A `SILENCE` phase with zero arrivals passed even if the oracle's listeners were
+  dead throughout. An independent sentinel now has to prove continuity across
+  every silent window, and a family with zero beats is not continuous.
+* The sentinel's own token was handed to the device under test. A DUT beating it
+  from its own address emits exactly the packet the kill switch should stop, and
+  it would have been filed as proof the oracle was alive.
+* **No lane could host its own sentinel** — not the EC2 Mac, which is the DUT;
+  not the iOS controller, which runs the probe; and not the Windows L1 host,
+  whose guest switch NATs through L1's own address. All three had been planned
+  that way. The sentinel is now a standing process on a separate machine, which
+  nobody has provisioned.
+* The Android per-ABI alignment check scraped `readelf`, whose GNU build wraps
+  each LOAD across two lines. Against real libraries it found zero LOAD rows —
+  **which reads identically to "no libraries."**
+* `PageSize16kTest` proved the underlay never contains our own VPN interface and
+  logged it, and the CI script scraped only the JNI line. The assertion passed
+  and nothing graded it.
+* An `abi_load_alignment` map of `{"x86_64": {"aligned": true}}` satisfies a
+  naive "every value true" check while being a green row about the one ABI nobody
+  ships to phones. `arm64-v8a` is now required in the map by name.
+
+Two adjudication rules were tightened in the same direction. `null` for
+`*_identity_distinct` is accepted only where a table says that family is out of
+play, and `true` is refused there as well — it is the value someone writes to
+green a row about a leg that was never exercised. And `probe_host` must be
+`device`: a controller-side probe produces an oracle report that is internally
+consistent and entirely about the wrong machine.
+
+**Nothing here moved a row.** Eligibility is unchanged at 5 of 27, and every
+platform row is still `NOT-EXECUTED` — the four hardware rows §12 replaced are
+now blocked on cloud infrastructure instead of physical hardware, which is a
+better blocker but is still a blocker. What changed is that the rows can no
+longer go green dishonestly when someone does provision it. The checklist is
+[`remote-acceptance-provisioning.md`](remote-acceptance-provisioning.md).

@@ -1,5 +1,22 @@
 <#
 .SYNOPSIS
+  SUPERSEDED 2026-08-30 — kept for the local-hardware path only.
+
+  The First Implementation Wave gate no longer depends on this rig. The
+  `WINDOWS-WFP-KILLSWITCH` criterion now runs on an Azure self-hosted L1
+  controller that builds a DISPOSABLE nested guest per run and destroys it —
+  `scripts/twinvpn-azure-l1.ps1`, driven by the `windows-killswitch` job in
+  `.github/workflows/first-implementation-wave-gate.yml`.
+
+  The difference that matters: this script's guest is RESTORED between runs from
+  a golden checkpoint, and the restore is a discipline someone has to keep. The
+  controller's guest is created from a differencing disk and deleted, so the
+  golden image is never written to and there is nothing to keep.
+
+  These two scripts still work and are still the fastest way to reproduce a
+  Windows privileged run on a machine you own. They are no longer part of the
+  gate.
+
   Provision the Hyper-V guest and register the GitHub Actions runner that
   carries `[self-hosted, Windows, twinvpn-vpn-lifecycle]`. Run ELEVATED INSIDE
   the guest.

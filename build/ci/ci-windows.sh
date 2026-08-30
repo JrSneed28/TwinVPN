@@ -47,6 +47,13 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# `twinvpn_run_attempt_json`, `twinvpn_sha256`, `twinvpn_verify_digest` and
+# `twinvpn_digest_json`. Sourced rather than reimplemented per script: the
+# sha256 command differs on every host this repository runs on, and a digest
+# helper that silently produced nothing on one of them would bind the evidence
+# to no bytes at all.
+# shellcheck disable=SC1091
+. "$REPO/build/ci/digest.sh"
 EVIDENCE="$REPO/build/ci/evidence/windows.json"
 LOGDIR="$REPO/build/ci/logs/windows"
 mkdir -p "$(dirname "$EVIDENCE")" "$LOGDIR"
@@ -123,8 +130,10 @@ if [ "$do_cleanup" = true ]; then
   # or reboot step, which is why the job fragment requires one.
   echo
   echo "NOTE: persistent WFP filters installed by a privileged run are CB-6"
-  echo "      survivors BY DESIGN and are not removed here. The rig's snapshot"
-  echo "      restore is what removes them; see build/ci/jobs/windows-privileged-lifecycle.yml."
+  echo "      survivors BY DESIGN and are not removed here. DESTROYING THE GUEST"
+  echo "      is what removes them: the kill-switch criterion runs inside a"
+  echo "      throwaway nested Hyper-V guest that scripts/twinvpn-azure-l1.ps1"
+  echo "      deletes on every exit path, so nothing needs cleaning between runs."
   exit 0
 fi
 
@@ -335,6 +344,8 @@ cat > "$EVIDENCE" <<JSON
   "runner_kind": "$runner_kind",
   "privileged": $do_privileged,
   "github_run_id": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"$GITHUB_RUN_ID\"" || echo null),
+  "github_run_attempt": $(twinvpn_run_attempt_json),
+  "artifact_digests": {},
   "github_run_url": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/$GITHUB_RUN_ID\"" || echo null),
   "commit": "$(cd "$REPO" && git rev-parse HEAD)",
   "toolchain": {

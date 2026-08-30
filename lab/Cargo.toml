@@ -9,7 +9,7 @@
 # THIS MANIFEST IS OWNED BY THE INTEGRATION LEAD.
 [workspace]
 resolver = "2"
-members = ["twinlab", "twinlab-scenarios", "twinnet", "twinsim"]
+members = ["twinlab", "twinlab-scenarios", "twinnet", "twinoracle", "twinsim"]
 
 [workspace.package]
 version      = "0.1.0"
@@ -28,6 +28,7 @@ repository   = "https://github.com/twinvpn/twinvpn"
 # still wins for resolution; the `version` is what an auditor reads.
 twinlab           = { version = "0.1.0", path = "twinlab" }
 twinnet           = { version = "0.1.0", path = "twinnet" }
+twinoracle        = { version = "0.1.0", path = "twinoracle" }
 twinsim           = { version = "0.1.0", path = "twinsim" }
 twinvpn-types     = { version = "0.1.0", path = "../core/crates/twinvpn-types" }
 twinvpn-env       = { version = "0.1.0", path = "../core/crates/twinvpn-env", features = ["test-support"] }

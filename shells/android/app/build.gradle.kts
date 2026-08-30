@@ -35,8 +35,45 @@ android {
     // device-to-device transfer. Both sections, or the exclusion is half done.
     // The rules themselves are in `res/xml/`.
 
+    // THE RELEASE SIGNING CONFIG EXISTS SO THAT `ANDROID-16K-PAGE-SIZE` CAN
+    // INSTALL THE PRODUCTION APK.
+    //
+    // Without one, `assembleRelease` produces `app-release-unsigned.apk`, which
+    // `adb install` refuses -- so the 16 KiB criterion used to be discharged by
+    // installing the DEBUG build, which is a different artifact: unminified, not
+    // shrunk, and packaged by a different code path. C-12's alignment claim is
+    // about the shipped `.so` inside the shipped APK, and only the release build
+    // is that.
+    //
+    // NO FALLBACK TO THE DEBUG KEYSTORE. A silent fallback would make "the
+    // production APK was installed" true in the evidence and false on the disk,
+    // which is the exact class of quiet substitution the acceptance gate exists
+    // to refuse. Absent properties leave `signingConfigs` empty, `assembleRelease`
+    // produces an unsigned APK as before, and `build/ci/ci-android.sh --pagesize16k`
+    // fails loudly naming the four properties.
+    val releaseStore = providers.gradleProperty("twinvpn.release.storeFile").orNull
+    if (releaseStore != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseStore)
+                storePassword = providers.gradleProperty("twinvpn.release.storePassword").get()
+                keyAlias = providers.gradleProperty("twinvpn.release.keyAlias").get()
+                keyPassword = providers.gradleProperty("twinvpn.release.keyPassword").get()
+            }
+        }
+    }
+
+    // Which build type the instrumented suite is compiled and signed against.
+    // `debug` by default, so nothing about a developer's day changes; the 16 KiB
+    // job passes `release` so that the test APK is signed by the same key as the
+    // production APK, which `adb install` requires of a test package.
+    testBuildType = providers.gradleProperty("twinvpn.testBuildType").getOrElse("debug")
+
     buildTypes {
         release {
+            if (releaseStore != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

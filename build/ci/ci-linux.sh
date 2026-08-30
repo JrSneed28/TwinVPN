@@ -35,6 +35,13 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# `twinvpn_run_attempt_json`, `twinvpn_sha256`, `twinvpn_verify_digest` and
+# `twinvpn_digest_json`. Sourced rather than reimplemented per script: the
+# sha256 command differs on every host this repository runs on, and a digest
+# helper that silently produced nothing on one of them would bind the evidence
+# to no bytes at all.
+# shellcheck disable=SC1091
+. "$REPO/build/ci/digest.sh"
 EVIDENCE="$REPO/build/ci/evidence/linux.json"
 LOGDIR="$REPO/build/ci/logs/linux"
 mkdir -p "$(dirname "$EVIDENCE")" "$LOGDIR"
@@ -140,6 +147,8 @@ cat > "$EVIDENCE" <<JSON
   "runner_kind": "$([ -n "${GITHUB_ACTIONS:-}" ] && echo github-hosted || echo local)",
   "privileged": false,
   "github_run_id": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"$GITHUB_RUN_ID\"" || echo null),
+  "github_run_attempt": $(twinvpn_run_attempt_json),
+  "artifact_digests": {},
   "github_run_url": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/$GITHUB_RUN_ID\"" || echo null),
   "commit": "$(cd "$REPO" && git rev-parse HEAD)",
   "toolchain": {

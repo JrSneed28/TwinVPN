@@ -25,6 +25,13 @@
 #                  can. It does NOT activate a NetworkExtension.
 #
 #   --privileged   SELF-HOSTED, SIGNED  -> build/ci/evidence/macos-privileged.json
+#                  NO LONGER PART OF THE ACCEPTANCE GATE. Its claim was split in
+#                  two, because developer-mode activation and production signing
+#                  are different facts and one evidence file made a green
+#                  lifecycle read as a verified signature:
+#                  `ci-macos-sysext.sh`    -> MACOS-SYSEXT-LIFECYCLE
+#                  `ci-macos-signature.sh` -> MACOS-PRODUCTION-SIGNATURE
+#                  Kept: still the way to reproduce a run on a Mac you own.
 #                  privileged: true. The same suite on a runner that is root and
 #                  has the signing identity and entitlements, where
 #                  `tvb_ext_start` succeeds and the full ABI lifecycle runs.
@@ -50,6 +57,13 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# `twinvpn_run_attempt_json`, `twinvpn_sha256`, `twinvpn_verify_digest` and
+# `twinvpn_digest_json`. Sourced rather than reimplemented per script: the
+# sha256 command differs on every host this repository runs on, and a digest
+# helper that silently produced nothing on one of them would bind the evidence
+# to no bytes at all.
+# shellcheck disable=SC1091
+. "$REPO/build/ci/digest.sh"
 SHELL_DIR="$REPO/shells/macos"
 LOGDIR="$REPO/build/ci/logs/macos"
 
@@ -363,6 +377,8 @@ cat > "$EVIDENCE" <<JSON
   "runner_kind": "$([ -n "${GITHUB_ACTIONS:-}" ] && { [ "$PRIVILEGED" = true ] && echo self-hosted || echo github-hosted; } || echo local)",
   "privileged": $PRIVILEGED,
   "github_run_id": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"$GITHUB_RUN_ID\"" || echo null),
+  "github_run_attempt": $(twinvpn_run_attempt_json),
+  "artifact_digests": {},
   "github_run_url": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/$GITHUB_RUN_ID\"" || echo null),
   "commit": "$(cd "$REPO" && git rev-parse HEAD)",
   "toolchain": {

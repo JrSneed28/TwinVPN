@@ -21,6 +21,13 @@ name: First Implementation Wave — acceptance gate
 #   ios-link-run           iOS     "
 #   android-link-run       Android "
 #   linux-link-run         Linux, already PASSing, re-run only as regression
+#
+#   windows-killswitch     WINDOWS-WFP-KILLSWITCH, in a disposable nested guest
+#   android-16k            ANDROID-16K-PAGE-SIZE, on Google's 16 KB emulator
+#   ios-corellium          IOS-NE-FAIL-CLOSED + IOS-PROFILE-REMOVAL-HONESTY
+#   macos-sysext           MACOS-SYSEXT-LIFECYCLE, on an EC2 Mac
+#   macos-signature        MACOS-PRODUCTION-SIGNATURE -- a DIFFERENT claim
+#
 #   first-wave-acceptance  the conjunction, computed from evidence
 #
 # `first-wave-acceptance` is the only job whose verdict means anything on its
@@ -32,14 +39,41 @@ name: First Implementation Wave — acceptance gate
 # leaves failing evidence, and either way the row is not PASS.
 #
 # ===========================================================================
-# WHAT A HOSTED RUNNER CANNOT PROVE
+# WHAT A HOSTED LINK/RUN JOB CANNOT PROVE
 # ===========================================================================
-# A hosted runner proves linking and execution. It does not prove privileged
-# platform behaviour: WFP/driver/service activation on Windows, a signed
-# NetworkExtension on macOS, an on-device packet tunnel on iOS. Those are
-# SEPARATE required jobs on self-hosted runners, below, and they are separate
-# on purpose: a simulator run and a device run are different evidence and this
-# file must not let one stand in for the other.
+# A hosted link/run job proves compiling, linking, loading and invoking. It
+# does not prove privileged platform behaviour: WFP arming on Windows, a real
+# system extension on macOS, a real packet tunnel on iOS, 16 KiB page mapping
+# on Android. Those are SEPARATE jobs with SEPARATE evidence files, and the
+# separation is deliberate -- a simulator run must never stand in for one of
+# them.
+#
+# ===========================================================================
+# EVERY PLATFORM CRITERION IS IN THIS FILE, AND WAS NOT ALWAYS
+# ===========================================================================
+# The four privileged criteria used to live in
+# `first-implementation-wave-privileged.yml`, ran on four PHYSICAL MACHINES,
+# and were imported into this run with `gh run download --commit`. Two problems
+# with that, and only one of them was about hardware:
+#
+#   * a cross-run import is a place where evidence from a different run can
+#     arrive. The import step had to re-check each file's own commit precisely
+#     because the mechanism could not guarantee whose evidence it had. It is
+#     gone: every criterion runs here, and `actions/download-artifact` reads
+#     this run and only this run.
+#   * local or user-owned hardware is no longer an acceptable dependency. Each
+#     criterion is now a remotely executable, ENVIRONMENT-ATTESTED probe --
+#     Azure with a nested guest, Google's 16 KB emulator image, an EC2 Mac,
+#     a Corellium virtual iPhone -- and each carries an `environment` map that
+#     `build/acceptance/report.py` checks BEFORE it reads any test result.
+#
+# AND THE EGRESS CLAIMS ARE ADJUDICATED OFF-DEVICE. A kill-switch criterion
+# cannot be graded by the platform under test: a filter set that was never
+# installed and an extension that died both leave the platform's own status API
+# saying "protected" while packets leave. `lab/twinoracle` runs somewhere the
+# device can only reach by emitting a packet that left it, and
+# `first-wave-acceptance` fetches its verdict FROM THE ORACLE rather than from
+# anything a platform job uploaded.
 # ===========================================================================
 
 on:
@@ -51,15 +85,18 @@ on:
     # looked configured while proving nothing on merge.
     branches: [main, master, 'fix/wave1-final-review-register']
   workflow_dispatch:
-  # TWO HOURS AFTER the privileged workflow's own 05:00 nightly, which is the
-  # whole point of the time: those jobs are allowed 60-75 minutes each on three
-  # physical machines, and this run imports their evidence for the same commit.
-  # Earlier and the import finds nothing; on a commit that moved in between it
-  # correctly finds nothing either. This is the only cadence on which all
-  # twenty-six rows can be decided in one report without a human re-running a
-  # job by hand.
+  # ONE NIGHTLY, DECIDING EVERY ROW.
+  #
+  # There used to be two: 05:00 for the privileged workflow and 07:00 here, two
+  # hours later so this run could import the other's artifacts. The gap was
+  # load-bearing and silent -- move either time and the join breaks with no
+  # error, and a commit that moved in between produced a report with four
+  # permanently NOT-EXECUTED rows.
+  #
+  # Every criterion is in this workflow now, so there is nothing to join and
+  # nothing to schedule around.
   schedule:
-    - cron: '0 7 * * *'
+    - cron: '0 5 * * *'
 
 # Minimal token. Nothing here writes to the repository.
 permissions:
@@ -681,6 +718,545 @@ jobs:
         if: always()
         run: build/ci/ci-android.sh --cleanup
 
+  # =========================================================================
+  # THE FOUR CRITERIA THAT USED TO NEED HARDWARE ON SOMEBODY'S DESK
+  # =========================================================================
+  # They lived in `first-implementation-wave-privileged.yml` and were discharged
+  # by four physical machines: a Windows rig, a Mac mini, an iPhone on a cable,
+  # and a 16 KiB-page Android phone with an unlocked bootloader. That made the
+  # wave's last blockers a purchasing decision.
+  #
+  # They are now remotely executable, and they live HERE -- in the same workflow
+  # as the aggregator that reads them. That is not tidiness. While they were a
+  # separate workflow, `first-wave-acceptance` had to import their artifacts
+  # across runs with `gh run download --commit`, and a cross-run import is a
+  # place where evidence from a DIFFERENT run can arrive: the import had to
+  # re-check each file's own commit precisely because the mechanism could not
+  # guarantee it otherwise. One workflow, one run, one `download-artifact`, and
+  # that whole class of mistake is gone.
+  #
+  # WHAT REPLACED `needs:` FOR THE TWO SELF-HOSTED JOBS. A `needs:` on a job
+  # whose runner label is not registered does not fail -- it QUEUES, for up to
+  # twenty-four hours, and the gate sits pending instead of returning a verdict.
+  # A check that cannot go red is not a gate. So each self-hosted job is gated
+  # on a REPOSITORY VARIABLE that says the rig exists. Unset, the job SKIPS;
+  # `first-wave-acceptance` runs under `always()` and its `needs:` are satisfied
+  # by a skip; no evidence file is produced; and `report.py` reads the row as
+  # NOT-EXECUTED, which counts against Phase 5 eligibility exactly as a failure
+  # does. Immediately, and by name.
+
+  windows-killswitch:
+    name: windows-killswitch
+    # THE L1 CONTROLLER, and it is deliberately not where the test runs.
+    #
+    # An Azure Windows VM on a size with nested virtualization, registered as a
+    # self-hosted runner. It creates a THROWAWAY L2 Hyper-V guest, runs the
+    # kill-switch sequence inside it over PowerShell Direct, takes the evidence
+    # out and destroys the guest.
+    #
+    # The reason is not isolation hygiene. TwinVPN's Windows kill switch
+    # installs PERSISTENT WFP filters and CB-6 requires that shutdown MUST NOT
+    # remove them -- so a CORRECT fail-closed run ends with the machine unable
+    # to reach the network. On the runner itself that severs the runner agent's
+    # connection to GitHub mid-job: the run is lost, no evidence is uploaded,
+    # and correct product behaviour is indistinguishable from flaky
+    # infrastructure. The L1 runner stays outside the filters for the whole run,
+    # and PowerShell Direct is a VMBus channel that survives the guest cutting
+    # itself off.
+    runs-on: [self-hosted, Windows, twinvpn-azure-l1]
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    # Unset the variable and this job skips rather than queues. See the block
+    # above for why that is the honest failure mode.
+    if: ${{ vars.TWINVPN_AZURE_L1_REGISTERED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TWINVPN_ORACLE_URL:   ${{ vars.TWINVPN_ORACLE_URL }}
+      TWINVPN_ORACLE_TOKEN: ${{ secrets.TWINVPN_ORACLE_TOKEN }}
+      # WHERE THE INDEPENDENT HEARTBEAT RUNS. Not started by this job and not
+      # startable by it: the oracle discards any IPv4/IPv6 sentinel beat whose
+      # source address the device was also seen egressing from, and the L2
+      # guest's switch ordinarily NATs it through this L1 host's own address --
+      # so an L1 heartbeat would be device-sourced. It is a standing
+      # `leak-probe.sh sentinel` on a third machine, and this names it.
+      # `ci-windows-killswitch.sh` refuses to run without it.
+      TWINVPN_SENTINEL_HOST: ${{ vars.TWINVPN_SENTINEL_HOST }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      # BEFORE a guest is built. Nested virtualization, the switch, the guest
+      # credential and the oracle configuration are all things whose absence
+      # would otherwise surface twenty minutes later as a message about
+      # something else.
+      - name: preflight
+        run: |
+          scripts\twinvpn-azure-l1.ps1 -Action preflight `
+            -GoldenVhd '${{ vars.TWINVPN_GOLDEN_VHD }}'
+
+      - name: kill-switch sequence in a disposable nested guest
+        run: |
+          scripts\twinvpn-azure-l1.ps1 -Action run `
+            -GoldenVhd   '${{ vars.TWINVPN_GOLDEN_VHD }}' `
+            -RepoPath    '${{ github.workspace }}' `
+            -EvidenceOut '${{ github.workspace }}\build\ci\evidence'
+
+      # STEP 10, AND IT IS NOT ENOUGH THAT THE CONTROLLER SCRIPT ALSO DOES IT.
+      #
+      # `twinvpn-azure-l1.ps1 -Action run` destroys the guest in a `finally`,
+      # which covers a throw. It does NOT cover this job being CANCELLED: a
+      # `timeout-minutes` expiry kills pwsh outright and a `finally` never runs.
+      # The guest that survives that is the worst possible one to leave behind --
+      # it is holding a differencing disk AND it has installed persistent WFP
+      # filters (CB-6), so it is a machine nobody can log into over the network
+      # to clean up, on a runner the next run will try to reuse.
+      #
+      # `-Action destroy` is idempotent and succeeds with no such VM, so this
+      # costs nothing on the normal path.
+      - name: destroy the disposable guest
+        if: always()
+        run: scripts\twinvpn-azure-l1.ps1 -Action destroy
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-windows-killswitch
+          path: build/ci/evidence/windows-killswitch.json
+          # `warn`, not `ignore`. A criterion job that finished without writing
+          # its evidence file is a real defect -- the script did not reach its
+          # own write -- and `ignore` made that indistinguishable from a job that
+          # was never going to produce one. It stays non-fatal because the row is
+          # already going to read NOT-EXECUTED, and a second red here would bury
+          # the first.
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          # `oracle-report.json` is the oracle's own record: source addresses of
+          # OUR OWN beacons, timestamps and counts. No key, no pairing secret,
+          # no token, no tunnel plaintext, no capture.
+          name: diagnostics-windows-killswitch
+          path: build/ci/logs/windows/**
+          if-no-files-found: ignore
+
+  android-16k:
+    name: android-16k
+    # HOSTED. This is the whole point of the change: Google ships an official
+    # 16 KB page-size emulator image, so the criterion no longer needs a Pixel
+    # with an unlocked bootloader and a wiped data partition -- which no device
+    # farm will provide and which made the row undischargeable in the cloud.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: pin the NDK
+        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+
+      # The signing material for the RELEASE-CONFIGURED APK. The criterion
+      # installs the release build, not the debug one, and
+      # `app/build.gradle.kts` gives the release signing config no silent
+      # fallback -- so a run without these fails naming them rather than quietly
+      # installing a debug artifact and recording "release" in the evidence.
+      #
+      # THIS IS AN ACCEPTANCE-ONLY KEYSTORE. It exists so the 16 KiB criterion
+      # can install a release-configured artifact; it is not the Play release
+      # identity and must never sign a shipped build. Nothing below prints,
+      # echoes or logs any of the four values -- the base64 goes straight from
+      # the environment into a file, and the three passwords are handed to
+      # Gradle by the step that runs it.
+      - name: stage the release keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.TWINVPN_RELEASE_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::TWINVPN_RELEASE_KEYSTORE_B64 is not configured; ANDROID-16K-PAGE-SIZE installs the release-configured APK (this is the acceptance-only keystore, never the Play identity) and cannot substitute a debug build"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/signing"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/signing/release.jks"
+          echo "TWINVPN_RELEASE_KEYSTORE=$RUNNER_TEMP/signing/release.jks" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            build/ci/android-target
+          key: fwg-android16k-${{ hashFiles('rust-toolchain.toml', 'core/Cargo.lock', 'shells/android/jni/Cargo.lock', 'shells/android/**/*.gradle.kts', 'shells/android/gradle/libs.versions.toml', 'build/ci/ci-android.sh') }}
+
+      - name: 16 KiB page-size lifecycle on the official emulator image
+        env:
+          TWINVPN_RELEASE_STORE_PASSWORD: ${{ secrets.TWINVPN_RELEASE_STORE_PASSWORD }}
+          TWINVPN_RELEASE_KEY_ALIAS:      ${{ secrets.TWINVPN_RELEASE_KEY_ALIAS }}
+          TWINVPN_RELEASE_KEY_PASSWORD:   ${{ secrets.TWINVPN_RELEASE_KEY_PASSWORD }}
+        # ONE invocation. `--reset` does not stop the run -- it clears the
+        # stale AVD, evidence and logs and then falls through -- so calling the
+        # script twice would build, boot and instrument twice.
+        run: build/ci/ci-android.sh --reset --pagesize16k
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-android-16k
+          path: build/ci/evidence/android-16k.json
+          # `warn`, not `ignore`: a criterion job that finished without
+          # writing its evidence file did not reach its own write, and
+          # that is worth seeing. Non-fatal, because the row already
+          # reads NOT-EXECUTED and a second red would bury the first.
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diagnostics-android-16k
+          path: |
+            build/ci/logs/android/gradle-assemble.log
+            build/ci/logs/android/instrumentation.log
+            build/ci/logs/android/logcat.txt
+            build/ci/logs/android/emulator.log
+            build/ci/logs/android/zipalign.log
+          if-no-files-found: warn
+
+      - name: stop the emulator and remove the packages
+        if: always()
+        run: build/ci/ci-android.sh --cleanup
+
+  ios-corellium:
+    name: ios-corellium
+    # HOSTED, and that surprises people: the device is a CLOUD VIRTUAL iPhONE
+    # driven entirely over Corellium's REST API, so the runner needs curl and
+    # python and nothing else. No Mac, no cable, no provisioning dance on the
+    # runner.
+    #
+    # Corellium rather than a device farm for one reason: AWS Device Farm,
+    # BrowserStack, Sauce Labs and Firebase Test Lab all RE-SIGN the uploaded
+    # IPA, which strips `packet-tunnel-provider` -- so the tunnel cannot start
+    # and the criterion is untestable on every one of them.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    if: ${{ vars.TWINVPN_CORELLIUM_ENABLED == 'true' }}
+    env:
+      CORELLIUM_API_TOKEN:  ${{ secrets.CORELLIUM_API_TOKEN }}
+      CORELLIUM_PROJECT_ID: ${{ vars.CORELLIUM_PROJECT_ID }}
+      TWINVPN_TEAM_ID:      ${{ vars.TWINVPN_TEAM_ID }}
+      TWINVPN_ORACLE_URL:   ${{ vars.TWINVPN_ORACLE_URL }}
+      TWINVPN_ORACLE_TOKEN: ${{ secrets.TWINVPN_ORACLE_TOKEN }}
+      # The standing heartbeat, declared rather than started -- this runner runs
+      # the probe, so a sentinel started here would share its source address and
+      # every beat would be discarded as device-sourced. See
+      # `build/ci/leak-probe.sh`'s header.
+      TWINVPN_SENTINEL_HOST: ${{ vars.TWINVPN_SENTINEL_HOST }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # THE SIGNED IPA IS AN INPUT, NOT A PRODUCT OF THIS JOB.
+      #
+      # Building it needs a Mac with the provisioning profile; re-signing it
+      # here would strip the entitlement and reproduce the exact defect that
+      # rules every commercial farm out. So the release pipeline publishes it
+      # and this job consumes it -- and `ci-ios-corellium.sh` reads the
+      # entitlement out of the archive before uploading anything, so a wrong
+      # artifact fails in one line rather than as a provider that never starts.
+      - name: fetch the signed IPA and verify it against its pinned digest
+        env:
+          IPA_URL: ${{ vars.TWINVPN_SIGNED_IPA_URL }}
+          IPA_TOKEN: ${{ secrets.TWINVPN_SIGNED_IPA_TOKEN }}
+          IPA_SHA256: ${{ vars.TWINVPN_SIGNED_IPA_SHA256 }}
+        run: |
+          if [ -z "$IPA_URL" ]; then
+            echo "::error::TWINVPN_SIGNED_IPA_URL is not configured; this criterion needs the REAL signed build with its NetworkExtension entitlement intact"
+            exit 1
+          fi
+          # THE PIN, AND WHY IT IS NOT OPTIONAL.
+          #
+          # This is the one artifact in the whole gate that crosses a workflow
+          # boundary: the release pipeline builds and signs it, this job consumes
+          # it over HTTPS. So "IOS-NE-FAIL-CLOSED passed" is a claim about
+          # WHICHEVER build that URL happened to serve at the moment of the
+          # fetch. A URL that was rebuilt between the review and the run produces
+          # a perfectly green row about a build nobody can point at, and a
+          # transfer truncated by a proxy produces a red row for a reason that
+          # has nothing to do with the product.
+          #
+          # There is deliberately NO fallback. "No digest was configured, so we
+          # skipped the check" is the failure this exists to remove.
+          if [ -z "$IPA_SHA256" ]; then
+            echo "::error::TWINVPN_SIGNED_IPA_SHA256 is not configured. The IPA is fetched from outside this run, so without a pinned SHA-256 the evidence cannot name which build it is about, and this criterion must not be graded on bytes nobody pinned."
+            exit 1
+          fi
+          curl -sSL --fail-with-body \
+            ${IPA_TOKEN:+-H "Authorization: Bearer $IPA_TOKEN"} \
+            -o "$RUNNER_TEMP/TwinVPN.ipa" "$IPA_URL"
+          . build/ci/digest.sh
+          twinvpn_verify_digest "$RUNNER_TEMP/TwinVPN.ipa" "$IPA_SHA256" TwinVPN.ipa
+          echo "TWINVPN_IPA=$RUNNER_TEMP/TwinVPN.ipa" >> "$GITHUB_ENV"
+
+      - name: NetworkExtension failure injection on a virtual iPhone
+        run: build/ci/ci-ios-corellium.sh
+
+      # THE SCRIPT ALREADY DOES THIS IN A TRAP, AND THAT IS NOT SUFFICIENT.
+      #
+      # `ci-ios-corellium.sh` traps EXIT, TERM and INT, which covers a failure
+      # and covers the runner asking it to stop. It does not cover the script
+      # being killed outright, which leaves a session open at the oracle: one
+      # whose phases never ended and whose report the aggregator can still
+      # fetch. Cheap to close twice, expensive to leave open.
+      - name: close the oracle session
+        if: always()
+        run: build/ci/leak-probe.sh close || true
+
+      # THE VIRTUAL DEVICE IS DESTROYED FROM OUTSIDE THE SCRIPT.
+      #
+      # The script's own trap deletes the instance on a failure and on a
+      # requested stop. It cannot cover being KILLED -- a `timeout-minutes`
+      # expiry gives seconds of grace and then the process is gone mid-`curl` --
+      # and what survives that is a Corellium instance BILLING BY THE HOUR until
+      # a human notices. That is why the instance's name is derived from the run
+      # id and attempt rather than random: this step can reconstruct it from the
+      # environment alone and delete whatever is still wearing it.
+      #
+      # Idempotent, and never fatal: it runs after the verdict is decided, and a
+      # teardown that fails the job hides the failure it was cleaning up after.
+      - name: destroy the virtual device
+        if: always()
+        run: build/ci/ci-ios-corellium.sh --reap
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-ios-corellium
+          path: |
+            build/ci/evidence/ios-corellium.json
+            build/ci/evidence/ios-profile-removal.json
+          # `warn`, not `ignore`: a criterion job that finished without writing
+          # its evidence file did not reach its own write, and that is worth
+          # seeing. Non-fatal, because the row already reads NOT-EXECUTED and a
+          # second red would bury the first.
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          # NEVER the IPA, never the provisioning profile, never the Corellium
+          # token. The console log is the device's own and carries our reason
+          # codes; the oracle report carries our own beacons' source addresses.
+          name: diagnostics-ios-corellium
+          path: |
+            build/ci/logs/ios/oracle-report.json
+            build/ci/logs/ios/profile-removal.log
+            build/ci/logs/ios/app-install.json
+          if-no-files-found: ignore
+
+  macos-sysext:
+    name: macos-sysext
+    # AN AWS EC2 MAC SELF-HOSTED RUNNER. GitHub's hosted macOS runners cannot do
+    # this: `systemextensionsctl developer on` needs SIP configured, and no
+    # hosted Mac lets a job reach Recovery mode. EC2 Mac exposes SIP
+    # configuration through an API instead
+    # (`create-mac-system-integrity-protection-modification-task`), which is the
+    # only reason this row has a cloud path at all.
+    #
+    # SIP state is VOLUME-scoped, so the instance is long-lived and never
+    # stopped, and `ci-macos-sysext.sh` asserts `csrutil status` as a pre-flight
+    # rather than trusting the provisioning.
+    runs-on: [self-hosted, macOS, twinvpn-ec2-mac]
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    if: ${{ vars.TWINVPN_EC2_MAC_REGISTERED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    # One authority per host (ADR-0016 PS-1), and the signature job below shares
+    # the machine. They are serialised rather than merged because they are
+    # different claims and must be able to go red independently.
+    concurrency:
+      group: twinvpn-ec2-mac
+      cancel-in-progress: false
+    env:
+      TWINVPN_TEAM_ID:             ${{ vars.TWINVPN_TEAM_ID }}
+      TWINVPN_EXTENSION_BUNDLE_ID: ${{ vars.TWINVPN_EXTENSION_BUNDLE_ID }}
+      TWINVPN_ORACLE_URL:          ${{ vars.TWINVPN_ORACLE_URL }}
+      TWINVPN_ORACLE_TOKEN:        ${{ secrets.TWINVPN_ORACLE_TOKEN }}
+      # The standing heartbeat, declared rather than started -- and this is the
+      # lane where that is most obviously forced: the EC2 Mac IS the device
+      # under test, so any beat it sent would travel the stack the criterion
+      # says cannot emit a packet. `ci-macos-sysext.sh` refuses to run without
+      # it. The real enforcement is the oracle's: no beats is no continuity,
+      # which is INCONCLUSIVE and never a quiet pass.
+      TWINVPN_SENTINEL_HOST:       ${{ vars.TWINVPN_SENTINEL_HOST }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - name: select the pinned Xcode
+        run: |
+          XCODE_DEV_DIR="$(build/ci/ci-macos.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
+          xcodebuild -version
+          sw_vers
+          csrutil status || true
+          systemextensionsctl list || true
+
+      - name: reset to a known-clean state
+        run: build/ci/ci-macos-sysext.sh --cleanup
+
+      - name: system-extension lifecycle with external leak observation
+        run: build/ci/ci-macos-sysext.sh
+
+      # EVERY exit path. Unlike the old rig, this one CAN deactivate: developer
+      # mode is what makes `systemextensionsctl uninstall` available, and this
+      # criterion runs in it. A Mac left holding an activated extension and a pf
+      # anchor is a Mac whose next job inherits our firewall.
+      - name: deactivate the extension and return the Mac
+        if: always()
+        run: build/ci/ci-macos-sysext.sh --cleanup
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-macos-sysext
+          path: build/ci/evidence/macos-sysext.json
+          # `warn`, not `ignore`: a criterion job that finished without
+          # writing its evidence file did not reach its own write, and
+          # that is worth seeing. Non-fatal, because the row already
+          # reads NOT-EXECUTED and a second red would bury the first.
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-macos-sysext
+          path: |
+            build/ci/logs/macos/sysext-list.txt
+            build/ci/logs/macos/pf-anchors.txt
+            build/ci/logs/macos/oracle-report.json
+            build/ci/logs/macos/sysext-build.log
+          if-no-files-found: ignore
+
+  macos-signature:
+    name: macos-signature
+    # SEPARATE FROM `macos-sysext`, AND THAT SEPARATION IS THE POINT.
+    #
+    # `macos-sysext` runs in DEVELOPER MODE, which accepts an extension a
+    # customer's Mac would refuse -- an ad-hoc signature, an expired
+    # certificate, a missing notarization ticket, an unstapled bundle. While
+    # both claims shared one evidence file, a green developer-mode lifecycle
+    # read as "the signed, notarized product works". Now this job can be red
+    # while that one is green, which is the true state of affairs more often
+    # than not.
+    #
+    # It activates nothing and installs nothing to /Applications: it inspects a
+    # built artifact, so the two jobs cannot contaminate each other's evidence.
+    runs-on: [self-hosted, macOS, twinvpn-ec2-mac]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    if: ${{ vars.TWINVPN_EC2_MAC_REGISTERED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    concurrency:
+      group: twinvpn-ec2-mac
+      cancel-in-progress: false
+    env:
+      TWINVPN_TEAM_ID: ${{ vars.TWINVPN_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      # The SIGNED, NOTARIZED product, published by the release pipeline. NOT a
+      # CI build: a build produced here would be signed by whatever identity the
+      # runner holds and notarized by nobody, and checking its signature would
+      # tell us about the runner rather than about the product.
+      - name: fetch the notarized product and verify it against its pinned digest
+        env:
+          APP_URL: ${{ vars.TWINVPN_NOTARIZED_APP_URL }}
+          APP_TOKEN: ${{ secrets.TWINVPN_NOTARIZED_APP_TOKEN }}
+          APP_SHA256: ${{ vars.TWINVPN_NOTARIZED_APP_SHA256 }}
+        run: |
+          if [ -z "$APP_URL" ]; then
+            echo "::error::TWINVPN_NOTARIZED_APP_URL is not configured; MACOS-PRODUCTION-SIGNATURE is about the artifact users download and must not be handed a CI build"
+            exit 1
+          fi
+          # The same pin as the IPA above, for the same reason and with more
+          # force: this criterion's entire subject is "the bytes a user would
+          # download", so a run that cannot name those bytes has not made the
+          # claim. A truncated transfer also fails `codesign --verify` for a
+          # reason that has nothing to do with signing, which is the confusing
+          # red this turns into a legible one.
+          if [ -z "$APP_SHA256" ]; then
+            echo "::error::TWINVPN_NOTARIZED_APP_SHA256 is not configured. MACOS-PRODUCTION-SIGNATURE is a claim about a specific published artifact; without a pinned SHA-256 the row would be about whatever that URL served today."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/product"
+          curl -sSL --fail-with-body \
+            ${APP_TOKEN:+-H "Authorization: Bearer $APP_TOKEN"} \
+            -o "$RUNNER_TEMP/product/TwinVPN.zip" "$APP_URL"
+          . build/ci/digest.sh
+          twinvpn_verify_digest "$RUNNER_TEMP/product/TwinVPN.zip" "$APP_SHA256" TwinVPN.app.zip
+          # Handed to the script so the EVIDENCE records the digest that was
+          # actually gated on, rather than one recomputed later from a file that
+          # by then has been expanded, quarantined and re-signed by nothing.
+          echo "TWINVPN_ARCHIVE_SHA256=$APP_SHA256" >> "$GITHUB_ENV"
+          ditto -x -k "$RUNNER_TEMP/product/TwinVPN.zip" "$RUNNER_TEMP/product"
+
+      - name: signature, notarization and stapling
+        run: build/ci/ci-macos-signature.sh "$RUNNER_TEMP/product/TwinVPN.app"
+
+      # THIS MAC IS LONG-LIVED AND SHARED WITH `macos-sysext`.
+      #
+      # It is never stopped -- SIP state is volume-scoped, so a stop/start would
+      # undo the one thing that makes this runner usable -- which means anything
+      # this job leaves on disk is inherited by the next job and by the next
+      # run. What it leaves is the SIGNED, NOTARIZED PRODUCT: not a secret, but a
+      # release artifact on a machine that also activates system extensions, and
+      # a stale copy is exactly the sort of thing a later run picks up by
+      # accident when a download half-fails. Removed on every path.
+      - name: remove the downloaded product
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/product"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-macos-signature
+          path: build/ci/evidence/macos-signature.json
+          # `warn`, not `ignore`: a criterion job that finished without
+          # writing its evidence file did not reach its own write, and
+          # that is worth seeing. Non-fatal, because the row already
+          # reads NOT-EXECUTED and a second red would bury the first.
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-macos-signature
+          path: build/ci/logs/macos/sig-*.log
+          if-no-files-found: ignore
+
   first-wave-acceptance:
     name: first-wave-acceptance
     runs-on: ubuntu-24.04
@@ -699,6 +1275,27 @@ jobs:
       - macos-link-run
       - ios-link-run
       - android-link-run
+      # THE FIVE PLATFORM-CRITERION JOBS ARE NOW IN `needs:`, WHICH THE FOUR
+      # THEY REPLACED COULD NOT BE.
+      #
+      # The old privileged jobs lived in another workflow and were kept out of
+      # `needs:` because a job whose self-hosted label is unregistered QUEUES
+      # for twenty-four hours rather than failing, and the gate would sit
+      # pending instead of returning a verdict.
+      #
+      # Two of these are hosted and cannot queue at all. The three that are not
+      # -- `windows-killswitch`, `macos-sysext`, `macos-signature` -- are gated
+      # on a repository variable, so an unregistered rig makes them SKIP. A
+      # skipped `needs:` is satisfied under `always()`, so the gate still
+      # returns promptly, and the skipped job wrote no evidence, so its row
+      # reads NOT-EXECUTED and counts against eligibility exactly as a failure
+      # does. Same strictness, no deadlock, and the evidence now comes from
+      # THIS run rather than being imported from another one.
+      - windows-killswitch
+      - android-16k
+      - ios-corellium
+      - macos-sysext
+      - macos-signature
     # `always()`, so the report is PRINTED rather than skipped.
     #
     # Without it a single red `needs:` job skips this one, and the artifact
@@ -709,35 +1306,29 @@ jobs:
     # report is not eligible, because `report.py` exits non-zero.
     if: always()
     #
-    # THE FOUR PRIVILEGED JOBS ARE REQUIRED, AND ARE DELIBERATELY NOT IN
-    # `needs:`.
+    # AND `always()` IS WHY THE LAST STEP OF THIS JOB EXISTS.
     #
-    # They live in first-implementation-wave-privileged.yml and run on
-    # self-hosted runners. A `needs:` on a job whose runner label is not
-    # registered does not fail -- it QUEUES, for up to twenty-four hours, and
-    # the gate sits pending instead of returning a verdict. A check that cannot
-    # go red is not a gate.
+    # `always()` means every entry in `needs:` above is satisfied by a job that
+    # FAILED, was CANCELLED, or was SKIPPED. A skip is the ordinary outcome for
+    # the three self-hosted jobs -- they are gated on a repository variable
+    # precisely so that an unregistered runner skips instead of queueing for
+    # twenty-four hours -- so a run with no rigs provisioned at all reaches this
+    # job with every `needs:` "satisfied" and nothing having been proved.
     #
-    # So the requirement is enforced where it can be enforced promptly: each
-    # privileged job writes its own evidence file with `privileged: true`, and
-    # build/acceptance/report.py has a required row per file. No runner means
-    # no file means NOT-EXECUTED, which counts against Phase 5 eligibility
-    # exactly as a failure does -- immediately, and by name.
+    # That leaves the gate's redness resting entirely on
+    # `build/acceptance/report.py`, which grades EVIDENCE FILES. It is a good
+    # mechanism and it is not a complete one: a job that never ran wrote no file,
+    # `core-crypto` and `pairing-mi` write no platform evidence at all, and
+    # "unprovisioned" and "the runner died" produce identical silence. Job
+    # results are the only place that information exists.
     #
-    # That is only true if the file can ever ARRIVE, which until the import
-    # step below it could not: `actions/download-artifact` reads the CURRENT
-    # workflow run unless it is given `run-id` and a token, and those four
-    # artifacts belong to a different run of a different workflow. A fully
-    # green privileged run wrote evidence nobody collected, and the four rows
-    # were pinned at NOT-EXECUTED no matter what any machine did. The import
-    # step is what makes a green privileged run able to flip its row.
+    # So the final step reads `toJSON(needs)` and requires `success` from every
+    # one of them -- not `skipped`, not `cancelled`, not `failure`, not absent.
+    # A specialized runner being unavailable makes this check RED and names the
+    # variable or the label responsible. GREEN BY ABSENCE is the failure mode
+    # that whole arrangement exists to make unreachable.
     #
-    # It stays strictly stronger than `needs:` would be: a self-hosted job that
-    # runs and goes green still cannot satisfy the row unless the file it wrote
-    # also carries `privileged: true`, a non-empty transition list, and this
-    # exact commit.
-    #
-    # `mutation-proof` IS IN THIS WORKFLOW AND IS ALSO NOT IN `needs:`, FOR AN
+    # `mutation-proof` IS IN THIS WORKFLOW AND IS NOT IN `needs:`, FOR AN
     # UNRELATED REASON. Do not read the two as the same case. The privileged
     # jobs are still required and are enforced through their evidence rows;
     # B-1 is DEFERRED PAST WAVE 1 by the integration lead (2026-08-30), because
@@ -771,95 +1362,180 @@ jobs:
       # them all back into build/ci/evidence/ so the report reads real files
       # rather than a job's word for it.
       - uses: actions/download-artifact@v4
-        # TOLERANT, because this job is now `always()`: a platform job that
-        # died in setup uploads no artifact at all, and the correct outcome
-        # then is a NOT-EXECUTED row in the report, not a job that dies before
-        # it can print one.
+        # TOLERANT. THIS AND THE `mutation-report` DOWNLOAD BELOW ARE THE ONLY
+        # TWO `continue-on-error` IN THIS FILE, AND BOTH ARE COLLECTION STEPS.
+        #
+        # `download-artifact` ERRORS when its pattern matches nothing, and on a
+        # run where every rig is unprovisioned that is the normal case. Letting
+        # it kill the job would destroy the one thing `always()` was added to
+        # produce: the report naming WHICH rows are red.
+        #
+        # It cannot turn a red into a green, and that is the test this
+        # tolerance had to pass. A download that fails leaves the evidence
+        # directory empty; report.py reads an absent file as NOT-EXECUTED,
+        # which counts against eligibility exactly as a failure does; and the
+        # `require-job-results` step at the end of this job fails on any
+        # `needs:` result that is not `success` regardless of what was or was
+        # not downloaded. Every path through a failed download is red.
+        #
+        # It is COLLECTION, not verification. No `continue-on-error` remains on
+        # any step of this workflow that decides anything.
         continue-on-error: true
         with:
           pattern: evidence-*
           path: build/ci/evidence-download
           merge-multiple: true
 
-      # TOLERANT since B-1 lost its `needs:` edge. `mutation-proof` may still
-      # be running when this job starts -- it is allowed 180 minutes and this
-      # one 45 -- so the artifact is frequently absent, and `report.py` reads
-      # that as NOT-EXECUTED on the deferred F-5 row. It must not take the
-      # whole gate down with it.
+      # TOLERANT since B-1 lost its `needs:` edge, and for the same reason as
+      # the step above: `mutation-proof` may still be RUNNING when this job
+      # starts -- it is allowed 180 minutes and this one 45 -- so its artifact
+      # is frequently absent, `report.py` reads that as NOT-EXECUTED on the
+      # DEFERRED F-5 row, and a deferred row must not take the gate down.
+      #
+      # Same test as above: it cannot turn a red into a green. F-5 is deferred,
+      # so its row counts toward nothing either way; `require-job-results` does
+      # not list `mutation-proof` because it is not in `needs:` and re-imposing
+      # it here would undo the deferral by the back door.
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           name: mutation-report
           path: build/proof
 
-      # THE PRIVILEGED EVIDENCE IS IN A DIFFERENT WORKFLOW RUN.
+      # THE OLD CROSS-RUN IMPORT IS GONE, AND ITS ABSENCE IS THE POINT.
       #
-      # `actions/download-artifact` above reads this run only; without `run-id`
-      # and a token it cannot see another workflow's artifacts, so the four
-      # `Privileged / physical` rows had no route to their evidence at all.
-      # This step is that route.
+      # There used to be a step here that asked GitHub for the most recent
+      # completed run of `first-implementation-wave-privileged.yml` at this head
+      # SHA and downloaded its `evidence-*` artifacts. It worked, and it was a
+      # standing hazard: `gh run download` reaches into ANOTHER RUN, so the step
+      # had to re-check each file's own recorded commit precisely because the
+      # mechanism could not guarantee whose evidence it had fetched.
       #
-      # BOUND TO THIS COMMIT, twice. `--commit "$GITHUB_SHA"` asks GitHub only
-      # for privileged runs of this exact head SHA, and the collect step below
-      # re-checks each file's own recorded `commit` before it is allowed into
-      # build/ci/evidence/. Evidence from an older commit can therefore never
-      # flip a row here, which is rule C-5 and is the difference between a
-      # verdict and a rumour.
+      # Every platform criterion now runs in THIS workflow, so `download-artifact`
+      # above -- which reads this run and only this run -- collects all of it.
+      # The class of mistake where a row is flipped by evidence from a different
+      # run is not mitigated; it is unreachable.
       #
-      # TOLERANT, ALWAYS. No privileged run, no registered runner, or a run
-      # cancelled before it uploaded (`gh run download` prints "no valid
-      # artifacts found to download" and exits 1) all leave the directory
-      # empty, and the rows then read NOT-EXECUTED -- the honest verdict, which
-      # counts against eligibility exactly as a failure does. This step never
-      # fails the gate and never turns a row green on its own.
-      - name: import the privileged evidence for this commit
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          # Named rather than inferred from the checkout's git remote, so this
-          # keeps working if the checkout step ever moves or gains a `path:`.
-          GH_REPO: ${{ github.repository }}
-        run: |
-          mkdir -p build/ci/privileged-download
-          run_id="$(gh run list \
-            --workflow first-implementation-wave-privileged.yml \
-            --commit "$GITHUB_SHA" --status completed --limit 1 \
-            --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
-          if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
-            echo "no completed privileged run for $GITHUB_SHA;" \
-                 "the four privileged rows stay NOT-EXECUTED"
-            exit 0
-          fi
-          echo "privileged run: $run_id"
-          gh run download "$run_id" --pattern 'evidence-*' \
-            --dir build/ci/privileged-download \
-            || echo "that run uploaded no evidence artifact"
+      # `report.py` still binds every file to `GITHUB_SHA` and to
+      # `GITHUB_RUN_ID`, because defence in depth costs nothing here and a
+      # locally-run report should be held to the same rule.
 
       - name: collect platform evidence
         run: |
-          mkdir -p build/ci/evidence build/ci/privileged-download
+          mkdir -p build/ci/evidence
           find build/ci/evidence-download -name '*.json' -exec cp {} build/ci/evidence/ \;
-          # The imported half, one file at a time. `gh run list --commit` is
-          # GitHub's word for which commit that run was about; this is the
-          # file's own, and only a file that agrees with both is admitted.
-          python3 - "$GITHUB_SHA" <<'PY'
-          import json, shutil, sys
-          from pathlib import Path
-          sha = sys.argv[1]
-          for f in sorted(Path("build/ci/privileged-download").rglob("*.json")):
-              try:
-                  got = json.loads(f.read_text()).get("commit", "")
-              except json.JSONDecodeError as exc:
-                  print(f"::warning::dropping {f.name}: not valid JSON ({exc})")
-                  continue
-              if got == sha:
-                  print(f"admitting {f.name} (commit {got})")
-                  shutil.copy(f, "build/ci/evidence/")
-              else:
-                  print(f"::warning::dropping {f.name}: "
-                        f"recorded commit {got!r} is not {sha}")
-          PY
           ls -la build/ci/evidence/
+
+      # THE JOB OUTCOMES, WRITTEN WHERE report.py CAN READ THEM.
+      #
+      # report.py grades EVIDENCE FILES, and a job that never got as far as
+      # writing one leaves nothing behind. Its row then says "no evidence",
+      # which is equally true of a job that failed in setup, a job its own
+      # timeout cancelled, and a job that was SKIPPED because its self-hosted
+      # runner is not registered -- three different problems and one sentence,
+      # with the most dangerous of them, the skip, looking the most like routine
+      # absence.
+      #
+      # `needs.<job>.result` is the only place that distinction exists, and it
+      # exists ONLY inside this workflow -- nothing report.py can read on its own
+      # and nothing a platform job could have written about itself. So it is
+      # flattened to a job -> result map here, before the report runs, and
+      # `build/acceptance/job_results.py` turns each outcome into the sentence
+      # the row deserves.
+      #
+      # It is written BEFORE `make test-first-wave-gate`, and its absence is
+      # meaningful: report.py reads a missing file as "this is not a GitHub run"
+      # (a laptop, a docs check) rather than as "every job passed".
+      - name: record every job's outcome for the report
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          mkdir -p build/ci/evidence
+          python3 - <<'PY'
+          import json, os, pathlib
+          needs = json.loads(os.environ["NEEDS"])
+          results = {job: (v or {}).get("result") for job, v in needs.items()}
+          out = pathlib.Path("build/ci/evidence/job-results.json")
+          out.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")
+          for job, result in sorted(results.items()):
+              print(f"{job:<22} {result}")
+          PY
+
+      # THE ORACLE'S OWN REPORTS, FETCHED FROM THE ORACLE.
+      #
+      # This is the step that makes the egress criteria evidence rather than
+      # self-report. Each platform evidence file NAMES a leak-oracle session id;
+      # this asks the oracle for that session's report over its control API and
+      # writes it where `report.py` reads it.
+      #
+      # It is fetched HERE, in the aggregator, rather than uploaded by the
+      # platform job -- because the platform job is the defendant. A job that
+      # leaked could upload a report saying it did not; it cannot make the
+      # oracle say so.
+      #
+      # `continue-on-error` IS GONE FROM THIS STEP, AND ITS ABSENCE IS THE
+      # CHANGE.
+      #
+      # The tolerance this step needs is about the ORACLE -- unconfigured,
+      # unreachable, or a session it has forgotten -- and every one of those is
+      # already handled INSIDE the script below: the unconfigured case exits 0
+      # with a warning, and a per-session fetch failure is warned and skipped.
+      # A missing oracle report is then read by report.py as a FAILED row, never
+      # as a pass, so the tolerance is expressed where it belongs and is visible
+      # to a reader of the script rather than hidden in a step attribute.
+      #
+      # What `continue-on-error` was additionally swallowing was a crash in the
+      # Python below -- a genuine defect in this file, which would have produced
+      # zero oracle reports while the step showed green with a warning. That now
+      # fails the job at the line responsible.
+      - name: fetch the leak-oracle reports for this run's sessions
+        env:
+          TWINVPN_ORACLE_URL:   ${{ vars.TWINVPN_ORACLE_URL }}
+          TWINVPN_ORACLE_TOKEN: ${{ secrets.TWINVPN_ORACLE_TOKEN }}
+        run: |
+          mkdir -p build/ci/evidence/oracle
+          if [ -z "${TWINVPN_ORACLE_URL:-}" ] || [ -z "${TWINVPN_ORACLE_TOKEN:-}" ]; then
+            echo "::warning::no leak oracle is configured; every criterion that" \
+                 "makes an egress claim will read FAIL for want of an adjudicator"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          base = os.environ["TWINVPN_ORACLE_URL"].rstrip("/")
+          token = os.environ["TWINVPN_ORACLE_TOKEN"]
+          out = pathlib.Path("build/ci/evidence/oracle")
+          for f in sorted(pathlib.Path("build/ci/evidence").glob("*.json")):
+              try:
+                  ev = json.loads(f.read_text())
+              except json.JSONDecodeError:
+                  continue
+              ref = ev.get("leak_oracle")
+              if not isinstance(ref, dict) or not ref.get("session_id"):
+                  continue
+              sid = ref["session_id"]
+              url = f"{base}/v1/sessions/{sid}/report"
+              proc = subprocess.run(
+                  ["curl", "-sS", "--fail-with-body", "--max-time", "30",
+                   "-H", f"Authorization: Bearer {token}", url],
+                  capture_output=True, text=True)
+              if proc.returncode != 0:
+                  print(f"::warning::the oracle would not return session {sid}: "
+                        f"{proc.stdout.strip()[:200]}")
+                  continue
+              # WRITTEN VERBATIM, then parsed only to LOG the verdict. The file
+              # report.py grades is the oracle's own bytes; a body this step
+              # could not parse is still written, because "the oracle answered
+              # something we did not understand" is evidence report.py must get
+              # to refuse rather than a reason to write nothing and let the row
+              # read as an absent adjudicator.
+              (out / f"{sid}.json").write_text(proc.stdout)
+              try:
+                  verdict = json.loads(proc.stdout).get("verdict")
+              except json.JSONDecodeError:
+                  verdict = "<unparseable body; report.py will refuse the row>"
+              print(f"fetched oracle report for session {sid} ({verdict})")
+          PY
+
 
       - name: make test-first-wave-gate
         run: make test-first-wave-gate
@@ -872,5 +1548,36 @@ jobs:
             build/acceptance/first-wave-acceptance.json
             build/acceptance/first-wave-acceptance.md
             build/ci/evidence/*.json
+            build/ci/evidence/oracle/*.json
             build/proof/mutation-report.json
           if-no-files-found: error
+
+      # ==================================================================
+      # THE LAST WORD, AND IT IS DELIBERATELY LAST.
+      # ==================================================================
+      # It runs AFTER the report is generated and AFTER the report is uploaded,
+      # so that a run whose provisioning is incomplete still leaves behind the
+      # artifact naming which rows are red. Failing earlier would trade the
+      # gate's legibility for nothing: the job goes red either way.
+      #
+      # `if: always()` so it also runs when `make test-first-wave-gate` already
+      # failed. The job is red by then, but this step is what says WHICH runner
+      # or WHICH repository variable is missing, and that sentence is the only
+      # actionable output of a run with no rigs provisioned.
+      #
+      # What it enforces, from `toJSON(needs)`, which nothing else in the run can
+      # see: every required job returned `success`. Not `skipped` -- the ordinary
+      # result of an unregistered self-hosted label or a false
+      # `TWINVPN_*_ENABLED`. Not `cancelled` -- a timeout expiry or a superseding
+      # run. Not `failure`. Not absent from `needs:` at all, which is what
+      # happens when somebody edits the dependency list and a criterion silently
+      # stops being required.
+      #
+      # The remedy text lives in `build/ci/require-job-results.py` beside the
+      # job list, so the two cannot drift, and that file self-checks with
+      # `--self-check`.
+      - name: every required job must have SUCCEEDED
+        if: always()
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 build/ci/require-job-results.py

@@ -1,0 +1,56 @@
+# twinoracle — the external leak oracle.
+#
+# Owner: test-engineering. NEVER SHIPPED (ADR-0018 §11.12: `/lab/` is the
+# never-shipped path). It is deliberately NOT under /services: it is not a
+# product artifact, it links nothing from the core, and scripts/check_freeze_scope.py
+# guards `services` as production.
+#
+# ===========================================================================
+# WHY THIS EXISTS AT ALL
+# ===========================================================================
+# Every platform kill-switch criterion in the First Implementation Wave used to
+# be discharged by asking the platform under test whether it was blocking. That
+# is the system under test grading its own exam: a WFP filter set that was never
+# installed, a pf anchor that was flushed, a NetworkExtension that died silently
+# — each of those makes the platform's own status API say "protected" while
+# packets leave.
+#
+# So the observation moves OFF the device. This process runs somewhere the
+# device under test can only reach by actually emitting a packet, and it records
+# what arrived, from which address, on which family, and when. "Zero egress" is
+# then a statement made by a third party rather than by the defendant.
+#
+# ===========================================================================
+# WHY THERE IS NO HTTP FRAMEWORK AND NO DNS LIBRARY HERE
+# ===========================================================================
+# The data plane answers exactly two shapes — one HTTP GET line and one DNS
+# question — and needs the PEER ADDRESS and the ADDRESS FAMILY OF THE LISTENER
+# more than it needs routing, middleware or a resolver. axum/hyper and a full
+# resolver would each add a dependency tree to a never-shipped observer whose
+# entire job is to be simple enough that nobody doubts what it recorded.
+[package]
+name    = "twinoracle"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the external IPv4/IPv6/DNS leak oracle — observation of egress by a third party, never by the system under test"
+publish = false
+
+[lib]
+name = "twinoracle"
+path = "src/lib.rs"
+
+[[bin]]
+name = "twinoracle"
+path = "src/main.rs"
+
+[dependencies]
+clap       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
+tracing-subscriber = { workspace = true }

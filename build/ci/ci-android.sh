@@ -62,14 +62,36 @@
 #   --reset        wipe the AVD and clear stale evidence and logs, so a run
 #                  cannot inherit an installed package or a dirty data dir.
 #   --privileged   use the ATTACHED PHYSICAL DEVICE (ANDROID_SERIAL) and boot no
-#                  emulator. `android-device-lifecycle`, self-hosted.
+#                  emulator. NO LONGER PART OF THE ACCEPTANCE GATE -- the 16 KiB
+#                  criterion it used to discharge is `--pagesize16k` below, on
+#                  Google's official 16 KB emulator image, because local or
+#                  user-owned hardware is no longer an acceptable dependency for
+#                  the gate. Kept: it is still the fastest way to reproduce a
+#                  run on a phone you own.
+#   --pagesize16k  ANDROID-16K-PAGE-SIZE. Discovers Google's 16 KB page-size
+#                  system image, REFUSES to continue unless the device reports
+#                  `getconf PAGE_SIZE` = 16384, runs `zipalign -c -P 16 -v 4` on
+#                  the release APK, and installs the PRODUCTION APK. Writes
+#                  build/ci/evidence/android-16k.json.
 #   --cleanup      uninstall the packages and kill the emulator, on every path.
 #                  Safe under `if: always()`; never fails the job.
 
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# `twinvpn_run_attempt_json`, `twinvpn_sha256`, `twinvpn_verify_digest` and
+# `twinvpn_digest_json`. Sourced rather than reimplemented per script: the
+# sha256 command differs on every host this repository runs on, and a digest
+# helper that silently produced nothing on one of them would bind the evidence
+# to no bytes at all.
+# shellcheck disable=SC1091
+. "$REPO/build/ci/digest.sh"
 EVIDENCE="$REPO/build/ci/evidence/android.json"
+# `{}` until an APK is actually installed. An ABSENT key and an empty map mean
+# different things to report.py -- "the field was never written" versus "this run
+# tested no artifact" -- and a run that died before the device was ready is
+# honestly the second.
+ARTIFACT_DIGESTS="{}"
 LOGDIR="$REPO/build/ci/logs/android"
 GRADLE_DIR="$REPO/shells/android"
 JNILIBS="$GRADLE_DIR/app/src/main/jniLibs"
@@ -208,12 +230,62 @@ readonly ANDROID_API_MIN=26
 # and the device farm's. `google_apis` rather than `default`: the plain image
 # omits services the AndroidX test runner expects.
 readonly EMULATOR_API=30
-readonly EMULATOR_IMAGE="system-images;android-${EMULATOR_API};google_apis;x86_64"
-readonly AVD_NAME="twinvpn-ci-api${EMULATOR_API}"
+EMULATOR_IMAGE="system-images;android-${EMULATOR_API};google_apis;x86_64"
+AVD_NAME="twinvpn-ci-api${EMULATOR_API}"
+
+# THE 16 KiB IMAGE IS DISCOVERED, NOT GUESSED.
+#
+# Google ships the page-size images under a `google_apis_ps16k` tag, and the tag
+# has moved once already (it was `google_apis_ps16k_experimental` while the
+# feature was pre-release). Hard-coding one package id means a rename turns this
+# lane into "package not found" and somebody eventually deletes the assertion to
+# make CI green. So the script asks `sdkmanager --list` which page-size images
+# this SDK actually offers, takes the highest API level for the wanted ABI, and
+# prints it -- and FAILS LOUDLY, naming what it did find, when there is none.
+#
+# `docs`: Support 16 KB page sizes, developer.android.com/guide/practices/page-sizes.
+readonly PS16K_ABI="${TWINVPN_PS16K_ABI:-x86_64}"
+readonly PS16K_MIN_API=35   # Android 15. The images do not exist below it.
+# THE CEILING IS THE POINT, NOT THE FLOOR.
+#
+# `sys-img2-3.xml` publishes `google_apis_ps16k` for android-35 and android-36
+# and ALSO for android-36.1, android-37.0, android-37.1, android-37.2 and the
+# CANARY channel. "Highest wins" therefore drifts onto a preview platform the
+# moment Google publishes one, and a criterion discharged on a beta is a
+# criterion discharged on an OS no user has -- with the failure arriving as an
+# unrelated-looking emulator or AndroidX incompatibility rather than as "this is
+# a preview". So the sweep takes the highest STABLE level at or below this
+# ceiling, and raising it is a reviewed edit.
+#
+# STABLE also means an INTEGER label. `36.1` is a preview of 37 and would have
+# parsed as `36` under `part[2] + 0` -- scoring equal to the real android-36 and
+# winning or losing by listing order, which is the worst possible way to choose.
+readonly PS16K_MAX_API=36   # Android 16. Raise deliberately, never to chase a beta.
+
+discover_ps16k_image() {
+  local sdkmanager="$1" listing
+  listing="$("$sdkmanager" --list 2>/dev/null | tr -d '\r')" || true
+  printf '%s\n' "$listing" \
+    | awk -v abi="$PS16K_ABI" -v min="$PS16K_MIN_API" -v max="$PS16K_MAX_API" '
+        # The API label must be PURELY numeric: `android-36.1` and
+        # `android-37.2` are previews and are excluded by the regex itself
+        # rather than by arithmetic that would silently truncate them.
+        match($0, /system-images;android-[0-9]+;[A-Za-z0-9_]*ps16k[A-Za-z0-9_]*;[A-Za-z0-9_-]+/) {
+          pkg = substr($0, RSTART, RLENGTH);
+          split(pkg, part, ";");
+          sub(/android-/, "", part[2]);
+          if (part[2] !~ /^[0-9]+$/) next;
+          if (tolower(pkg) ~ /canary|preview|experimental/) next;
+          if (part[4] == abi && part[2] + 0 >= min && part[2] + 0 <= max && part[2] + 0 > best) {
+            best = part[2] + 0; found = pkg;
+          }
+        }
+        END { if (found) print found; }'
+}
 
 readonly APPLICATION_ID="net.twinvpn.android"
 readonly TEST_PACKAGE="net.twinvpn.android.test"
-readonly TEST_CLASS="net.twinvpn.android.NativeLinkRunTest"
+TEST_CLASS="net.twinvpn.android.NativeLinkRunTest"
 readonly INSTRUMENTATION="$TEST_PACKAGE/androidx.test.runner.AndroidJUnitRunner"
 
 # ADR-0018 §11.9 row 3: "aarch64-linux-android, armv7-linux-androideabi,
@@ -232,20 +304,51 @@ readonly ABIS=(
 do_reset=false
 do_privileged=false
 do_cleanup=false
+do_pagesize16k=false
 do_run=true
 
 for arg in "$@"; do
   case "$arg" in
-    --reset)      do_reset=true ;;
-    --privileged) do_privileged=true ;;
-    --cleanup)    do_cleanup=true; do_run=false ;;
+    --reset)        do_reset=true ;;
+    --privileged)   do_privileged=true ;;
+    --pagesize16k)  do_pagesize16k=true ;;
+    --cleanup)      do_cleanup=true; do_run=false ;;
     *)
       echo "ci-android.sh: unknown flag: $arg" >&2
-      echo "usage: ci-android.sh [--reset] [--privileged] [--cleanup]" >&2
+      echo "usage: ci-android.sh [--reset] [--privileged] [--pagesize16k] [--cleanup]" >&2
       exit 2
       ;;
   esac
 done
+
+# THE TWO PRIVILEGED-ish MODES ARE MUTUALLY EXCLUSIVE.
+#
+# `--privileged` means "use the attached physical device and boot nothing";
+# `--pagesize16k` means "boot Google's 16 KB page-size image". Together they
+# would boot nothing and then assert a page size the attached device chose,
+# which is neither criterion. Refuse rather than pick one.
+if [ "$do_privileged" = true ] && [ "$do_pagesize16k" = true ]; then
+  echo "::error::--privileged and --pagesize16k are different criteria and cannot be combined" >&2
+  exit 2
+fi
+
+# `--pagesize16k` writes a DIFFERENT evidence file and discharges a DIFFERENT
+# criterion. Two lanes writing `android.json` would let whichever finished last
+# decide what the acceptance report says, and an emulator PASS must never be
+# readable as the 16 KiB criterion's, nor the reverse.
+CRITERION="ANDROID-LINK-RUN"
+if [ "$do_pagesize16k" = true ]; then
+  CRITERION="ANDROID-16K-PAGE-SIZE"
+  EVIDENCE="$REPO/build/ci/evidence/android-16k.json"
+  # SET HERE, NOT WHERE THE IMAGE IS DISCOVERED.
+  #
+  # `--reset` deletes the AVD by name and runs long before the emulator block
+  # that discovers the image. Leaving the rename until then would make
+  # `--reset --pagesize16k` delete the API-30 link/run AVD and leave the 16 KiB
+  # one carrying the previous run's data dir -- so a reset would corrupt the
+  # other lane and fail to reset this one.
+  AVD_NAME="twinvpn-ci-ps16k"
+fi
 
 sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
 adb() { "$sdk_root/platform-tools/adb" "$@"; }
@@ -437,6 +540,15 @@ transitions='[]'
 notes=""
 exit_code=0
 
+# The 16 KiB criterion runs BOTH classes: `NativeLinkRunTest` is the boundary
+# proof and `PageSize16kTest` is the criterion's own -- the page size, the
+# pending-JNI check, the service restart and the underlay exclusion. Naming both
+# rather than replacing one keeps the boundary proof inside the criterion's
+# evidence, so a 16 KiB run that broke the JNI carriage cannot pass on the
+# strength of the page-size assertion alone.
+if [ "$do_pagesize16k" = true ]; then
+  TEST_CLASS="net.twinvpn.android.NativeLinkRunTest,net.twinvpn.android.PageSize16kTest"
+fi
 TEST_CMD="adb shell am instrument -w -e class $TEST_CLASS $INSTRUMENTATION"
 
 # ---------------------------------------------------------------------------
@@ -501,9 +613,39 @@ fi
 # ---------------------------------------------------------------------------
 release_abis=""
 if [ "$linked" = true ]; then
+  # THE 16 KiB LANE BUILDS AND INSTALLS THE PRODUCTION APK.
+  #
+  # The debug build is a different artifact: unminified, not shrunk, and
+  # packaged by a different code path. C-12's alignment claim is about the
+  # `.so` inside the SHIPPED APK, so the criterion installs the release one --
+  # which means the release build must be SIGNED, and the instrumentation
+  # package must be signed by the same key or `adb install` refuses it. Hence
+  # `-Ptwinvpn.testBuildType=release` and the four signing properties, which
+  # `app/build.gradle.kts` deliberately gives no silent fallback for.
+  gradle_targets=(:app:assembleDebug :app:assembleDebugAndroidTest :app:assembleRelease)
+  gradle_props=()
+  if [ "$do_pagesize16k" = true ]; then
+    for var in TWINVPN_RELEASE_KEYSTORE TWINVPN_RELEASE_STORE_PASSWORD \
+               TWINVPN_RELEASE_KEY_ALIAS TWINVPN_RELEASE_KEY_PASSWORD; do
+      if [ -z "${!var:-}" ]; then
+        echo "::error::$var is unset. $CRITERION installs the PRODUCTION APK, which \
+must be signed; a debug-signed substitute would make the evidence say 'release' and \
+the disk say otherwise." >&2
+        exit 2
+      fi
+    done
+    gradle_targets=(:app:assembleRelease :app:assembleReleaseAndroidTest)
+    gradle_props=(
+      "-Ptwinvpn.testBuildType=release"
+      "-Ptwinvpn.release.storeFile=$TWINVPN_RELEASE_KEYSTORE"
+      "-Ptwinvpn.release.storePassword=$TWINVPN_RELEASE_STORE_PASSWORD"
+      "-Ptwinvpn.release.keyAlias=$TWINVPN_RELEASE_KEY_ALIAS"
+      "-Ptwinvpn.release.keyPassword=$TWINVPN_RELEASE_KEY_PASSWORD"
+    )
+  fi
   if android_build_step "assemble the app, the test package and the release artifact" \
        "$GRADLE_LOG" "$GRADLE_DIR" \
-       "$GRADLE" --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleRelease
+       "$GRADLE" --no-daemon "${gradle_targets[@]}" "${gradle_props[@]}"
   then
     :
   else
@@ -540,6 +682,109 @@ if [ "$linked" = true ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 2b. C-12's alignment, asserted on the ARTIFACT by the SDK's own checker
+# ---------------------------------------------------------------------------
+#
+# `zipalign -c -P 16 -v 4` is the command developer.android.com's page-size
+# guide names, and it answers a question no on-device test can: whether every
+# shared library inside the APK is 16 KiB-aligned, including the ABIs this
+# emulator will never load. The on-device half proves the ONE library the
+# emulator maps; this proves all four.
+#
+# It runs in BOTH lanes -- the check is cheap and the answer is about the
+# shipped artifact either way -- but only the 16 KiB lane makes it fatal,
+# because only that lane's criterion is about alignment.
+zipalign_p16=false
+if [ "$linked" = true ] && [ -n "${release_apk:-}" ]; then
+  zipalign_bin="$(find "$sdk_root/build-tools" -name zipalign -type f 2>/dev/null | sort -V | tail -1)"
+  if [ -z "$zipalign_bin" ]; then
+    # A CHECK THAT DID NOT RUN CANNOT DISCHARGE A CRITERION.
+    #
+    # In the link/run lane this is a warning and stays one: alignment is not
+    # that lane's claim. In the 16 KiB lane it is the claim, and leaving
+    # `zipalign_p16=false` with only a `::warning::` meant a missing SDK
+    # component produced a row that read like a measured negative. Absence and
+    # measurement must not share a value, and here absence must be loud.
+    if [ "$do_pagesize16k" = true ]; then
+      echo "::error::no zipalign under $sdk_root/build-tools. $CRITERION is a \
+claim about 16 KiB alignment IN THE SHIPPED ARTIFACT, and the SDK's own checker \
+is what makes it; a run that could not execute the check has not made the claim. \
+Install a build-tools package on this runner." >&2
+      exit 1
+    fi
+    echo "::warning::no zipalign in $sdk_root/build-tools; the 16 KiB alignment of the APK was not checked"
+  else
+    echo "::group::zipalign -c -P 16 -v 4 (C-12, on the release artifact)"
+    set +e
+    "$zipalign_bin" -c -P 16 -v 4 "$release_apk" > "$LOGDIR/zipalign.log" 2>&1
+    zipalign_exit=$?
+    set -e
+    tail -20 "$LOGDIR/zipalign.log"
+    echo "::endgroup::"
+    if [ "$zipalign_exit" -eq 0 ]; then
+      zipalign_p16=true
+    else
+      echo "::error::zipalign -c -P 16 reports the release APK is NOT 16 KiB aligned; see build/ci/logs/android/zipalign.log" >&2
+      if [ "$do_pagesize16k" = true ]; then
+        linked=false
+        notes="the release APK failed zipalign -c -P 16 -v 4, so its shared libraries cannot be mapped on a 16 KiB kernel"
+      fi
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 2c. C-12's alignment in the ELF ITSELF, for EVERY shipped ABI
+# ---------------------------------------------------------------------------
+#
+# THE THIRD CHECK, AND THE ONLY ONE THAT COVERS THE ABI USERS ACTUALLY RUN.
+#
+# `zipalign -c -P 16` (2b) proves each `.so` is 16 KiB-aligned WITHIN THE ZIP,
+# so the loader can map it straight out of the APK -- a property of the
+# archive's layout. `PageSize16kTest` proves the ONE library the emulator maps
+# loads on a 16 KiB kernel, and the emulator is x86_64. Neither says anything
+# about arm64-v8a's own ELF program headers, which is what every real phone
+# loads and what `-Wl,-z,max-page-size=16384` is supposed to set.
+#
+# Those three fail independently. A build where the link flag was dropped for
+# one ABI still zipaligns perfectly and still passes on an x86_64 emulator, and
+# the defect surfaces as an install-time refusal on a user's arm64 device. So
+# this reads `p_align` of every PT_LOAD segment of every `.so` in the release
+# APK, per ABI, and requires >= 16384 from all of them.
+#
+# `elf-align.py` parses the program header table directly rather than scraping
+# `readelf` -- GNU and LLVM readelf disagree about whether the Align column is
+# on the LOAD line or its continuation, and a scraper tuned to one finds zero
+# rows under the other, which reads exactly like "no libraries".
+abi_alignment='{}'
+if [ "$linked" = true ] && [ -n "${release_apk:-}" ]; then
+  echo "::group::PT_LOAD alignment, every ABI in the release APK"
+  set +e
+  abi_alignment="$("$REPO/build/ci/elf-align.py" --apk "$release_apk")"
+  abi_align_exit=$?
+  set -e
+  echo "::endgroup::"
+  [ -n "$abi_alignment" ] || abi_alignment='{}'
+  if [ "$abi_align_exit" -ne 0 ]; then
+    # Fatal in the 16 KiB lane only, for the same reason zipalign is: alignment
+    # is this criterion's whole claim, and it is not the link/run lane's.
+    if [ "$do_pagesize16k" = true ]; then
+      linked=false
+      notes="a shipped ABI's .so declares PT_LOAD p_align below 16384, so it \
+cannot be mapped on a 16 KiB kernel however well the x86_64 emulator ran"
+    else
+      echo "::warning::a shipped ABI is not 16 KiB load-aligned; \
+ANDROID-16K-PAGE-SIZE would fail on it"
+    fi
+  fi
+
+  # THE BYTES THE ABI SWEEP WAS ABOUT. Recorded here rather than only at install
+  # time, so a run that measured the artifact and then failed to boot a device
+  # still names which APK it measured.
+  ARTIFACT_DIGESTS="$(twinvpn_digest_json "app-${apk_variant:-release}.apk" "$release_apk")"
+fi
+
+# ---------------------------------------------------------------------------
 # 3. a device
 # ---------------------------------------------------------------------------
 device_ready=false
@@ -555,6 +800,21 @@ if [ "$linked" = true ]; then
   elif adb devices | awk 'NR>1 && $2=="device" { found=1 } END { exit !found }'; then
     echo "a device is already attached; not booting an emulator"
   else
+    if [ "$do_pagesize16k" = true ]; then
+      # The image is discovered here rather than pinned above, so the failure
+      # when Google renames the tag is "this SDK offers no ps16k image for
+      # x86_64" with the listing to look at, not "package not found".
+      found="$(discover_ps16k_image "$sdk_root/cmdline-tools/latest/bin/sdkmanager")"
+      if [ -z "$found" ]; then
+        echo "::error::this SDK offers no 16 KB page-size system image for $PS16K_ABI at API >= $PS16K_MIN_API." >&2
+        echo "--- every page-size image sdkmanager does list ---" >&2
+        "$sdk_root/cmdline-tools/latest/bin/sdkmanager" --list 2>/dev/null \
+          | tr -d '\r' | grep -i 'ps16k' >&2 || echo "  (none at all)" >&2
+        exit 1
+      fi
+      EMULATOR_IMAGE="$found"
+      echo "16 KB page-size image discovered: $EMULATOR_IMAGE"
+    fi
     echo "booting the pinned emulator: $EMULATOR_IMAGE"
     # NOT `yes |`. This script runs under `set -o pipefail`, and an INFINITE
     # writer into a command that exits is a guaranteed pipeline failure rather
@@ -688,17 +948,132 @@ if [ "$linked" = true ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 3b. THE PAGE SIZE, ASSERTED BEFORE ANYTHING IS INSTALLED
+# ---------------------------------------------------------------------------
+#
+# `-Wl,-z,max-page-size=16384` is applied on every ABI and exercised by NOTHING
+# unless the `.so` is actually mapped by a kernel with 16 KiB pages: a 4 KiB
+# aligned library loads perfectly well on a 4 KiB device. So a 4096-byte-page
+# emulator takes this lane green, writes evidence with every boolean true, and
+# flips the criterion while leaving the alignment tested nowhere. That is a
+# VACUOUS PASS and it is worse than a red row, because it is indistinguishable
+# from a real one in the report.
+#
+# `getconf PAGE_SIZE` is the on-device answer: toybox reads
+# `sysconf(_SC_PAGESIZE)`, which is the RUNNING kernel's page size and not a
+# build-time constant, so it cannot be right about the wrong thing. It is
+# checked here, before the APK is pushed, so a wrong image costs seconds rather
+# than a whole instrumented run.
+device_page_size=""
+if [ "$device_ready" = true ]; then
+  device_page_size="$(adb shell getconf PAGE_SIZE 2>/dev/null | tr -d '\r')"
+  echo "device page size: $device_page_size"
+  if [ "$do_pagesize16k" = true ] && [ "$device_page_size" != "16384" ]; then
+    echo "::error::the device reports a ${device_page_size}-byte page. $CRITERION is \
+about 16 KiB pages and nothing else discharges it; a green run here would be a vacuous \
+pass. Boot Google's 16 KB page-size system image ($EMULATOR_IMAGE)." >&2
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 3b. what this run actually ran on -- MEASURED, never assumed
+# ---------------------------------------------------------------------------
+#
+# THE DIFFERENCE BETWEEN CONFIGURED AND OBSERVED IS THE WHOLE POINT.
+#
+# `EMULATOR_IMAGE` is what the script ASKED sdkmanager for. It is not evidence
+# that the emulator booted that image: a stale AVD carrying a previous run's
+# data dir, a `--force` create that silently reused an existing target, an
+# sdkmanager that resolved the package to a different revision -- each leaves
+# the configured string right and the running system different. So every fact
+# below is read out of the BOOTED DEVICE, and the package revision out of the
+# installed package's own `source.properties`, and report.py grades those.
+#
+# `ro.build.fingerprint` is the single most useful of them: it names the build
+# id, the platform version and the incremental, so two runs that disagree can be
+# told apart without anyone guessing which image moved.
+device_fingerprint=""
+device_api_level=""
+device_kernel=""
+emulator_version=""
+image_revision=""
+if [ "$device_ready" = true ]; then
+  echo "::group::what booted"
+  device_fingerprint="$(adb shell getprop ro.build.fingerprint 2>/dev/null | tr -d '\r')"
+  device_api_level="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r')"
+  device_kernel="$(adb shell uname -r 2>/dev/null | tr -d '\r')"
+  if [ "$do_privileged" != true ] && [ -x "$sdk_root/emulator/emulator" ]; then
+    emulator_version="$("$sdk_root/emulator/emulator" -version 2>/dev/null \
+      | tr -d '\r' | head -1)"
+  fi
+  # The REVISION of the system image that is installed, from the package's own
+  # `source.properties`. `EMULATOR_IMAGE` is a package PATH and carries no
+  # version, so two runs a month apart can name the same path and boot different
+  # bits; without this the evidence could not tell them apart.
+  image_dir="$sdk_root/$(printf '%s' "$EMULATOR_IMAGE" | tr ';' '/')"
+  if [ -f "$image_dir/source.properties" ]; then
+    image_revision="$(tr -d '\r' < "$image_dir/source.properties" \
+      | awk -F= '/^Pkg.Revision=/ { print $2; exit }')"
+  fi
+  echo "fingerprint: ${device_fingerprint:-<unreadable>}"
+  echo "api level:   ${device_api_level:-<unreadable>}"
+  echo "kernel:      ${device_kernel:-<unreadable>}"
+  echo "emulator:    ${emulator_version:-<n/a>}"
+  echo "image:       $EMULATOR_IMAGE rev ${image_revision:-<unknown>}"
+  echo "::endgroup::"
+
+  # Each of these is part of the criterion's environment attestation, so an
+  # unreadable one is a gap rather than a detail: report.py cannot check what
+  # the evidence does not carry. Fatal only in the 16 KiB lane, whose row is the
+  # one that claims something about the machine.
+  if [ "$do_pagesize16k" = true ]; then
+    for fact in device_fingerprint device_api_level device_kernel image_revision; do
+      if [ -z "${!fact}" ]; then
+        echo "::error::$fact could not be read from the booted device or the \
+installed package. $CRITERION's evidence must name the exact system it ran on, \
+and a row whose environment cannot be attested is not a discharged criterion." >&2
+        exit 1
+      fi
+    done
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 4/5/6. install, instrument, and drive the lifecycle
 # ---------------------------------------------------------------------------
 device_abi=""
 if [ "$device_ready" = true ]; then
   device_abi="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
   echo "::group::install and instrument"
-  app_apk="$(find "$GRADLE_DIR/app/build/outputs/apk/debug" -name '*.apk' -print -quit)"
-  test_apk="$(find "$GRADLE_DIR/app/build/outputs/apk/androidTest/debug" -name '*.apk' -print -quit)"
+  apk_variant="debug"
+  [ "$do_pagesize16k" = true ] && apk_variant="release"
+  app_apk="$(find "$GRADLE_DIR/app/build/outputs/apk/$apk_variant" -name '*.apk' -print -quit)"
+  test_apk="$(find "$GRADLE_DIR/app/build/outputs/apk/androidTest/$apk_variant" -name '*.apk' -print -quit)"
   [ -n "$app_apk" ] && [ -n "$test_apk" ] || {
-    echo "::error::the debug APK or the androidTest APK is missing" >&2; exit 1;
+    echo "::error::the $apk_variant APK or its androidTest APK is missing" >&2; exit 1;
   }
+  # NAMED, so the log says which artifact answered. An `-unsigned` suffix here
+  # is the signing config not having applied, and `adb install` would refuse it
+  # a line later with a message that does not mention signing.
+  echo "installing: $app_apk"
+  echo "installing: $test_apk"
+
+  # THE BYTES THAT WERE INSTALLED, NAMED. Computed here rather than after the
+  # run, so the digest is of the file `adb install` is about to push and not of
+  # whatever a later Gradle task leaves in `outputs/apk`. The 16 KiB criterion is
+  # entirely about the `.so` inside the SHIPPED APK, and a cached Gradle build
+  # that served a stale release APK produces a green ANDROID-16K-PAGE-SIZE row
+  # about an artifact nobody can point at.
+  ARTIFACT_DIGESTS="$(twinvpn_digest_json \
+    "app-$apk_variant.apk" "$app_apk" \
+    "app-androidTest-$apk_variant.apk" "$test_apk")"
+  echo "artifact digests: $ARTIFACT_DIGESTS"
+  case "$app_apk" in
+    *unsigned*)
+      echo "::error::the release APK is unsigned; the four twinvpn.release.* properties did not reach Gradle" >&2
+      exit 1 ;;
+  esac
   adb install -r -g "$app_apk"
   adb install -r "$test_apk"
 
@@ -822,15 +1197,74 @@ fi
 # secret, NO authentication token and NO tunnel payload -- `NativeLinkRunTest`
 # never establishes a tunnel and ADR-0015 §11.4 classes an address SENSITIVE, so
 # nothing in this shell logs one. It is uploaded on failure only.
+# THE ENVIRONMENT ATTESTATION.
+#
+# Every value here is MEASURED -- the page size from the running kernel, the
+# alignment from the SDK's own checker, the variant from the file that was
+# actually installed, the pending-exception answer from the instrumented run's
+# own logcat marker. `build/acceptance/report.py` refuses a PASS for
+# ANDROID-16K-PAGE-SIZE unless `page_size` is exactly 16384, so a 4 KiB
+# emulator cannot produce green evidence for this criterion no matter how well
+# every test in it ran.
+#
+# `jni_pending_exception` is derived from the ABSENCE of the marker being
+# false, and the marker is only printed by a run that survived 64 crossings --
+# under CheckJNI a pending exception aborts the process, so an aborted run
+# prints nothing and the key stays absent, which report.py reads as NOT
+# MEASURED rather than as `false`. Absence is not a pass.
+jni_clean="null"
+if [ -f "$LOGDIR/logcat.norm" ] \
+   && grep -q 'TWINVPN_ATTESTATION jni_pending_exception=false' "$LOGDIR/logcat.norm"; then
+  jni_clean="false"
+fi
+
+# THE UNDERLAY EXCLUSION, WHICH THE TEST PROVED AND NOTHING RECORDED.
+#
+# `PageSize16kTest.the_underlay_set_never_contains_our_own_vpn_interface` asserts
+# that no network carrying TRANSPORT_VPN reaches the set the adapter treats as
+# underlay -- the defect being a tunnel carried by itself, whose symptom is a
+# connection that comes up and then stalls with no error anywhere. It logs
+# `TWINVPN_ATTESTATION underlay_excludes_vpn=true`, and until now this script
+# scraped only the JNI line, so a proven property left no trace in the evidence
+# and report.py had nothing to grade.
+#
+# `null` when absent, exactly like `jni_pending_exception`: a test that did not
+# run and a test that ran and found a VPN in the underlay must not share a value.
+underlay_excludes_vpn="null"
+if [ -f "$LOGDIR/logcat.norm" ] \
+   && grep -q 'TWINVPN_ATTESTATION underlay_excludes_vpn=true' "$LOGDIR/logcat.norm"; then
+  underlay_excludes_vpn="true"
+fi
+
 cat > "$EVIDENCE" <<JSON
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "platform": "android",
+  "criterion": "$CRITERION",
   "job_name": "${GITHUB_JOB:-android-link-run}",
   "runner": "${RUNNER_NAME:-local}",
   "runner_kind": "$runner_kind",
   "privileged": $do_privileged,
+  "environment": {
+    "page_size": ${device_page_size:-null},
+    "zipalign_p16": $zipalign_p16,
+    "apk_variant": "${apk_variant:-none}",
+    "jni_pending_exception": $jni_clean,
+    "underlay_excludes_vpn": $underlay_excludes_vpn,
+    "abi": "$device_abi",
+    "abi_load_alignment": $abi_alignment,
+    "api_level": ${device_api_level:-null},
+    "build_fingerprint": "$device_fingerprint",
+    "kernel_release": "$device_kernel",
+    "emulator_version": "$emulator_version",
+    "system_image_package": "$([ "$do_privileged" = true ] && echo "physical device" || echo "$EMULATOR_IMAGE")",
+    "system_image_revision": "$image_revision",
+    "emulator_image": "$([ "$do_privileged" = true ] && echo "physical device" || echo "$EMULATOR_IMAGE")"
+  },
+  "leak_oracle": null,
   "github_run_id": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"$GITHUB_RUN_ID\"" || echo null),
+  "github_run_attempt": $(twinvpn_run_attempt_json),
+  "artifact_digests": $ARTIFACT_DIGESTS,
   "github_run_url": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/$GITHUB_RUN_ID\"" || echo null),
   "commit": "$(cd "$REPO" && git rev-parse HEAD)",
   "toolchain": {

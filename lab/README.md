@@ -114,6 +114,7 @@ $ cargo run -q -p twinlab-scenarios -- conformance
 | `twinlab-scenarios` | the named scenario family and the NAT class-pair matrix, plus the CLI |
 | `twinnet` | **the fabric**: the sandbox, real topologies, the userspace middleboxes, impairment, the packet observer, the §3.4.2 prober, and the traffic that makes any of it do work |
 | `twinsim` | the **peers**: simulated devices and gateways, and the L-CONTROL binding |
+| `twinoracle` | **the external leak oracle**: the off-device observer that decides whether a platform kill-switch criterion holds. It is the only member deployed OUTSIDE this repository's runners, and that is the point — see below |
 
 ### `twinnet`, and why it is a separate crate
 
@@ -141,6 +142,32 @@ arguments and no pointer arithmetic.
 real encapsulation and not a real cryptographic one, so nothing built on it may
 claim a payload was unreadable. Those claims belong to `twinsim`, which drives
 the real binaries, and to `tests/`, which links the real crates.
+
+### `twinoracle`, and why it does not run beside the test
+
+Every other member here runs on the same host as the thing it measures.
+`twinoracle` must not, and the §3.1 realization principle is the reason: a
+kill-switch criterion cannot be produced by a mechanism the system under test
+can see, and it cannot be *graded* by one either.
+
+A platform's own status API says `protected` when the filter set was never
+installed, when the firewall anchor was flushed by something else, and when the
+NetworkExtension provider died — three separate ways for a device to be leaking
+while reporting that it is not. So the observation moves off the device
+entirely: `twinoracle` runs on a public instance the device can reach only by
+emitting a packet that actually left it, and it records what arrived, from
+which address, on which family, and when.
+
+The verdict logic's whole shape comes from one fact: **zero observations because
+the kill switch worked and zero observations because the oracle was unreachable
+are the same bytes.** So a session that never proved the oracle could hear it is
+`Inconclusive`, never `Pass` — which is `Verdict::Unavailable`'s discipline from
+§1, arriving in a different crate for the same reason.
+
+`lab/twinoracle/README.md` has the deployment and the session protocol;
+`build/ci/leak-probe.sh` is the device-side driver;
+`build/acceptance/report.py` fetches the verdict from the oracle rather than
+from the job under test.
 
 ### `twinsim`, and the one thing it proves that `twinlab` cannot
 

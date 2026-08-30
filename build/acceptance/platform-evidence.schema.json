@@ -1,19 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://twinvpn.invalid/schema/platform-evidence-1.json",
-  "title": "TwinVPN platform lifecycle CI evidence, version 1",
-  "description": "What one platform link/run job MUST emit for its result to count as evidence. A job that cannot fill a field truthfully sets it false and states why in `notes`; it does NOT omit the field, because an absent field and a false one read identically in a summary and only one of them is honest. The First Implementation Wave criterion is that the shared core/platform boundary compiles, links, LOADS, INVOKES core code, RECEIVES a result back, and executes lifecycle state transitions -- so each of those is its own boolean and `verdict` is their conjunction, computed by build/acceptance/report.py rather than asserted by the job.",
+  "$id": "https://twinvpn.invalid/schema/platform-evidence-2.json",
+  "title": "TwinVPN platform lifecycle CI evidence, version 2",
+  "description": "What one platform job MUST emit for its result to count as evidence. A job that cannot fill a field truthfully sets it false and states why in `notes`; it does NOT omit the field, because an absent field and a false one read identically in a summary and only one of them is honest.\n\nVERSION 2 ADDS THE TWO THINGS VERSION 1 COULD NOT EXPRESS.\n\n(1) `environment` -- the ATTESTATION. Version 1's booleans described what the test did; none of them described whether the machine it ran on was capable of the claim in the first place. A Windows kill-switch run on an unprivileged process, an Android 16 KiB run on a 4096-byte-page emulator, and a macOS system-extension run on a host whose extension never activated all produced perfectly well-formed version-1 evidence with every boolean true. `environment` is a flat map of machine-checked facts about the ENVIRONMENT, and `build/acceptance/report.py` refuses a PASS for a criterion whose prerequisite keys are absent or wrong -- before it looks at any of the booleans below. An environment that failed its prerequisite attestation cannot produce a green criterion.\n\n(2) `leak_oracle` -- WHERE THE EGRESS CLAIM IS ADJUDICATED, which is deliberately not here. A criterion that asserts 'no unauthorized IPv4, IPv6 or DNS egress' names a session id; the acceptance job fetches that session's report FROM THE ORACLE over its control API and re-derives the row from it. Nothing this file says about egress is believed, because the job that writes this file is the defendant.",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version", "platform", "job_name", "runner", "runner_kind",
-    "commit", "toolchain", "compiled", "linked_real_core", "loaded",
+    "schema_version", "platform", "criterion", "job_name", "runner", "runner_kind",
+    "commit", "toolchain", "environment", "compiled", "linked_real_core", "loaded",
     "invoked_core", "received_result", "lifecycle_transitions",
     "graceful_shutdown", "verdict", "generated_at"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "platform": { "enum": ["linux", "windows", "macos", "ios", "android"] },
+    "criterion": {
+      "type": "string",
+      "pattern": "^[A-Z0-9-]+$",
+      "description": "The acceptance criterion this file discharges, e.g. `WINDOWS-WFP-KILLSWITCH`, `MACOS-SYSEXT-LIFECYCLE`, `MACOS-PRODUCTION-SIGNATURE`, `ANDROID-16K-PAGE-SIZE`, `IOS-NE-FAIL-CLOSED`. ONE FILE, ONE CRITERION: version 1 let a single macOS file be read as evidence for both extension lifecycle and production signing, which is exactly the conflation the wave's gate exists to prevent."
+    },
     "job_name": {
       "type": "string",
       "description": "The stable GitHub Actions job name, so a reader can find the run that produced this."
@@ -21,20 +26,50 @@
     "runner": { "type": "string", "description": "The pinned runner image or self-hosted label set, verbatim." },
     "runner_kind": {
       "enum": ["github-hosted", "self-hosted", "local"],
-      "description": "Hosted and self-hosted are DIFFERENT EVIDENCE and must not be conflated. A hosted simulator run never stands in for a privileged or physical-device run."
+      "description": "Hosted and self-hosted are DIFFERENT EVIDENCE and must not be conflated."
     },
     "privileged": {
       "type": "boolean",
       "default": false,
-      "description": "True only where the job actually exercised the privileged platform surface (WFP/driver/service activation, NetworkExtension activation, a physical device). A hosted smoke test sets this false."
+      "description": "Retained from version 1 and still meaningful, but no longer sufficient on its own: see `environment`, where the Windows criterion's four separate preconditions live."
     },
     "github_run_id":  { "type": ["string", "null"] },
     "github_run_url": { "type": ["string", "null"] },
+    "github_run_attempt": {
+      "type": ["string", "null"],
+      "description": "GITHUB_RUN_ATTEMPT, verbatim. REQUIRED BY EVERY CRITERION `report.py` RE-DERIVES, and it is the field that catches the one stale artifact the commit and run bindings cannot. A re-run of the same commit keeps the SHA and keeps the run id; only the attempt changes. So an artifact left in the run's store by a failed first attempt satisfies every other binding while describing a machine that was torn down hours ago -- a rumour from another run, wearing the right name. Evidence that records no attempt cannot be tied to any run at all and is refused."
+    },
+    "repository": {
+      "type": ["string", "null"],
+      "description": "GITHUB_REPOSITORY, verbatim. Checked when the environment names one, so evidence produced for a fork or for another repository cannot discharge this repository's criterion."
+    },
+    "artifact_digests": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+      "description": "SHA-256 of the artifact this criterion was actually run against, keyed by the artifact's name as the producing job knows it -- `app-release.apk`, `TwinVPN.ipa`, `TwinVPN.app.zip` (the operator's pinned digest, recorded verbatim -- the digest the download was gated on), `TwinVPN.app/Contents/MacOS/TwinVPN` (a .app is a directory with no single-file digest, so the key names the executable it actually covers and not the Info.plist or the nested extension), `net.twinvpn.client.tunnel.systemextension`, `twinvpnsvc.exe`. `report.py`'s ARTIFACT_DIGEST_REQUIRED says which names each criterion must carry; a criterion that tests no artifact records `{}`.\n\nWITHOUT IT, 'we tested the release APK' IS A SENTENCE IN A JSON FILE. The job could have installed a debug build, a cached download or last week's artifact, and every boolean here would still be true and every prerequisite still met. The digest is what makes the claim recomputable.\n\nA DIGEST IS A BINDING ONLY WHERE THE ARTIFACT CROSSED A JOB BOUNDARY. The IPA and the notarized `TwinVPN.app.zip` are fetched from a URL the release pipeline publishes, and their digests are the only thing tying the graded bytes to the published ones. Everything else is built and used inside one job, where the digest gives INTEGRITY -- the thing installed is the thing built moments earlier -- and not provenance. Record both; do not read the second as the first. Uppercase hex is refused rather than normalised: it means a different tool produced it than the one the pipeline documents."
+    },
     "commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
     "toolchain": {
       "type": "object",
       "description": "Whatever the job printed. Free-form on purpose: the rule is that versions are PRINTED and RECORDED, not that every platform names the same tools.",
       "additionalProperties": { "type": "string" }
+    },
+    "environment": {
+      "type": "object",
+      "description": "THE ATTESTATION. A flat map of facts the job MEASURED about the machine it ran on -- never a fact it assumed, and never a fact it was configured with. Each value must come from a command whose output the job also logged.\n\nFlat rather than nested on purpose: `build/acceptance/report.py` carries one required-key table per criterion, and a flat map is a table a reader can check against the script in one pass.\n\nThe keys each criterion requires are stated in report.py's PREREQUISITES, and are, at the time of writing:\n  WINDOWS-WFP-KILLSWITCH   privileged=true, bfe_running=true,\n                           wfp_write_probe=true, twinvpn_filters_installed=true,\n                           guest_kind='nested-hyperv-guest', guest_disposable=true\n  ANDROID-16K-PAGE-SIZE    page_size=16384, zipalign_p16=true,\n                           apk_variant='release', jni_pending_exception=false\n  MACOS-SYSEXT-LIFECYCLE   macos_version, sip_config, team_id,\n                           extension_bundle_id, systemextensionsctl_state='activated enabled'\n  MACOS-PRODUCTION-SIGNATURE  notarized=true, stapled=true, team_id, signing_authority\n  IOS-NE-FAIL-CLOSED       real_network_extension_invoked=true, device_kind,\n                           entitlement_packet_tunnel_provider=true, product_mode\n  IOS-PROFILE-REMOVAL-HONESTY  real_network_extension_invoked=true, device_kind,\n                           product_mode='consumer', and the five honesty conditions\n                           reported_not_protected, green_shield_impossible,\n                           connected_state_cleared, protection_lost_actionable,\n                           no_continued_killswitch_claim -- all true. The last is the\n                           subtle one: `blocked` is as wrong as `protected`, because\n                           both assert TwinVPN is still deciding what leaves a device\n                           whose authority the user just revoked.\n  IOS-SUPERVISED-ALWAYS-ON  real_network_extension_invoked=true, device_kind,\n                           product_mode='supervised', always_on_payload_installed=true,\n                           user_removal_blocked=true\n\nAND EVERY CRITERION THAT MAKES AN EGRESS CLAIM -- the ones report.py lists in ORACLE_REQUIRED -- ALSO ATTESTS ITS TWO PATHS: protected_path_established=true, unprotected_path_established=true, and the two source identities protected_path_identity and unprotected_path_identity, which must not be equal, plus probe_host='device'. Without the unprotected control leg a silent armed window is equally well explained by a device with no working network at all; with two identities that overlap, a control probe and a leak are the same observation and neither can be attributed. And probe_host names the machine the leak probe RAN ON: a probe run on the CI controller rather than on the device under test measures the controller's egress, so every number the oracle reports is about the wrong machine while staying perfectly self-consistent.\n\nA key that is absent is NOT a pass, and a key with the wrong value fails the criterion before any test result is read.",
+      "additionalProperties": { "type": ["string", "boolean", "integer", "null"] }
+    },
+    "leak_oracle": {
+      "type": ["object", "null"],
+      "description": "The external-observation session this run drove, when the criterion makes an egress claim. NULL when it makes none -- `ANDROID-16K-PAGE-SIZE` is about page size and the JNI/VpnService boundary and asserts nothing about egress, so it names no session and report.py requires none of it.\n\nThe `verdict_claimed` field is recorded for a reader and is NEVER trusted: the acceptance job fetches the oracle's own report for `session_id` and compares. A disagreement fails the row.",
+      "additionalProperties": false,
+      "required": ["session_id", "url", "criterion"],
+      "properties": {
+        "session_id": { "type": "string" },
+        "url": { "type": "string", "description": "The oracle's control-plane base URL, so a reader knows which oracle answered." },
+        "criterion": { "type": "string" },
+        "verdict_claimed": { "enum": ["PASS", "FAIL", "INCONCLUSIVE", null] }
+      }
     },
     "compiled":          { "type": "boolean", "description": "The shared core compiled for this target." },
     "linked_real_core":  { "type": "boolean", "description": "The platform artifact linked the REAL shared-core artifact. A stub or a re-implementation is false." },
@@ -58,7 +93,7 @@
     "notes": { "type": "string", "description": "Required reading when any boolean above is false: say what did not happen and why." },
     "verdict": {
       "enum": ["PASS", "FAIL", "NOT-EXECUTED"],
-      "description": "PASS requires every boolean true AND at least one lifecycle transition. NOT-EXECUTED is for a job that did not run at all -- it is an ABSENCE of evidence and the gate treats it as failing, never as passing."
+      "description": "PASS requires every boolean true AND at least one lifecycle transition. NOT-EXECUTED is for a job that did not run at all -- it is an ABSENCE of evidence and the gate treats it as failing, never as passing. It is re-derived by report.py in every case; this field is what the job believed, not what the gate concluded."
     },
     "generated_at": { "type": "string" }
   }

@@ -1,7 +1,40 @@
 # Self-hosted runners for the privileged lifecycle jobs
 
-Three machines. Every requirement below is derived from a step in
-`.github/workflows/first-implementation-wave-privileged.yml` or from the
+> ## SUPERSEDED — 2026-08-30
+>
+> **This arrangement is no longer the one the gate uses, and the workflow it
+> describes no longer exists.** The four privileged criteria needed four
+> physical machines: a Windows rig, a Mac mini, an iPhone on a cable, and a
+> 16 KiB-page Android phone with an unlocked bootloader. Local or user-owned
+> hardware is no longer an acceptable dependency for the First Implementation
+> Wave gate, so each was replaced by a remotely executable, environment-attested
+> probe — Azure with a disposable nested guest, Google's official 16 KB emulator
+> image, an AWS EC2 Mac, and a Corellium virtual iPhone — all of them now in
+> `.github/workflows/first-implementation-wave-gate.yml`.
+>
+> **Read [`remote-acceptance-infrastructure.md`](remote-acceptance-infrastructure.md)
+> instead.** It is the current specification.
+>
+> This file is kept for two things it records that the new one does not repeat:
+> the reasoning about *why each row needed what it needed* (§§ Machine A–C), and
+> the 2026-08-30 cloud-alternatives research that concluded the iOS and Android
+> rows had no cloud path — a conclusion the new arrangement overturns, and the
+> difference is worth being able to read:
+>
+> * **iOS** was closed because every commercial device farm re-signs the IPA and
+>   strips `packet-tunnel-provider`. Corellium does not re-sign, which is the one
+>   capability that reopens it. The survey below did not consider it.
+> * **Android** was closed because no farm hands over a device on a 16 KiB
+>   kernel. That is still true — and irrelevant, because Google's own emulator
+>   image provides 16 KiB pages, and `getconf PAGE_SIZE` cannot tell a real
+>   kernel's page size from an emulated one because it is asking the running
+>   kernel either way.
+> * **macOS** was correctly identified as possible on EC2 Mac and rejected on
+>   cost. That trade is now decided the other way, for a reason that is not about
+>   cost: a desk is what the gate may no longer depend on.
+
+Three machines. Every requirement below is derived from a step in the (now
+removed) `first-implementation-wave-privileged.yml` or from the
 `build/ci/ci-*.sh` it invokes; nothing here is general advice.
 
 Two wiring defects that would have survived buying these machines were fixed on

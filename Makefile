@@ -852,6 +852,8 @@ proof: proof-register proof-oracles proof-mutants
 # ---------------------------------------------------------------------------
 .PHONY: test-crypto-integration test-pairing-integration test-mutation \
         ci-linux ci-windows ci-macos ci-ios ci-android test-first-wave-gate \
+        ci-windows-killswitch ci-android-16k ci-macos-sysext \
+        ci-macos-signature ci-ios-corellium test-acceptance-gate-logic \
         first-wave-report
 
 # F-1. The crypto core must be exercised by the real producer/consumer paths,
@@ -900,6 +902,48 @@ ci-ios:
 ci-android:
 	@build/ci/ci-android.sh
 
+# ---------------------------------------------------------------------------
+# The environment-attested platform criteria.
+#
+# These replaced four jobs that needed physical machines. Each one refuses to
+# run on a host that cannot support its claim, and each writes evidence
+# carrying an `environment` map that `build/acceptance/report.py` checks before
+# it reads a single test result. Three of them are adjudicated by the EXTERNAL
+# leak oracle (`lab/twinoracle`) rather than by the platform under test, and
+# they need TWINVPN_ORACLE_URL and TWINVPN_ORACLE_TOKEN.
+#
+# `ci-windows-killswitch` is deliberately NOT here as a plain target: it must
+# run inside a disposable guest, and a make target inviting someone to run it
+# on their workstation would install persistent WFP filters on it. The
+# controller is the entry point.
+# ---------------------------------------------------------------------------
+ci-windows-killswitch:
+	@echo "==> WINDOWS-WFP-KILLSWITCH runs INSIDE a disposable nested guest."
+	@echo "    It installs persistent WFP filters that survive the process by"
+	@echo "    design (CB-6), so running it on this machine would cut it off the"
+	@echo "    network. Drive it through the controller:"
+	@echo "      pwsh scripts/twinvpn-azure-l1.ps1 -Action run ..."
+	@exit 2
+
+ci-android-16k:
+	@build/ci/ci-android.sh --pagesize16k
+
+ci-macos-sysext:
+	@build/ci/ci-macos-sysext.sh
+
+ci-macos-signature:
+	@build/ci/ci-macos-signature.sh
+
+ci-ios-corellium:
+	@build/ci/ci-ios-corellium.sh
+
+# The gate's own gate. `report.py`'s prerequisite table is the only thing
+# between the acceptance report and a green row produced on a 4 KiB emulator or
+# an unprivileged Windows host, so it has a test of its own that builds
+# evidence which is perfect except for one thing and asserts the row is refused.
+test-acceptance-gate-logic:
+	@build/acceptance/test_report_prerequisites.py
+
 # The whole gate: every host-independent blocker, executed, plus verification
 # of the machine-readable platform CI evidence. Non-zero unless every required
 # criterion is genuinely green -- NOT-EXECUTED counts against eligibility
@@ -908,6 +952,7 @@ test-first-wave-gate:
 	@$(MAKE) --no-print-directory test-crypto-integration
 	@$(MAKE) --no-print-directory test-pairing-integration
 	@$(MAKE) --no-print-directory test-mutation
+	@$(MAKE) --no-print-directory test-acceptance-gate-logic
 	@build/acceptance/report.py --run
 
 # The report without re-running the host-independent blockers: reads whatever

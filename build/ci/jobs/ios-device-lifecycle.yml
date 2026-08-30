@@ -1,194 +1,36 @@
 # build/ci/jobs/ios-device-lifecycle.yml
 #
-# A JOB BODY, not a workflow. Paste it under a workflow's `jobs:` key.
-#
 # ===========================================================================
-# THE SIMULATOR JOB AND THIS JOB ARE DIFFERENT EVIDENCE
+# SUPERSEDED. THIS JOB NO LONGER EXISTS.
 # ===========================================================================
-# `ios-link-run` boots a SIMULATOR. `shells/ios/TwinVPNTests/
-# LifecycleTests.swift` states what that costs, in its own header:
+# The criterion it discharged -- IOS-NE-FAIL-CLOSED and IOS-PROFILE-REMOVAL-HONESTY -- is now
+# the `ios-corellium` job in
+# `.github/workflows/first-implementation-wave-gate.yml`.
 #
-#   "The simulator has no Secure Enclave, no jetsam, and no real
-#    `includeAllNetworks`, so every assertion here is vacuous on it."
+# WHAT CHANGED, AND WHY.
 #
-# and every case in that suite enforces it with
-# `XCTSkipUnless(DeviceCapabilities.isPhysicalDevice)`. So the simulator job
-# runs a DIFFERENT SUITE (`TwinVPNIntegrationTests`), proves a DIFFERENT thing
-# (link, load, invoke, receive, lifecycle phases across `twinvpn.h`), and writes
-# a DIFFERENT file (`build/ci/evidence/ios.json`, `privileged: false`).
+# This job needed a provisioned iPhone attached to that Mac.
+# The First Implementation Wave gate must stay evidence-based, but local or
+# user-owned physical hardware is no longer an acceptable dependency for it: a
+# blocker that can only be closed by someone with a machine in a room is a
+# purchasing decision wearing an engineering costume.
 #
-# This job runs `TwinVPNTests` against a PROVISIONED PHYSICAL DEVICE through
-# `xcodebuild -destination "id=<udid>"`, and writes
-# `build/ci/evidence/ios-device.json` with `privileged: true`.
+# The replacement is a Corellium cloud virtual iPhone, non-jailbroken, running the REAL signed IPA with its entitlements intact -- the capability every commercial device farm lacks, because they all re-sign the upload and strip packet-tunnel-provider.
 #
-# **Neither may be read as the other, and a green simulator run never
-# discharges a device row.** `shells/ios/README.md` §8 lists the seven rows that
-# need a device and why each one does.
+# It is also STRICTER, in three ways that matter:
 #
-# ===========================================================================
-# WHY THE CRITERION NEEDS THIS JOB AT ALL
-# ===========================================================================
-# Real on-device NetworkExtension activation is the only way to reach:
-#   - OS termination of the extension (jetsam gives no notice and has no API);
-#   - the extension memory-limit kill (ADR-0018 §11.9 row 1's 9 MB core RSS
-#     inside ADR-0022's 12 MB provider budget is only real under load);
-#   - profile revocation from Settings (no API removes our own profile);
-#   - the suspend/resume gap on the right clock (LC-8's failure is invisible on
-#     a host that never sleeps);
-#   - ADR-0012 §11.9's **P09** attach-to-arm window, whose §14 revisit
-#     condition 5 turns on a MEASURED p95.
+#   * the evidence carries an `environment` attestation of facts the job
+#     MEASURED about the machine, and `build/acceptance/report.py` checks those
+#     keys BEFORE it reads any test result. A host that was never capable of the
+#     claim cannot produce a green row however well its tests ran;
+#   * where the criterion makes an egress claim, the verdict comes from
+#     `lab/twinoracle` -- an EXTERNAL observer the device can only reach by
+#     emitting a packet that left it -- fetched by the aggregator FROM THE
+#     ORACLE, not from anything this job could upload;
+#   * the job runs in the SAME workflow as the aggregator, so evidence can no
+#     longer be imported from a different run.
 #
-# ===========================================================================
-# WHAT THE RUNNER MUST BE
-# ===========================================================================
-# Labelled `[self-hosted, macOS, twinvpn-ios-device]`. None of this is checked
-# by the file; the job fails at the step that needs it.
+# The script is `build/ci/ci-ios-corellium.sh`.
 #
-#   1. Xcode pinned to `TWINVPN_XCODE_VERSION` (build/ci/ci-common-apple.sh).
-#   2. A physical iPhone attached, unlocked, trusted, and in Developer Mode,
-#      with its UDID in `TWINVPN_IOS_DEVICE_UDID`.
-#   3. A provisioning profile carrying `packet-tunnel-provider`, `allow-vpn`,
-#      the shared keychain access group and the App Group (ADR-0016 §11.2's
-#      entitlement table), and a signing identity in a keychain the runner can
-#      unlock without an interactive prompt.
-#   4. For the always-on rows, a SUPERVISED device: ADR-0022 §11.10's iOS row
-#      makes true boot start an MDM payload and an unsupervised device cannot
-#      reach it.
-#   5. A CI-only Apple account and a CI-only device. This job installs, runs and
-#      uninstalls a VPN profile.
-#
-# **NOT satisfied by this job, and it must not pretend otherwise:** ADR-0018
-# §11.9 lists **iPadOS as a DISTINCT farm entry**, not a variant of row 1. A run
-# on an iPhone does not discharge row 2. Running both means a second runner
-# labelled for an iPad and a second instance of this job; the evidence file
-# names the device it ran on so the two are distinguishable.
-#
-# **ALSO NOT satisfied:** every leak row in `TwinVPNTests/LeakAndArmTests.swift`
-# needs "a capture point on the far side of the device's uplink", because a leak
-# is by definition a packet the device emitted that we did not see it emit. This
-# job has no such capture point, so those cases are expected to skip. That is
-# the honest outcome and it is why the evidence file's `notes` says which rows
-# ran.
-#
-# ===========================================================================
-# SECRETS AND CAPTURES
-# ===========================================================================
-# No signing identity, keychain password, team identifier or provisioning
-# profile is echoed by any step, and none reaches the evidence file. No packet
-# capture is taken here at all — precisely so there is none to redact and none
-# to leak. Device syslog is NOT uploaded wholesale for the same reason: it is
-# the whole device's log, not ours.
-
-  ios-device-lifecycle:
-    name: ios-device-lifecycle
-    runs-on: [self-hosted, macOS, twinvpn-ios-device]
-    # A device run installs, activates and tears down a VPN profile on real
-    # hardware. If it has not finished in 75 minutes the device is wedged and
-    # holding it is worse than failing.
-    timeout-minutes: 75
-    # One at a time per device. Two `xcodebuild -destination id=` runs against
-    # one iPhone interleave in ways that look like product defects.
-    concurrency:
-      group: twinvpn-ios-device-lifecycle
-      cancel-in-progress: false
-    env:
-      # Set on the runner, not here. Named so a missing value fails with the
-      # message `ci-ios.sh` writes rather than an opaque xcodebuild error.
-      TWINVPN_IOS_DEVICE_UDID: ${{ vars.TWINVPN_IOS_DEVICE_UDID }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          clean: true
-
-      - name: select the pinned Xcode and print every toolchain version
-        run: |
-          # RESOLVED FIRST, into a variable. Inlining the command substitution
-          # into `xcode-select -s "$(...)"` discards the resolver's exit status
-          # and hands `xcode-select` an empty string, which fails with
-          # `invalid developer directory ''` instead of with the resolver's own
-          # message naming the pin and every Xcode the machine does have.
-          XCODE_DEV_DIR="$(build/ci/ci-ios.sh --print-xcode-path)"
-          sudo xcode-select -s "$XCODE_DEV_DIR"
-          xcodebuild -version
-          swift --version
-          xcrun --sdk iphoneos --show-sdk-version
-          rustc --version
-          sw_vers
-          # The device, by identifier. `devicectl list devices` prints model,
-          # OS version and pairing state — not a serial-numbered inventory of
-          # anyone else's hardware, because a device runner holds one device.
-          xcrun devicectl list devices
-
-      - name: reset to a known-clean state
-        # Removes a stale generated project, stale staged archives, a stale
-        # evidence file, a booted simulator, and any previously installed
-        # TwinVPN app — which is what removes its VPN profile, since no API
-        # removes our own profile (TwinVPNTests' own header).
-        run: build/ci/ci-ios.sh --reset
-
-      - name: on-device lifecycle
-        run: build/ci/ci-ios.sh --device
-
-      - name: collect device diagnostics
-        if: failure()
-        # Crash reports for OUR bundles only, copied off the device. NOT the
-        # device syslog (it is the whole device's, not ours) and NOT a packet
-        # capture (none is taken).
-        run: |
-          mkdir -p build/ci/logs/ios/crashes
-          xcrun devicectl device info files \
-            --device "$TWINVPN_IOS_DEVICE_UDID" \
-            --domain-type appDataContainer \
-            --domain-identifier net.twinvpn.client \
-            --username mobile / 2>&1 \
-            | tee build/ci/logs/ios/device-container-listing.txt || true
-          find ~/Library/Logs/CrashReporter/MobileDevice \
-            -name '*TwinVPN*' -type f -exec cp {} build/ci/logs/ios/crashes/ \; 2>/dev/null \
-            || echo "no device crash reports"
-
-      - name: return the device to a known state
-        if: always()
-        # UNCONDITIONAL. Uninstalls the container app, which takes the extension
-        # and the VPN configuration with it, and shuts down any simulator the
-        # run happened to boot. A device left holding our tunnel is a device the
-        # next job — and its owner — inherits.
-        run: build/ci/ci-ios.sh --cleanup
-
-      # TWO uploads, split the way `build/ci/jobs/android-link-run.yml` splits
-      # its own, because they are not the same claim. The evidence is the
-      # acceptance gate's input and stays `error`: a run that reached the end
-      # without writing evidence must go red rather than be read as a pass. The
-      # diagnostics are `failure()` + `ignore`, so a job that died in its FIRST
-      # step (selecting Xcode, say) does not stack a second, misleading
-      # "No files were found" red on top of the real failure.
-      #
-      # NOTE FOR THE INTEGRATION OWNER: this renames the evidence half from
-      # `diagnostics-ios-device` to `evidence-ios-device`. The gate job collects
-      # `pattern: evidence-*`, and `build/acceptance/report.py` probes
-      # `build/ci/evidence/ios-device.json` — so under the old name this job's
-      # evidence was uploaded but never collected, and that row could only ever
-      # read NOT_EXECUTED. The new name is what `android-device-lifecycle.yml`
-      # already does (`evidence-android-device`).
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: evidence-ios-device
-          # ENUMERATED. NEVER a provisioning profile, a signing identity, a
-          # keychain, a pairing secret, an authentication token, tunnel
-          # plaintext, or a packet capture.
-          path: |
-            build/ci/evidence/ios-device.json
-            build/ci/logs/ios/xctest-device.log
-          if-no-files-found: error
-          retention-days: 14
-
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: diagnostics-ios-device
-          # ENUMERATED to this job's own log tree, under the same prohibition as
-          # above. NEVER the CoreSimulator tree and NEVER the device syslog.
-          path: |
-            build/ci/logs/ios/**
-          if-no-files-found: ignore
-          retention-days: 14
+# This file is kept as a pointer because several READMEs and source headers
+# name it; it is not a job fragment any more and nothing reads it as one.

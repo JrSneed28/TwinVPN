@@ -23,6 +23,11 @@
 #              each completion back off `tw_core_next_event`.
 #
 #   --device   SELF-HOSTED, PHYSICAL DEVICE -> build/ci/evidence/ios-device.json
+#              NO LONGER PART OF THE ACCEPTANCE GATE. The criteria it used to
+#              discharge are `build/ci/ci-ios-corellium.sh`'s, on a
+#              non-jailbroken Corellium virtual iPhone, because local hardware is
+#              no longer an acceptable dependency for the gate. Kept: it is still
+#              the way to reproduce a run on a phone you own.
 #              privileged: true. Runs `TwinVPNTests` — the suite that skips
 #              itself on a simulator — against a provisioned iPhone or iPad,
 #              where a NetworkExtension can actually be activated.
@@ -45,6 +50,13 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# `twinvpn_run_attempt_json`, `twinvpn_sha256`, `twinvpn_verify_digest` and
+# `twinvpn_digest_json`. Sourced rather than reimplemented per script: the
+# sha256 command differs on every host this repository runs on, and a digest
+# helper that silently produced nothing on one of them would bind the evidence
+# to no bytes at all.
+# shellcheck disable=SC1091
+. "$REPO/build/ci/digest.sh"
 SHELL_DIR="$REPO/shells/ios"
 LOGDIR="$REPO/build/ci/logs/ios"
 
@@ -405,6 +417,8 @@ cat > "$EVIDENCE" <<JSON
   "runner_kind": "$([ -n "${GITHUB_ACTIONS:-}" ] && { [ "$PRIVILEGED" = true ] && echo self-hosted || echo github-hosted; } || echo local)",
   "privileged": $PRIVILEGED,
   "github_run_id": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"$GITHUB_RUN_ID\"" || echo null),
+  "github_run_attempt": $(twinvpn_run_attempt_json),
+  "artifact_digests": {},
   "github_run_url": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/$GITHUB_RUN_ID\"" || echo null),
   "commit": "$(cd "$REPO" && git rev-parse HEAD)",
   "toolchain": {
