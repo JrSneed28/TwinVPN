@@ -277,9 +277,26 @@ adb() { "$sdk_root/platform-tools/adb" "$@"; }
 # -- which is exactly the three-entry list emulator 37.1.11 printed above.
 #
 # `ANDROID_AVD_HOME` is the ONE variable both tools honour, so it is the one
-# that makes them agree. It is set here rather than in the workflow so that the
-# `--cleanup` re-entry -- a separate process, which deletes the AVD -- resolves
-# the same directory the create used.
+# that makes them agree. `ANDROID_USER_HOME` would dodge the `mkdir` below --
+# it is the only one of these with `mustExist = false` -- but emulator 37.1.11
+# DOES NOT READ IT: its own message above lists exactly three, and
+# `ConfigDirs::getAvdRootDirectory()` agrees. Setting it would work only by the
+# coincidence that `$ANDROID_USER_HOME/avd` equalled the emulator's last-resort
+# fallback, and would break silently the moment the value changed.
+# (`developer.android.com/tools/variables` claims the emulator searches
+# `$ANDROID_USER_HOME/avd/`; the emulator's own runtime output disagrees, and
+# the emulator wins.)
+#
+# It is set HERE, at the top, rather than beside the create, because three entry
+# points need it and only one of them creates: the bare script, `--cleanup`, and
+# `--reset`. `--reset` is the one that matters -- `avdmanager delete avd` below
+# resolves through the same `AndroidLocations`, so without this it would look in
+# the XDG path and silently delete nothing, leaving a stale AVD to survive the
+# reset that exists to remove it. (`--cleanup` does not touch the AVD at all; it
+# uninstalls the packages and kills the emulator.)
+#
+# This is a 22.04 -> 24.04 REGRESSION, not an OS difference: cmdline-tools 9.0,
+# which the ubuntu-22.04 image pinned, has no XDG lookup in that chain at all.
 #
 # **THE `mkdir` IS LOAD-BEARING, NOT TIDINESS.** `ANDROID_AVD_HOME` carries
 # `mustExist = true` in both implementations: `PathLocator.handlePath()` returns
@@ -287,7 +304,9 @@ adb() { "$sdk_root/platform-tools/adb" "$@"; }
 # the emulator's own read is guarded by `pathIsDir`. Exporting it at a path that
 # does not exist yet is therefore SILENTLY IGNORED by both halves, which fails
 # exactly as it does today while looking like the fix is in place.
-export ANDROID_AVD_HOME="$HOME/.android/avd"
+# `:-` so a self-hosted rig can point this somewhere else and keep it; `set -u`
+# safe, and `mkdir -p` is idempotent and still fails loudly on an unusable path.
+export ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
 mkdir -p "$ANDROID_AVD_HOME"
 
 # ---------------------------------------------------------------------------
