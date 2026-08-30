@@ -1,5 +1,7 @@
 //! ADR-0013's per-peer isolation, grants and fairness, asserted.
 
+use core::time::Duration;
+
 use twinvpn_gateway::grant::{
     self, GatewayPolicy, Grant, Granted, Refusal as GrantRefusal, Request,
 };
@@ -403,6 +405,48 @@ fn the_guaranteed_floor_is_the_larger_of_the_share_and_256_kbit() {
         quota::PREEMPTION_BOUND,
         core::time::Duration::from_millis(100)
     );
+}
+
+/// The fairness pair ADR-0013 §11.11 designates, as arithmetic.
+///
+/// `docs/testing-strategy.md` §P06: "the assertion is
+/// `gw_peer_achieved_bps(B) >= gw_peer_floor_share_bps(B)` sustained, reached
+/// within 100 ms". What this crate can hold is the comparison and the
+/// conversion; the measurement needs a forwarding data plane, which `lib.rs`
+/// says in terms this crate does not have.
+#[test]
+fn the_designated_fairness_pair_compares_achieved_against_the_floor() {
+    let floor = quota::floor_bits_per_sec(100_000_000, 16);
+    assert_eq!(floor, 6_250_000);
+
+    // One second of traffic at exactly the floor. 6_250_000 bits is 781_250
+    // bytes.
+    let at_floor = quota::achieved_bits_per_sec(781_250, Duration::from_secs(1));
+    assert_eq!(at_floor, floor);
+    assert!(
+        quota::meets_floor(at_floor, floor),
+        "the comparison is >=, so a peer exactly at its floor meets it"
+    );
+
+    // The noisy-neighbour case MG-10 calls "a defect, not a condition".
+    let starved = quota::achieved_bits_per_sec(781_250 / 4, Duration::from_secs(1));
+    assert!(!quota::meets_floor(starved, floor));
+
+    // A sub-second window is the one the 100 ms preemption bound is measured
+    // over, so the conversion must be right there too.
+    assert_eq!(
+        quota::achieved_bits_per_sec(78_125, quota::PREEMPTION_BOUND),
+        floor,
+        "a tenth of the bytes in a tenth of a second is the same rate"
+    );
+
+    // No time has passed, so there is no rate. Answering anything else would
+    // let a zero-length sample satisfy the floor by accident.
+    assert_eq!(quota::achieved_bits_per_sec(1_000_000, Duration::ZERO), 0);
+    assert!(!quota::meets_floor(
+        quota::achieved_bits_per_sec(1_000_000, Duration::ZERO),
+        floor
+    ));
 }
 
 #[test]
