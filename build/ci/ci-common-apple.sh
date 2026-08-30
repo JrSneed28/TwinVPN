@@ -342,15 +342,37 @@ apple_transitions_from() {
   local present=()
   local log
   for log in "$@"; do
-    [ -f "$log" ] && present+=("$log")
+    # `if`, not `[ -f ] &&`. Under `set -e` a `for` loop's exit status is its
+    # last command's, so a final iteration whose test is FALSE returned 1 and
+    # killed the caller -- for the ordinary reason that the last log named does
+    # not exist yet.
+    if [ -f "$log" ]; then
+      present+=("$log")
+    fi
   done
   if [ "${#present[@]}" -eq 0 ]; then
     echo '[]'
     return 0
   fi
+  # ONE `awk`, not `grep | awk`.
+  #
+  # The banner above this function says "`awk` and not `grep`, because `grep`
+  # exits 1 when nothing matches and these scripts forbid `|| true`" -- and
+  # then this pipeline used `grep`. Under `set -o pipefail` a log with no
+  # marker made grep exit 1, the pipeline inherit it, and `set -e` kill the
+  # script BEFORE it wrote its evidence file.
+  #
+  # That is every failing run. It is why build/ci/evidence/ has only
+  # linux.json: a real macOS or iOS failure destroyed the evidence that would
+  # have named it, the `if-no-files-found: error` upload stacked a second red
+  # on top, and build/acceptance/report.py then read NOT-EXECUTED -- making a
+  # genuine failure indistinguishable from a platform that never ran.
+  #
+  # An empty array is the CORRECT evidence for a run that reached no
+  # transition. It must be produced, not thrown.
   cat "${present[@]}" \
     | tr -d '\r' \
-    | grep -oE '^TWINVPN_LIFECYCLE_TRANSITION [A-Z_]+->[A-Z_]+$' \
-    | awk '{print $2}' | sort -u \
+    | awk '/^TWINVPN_LIFECYCLE_TRANSITION [A-Z_]+->[A-Z_]+$/ { print $2 }' \
+    | sort -u \
     | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))'
 }
