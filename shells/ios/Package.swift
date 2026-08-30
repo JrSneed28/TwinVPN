@@ -70,6 +70,21 @@ let package = Package(
             name: "TwinVPNApp",
             dependencies: ["TwinVPNBridge"],
             path: "Sources/TwinVPNApp",
+            // The chrome string catalogue. Declared because an undeclared
+            // non-source file under a target path is not bundled — SwiftPM warns
+            // ("found 1 file(s) which are unhandled") and carries on, so the
+            // failure would be a missing string rather than a red build.
+            // `.process`, not `.copy`: the catalogue has to be COMPILED to
+            // `.lproj/Localizable.strings`, which is what `.copy` would skip.
+            //
+            // NOTE THE BUNDLE DIFFERENCE. SwiftPM puts resources in
+            // `Bundle.module`; the XcodeGen app target puts them in
+            // `Bundle.main`. The view files say `String(localized:)` with no
+            // `bundle:` — that is `Bundle.main` — because `project.yml` is the
+            // build of record and `Bundle.module` does not exist in it. This
+            // package builds a module graph for an editor and produces no
+            // running app, so nothing here reads a string at runtime.
+            resources: [.process("Resources/Localizable.xcstrings")],
             linkerSettings: [
                 // `core-lite`: ADR-0018 §11.12's feature profile of the SAME
                 // source — twinvpn-schema, twinvpn-crypto (verification only),

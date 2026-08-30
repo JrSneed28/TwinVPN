@@ -128,10 +128,23 @@ final class CoreLite {
         return RenderedDiagnostic.decode(rendered)
     }
 
-    /// A catalogue string.
+    /// `renderDiagnostic`'s summary alone, for a key that carries no evidence.
     ///
-    /// The catalogue "ships EMBEDDED in the artifact, so it is covered by S-46 and
-    /// by DP-5's SBOM" (CB-4) — which a literal in a Swift file is not.
+    /// **NOT FOR CHROME.** Tab labels, navigation titles, button labels and
+    /// accessibility labels are the SHELL's, and live in
+    /// `Resources/Localizable.xcstrings`. They were routed through here once, on
+    /// a comment claiming a "sibling entry point" to `tw_render_diagnostic` that
+    /// `core/ffi/include/twinvpn.h` does not have; what actually happened is that
+    /// `ObservedReasonCode::parse` rejected each lowercase key, `render` degraded
+    /// to `Domain::Internal`, and every one of them displayed the INTERNAL
+    /// fallback — "TwinVPN hit a defect in itself." — as its label.
+    ///
+    /// The one remaining caller is `StatusView`'s protection indicator, with
+    /// `ui.protection.unknown`. That key is NOT chrome — it is a sentence about
+    /// security posture, ADR-0019 §11.4's territory rather than a tab label — and
+    /// it is left routed here, still unresolved, until it is decided whether it
+    /// deserves a registered reason code. It has the same defect today; moving it
+    /// into the shell's catalogue would decide that question by accident.
     func string(_ key: String) -> String {
         renderDiagnostic(reasonCode: key,
                          evidence: [:],

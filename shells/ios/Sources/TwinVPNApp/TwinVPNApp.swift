@@ -88,27 +88,27 @@ struct RootView: View {
     @EnvironmentObject private var permission: VPNPermission
 
     var body: some View {
+        // Chrome, so the SHELL owns it: `Resources/Localizable.xcstrings`, the
+        // direct counterpart of Android's `res/values/strings.xml`, read with
+        // `String(localized:)` (iOS 15.0+, which is this target's floor).
+        //
+        // THESE USED TO GO THROUGH `tw_render_diagnostic` AS REASON CODES, on
+        // the strength of a comment claiming a "sibling entry point" to it.
+        // There is no such entry point — `core/ffi/include/twinvpn.h` has no
+        // catalogue lookup — so `ui.tab.status` was parsed as a reason code,
+        // rejected by `ObservedReasonCode::parse` for its lowercase bytes,
+        // degraded to `Domain::Internal`, and every tab was labelled with the
+        // INTERNAL fallback: "TwinVPN hit a defect in itself." Do not rebuild
+        // it; see the string catalogue's header for what belongs where.
         TabView {
             StatusView()
-                .tabItem { Label(Catalogue.tabStatus, systemImage: "shield") }
+                .tabItem { Label(String(localized: "nav_status"), systemImage: "shield") }
             PairingView()
-                .tabItem { Label(Catalogue.tabPairing, systemImage: "qrcode") }
+                .tabItem { Label(String(localized: "nav_pairing"), systemImage: "qrcode") }
             DiagnosticsView()
-                .tabItem { Label(Catalogue.tabDiagnostics, systemImage: "stethoscope") }
+                .tabItem {
+                    Label(String(localized: "nav_diagnostics"), systemImage: "stethoscope")
+                }
         }
     }
-}
-
-/// The one place a string may be looked up, and it is a LOOKUP.
-///
-/// Even the tab labels come from the core's catalogue rather than from literals
-/// here: CB-4 puts the catalogue "embedded in the artifact, so it is covered by
-/// S-46 and by DP-5's SBOM", and a literal in a Swift file is outside both.
-///
-/// These are keys, resolved through `tw_render_diagnostic`'s sibling entry
-/// point. They are named here so a reviewer can see there are exactly three.
-enum Catalogue {
-    static var tabStatus: String { CoreLite.shared.string("ui.tab.status") }
-    static var tabPairing: String { CoreLite.shared.string("ui.tab.pairing") }
-    static var tabDiagnostics: String { CoreLite.shared.string("ui.tab.diagnostics") }
 }

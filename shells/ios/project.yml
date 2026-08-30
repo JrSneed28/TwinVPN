@@ -57,6 +57,20 @@ targets:
     platform: iOS
     sources:
       - path: Sources/TwinVPNApp
+        # The string catalogue is listed BELOW with an explicit build phase, so
+        # it is excluded here — one file reference, one build file, no chance of
+        # it being carried twice. XcodeGen would default an unrecognised
+        # extension to the resources phase anyway, but a chrome catalogue that
+        # ships or does not ship by default is not a thing to leave implicit.
+        excludes:
+          - "Resources/Localizable.xcstrings"
+      # ADR-0019's iOS row puts platform chrome in the native view layer, and
+      # this is that layer's string table — the direct counterpart of Android's
+      # `res/values/strings.xml`. `xcstringstool` compiles it to
+      # `en.lproj/Localizable.strings` inside the signed `.app`, which is what
+      # `String(localized:)` in the view files reads.
+      - path: Sources/TwinVPNApp/Resources/Localizable.xcstrings
+        buildPhase: resources
       - path: Sources/TwinVPNBridge
       # `EnforcementProgramme`, and it is listed by BOTH production targets on
       # purpose. Only the app can present the system consent sheet

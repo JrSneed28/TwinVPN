@@ -69,7 +69,7 @@ struct StatusView: View {
                     }
                 }
             }
-            .navigationTitle(CoreLite.shared.string("ui.status.title"))
+            .navigationTitle(String(localized: "nav_status"))
             .refreshable {
                 // Pull-to-refresh is a poll the USER asked for, which is the one
                 // poll ADR-0017 §11.2.1's battery residual does not have to

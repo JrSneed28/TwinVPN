@@ -64,7 +64,7 @@ struct PairingView: View {
                     // them.
                     QRCodeImage(payload: offer)
                         .frame(maxWidth: 320, maxHeight: 320)
-                        .accessibilityLabel(CoreLite.shared.string("ui.pairing.qr"))
+                        .accessibilityLabel(String(localized: "pairing_qr_description"))
                 } else {
                     CameraScanner { payload in
                         // The bytes go straight to the core. This closure does
@@ -88,7 +88,7 @@ struct PairingView: View {
                 }
             }
             .padding()
-            .navigationTitle(CoreLite.shared.string("ui.pairing.title"))
+            .navigationTitle(String(localized: "pairing_title"))
             .task { await model.begin() }
             .onDisappear { model.end() }
         }

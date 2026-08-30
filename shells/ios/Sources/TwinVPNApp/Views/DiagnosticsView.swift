@@ -58,7 +58,7 @@ struct DiagnosticsView: View {
         NavigationView {
             List {
                 Section {
-                    Button(CoreLite.shared.string("ui.diagnostics.assemble")) {
+                    Button(String(localized: "diagnostics_assemble")) {
                         Task { await assemble() }
                     }
                 }
@@ -72,7 +72,7 @@ struct DiagnosticsView: View {
                         RedactionPreview(bundle: bundle)
                     }
                     Section {
-                        Button(CoreLite.shared.string("ui.diagnostics.export")) {
+                        Button(String(localized: "diagnostics_export")) {
                             isExporting = true
                         }
                     }
@@ -82,7 +82,7 @@ struct DiagnosticsView: View {
                     Section { DiagnosticView(reasonCode: reasonCode, evidence: [:]) }
                 }
             }
-            .navigationTitle(CoreLite.shared.string("ui.diagnostics.title"))
+            .navigationTitle(String(localized: "diagnostics_title"))
             // ADR-0019 §11.8: "iOS/iPadOS: `.fileExporter` into Files, plus the
             // share sheet." The artifact is signed and expiring per ADR-0015
             // §11.9 (4); this view moves it, and does not decide its lifetime.
@@ -137,7 +137,7 @@ struct RedactionPreview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(CoreLite.shared.string("ui.diagnostics.preview"))
+            Text(String(localized: "diagnostics_redaction_preview"))
                 .font(.headline)
             ScrollView {
                 Text(bundle.preview)

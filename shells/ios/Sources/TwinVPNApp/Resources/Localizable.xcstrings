@@ -1,0 +1,156 @@
+{
+  "_comment" : [
+    "CHROME ONLY.",
+    "",
+    "ADR-0018 CB-4: the core resolves, the shell presents. Every string here is a",
+    "button label, a heading, or a statement about a PLATFORM permission — never a",
+    "connection state, never a failure, never a remediation for a `reason_code`.",
+    "Those come from `tw_render_diagnostic` (F-10), resolved from",
+    "`contracts/registry/reason_codes.json` in the caller's locale with the",
+    "next-action variant selected by `(platform, os_version)` (ADR-0019 LT-3).",
+    "",
+    "A string in this file that described a TwinVPN condition would be a second",
+    "message catalogue outside the registry, which is R-31's defect class and the",
+    "reason `twinvpnctl` rendered catalogue keys (R-15)."
+  ],
+  "_comment_why_a_catalogue" : [
+    "WHY A CATALOGUE AND NOT SWIFT LITERALS.",
+    "",
+    "Not the SBOM: DP-5 (ADR-0018:1105) is one SBOM per target artifact, and this",
+    "file compiles to `Localizable.strings` INSIDE the code-signed `.app`, exactly",
+    "as Android's `strings.xml` compiles to `resources.arsc` inside the signed APK.",
+    "A bundle resource is in the artifact by construction; a Swift literal is the",
+    "thing that is not. S-46 is `CoreBuildIdentity` — which core, which ABI, which",
+    "registry version — and a tab label has no registry version.",
+    "",
+    "The real reason is TRANSLATABILITY and ADR-0019 LT-9's pseudo-locale gate: a",
+    "literal cannot be pseudo-localised, so a literal cannot be proved to survive",
+    "the 40 % expansion LT-9 applies to every string."
+  ],
+  "_comment_key_parity" : [
+    "KEY PARITY WITH ANDROID (R-36).",
+    "",
+    "Every key that Android already carries is spelled the SAME here, and copied",
+    "from `shells/android/app/src/main/res/values/strings.xml` rather than",
+    "reinvented: nav_status, nav_pairing, nav_diagnostics, pairing_title,",
+    "pairing_qr_description, diagnostics_title.",
+    "",
+    "`nav_status` labels the Status tab AND the Status screen's navigation title,",
+    "because Android carries no separate status-screen title to copy. The three",
+    "`diagnostics_*` keys below it have no Android counterpart yet: that shell has",
+    "no bundle-assembly UI. They are named in Android's style so the copy runs the",
+    "other way when it does."
+  ],
+  "sourceLanguage" : "en",
+  "strings" : {
+    "diagnostics_assemble" : {
+      "comment" : "Button. Starts ADR-0015 §11.8 bundle assembly. Wording tracks the core catalogue's own phrase, \"create a diagnostic report\".",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Create diagnostic report"
+          }
+        }
+      }
+    },
+    "diagnostics_export" : {
+      "comment" : "Button. Only shown after the redaction preview (ADR-0019 §11.10 (g)).",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Export report"
+          }
+        }
+      }
+    },
+    "diagnostics_redaction_preview" : {
+      "comment" : "Heading over the redacted bundle preview — what leaves the device, before it does.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "What will be shared"
+          }
+        }
+      }
+    },
+    "diagnostics_title" : {
+      "comment" : "Navigation title of the Diagnostics screen. Android: diagnostics_title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diagnostics"
+          }
+        }
+      }
+    },
+    "nav_diagnostics" : {
+      "comment" : "Tab label. Android: nav_diagnostics.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diagnostics"
+          }
+        }
+      }
+    },
+    "nav_pairing" : {
+      "comment" : "Tab label. Android: nav_pairing.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pair"
+          }
+        }
+      }
+    },
+    "nav_status" : {
+      "comment" : "Tab label, and the navigation title of the Status screen. Android: nav_status.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Status"
+          }
+        }
+      }
+    },
+    "pairing_qr_description" : {
+      "comment" : "VoiceOver label for the QR image. Describes the image, not the payload. Android: pairing_qr_description.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pairing code"
+          }
+        }
+      }
+    },
+    "pairing_title" : {
+      "comment" : "Navigation title of the Pairing screen. Android: pairing_title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pair a device"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}
