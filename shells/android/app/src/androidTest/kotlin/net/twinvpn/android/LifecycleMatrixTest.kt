@@ -183,9 +183,9 @@ class LifecycleMatrixTest {
     // Helpers. Each is device-bound, which is why this whole file is.
     // -----------------------------------------------------------------------
 
-    private fun startTunnelAndWaitForProtection() = TODO("device farm")
+    private fun startTunnelAndWaitForProtection(): Unit = TODO("device farm")
 
-    private fun launchApp() = TODO("device farm")
+    private fun launchApp(): Unit = TODO("device farm")
 
     private fun waitForServiceRunning(timeoutMillis: Long): Boolean = TODO("device farm")
 

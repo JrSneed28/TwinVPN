@@ -170,11 +170,11 @@ class DozeAndRevocationTest {
 
     private fun readWakeLockCount(): Int = TODO("device farm")
 
-    private fun startTunnelAndWaitForProtection() = TODO("device farm")
+    private fun startTunnelAndWaitForProtection(): Unit = TODO("device farm")
 
-    private fun startCompetingVpn() = TODO("device farm: a second VPN app fixture")
+    private fun startCompetingVpn(): Unit = TODO("device farm: a second VPN app fixture")
 
-    private fun revokeVpnGrantInSettings() = TODO("device farm")
+    private fun revokeVpnGrantInSettings(): Unit = TODO("device farm")
 
     private fun isProtected(): Boolean = TODO("device farm")
 

@@ -214,25 +214,25 @@ class LeakMeasurementTest {
     private fun captureOnPhysicalInterfaces(durationMillis: Long, body: () -> Unit): Capture =
         TODO("device farm: a rooted capture, or an upstream tap")
 
-    private fun startTunnelAndWaitForProtection() = TODO("device farm")
+    private fun startTunnelAndWaitForProtection(): Unit = TODO("device farm")
 
-    private fun forceBlockedPosture() = TODO("device farm")
+    private fun forceBlockedPosture(): Unit = TODO("device farm")
 
-    private fun generateTraffic(family: Int) = TODO("device farm")
+    private fun generateTraffic(family: Int): Unit = TODO("device farm")
 
-    private fun resolve(name: String) = TODO("device farm")
+    private fun resolve(name: String): Unit = TODO("device farm")
 
     private fun currentUnderlayFamilies(): Set<Int> = TODO("device farm")
 
-    private fun enableIpv6OnTheUnderlay() = TODO("device farm: a dual-stack AP fixture")
+    private fun enableIpv6OnTheUnderlay(): Unit = TODO("device farm: a dual-stack AP fixture")
 
-    private fun enablePrivateDns(hostname: String) = TODO("device farm")
+    private fun enablePrivateDns(hostname: String): Unit = TODO("device farm")
 
-    private fun unlockDevice() = TODO("device farm")
+    private fun unlockDevice(): Unit = TODO("device farm")
 
     private fun measureNetworkUpToClaimInForce(): Long = TODO("device farm")
 
-    private fun recordMeasurement(name: String, value: Long) = TODO("device farm")
+    private fun recordMeasurement(name: String, value: Long): Unit = TODO("device farm")
 
     private fun statusMentions(text: String): Boolean = TODO("device farm")
 }
