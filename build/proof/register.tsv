@@ -38,10 +38,26 @@
 #
 # P07 IS THE ROW TO READ CAREFULLY. Its mutant set is now complete - 5 of 5, all
 # five demonstrably caught - and it is still PARTIAL, because PT-1 needs BOTH
-# halves and ADR-0012 §11.9's oracle also wants `ruleset_digest` (unimplemented)
-# and a wire capture on every non-overlay interface. A complete mutant set is
-# not a discharged proof test, and reading it as one is the precise mistake
-# release blocker B-1 exists to catch.
+# halves and the oracle also wants a wire capture on every non-overlay
+# interface. A complete mutant set is not a discharged proof test, and reading
+# it as one is the precise mistake release blocker B-1 exists to catch.
+#
+# `ruleset_digest` is no longer unimplemented, and the row says precisely which
+# half of it exists. Two corrections to what this block used to claim:
+#
+#   - It is NOT ADR-0012 §11.9 that wants it. §11.9 mentions it once, in a
+#     testability table, on the P09 row, as a capability ("lets the test
+#     assert") rather than a MUST. The definition is one line in §11.13 and
+#     carries no algorithm, no ordering and no stability clause. The only
+#     normative MUST in the corpus is ADR-0017:1840's UnblockRecord.
+#   - The oracle requires the digest to be READ FROM THE OS, not computed by
+#     the agent: ADR-0017:1587 "asserted by querying the OS firewall directly
+#     ... not by asking the agent", and :1614 "byte-identical ... read from the
+#     OS". ScopeTransaction::ruleset_digest is over the DESIRED rule set, which
+#     is the agent's side. The read-back type, reconciler::Assertion, carries
+#     only `installed: Option<Ruleset>` - a two-variant enum with no prefixes -
+#     so no equivalent digest can be computed from it today. That is why the
+#     row calls what exists the CORE-SIDE half and leaves the lab half open.
 #
 # Columns, tab-separated:
 #   ID  STATUS  ORACLE  MUT_IMPL  MUT_SPEC  SCENARIOS  EVIDENCE  NEEDS
