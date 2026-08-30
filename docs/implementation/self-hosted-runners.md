@@ -203,3 +203,134 @@ OS-level claim: the `VpnService` claim dies with the process
 (`EnforcementView::custody` reports `survives_core_exit: false` unless lockdown
 is confirmed), so uninstalling the packages **is** the teardown. The device
 should still be factory-resettable or re-flashable.
+
+---
+
+## Runbook — Machine A on Hyper-V
+
+Machine A is the one row reachable without buying anything, provided the runner
+lives in a **guest VM with a checkpoint**, not on the host. Everything below runs
+on the Hyper-V host in an elevated PowerShell unless it says otherwise.
+
+The reason for the VM is not tidiness. `ci-windows.sh --cleanup` removes
+`TwinVPNService` and the overlay adapter and **deliberately leaves the WFP
+filters**, because ADR-0018 CB-6 and ADR-0022 §11.4 require enforcement to
+survive the process. `--reset` then refuses to start dirty:
+
+```
+::error::the rig still has TwinVPNService registered; it was not restored between runs
+::error::the rig still has a TwinVPN overlay adapter; it was not restored between runs
+```
+
+So run 1 passes on any Windows box and run 2 onwards fails until something
+restores the machine. The checkpoint is that something.
+
+### 1. Create the guest
+
+```powershell
+$VM = 'twinvpn-rig'
+New-VM -Name $VM -Generation 2 -MemoryStartupBytes 8GB `
+       -NewVHDPath "D:\Hyper-V\$VM.vhdx" -NewVHDSizeBytes 128GB
+Set-VM -Name $VM -ProcessorCount 4 -AutomaticCheckpointsEnabled $false
+Add-VMDvdDrive -VMName $VM -Path 'D:\iso\Win11_24H2.iso'
+Start-VM -Name $VM
+```
+
+`AutomaticCheckpointsEnabled $false` matters: an automatic checkpoint taken
+mid-run would capture the dirty state you are trying to discard.
+
+### 2. Provision the guest
+
+Inside the guest, as an administrator:
+
+* Windows 11 24H2 or Server 2022+, x86_64.
+* Rust **1.90.0** via rustup, on the machine PATH so a service can see it.
+* Visual Studio Build Tools with the MSVC C++ toolset. The job locates it with
+  `vswhere.exe` at
+  `C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe`, so an
+  installation the installer does not know about will not be found.
+* Git for Windows — the job sets `shell: bash` and uses `cmd //c ver`, which
+  needs MSYS path translation.
+* `wintun.dll` beside the build.
+* A local account in **Administrators**; the runner service runs as this
+  account. The spec permits LocalSystem or a local Administrator, and the
+  Administrator route is the one `config.cmd` documents a flag for.
+* Prime the cargo cache once — `cargo fetch` plus one full build. None of the
+  three jobs has an `actions/cache` step, and the 60-minute timeout assumes a
+  warm cache.
+
+### 3. Register the runner, ephemeral
+
+Get a registration token from **Settings → Actions → Runners → New self-hosted
+runner** (or `gh api -X POST repos/:owner/:repo/actions/runners/registration-token`).
+In the guest:
+
+```powershell
+mkdir C:\actions-runner; cd C:\actions-runner
+# download + extract the runner package per the page's own instructions
+./config.cmd --url https://github.com/<owner>/<repo> --token <TOKEN> `
+             --name twinvpn-rig `
+             --labels self-hosted,Windows,twinvpn-vpn-lifecycle `
+             --ephemeral --unattended `
+             --runasservice `
+             --windowslogonaccount "<VM>\<admin-account>" `
+             --windowslogonpassword "<password>"
+```
+
+**`--ephemeral` is the load-bearing flag.** The runner takes exactly one job and
+then deregisters and exits, which gives the host a defined moment to restore the
+checkpoint. Without it the runner would take a second job on a machine still
+carrying the first job's filters, and that run fails at `--reset` — correctly,
+but confusingly.
+
+The labels must be exactly `self-hosted, Windows, twinvpn-vpn-lifecycle`;
+`runs-on` matches all three.
+
+### 4. Take the golden checkpoint
+
+With the runner configured and the guest otherwise idle, on the host:
+
+```powershell
+Checkpoint-VM -Name 'twinvpn-rig' -SnapshotName 'golden'
+```
+
+Take it **after** registering the runner, so a restore comes back with the
+runner already installed.
+
+### 5. Restore between runs
+
+The guest cannot restore itself. Drive it from the host — a scheduled task, or
+this loop:
+
+```powershell
+$VM = 'twinvpn-rig'
+while ($true) {
+  if ((Get-VM -Name $VM).State -ne 'Running') {
+    Restore-VMCheckpoint -Name 'golden' -VMName $VM -Confirm:$false
+    Start-VM -Name $VM
+  }
+  Start-Sleep -Seconds 30
+}
+```
+
+An ephemeral runner exits after its job, so shut the guest down at the end of a
+run (a `shutdown /s /t 0` in a job-completed hook, or simply let the loop notice
+the runner service has stopped) and the loop restores and restarts it. Pair this
+with the 05:00 nightly in
+`.github/workflows/first-implementation-wave-privileged.yml`: the guest needs to
+be up and registered before 05:00.
+
+### 6. Confirm it actually flipped the row
+
+A green job is **not** the criterion. `build/acceptance/report.py` re-derives the
+verdict from the evidence file and requires `privileged: true` and a non-empty
+`lifecycle_transitions`:
+
+```bash
+gh run download <privileged-run-id> -p 'evidence-*' -D build/ci/evidence
+python3 -c "import json;d=json.load(open('build/ci/evidence/windows-privileged.json'));print(d['privileged'], len(d['lifecycle_transitions']))"
+# want: True  <non-zero>
+```
+
+Then the gate's own import step picks it up for the same `$GITHUB_SHA` — see
+`ownership.md` §11.6 **G-22**, which is why a green run can flip the row at all.
