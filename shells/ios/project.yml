@@ -94,6 +94,12 @@ targets:
       - sdk: NetworkExtension.framework
       - sdk: Security.framework
       - sdk: Network.framework
+      # `SecureEnclave.isAvailable` — §11.16 (l)'s truthful `hardware_backed`
+      # — is CryptoKit's, not Security's. Swift autolinks an imported
+      # framework, so this line is belt-and-braces; it is written out for the
+      # reason the macOS spec gives for the same list, "so a link failure says
+      # which framework is missing instead of listing symbols".
+      - sdk: CryptoKit.framework
     settings:
       base:
         INFOPLIST_FILE: Resources/Provider-Info.plist

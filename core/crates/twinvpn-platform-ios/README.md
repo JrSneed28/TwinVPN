@@ -106,6 +106,21 @@ prompt to check the new entry, not a prohibition on ever adding one.
   a probe, because a probe would imply the answer could come back the other way.
 - **A route metric and a firewall mark are reported as unrepresentable**, not
   silently dropped.
+- **The host's system resolvers are declared unreadable, not reported as
+  absent.** ADR-0011 §11.5's SPLIT mode forwards default-class names to "the
+  host's pre-existing upstream resolvers", and iOS vends no public API that names
+  them: Apple's DTS states "iOS does not provide APIs to get per-interface DNS
+  configuration information", `SCDynamicStore` is the macOS mechanism and is SPI
+  on iOS, and `NEDNSProxyProvider.systemDNSSettings` — the one public read —
+  belongs to a **DNS-proxy** provider, not the `NEPacketTunnelProvider` §11.12
+  fixes. `<resolv.h>`'s `res_9_ninit(3)` is not the escape hatch: Apple's DTS says
+  to "avoid that API wherever possible", its Xcode-16.4 header produced
+  `dyld: Symbol not found: ___res_9_state` against the shipping
+  `libresolv.9.dylib`, and on iOS it mis-reports IPv6 servers as `AF_UNSPEC`.
+  `PathSnapshot::resolvers` is therefore empty **because the list is unreadable**,
+  and since the seam's `PerFamily<Vec<IpAddr>>` has no third value,
+  `AdapterPosture::system_resolvers_readable` carries the fact — §5.1's rule
+  applied. Nothing substitutes a resolver address.
 
 ---
 

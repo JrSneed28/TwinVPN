@@ -278,6 +278,10 @@ impl IosPlatformAdapter {
             clocks: ClockPosture::probe(),
             sockets: self.sockets.posture(),
             hardware_backed_identity: self.identity.element_name() != "absent",
+            // A constant, not a probe. See the field's documentation: there is
+            // nothing on this platform that could answer the other way, and a
+            // probe would imply there might be.
+            system_resolvers_readable: false,
             provider_attached: !matches!(
                 self.network.read_installed(),
                 Err(PlatformError::AdapterUnavailable(_))
@@ -301,6 +305,36 @@ pub struct AdapterPosture {
     /// Enclave and this build cannot use it" and "this is a simulator" have
     /// different remediations.
     pub hardware_backed_identity: bool,
+    /// Whether the host's pre-existing resolvers can be read on this target.
+    ///
+    /// **Always `false`.** ADR-0011 §11.5's SPLIT mode forwards default-class
+    /// names to "the host's pre-existing upstream resolvers", so the core is
+    /// owed that list — and iOS vends no public API that names it. Apple's DTS
+    /// states the general case, *"iOS does not provide APIs to get per-interface
+    /// DNS configuration information"*; `SCDynamicStore` is the macOS mechanism
+    /// and is SPI on iOS; `NEDNSProxyProvider.systemDNSSettings` is the one
+    /// public read and belongs to a DNS-proxy provider, not the
+    /// `NEPacketTunnelProvider` ADR-0018 §11.12 fixes; `NEDNSSettingsManager`
+    /// and `NEPacketTunnelNetworkSettings.dnsSettings` write the configuration
+    /// and never read it. `shells/ios/…/PlatformFacts.swift`'s `SystemResolvers`
+    /// carries the full measurement, including why `<resolv.h>`'s `res_9_ninit`
+    /// is not the answer.
+    ///
+    /// **This is what stops an empty list from being read as a fact it is not.**
+    /// [`pathmon::PathSnapshot::resolvers`] and therefore
+    /// [`twinvpn_platform::LinkFacts::resolvers`] are empty on this platform
+    /// because the list is UNREADABLE, not because the host has none — and the
+    /// seam's `PerFamily<Vec<IpAddr>>` has no third value to say so with. So the
+    /// fact is declared here instead, which is §5.1's rule for a condition the
+    /// frozen registry has no code for: "where none does, the fact is a declared
+    /// posture value". The fail-closed direction is the safe one either way —
+    /// an empty resolver set narrows ADR-0012 §11.7's portal grant to nothing
+    /// rather than widening it.
+    ///
+    /// Kept separate from every other field for the reason
+    /// `hardware_backed_identity` is: "this build cannot read the resolvers" and
+    /// "this network configured none" have different remediations.
+    pub system_resolvers_readable: bool,
     /// Whether a Swift provider has registered through [`bridge`].
     pub provider_attached: bool,
 }
@@ -356,6 +390,7 @@ pub type AdapterError = PlatformError;
 mod tests {
     use super::*;
     use crate::host::RecordingHost;
+    use twinvpn_types::AddressFamily;
 
     fn parts() -> IosAdapterParts {
         let host = Arc::new(RecordingHost::new("/tmp/twinvpn-ios/AppGroup"));
@@ -431,6 +466,36 @@ mod tests {
             cfg!(target_os = "ios")
         );
         assert!(posture.hardware_backed_identity);
+        // ADR-0011 §11.5's SPLIT upstream. iOS vends no public API that names
+        // the host's resolvers, and the posture says so rather than a caller
+        // discovering it from an empty list.
+        assert!(!posture.system_resolvers_readable);
+    }
+
+    #[test]
+    fn an_empty_resolver_list_is_declared_unreadable_rather_than_read_as_none() {
+        // The conflation this pins: the seam carries `PerFamily<Vec<IpAddr>>`
+        // and has no third value for "we could not read them", so a snapshot
+        // with no resolver keys parses to EMPTY — which on any other platform
+        // would mean "this host configured none". On iOS it does not, and the
+        // posture is the only place that says so.
+        let snapshot = pathmon::PathSnapshot::parse(
+            r#"{"interfaces":[],"supports_v4":true,"supports_v6":false,
+                "supports_dns":true,"metered":false,"constrained":false,
+                "overlay_name_prefix":"utun"}"#,
+        )
+        .expect("a snapshot without resolver keys is well-formed");
+        assert!(snapshot.resolvers.get(AddressFamily::V4).is_empty());
+        assert!(snapshot.resolvers.get(AddressFamily::V6).is_empty());
+        assert!(snapshot
+            .link_facts()
+            .resolvers
+            .get(AddressFamily::V4)
+            .is_empty());
+
+        // ... and that emptiness is NOT evidence the host configured none.
+        let adapter = IosPlatformAdapter::new(parts());
+        assert!(!adapter.posture().system_resolvers_readable);
     }
 
     #[test]
