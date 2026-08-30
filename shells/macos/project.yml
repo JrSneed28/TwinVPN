@@ -40,10 +40,13 @@ options:
 
 settings:
   base:
-    # The pinned Swift language mode. `build/toolchain/env.sh` pins the COMPILER
-    # at 6.1.2 (asserted by `build/ci/ci-common-apple.sh`); this is the language
-    # mode the sources are written in, and it matches `shells/ios/project.yml`
-    # so the two shells cannot drift into different dialects.
+    # The pinned Swift LANGUAGE MODE — not a compiler version. The compiler is
+    # whichever the pinned Xcode ships (`build/ci/ci-common-apple.sh`:
+    # TWINVPN_XCODE_VERSION=26.6, Swift 6.3.3, asserted at run time); every
+    # Swift 6.x compiler implements mode 5.9. This is the dialect the sources
+    # are written in, and it matches `shells/ios/project.yml` so the two shells
+    # cannot drift apart. `build/toolchain/env.sh`'s TWINVPN_SWIFT_VERSION=6.1.2
+    # is a third, separate thing: the LINUX toolchain `make swift-parse` uses.
     SWIFT_VERSION: "5.9"
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     # ADR-0018 §11.3: `panic = "unwind"` in EVERY shipped profile, because F-7's
