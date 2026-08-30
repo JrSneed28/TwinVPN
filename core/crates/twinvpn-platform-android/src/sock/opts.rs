@@ -134,18 +134,27 @@ pub fn apply_options(
 /// One `setsockopt` of an `int`. The single such call site in this module.
 pub fn set_int(socket: &Socket, level: i32, name: i32, value: i32) -> Result<(), PlatformError> {
     use std::os::fd::AsRawFd;
-    // SAFETY: `setsockopt` reads exactly `size_of::<c_int>()` bytes through the
-    // pointer it is given. `value` is a live local of that type, borrowed for
-    // the duration of the call, and the descriptor is borrowed from a live
-    // `Socket`.
+    // The option length is a `socklen_t`, which bionic types as `int` on the two
+    // 32-bit ABIs and `unsigned int` on the two 64-bit ones -- so it is named,
+    // never written as a width (see `super::cmsg::socklen` for the same rule at
+    // the `recvmsg` seam). The value converted is `size_of::<c_int>()`, which is
+    // **4** on all four, so the fallback is unreachable; it is nonetheless ZERO
+    // rather than `socklen_t::MAX`, because this length tells the kernel how many
+    // bytes to READ through the pointer. Saturating would make an impossible
+    // input a two-gigabyte read out of a four-byte local, where zero makes it an
+    // `EINVAL` the caller already handles.
+    let len = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).unwrap_or(0);
+    // SAFETY: `setsockopt` reads exactly `len` bytes through the pointer it is
+    // given, and `len` is `size_of::<c_int>()`. `value` is a live local of that
+    // type, borrowed for the duration of the call, and the descriptor is
+    // borrowed from a live `Socket`.
     let rc = unsafe {
         libc::setsockopt(
             socket.as_raw_fd(),
             level,
             name,
             std::ptr::from_ref(&value).cast::<libc::c_void>(),
-            libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>())
-                .unwrap_or(libc::socklen_t::MAX),
+            len,
         )
     };
     if rc < 0 {

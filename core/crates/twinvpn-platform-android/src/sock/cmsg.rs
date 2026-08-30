@@ -25,6 +25,24 @@
 //! | the `recvmsg` | one syscall | the buffers are live, exclusively borrowed, and of exactly their declared lengths |
 //! | the `cmsg` walk | `CMSG_FIRSTHDR` / `CMSG_NXTHDR` / `CMSG_DATA` | **every read is length-checked against `CMSG_LEN` first**, so a hostile or truncated control buffer cannot drive a read past its end |
 //! | the two payload copies | `copy_nonoverlapping` out of the control buffer | each is guarded by the length check above and copies exactly `size_of::<T>()` bytes into a local of that type |
+//!
+//! # Widths, and why not one of them is written as a literal type
+//!
+//! ADR-0018 §11.9 row 3 requires **four** ABIs, and two of them are 32-bit. The
+//! C types this module touches are not all the same width across them:
+//!
+//! | Field | 32-bit bionic | 64-bit bionic | How this module handles it |
+//! |---|---|---|---|
+//! | `msghdr::msg_namelen` | `socklen_t` = **`int`** | `socklen_t` = **`unsigned int`** | [`socklen`] — names `libc::socklen_t`, refuses rather than truncating |
+//! | `msghdr::msg_controllen`, `msghdr::msg_iovlen`, `cmsghdr::cmsg_len` | `size_t` | `size_t` | assigned and compared as `usize`, with **no cast**, so a future narrowing is a compile error |
+//! | `in_pktinfo::ipi_ifindex`, `in6_pktinfo::ipi6_ifindex` | `int` (bionic) / `unsigned int` (glibc) | same | [`ifindex`] — generic over the width, absence is a value |
+//! | `CMSG_LEN`'s argument and result | `c_uint` | `c_uint` | [`cmsg_len`] — saturates in the **reject** direction |
+//!
+//! The rule the table encodes: **name the destination type, never a width**, and
+//! where a conversion can fail, fail toward refusing the datagram. A cast would
+//! have compiled on all four ABIs and reinterpreted on two of them, which is
+//! strictly worse than the build error that exposed this — the build error was
+//! the one telling the truth.
 
 use std::io;
 use std::mem::{size_of, MaybeUninit};
@@ -98,11 +116,18 @@ pub fn recvmsg(fd: RawFd, buf: &mut [u8]) -> io::Result<RecvMeta> {
     // SAFETY: as above.
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_name = std::ptr::addr_of_mut!(name).cast::<libc::c_void>();
-    msg.msg_namelen = u32::try_from(size_of::<libc::sockaddr_storage>()).unwrap_or(u32::MAX);
+    msg.msg_namelen = socklen(size_of::<libc::sockaddr_storage>());
     msg.msg_iov = std::ptr::addr_of_mut!(iov);
+    // `msg_iovlen` is a `size_t` on bionic and on glibc alike, and this is a
+    // literal rather than a conversion, so there is no width to get wrong.
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr().cast::<libc::c_void>();
-    msg.msg_controllen = control.len() as _;
+    // No cast, deliberately. `msg_controllen` is a `size_t` on every target this
+    // crate builds for, so a plain `usize` assigns directly — and if some future
+    // target narrows it, that becomes a COMPILE ERROR rather than a control
+    // buffer whose declared length is smaller than the one `recvmsg` was handed.
+    // The `as _` this replaces would have silently adapted to either.
+    msg.msg_controllen = control.len();
 
     // SAFETY: every pointer in `msg` refers to a live local of exactly the
     // declared length, all of them borrowed for the duration of this call, and
@@ -170,7 +195,48 @@ fn cmsg_len(payload: usize) -> usize {
     usize::try_from(total).unwrap_or(usize::MAX)
 }
 
+/// A buffer length of `len` bytes as a `socklen_t`, refusing rather than
+/// truncating.
+///
+/// # Why this is a function and not a cast, and not `u32` either
+///
+/// **`socklen_t` is `int` on 32-bit bionic and `unsigned int` on 64-bit**, so
+/// `msghdr::msg_namelen` is `i32` on `armv7-linux-androideabi` and
+/// `i686-linux-android` and `u32` on the two 64-bit ABIs — all four of which
+/// ADR-0018 §11.9 row 3 requires. Naming `u32` compiled on the ABIs that were
+/// built and failed the two that were not, which is the honest failure; naming
+/// `libc::socklen_t` is CB-3's direction, the same one [`ifindex`] above already
+/// takes: **branch on the declared fact, not on which OS it is.**
+///
+/// An `as` cast would have compiled on all four and been the *worse* outcome,
+/// because it would have silently reinterpreted rather than refused.
+///
+/// # Why the refusal is zero and never a saturation
+///
+/// `msg_namelen` is an **in-out** parameter: it tells the kernel how many bytes
+/// of `msg_name` it may write. A saturated `socklen_t::MAX` would claim a
+/// two-gigabyte buffer for a 128-byte stack local, so an over-large input would
+/// become a write past the end of `name` rather than a wrong number — the one
+/// direction this must not fail in. Zero tells the kernel to write no address at
+/// all, and [`read_source`] then refuses the short result through the path it
+/// already has for a short `msg_namelen`.
+///
+/// The bound is never reached in fact: the only caller passes
+/// `size_of::<libc::sockaddr_storage>()`, which is **128** on all four ABIs.
+/// `a_peer_address_length_is_declared_not_saturated` below asserts both halves —
+/// that the real length survives the conversion, and that an over-large one
+/// refuses instead of saturating.
+fn socklen(len: usize) -> libc::socklen_t {
+    libc::socklen_t::try_from(len).unwrap_or(0)
+}
+
 /// Decodes the kernel-supplied peer address, width-checked before it is read.
+///
+/// `namelen` is a `libc::socklen_t` rather than a `u32`, for [`socklen`]'s
+/// reason: on the two 32-bit ABIs it is **signed**, so "a negative length" is a
+/// representable input here rather than a theoretical one. `try_from` maps it to
+/// zero, which every arm below then refuses — the same treatment a short length
+/// already gets, and for the same reason.
 fn read_source(name: &libc::sockaddr_storage, namelen: libc::socklen_t) -> io::Result<SourceAddr> {
     let namelen = usize::try_from(namelen).unwrap_or(0);
     match i32::from(name.ss_family) {
@@ -304,11 +370,6 @@ mod tests {
         libc::sa_family_t::try_from(af).expect("AF_* fits sa_family_t")
     }
 
-    /// A `socklen_t` from a `size_of`.
-    fn socklen(len: usize) -> libc::socklen_t {
-        libc::socklen_t::try_from(len).expect("a sockaddr fits socklen_t")
-    }
-
     /// A width-checked decode over a genuinely kernel-shaped buffer, without a
     /// syscall: the check that a short `msg_namelen` is refused rather than read
     /// out of a zeroed `sockaddr_storage`.
@@ -377,8 +438,38 @@ mod tests {
         // than reinterpreted as a very large index.
         assert_eq!(ifindex(-1_i32), None);
         assert_eq!(ifindex(i32::MIN), None);
-        // And the widest legitimate value still passes.
-        assert_eq!(ifindex(i32::MAX), Some(i32::MAX as u32));
+        // And the widest legitimate value still passes. `unsigned_abs` rather
+        // than `as u32` for the same reason as everything else in this module:
+        // a total conversion, not a reinterpretation that happens to be exact.
+        assert_eq!(ifindex(i32::MAX), Some(i32::MAX.unsigned_abs()));
+    }
+
+    /// The width class this module is built against, pinned on whichever ABI the
+    /// test happens to run on.
+    ///
+    /// **`socklen_t` is `i32` on the two 32-bit Android ABIs and `u32` on the two
+    /// 64-bit ones**, which is what broke `armv7-linux-androideabi` when this
+    /// length was written as a `u32`. The assertions below hold on all four
+    /// because none of them names a width — they name the real bound (128 bytes
+    /// of `sockaddr_storage`) and the refusal direction.
+    #[test]
+    fn a_peer_address_length_is_declared_not_saturated() {
+        // The only real caller's value survives intact on every ABI.
+        let real = size_of::<libc::sockaddr_storage>();
+        assert_eq!(real, 128, "sockaddr_storage is 128 bytes on all four ABIs");
+        assert_eq!(usize::try_from(socklen(real)).unwrap_or(0), real);
+
+        // And an impossible one REFUSES rather than saturating. A saturated
+        // `socklen_t::MAX` would tell the kernel it may write two gigabytes into
+        // a 128-byte stack local; zero tells it to write no address at all.
+        assert_eq!(socklen(usize::MAX), 0);
+        // Which `read_source` then refuses, rather than reading a peer identity
+        // out of a buffer the kernel never filled.
+        // SAFETY: `sockaddr_storage` is plain-old-data; an all-zero value is a
+        // valid instance.
+        let mut name: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        name.ss_family = family(libc::AF_INET);
+        assert!(read_source(&name, socklen(usize::MAX)).is_err());
     }
 
     /// A link-local arrival address with no interface index is refused, which is
