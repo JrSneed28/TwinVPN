@@ -510,3 +510,6 @@ Rules:
   be made to choose between conflicting reports.
 - Skip the pipeline for anything already understood — a typo, a rename, a
   one-line fix in code already traced this session. Research is for unknowns.
+- `/research <task>` is the explicit entry point (`.claude/commands/research.md`),
+  with `--research-only` to stop at the handoff and `--deep` for the parallel
+  A/B/C/D mode. The trigger phrasings above work without it.
