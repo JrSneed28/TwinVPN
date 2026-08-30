@@ -466,10 +466,12 @@ Two agents, defined in `.claude/agents/research/technical-researcher.md` and
 orchestration layer — Ruflo still owns routing, memory, and coordination; these
 are two ordinary Claude Code subagents that use it.
 
-**Trigger it automatically** when a request matches any of these shapes, and
-when a task requires understanding something not already established in this
-session — a library, framework, API, protocol, OS/network behaviour,
-dependency, configuration, migration, or an unfamiliar TwinVPN subsystem:
+There are two ways in. The second one matters more.
+
+**1. The user asks.** These shapes route straight into the pipeline, as does
+any request needing understanding of a library, framework, API, protocol,
+OS/network behaviour, dependency, configuration, migration, or an unfamiliar
+TwinVPN subsystem:
 
 ```
 Research and fix this bug: <problem>
@@ -478,10 +480,55 @@ Understand this subsystem before modifying it: <subsystem>
 Research the correct way to integrate: <library/API/protocol/platform>
 ```
 
+**2. You notice you need it, mid-task.** The pipeline is not only a command —
+it is what you reach for the moment ordinary work runs into something you do
+not actually know. **Every agent and every session applies this, at all times,
+without being asked**, including work that started as something else entirely.
+
+Escalate to `technical-researcher` as soon as any of these is true:
+
+- You are about to write code against an API, config key, protocol field, or
+  CLI flag whose exact semantics you have not confirmed **in this session** —
+  argument order, ownership, error contract, lifecycle, thread-safety,
+  defaults, teardown.
+- A fix did not work, and the second attempt would be a guess. One failed
+  hypothesis is debugging; a second one without new evidence is thrashing.
+- An error, panic, log line, or failure mode is one you cannot explain.
+- Observed behaviour contradicts the documentation, the code comments, a test's
+  premise, or your own expectation — something is wrong about the model in your
+  head, and it is cheaper to find out now.
+- A test fails and you do not know why, or passes and you are not sure it
+  should have.
+- Two sources disagree, or the code disagrees with the docs.
+- An upgrade, migration, or dependency change is on the table for any reason.
+- A dependency's behaviour is load-bearing for the change and unverified here.
+- You are about to write "probably", "should", "I think", or "presumably"
+  about something external. That phrasing **is** the trigger — do not ship the
+  sentence, research the claim.
+- A subagent returns low confidence, thin evidence, or a claim the tree
+  contradicts.
+
+Do not announce the decision or ask permission for read-only research — just
+run it, then continue the task with the handoff in hand.
+
+**Do not escalate** when it is already established this session; when the
+change is mechanical (typo, rename, formatting, a one-line fix in code already
+traced); or when one cheap, safe, non-mutating experiment answers the question
+faster than research would — run the experiment.
+
+**Budget.** One research escalation per distinct unknown. If a second pass on
+the same question still comes back `low` confidence, stop and surface it to the
+user with what is unresolved — do not loop, and do not implement on it anyway.
+
+**Escalating from inside an agent.** A subagent cannot spawn the researcher.
+It stops and returns a `RESEARCH REQUEST` block naming the unresolved question,
+what it already checked, and what evidence would settle it. The parent session
+runs `technical-researcher` on that, then resumes the agent with the handoff.
+
 Flow:
 
 ```
-question / bug / unknown system
+question / bug / unknown system — asked, or noticed mid-task
   → local understanding (code, versions, config, docs, repro)
   → Ruflo memory
   → Context7
@@ -512,4 +559,5 @@ Rules:
   one-line fix in code already traced this session. Research is for unknowns.
 - `/research <task>` is the explicit entry point (`.claude/commands/research.md`),
   with `--research-only` to stop at the handoff and `--deep` for the parallel
-  A/B/C/D mode. The trigger phrasings above work without it.
+  A/B/C/D mode. Neither the phrasings nor the command are required — the
+  mid-task escalation above is the primary path, and it fires on its own.

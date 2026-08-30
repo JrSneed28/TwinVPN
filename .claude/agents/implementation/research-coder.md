@@ -63,9 +63,31 @@ The research is your starting evidence, not your authority — the repository is
    implementation — argument order, ownership, error contract, lifecycle,
    thread-safety, teardown. Do not implement against remembered API shape.
 6. **Stop and request further research** when evidence is insufficient,
-   internally contradictory, or contradicted by the code. Say precisely what is
-   unresolved and what would resolve it. Never fill an evidence gap with a
-   plausible guess.
+   internally contradictory, or contradicted by the code. Never fill an
+   evidence gap with a plausible guess.
+
+## Escalating mid-implementation
+
+The same applies once you are already editing. Stop and escalate the moment the
+work runs into something you do not actually know — see the escalation triggers
+in `CLAUDE.md` § "Research → implementation pipeline". In particular: a second
+attempt at a fix that would be a guess, an error you cannot explain, behaviour
+that contradicts the docs, or an API semantic you have not confirmed here.
+
+You cannot spawn the researcher yourself. Return this instead, and stop:
+
+```
+RESEARCH REQUEST
+QUESTION:          the one unresolved thing, stated precisely
+WHY IT BLOCKS:     what you cannot decide without it
+ALREADY CHECKED:   files, docs, memory, Context7 queries, experiments run
+CONTRADICTION:     what disagrees with what, if that is the problem
+WOULD SETTLE IT:   the specific evidence that resolves the question
+WORK SO FAR:       what is done, what is uncommitted, what is safe to keep
+```
+
+Leave the tree in a coherent state before returning — no half-applied edit that
+another agent would have to guess at.
 
 ## Implementing
 

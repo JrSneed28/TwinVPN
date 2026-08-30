@@ -9,8 +9,12 @@ description: >-
   configuration; to plan a migration or upgrade; to compare supported options;
   to investigate undocumented behaviour; to find known limitations, edge cases,
   regressions, CVEs, or performance implications; and to establish how upstream
-  expects something to be implemented. Returns one implementation-ready
-  TECHNICAL HANDOFF. Never edits production source.
+  expects something to be implemented. Also invoke it mid-task, on your own
+  initiative and without being asked, the moment ordinary work runs into an
+  unknown: an error you cannot explain, a fix whose second attempt would be a
+  guess, behaviour that contradicts the docs, an API semantic not confirmed in
+  this session, or a subagent's RESEARCH REQUEST. Returns one
+  implementation-ready TECHNICAL HANDOFF. Never edits production source.
 type: researcher
 color: "#7C5CFF"
 priority: high

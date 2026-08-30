@@ -11,6 +11,12 @@ Task: **$ARGUMENTS**
 Run the pipeline defined in `CLAUDE.md` § "Research → implementation pipeline".
 Do not re-derive it; do not build a parallel orchestration layer.
 
+This command is the *explicit* entry point, not the only one. The pipeline also
+fires on its own whenever you or a subagent hits an unknown mid-task — see the
+escalation triggers in that CLAUDE.md section. If `$ARGUMENTS` is a
+`RESEARCH REQUEST` block returned by a stopped agent, research its `QUESTION`,
+then resume that agent with the resulting handoff.
+
 ## Flags
 
 Strip these from the task text before using it.
