@@ -74,8 +74,14 @@
 //! the OSKs whose ORK-signed delegation carries `ENROLL`. That is a real,
 //! ORK-signed fact rather than a configured string — and it is **weaker than
 //! §7.4**: it authorizes "an ENROLL-powered OSK exists in this TwinNet" where
-//! §7.4 wants "one approved this ceremony". The residual is recorded here and
-//! reported by the shell at startup; it narrows when C1 has a transport.
+//! §7.4 wants "one approved this ceremony". The residual is recorded here,
+//! reported by the shell at startup, and — since it had reached neither —
+//! entered in the register as `ownership.md` §11.2 **G-25**. It narrows when C1
+//! has a transport, and **not before**: a C1 transport does not by itself make
+//! the approval per-ceremony, it only makes one possible, so G-25 must be
+//! re-measured rather than closed when W-12 lands. Note also that the divergence
+//! is **invisible to the acceptance gate** — on a host with no C1, a standing
+//! approval and a per-ceremony one are observationally identical.
 //!
 //! **The revocation set is empty** unless a caller supplies one, for the reason
 //! `crate::pairing` already gives: it arrives over C2 (W-12). An empty set is
