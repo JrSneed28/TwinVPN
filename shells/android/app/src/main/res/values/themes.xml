@@ -4,27 +4,25 @@
   has a background and a status-bar treatment before the first frame, which is
   what stops a white flash on a dark device.
 
-  WHY THE BASE IS NOT A DayNight THEME.
+  WHY THE BASE IS PLAIN `Theme.Material.NoActionBar`.
 
-  `android:Theme.Material.DayNight` does not exist. The platform ships
-  `Theme.Material` and `Theme.Material.Light` from API 21, and the only
-  platform DayNight family is `Theme.DeviceDefault.DayNight`, added in API 29.
-  Referencing the non-existent name failed the resource link outright:
+  Two platform DayNight names were tried against a real `aapt2` and neither
+  exists:
 
-      AAPT: error: resource android:style/Theme.Material.DayNight.NoActionBar
-      not found.
+      resource android:style/Theme.Material.DayNight.NoActionBar not found.
+      resource android:style/Theme.DeviceDefault.DayNight.NoActionBar not found.
 
-  `minSdk` is 26, so the DayNight base cannot be unconditional. This file is
-  the API 26-28 form and `values-v29/themes.xml` overrides it with the real
-  DayNight theme where the platform has one. Both set the same three
-  attributes, so the pre-first-frame appearance is identical; only the
-  light/dark following differs, and it differs exactly where the platform
-  gained the ability.
+  `Theme.Material` has no DayNight family at all, and `Theme.DeviceDefault`'s
+  DayNight member has no `NoActionBar` child. The remaining platform options
+  are a DayNight base plus manual `windowActionBar`/`windowNoTitle` items, or
+  an AppCompat dependency — and neither buys anything here, because **Compose
+  owns light/dark**: this style is only ever visible for the frames before the
+  first composition, and it sets its three colours from `?android:attr`
+  references that already resolve per the device's configuration.
 
-  The alternative was an AppCompat dependency for `Theme.AppCompat.DayNight`.
-  Not taken: the app is Compose, has no AppCompat dependency today, and adding
-  one to name a theme is a dependency-surface decision under ADR-0018 DP-3 for
-  a cosmetic gain on three API levels.
+  So the DayNight base is dropped rather than guessed at a third time. If a
+  pre-first-frame dark background is ever wanted on API 29+, the change is a
+  `values-night/` override, which needs no new base style and no dependency.
 -->
 <resources>
     <style name="Theme.TwinVPN" parent="android:Theme.Material.NoActionBar">
