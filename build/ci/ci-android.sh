@@ -516,8 +516,52 @@ if [ "$linked" = true ]; then
     printf 'y\n%.0s' $(seq 64) \
       | "$sdk_root/cmdline-tools/latest/bin/sdkmanager" --install \
         "$EMULATOR_IMAGE" "platform-tools" "emulator" >/dev/null
-    echo no | "$sdk_root/cmdline-tools/latest/bin/avdmanager" create avd \
-      -n "$AVD_NAME" -k "$EMULATOR_IMAGE" --force
+    # CAPTURED, and then CHECKED. `avdmanager` writes its prompts to stderr
+    # without a trailing newline, so on the console its output interleaves with
+    # everything else on the same line -- run 33295999765 shows
+    # "Do you wish to create a custom hardware profile? [no]" with this script's
+    # next echo run into it, and whatever avdmanager said after that is lost.
+    # Its own log is the only place it can be read.
+    avd_log="$LOGDIR/avdmanager.log"
+    if ! echo no | "$sdk_root/cmdline-tools/latest/bin/avdmanager" create avd \
+        -n "$AVD_NAME" -k "$EMULATOR_IMAGE" --force >"$avd_log" 2>&1; then
+      echo "::error::avdmanager create avd failed for $AVD_NAME" >&2
+      cat "$avd_log" >&2
+      exit 1
+    fi
+
+    # **`avdmanager` CAN EXIT 0 WITHOUT WRITING AN AVD**, and that is what run
+    # 33295999765 did: it selected the ABI -- so the system image was installed
+    # and it found it -- prompted about a hardware profile, exited successfully,
+    # and left no `.ini`. The emulator then reported, in `emulator.log` and
+    # nowhere else:
+    #
+    #     ERROR | Unknown AVD name [twinvpn-ci-api30], use -list-avds
+    #     ERROR | HOME is defined but there is no file twinvpn-ci-api30.ini
+    #             in $HOME/.android/avd
+    #
+    # and exited immediately, leaving `adb wait-for-device` to hang and the boot
+    # poll to spend its full 15 minutes on a device that was never launched.
+    #
+    # The exit code is therefore not evidence and is not treated as any. This
+    # asks the EMULATOR -- the consumer, whose search path is the one that
+    # matters -- whether the AVD it is about to be told to boot exists. The two
+    # binaries disagreeing about where an AVD lives is a known shape (avdmanager
+    # writes `$ANDROID_SDK_HOME/.android/avd`, the emulator reads
+    # `$ANDROID_SDK_HOME/avd`), and a name check here catches that as well as an
+    # outright non-creation.
+    if ! "$sdk_root/emulator/emulator" -list-avds | grep -qx "$AVD_NAME"; then
+      echo "::error::avdmanager exited 0 but the emulator cannot see $AVD_NAME" >&2
+      echo "--- avdmanager said ---" >&2
+      cat "$avd_log" >&2
+      echo "--- emulator -list-avds ---" >&2
+      "$sdk_root/emulator/emulator" -list-avds >&2
+      echo "--- \$HOME/.android/avd ---" >&2
+      ls -la "$HOME/.android/avd" >&2 || echo "  (no such directory)" >&2
+      echo "ANDROID_AVD_HOME=${ANDROID_AVD_HOME:-<unset>}" >&2
+      echo "ANDROID_SDK_HOME=${ANDROID_SDK_HOME:-<unset>}" >&2
+      exit 1
+    fi
     # `-no-snapshot`: every run starts from the freshly created image, so a run
     # cannot inherit state from the one before it. `-no-window` because there is
     # no display. Backgrounded and then waited for, rather than `-wait-for-boot`,
@@ -699,7 +743,7 @@ cat > "$EVIDENCE" <<JSON
   "graceful_shutdown": $shutdown,
   "test_command": "$TEST_CMD",
   "test_exit_code": $exit_code,
-  "artifacts": ["build/ci/logs/android/gradle-assemble.log","build/ci/logs/android/instrumentation.log","build/ci/logs/android/logcat.txt","build/ci/logs/android/emulator.log"],
+  "artifacts": ["build/ci/logs/android/gradle-assemble.log","build/ci/logs/android/instrumentation.log","build/ci/logs/android/logcat.txt","build/ci/logs/android/emulator.log","build/ci/logs/android/avdmanager.log"],
   "notes": "$notes",
   "verdict": "$verdict",
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
