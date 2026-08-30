@@ -103,23 +103,28 @@
 //!    it is a different, non-conforming interface.
 //!
 //!    The crossing is narrow because of **where** it happens, and the two paths
-//!    are deliberately different:
+//!    an executed operation has are deliberately different:
 //!
 //!    | Path | Carries | Who sees it |
 //!    |---|---|---|
-//!    | `Outcome::result` → `CommandCompleted` → §11.10's event stream | the 16-byte `pairing_id`, which `pairing_offer.cddl` classifies **PUBLIC** | every subscribed MI client, and the ledger |
-//!    | the `pair.begin` **response** on one connection | `pairing_id ‖ dCBOR(offer)` | the client that called it |
+//!    | [`crate::dispatch::Outcome::result`] → `CommandCompleted` → §11.10's event stream | the 16-byte `pairing_id`, which `pairing_offer.cddl` classifies **PUBLIC** | every subscribed MI client, and the ledger |
+//!    | [`crate::dispatch::Outcome::response`] → `Core::submit_response`'s return | `pairing_id ‖ dCBOR(offer)` | the one client that called `pair.begin` |
 //!
-//!    So the offer is *not* returned through [`ops::begin`], because an
-//!    `Outcome::result` is broadcast — that is the property that would have made
-//!    a "response" value reach subscribers who never asked for it. It leaves
-//!    through [`crate::Core::render_pairing_offer`], a scoped borrow under the
-//!    same mutex, which the MI server calls **only** on the `pair.begin`
-//!    response path. Rule 2 follows from that shape rather than from a review:
-//!    there is no code path from an offer to a log line, `diag.log.tail`, or a
-//!    Tier-1 bundle, because the value never enters the event stream or a
-//!    `Diagnostic` at all. Rule 3 follows from [`PairingCeremonies::offers`]
-//!    being a `BTreeMap` in a mutex that nothing writes to the vault, and
+//!    **That second field is the seam, and it is the only one there is.** An
+//!    `Outcome::result` is *published*, so anything put there reaches
+//!    subscribers who never asked for it; a return value is the core's only
+//!    *unicast* exit, because F-6 gives a submission exactly one caller. So
+//!    [`ops::begin`] builds both bodies, `Core::submit` publishes the first and
+//!    returns nothing, and `Core::submit_response` returns the second to the MI
+//!    server that submitted. No shell fetches the offer, no second entry point
+//!    exposes it, and no FFI export carries it.
+//!
+//!    Rule 2 follows from that shape rather than from a review: there is no code
+//!    path from an offer to a log line, `diag.log.tail`, or a Tier-1 bundle,
+//!    because the value never enters the event stream or a `Diagnostic` at all —
+//!    and `Outcome`'s hand-written `Debug` keeps a future `{:?}` from opening
+//!    one. Rule 3 follows from [`PairingCeremonies::offers`] being a `BTreeMap`
+//!    in a mutex that nothing writes to the vault, and
 //!    [`PairingCeremonies::expire_stale`] is the agent-side half of rule 2's
 //!    120-second deadline.
 //! 2. **`PairingOffer` redacts itself.** Its `Debug` renders `<redacted>` for
@@ -413,7 +418,9 @@ pub struct PairingCeremonies {
     /// ADR-0008 N-4 requires it to be.
     begun: BTreeMap<Vec<u8>, [u8; PAIRING_ID_BYTES]>,
     /// The in-flight offers, by `pairing_id`. **SECRET**, and reachable only
-    /// through [`crate::Core::with_pairing_offer`].
+    /// through [`Self::offer`] — which [`ops::begin`] copies from for the
+    /// `pair.begin` response and [`crate::Core::with_pairing_offer`] lends to an
+    /// in-process caller.
     ///
     /// `architecture.md` S-67: the in-flight offer is "non-durable BY
     /// REQUIREMENT — it MUST NOT survive process restart". A `BTreeMap` in a

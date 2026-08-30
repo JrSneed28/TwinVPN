@@ -303,10 +303,36 @@ pub fn executed() -> Vec<CoreCommand> {
 }
 
 /// What an executed operation produced.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// # Two bodies, because a response and an event do not have the same audience
+///
+/// [`Outcome::result`] is **published**: [`crate::Core::submit`] puts it on the
+/// one ordered stream as a `CommandCompleted`, where every subscriber and the
+/// MI-9 per-topic snapshot read it. [`Outcome::response`] is **returned**:
+/// [`crate::Core::submit_response`] hands it to the single caller that
+/// submitted, and nothing else ever sees it.
+///
+/// The divergence exists for exactly one rule — ADR-0017 **MI-P1**, the one
+/// `SECRET` that crosses MI, permitted *"only inside a `pair.begin` response"*.
+/// A value that must reach the calling MI client and must not reach the stream
+/// has no other way out of the core: a return value is its only unicast exit,
+/// and the event stream is a broadcast by construction.
+///
+/// `response` is `None` for every operation but `pair.begin`, and `None` means
+/// "the response body **is** the published one" — so no other operation's
+/// return widens by this field existing.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Outcome {
     /// The encoded result (F-8), or empty where the operation has no body.
+    ///
+    /// **Broadcast.** Nothing above `PUBLIC` may be put here.
     pub result: Vec<u8>,
+    /// The response body for the caller that submitted, where it differs from
+    /// [`Outcome::result`]. **Never published, never logged.**
+    ///
+    /// MI-P1's carriage, and it has no second use. See the type's own
+    /// documentation.
+    pub response: Option<Vec<u8>>,
     /// How many observable effects the operation had.
     ///
     /// **Not decoration.** `tests/command_path.rs` asserts that every operation
@@ -318,16 +344,51 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    /// An outcome with a body and a stated effect count.
+    /// An outcome with a published body and a stated effect count.
     #[must_use]
     pub const fn new(result: Vec<u8>, effects: u32) -> Self {
-        Self { result, effects }
+        Self {
+            result,
+            response: None,
+            effects,
+        }
     }
 
     /// A read that produced a body. A read's effect is the read itself.
     #[must_use]
     pub const fn read(result: Vec<u8>) -> Self {
-        Self { result, effects: 1 }
+        Self {
+            result,
+            response: None,
+            effects: 1,
+        }
+    }
+
+    /// Attaches the caller-only response body — MI-P1's carriage.
+    ///
+    /// `None` leaves the outcome unchanged, which is what a `pair.begin` replay
+    /// whose ceremony is no longer in flight produces: ADR-0008's recorded
+    /// outcome is the `pairing_id` alone and there is no offer left to return.
+    #[must_use]
+    pub fn responding(mut self, response: Option<Vec<u8>>) -> Self {
+        self.response = response;
+        self
+    }
+}
+
+/// Hand-written, and the reason is **MI-P1 rule 2**.
+///
+/// A derived `Debug` would render [`Outcome::response`], which is where the one
+/// `SECRET` that crosses MI lives. Rule 2 forbids it appearing "at any level",
+/// and a `{outcome:?}` added to a log line later is exactly how that happens by
+/// accident. Presence is a debuggable fact; the bytes are not.
+impl core::fmt::Debug for Outcome {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Outcome")
+            .field("result", &self.result)
+            .field("response", &self.response.as_ref().map(|_| "<redacted>"))
+            .field("effects", &self.effects)
+            .finish()
     }
 }
 

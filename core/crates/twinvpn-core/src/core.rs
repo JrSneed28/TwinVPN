@@ -404,6 +404,13 @@ impl Core {
     /// compile until someone states whether it executes. See this crate's
     /// `README.md` §6.
     ///
+    /// **One operation answers with more than it publishes.** `pair.begin`'s
+    /// response carries ADR-0017 MI-P1's `SECRET`, which must not go on the
+    /// stream; this entry point discards it, and an MI server calls
+    /// [`Core::submit_response`] instead. Every other operation's response
+    /// **is** the `CommandCompleted` body, so the two entry points are the same
+    /// call.
+    ///
     /// # Errors
     ///
     /// A [`Diagnostic`] when the instance is poisoned or the operation is not
@@ -412,6 +419,44 @@ impl Core {
     /// event and never a silent drop — the return value is the in-process
     /// caller's convenience, not the record.
     pub fn submit(&self, submission: &Submission) -> Result<(), Box<Diagnostic>> {
+        self.submit_response(submission).map(|_| ())
+    }
+
+    /// [`Core::submit`], and the part of the response the stream must not carry.
+    ///
+    /// **ADR-0017 §11.9 and MI-P1 — the one `SECRET` that crosses MI.**
+    ///
+    /// > "The `PairingOffer` material to render — QR payload or 9-digit SPAKE2
+    /// > code. **The one `SECRET` that crosses MI**; see MI-P1."
+    ///
+    /// `Some(body)` is the **whole** MI response body for this call, and it goes
+    /// to this caller and to nothing else. `None` — every operation but
+    /// `pair.begin` — means the response is the `CommandCompleted` body the
+    /// stream already carried, which is what an MI server correlates and
+    /// answers with today.
+    ///
+    /// # Why this is a return value and not an event
+    ///
+    /// MI-P1 rule 1 permits the offer "only inside a `pair.begin` response, only
+    /// over the MI channel, never in any other operation". An `Outcome::result`
+    /// becomes a `CommandCompleted` **broadcast to every subscriber** and
+    /// retained as the topic's MI-9 snapshot row, so it cannot carry a value
+    /// that only one connection may see. A return value can: it is the core's
+    /// only unicast exit, and `Core` has exactly one caller per submission
+    /// because F-6 serializes them. See [`crate::dispatch::Outcome`].
+    ///
+    /// Every MI carriage that speaks Rust — the Unix socket, the named pipe,
+    /// XPC — calls this and gets the contract's own body without a
+    /// shell-specific fetch. `tw_core_submit` keeps calling [`Core::submit`]
+    /// unchanged, so no ABI moves.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Core::submit`]'s.
+    pub fn submit_response(
+        &self,
+        submission: &Submission,
+    ) -> Result<Option<Vec<u8>>, Box<Diagnostic>> {
         if self.is_poisoned() {
             let d = Diagnostic::builder(codes::INTERNAL_CORE_PANIC, Component::Diagnostics).build();
             return Err(Box::new(d));
@@ -483,14 +528,24 @@ impl Core {
                 self.generation.fetch_add(1, Ordering::Relaxed);
             }
 
+            // **The divergence, in one place.** `result` is published; `response`
+            // is not, and is handed back to the one caller that submitted. The
+            // destructuring is deliberate: a field added to `Outcome` later
+            // fails to compile here until someone states which of the two
+            // audiences it belongs to.
+            let dispatch::Outcome {
+                result,
+                response,
+                effects: _,
+            } = outcome;
             self.events.publish(
                 CoreEventKind::CommandCompleted {
                     op: submission.op.name(),
-                    result: outcome.result,
+                    result,
                 },
                 submission.actor_principal.clone(),
             );
-            Ok(())
+            Ok(response)
         }
     }
 
@@ -809,13 +864,14 @@ impl Core {
     /// Borrows one in-flight `PairingOffer`, under the lock, for exactly as long
     /// as `f` runs.
     ///
-    /// **This is the offer's only exit from the core, and it is not a copy.**
-    /// `pairing_offer.cddl` classifies the payload SECRET with no rendering path
-    /// into any log at any level, so it must not travel as an `Outcome::result`
-    /// — which would put it on the event stream — and must not outlive the
-    /// mutex. A shell renders ADR-0023's E1 QR or E2 text from inside `f`
-    /// (`twinvpn_crypto::pairing_offer::encode` and `::render_text`) and keeps
-    /// nothing.
+    /// **An in-process borrow, not a copy, and not the MI's route to the
+    /// offer.** `pairing_offer.cddl` classifies the payload SECRET with no
+    /// rendering path into any log at any level, so it must not travel as an
+    /// `Outcome::result` — which would put it on the event stream — and must
+    /// not outlive the mutex. The MI response gets its copy from
+    /// `crate::pairing::ops::begin`, through
+    /// [`crate::dispatch::Outcome::response`]; this borrow exists for an
+    /// in-process caller and for the tests that assert the offer's lifetime.
     ///
     /// `None` when no ceremony with that `pairing_id` is in flight.
     #[cfg(feature = "full")]
@@ -825,56 +881,6 @@ impl Core {
         f: impl FnOnce(&twinvpn_crypto::pairing_offer::PairingOffer) -> R,
     ) -> Option<R> {
         self.pairing().offer(pairing_id).map(f)
-    }
-
-    /// The `pair.begin` **response** body — ADR-0017 §11.9 and **MI-P1**.
-    ///
-    /// > "The `PairingOffer` material to render — QR payload or 9-digit SPAKE2
-    /// > code. **The one `SECRET` that crosses MI**; see MI-P1."
-    ///
-    /// Returns `pairing_id ‖ dCBOR(offer)`: the 16-byte PUBLIC handle every
-    /// subsequent `pair.cancel` / `pair.status` names, followed by the exact
-    /// octets ADR-0023 **E1** renders as a QR and **E2** renders as Crockford
-    /// base32. One encoding, two views — `pairing_offer.cddl` encoding rule 1 is
-    /// what makes that true, and it is why nothing here renders: a shell calls
-    /// `twinvpn_crypto::pairing_offer::decode` and then `::render_text` or its
-    /// own QR encoder over the same bytes.
-    ///
-    /// # MI-P1's three rules, and where each is held
-    ///
-    /// 1. **Only inside a `pair.begin` response, only over the MI channel.**
-    ///    This is the only function in the workspace that copies the offer out
-    ///    of the core, and its one caller is the MI server's `pair.begin`
-    ///    response path. `pair.begin`'s `Outcome::result` — which becomes a
-    ///    `CommandCompleted` event broadcast to **every** subscriber — carries
-    ///    the `pairing_id` and nothing else, which is why the offer is *not*
-    ///    returned through [`Core::submit`].
-    /// 2. **Never logged, never in `diag.log.tail`, never in a Tier-1 bundle,
-    ///    dropped at `not_after_ms`.** The first three hold because the value
-    ///    never enters the event stream, the diagnostic ledger or a
-    ///    `Diagnostic`: there is no path from here to any of them. The client's
-    ///    deadline is served by field 7, which the returned bytes carry; the
-    ///    agent's own copy is freed by
-    ///    `crate::pairing::PairingCeremonies::drop_expired`.
-    /// 3. **Not persisted by either side.** The offer lives in a `BTreeMap`
-    ///    behind this core's mutex and is written to no store
-    ///    (`architecture.md` S-67: "non-durable BY REQUIREMENT"). Dropping it
-    ///    zeroizes.
-    ///
-    /// `None` when no ceremony with that `pairing_id` is in flight — a replay
-    /// after cancellation or expiry, where ADR-0008's recorded outcome is the
-    /// `pairing_id` alone and there is no longer an offer to render.
-    #[cfg(feature = "full")]
-    #[must_use]
-    pub fn render_pairing_offer(
-        &self,
-        pairing_id: &[u8; crate::pairing::PAIRING_ID_BYTES],
-    ) -> Option<Vec<u8>> {
-        self.with_pairing_offer(pairing_id, |offer| {
-            let mut body = pairing_id.to_vec();
-            body.extend_from_slice(&twinvpn_crypto::pairing_offer::encode(offer).ok()?);
-            Some(body)
-        })?
     }
 
     /// Binds the L-CONTROL transport this core will use.

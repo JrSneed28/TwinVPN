@@ -125,8 +125,8 @@ impl ServerContext {
 /// kernel would have reported for a root caller. That is **one** substitution,
 /// at the same place `tests/mi_roundtrip.rs` makes its one: everything below —
 /// the catalogue scope check, the §11.14 ceremony, the idempotency
-/// precondition, `Core::submit`, the completion correlation and the MI-P1
-/// response path — is the production code, unchanged.
+/// precondition, `Core::submit_response`, the completion correlation and the
+/// MI-P1 response path — is the production code, unchanged.
 pub async fn dispatch(
     context: &ServerContext,
     principal: &Principal,
@@ -204,16 +204,16 @@ pub async fn dispatch(
     let core = Arc::clone(&context.core);
     let guard = context.submission.lock().await;
 
-    // **The body of a read, made reachable.** `Core::submit` returns `Ok(())`
-    // and *publishes* the operation's result as a `CommandCompleted` event, so
-    // the result never comes back through the return value. The registration is
-    // taken BEFORE the submission and carries the cursor read before it, so the
-    // drain thread can settle it with this call's own completion and with no
-    // other. `Fanout::expect_completion` states why both facts are needed.
+    // **The body of a read, made reachable.** `Core::submit_response` *publishes*
+    // the operation's result as a `CommandCompleted` event, so the ordinary body
+    // does not come back through the return value. The registration is taken
+    // BEFORE the submission and carries the cursor read before it, so the drain
+    // thread can settle it with this call's own completion and with no other.
+    // `Fanout::expect_completion` states why both facts are needed.
     let cursor_before = context.core.event_cursor();
     let (pending, completion) = context.fanout.expect_completion(op.name(), cursor_before);
 
-    let submitted = tokio::task::spawn_blocking(move || core.submit(&submission)).await;
+    let submitted = tokio::task::spawn_blocking(move || core.submit_response(&submission)).await;
     drop(guard);
 
     // The blocking task was cancelled or panicked. F-7 contains a panic inside
@@ -230,54 +230,39 @@ pub async fn dispatch(
     // `Ok` means the event is in the queue and the drain will reach it. CD-2:
     // timeouts are the core's, so a deadline invented here would be the shell
     // holding a decision it was not given.
-    let body = if submitted.is_ok() {
+    let published = if submitted.is_ok() {
         completion.await.unwrap_or_default()
     } else {
         context.fanout.cancel_completion(pending);
         Vec::new()
     };
 
-    // **MI-P1: the one `SECRET` that crosses MI — finding F-2B.**
-    //
-    // §11.9's `pair.begin` row states the return value as "the `PairingOffer`
-    // material to render — QR payload or 9-digit SPAKE2 code", and §11.17 as
-    // "`pair.begin` returns the QR payload; the CLI renders it as terminal-drawn
-    // QR". The body above is the 16-byte `pairing_id` and nothing else, because
-    // it came off the **event stream**, which fans out to every subscriber —
-    // and MI-P1 rule 1 permits the offer "only inside a `pair.begin` response".
-    //
-    // So the offer is fetched here, on the response path, for this connection
-    // only. `Core::render_pairing_offer` is the only function that copies it out
-    // of the core and this is its only caller; the value is not logged, is not
-    // published, and lives exactly as long as the frame it goes into. `None`
-    // means the ceremony is no longer in flight — a replay after cancellation or
-    // expiry, whose recorded outcome (ADR-0008) is the `pairing_id` alone.
-    //
-    // This is **not** a branch on a TwinVPN domain fact (CB-2): the condition is
-    // "which operation was called", which the core's own vocabulary supplies.
-    let body = match (op, submitted.is_ok()) {
-        (CoreCommand::PairBegin, true) => {
-            <[u8; twinvpn_core::pairing::PAIRING_ID_BYTES]>::try_from(body.as_slice())
-                .ok()
-                .and_then(|id| context.core.render_pairing_offer(&id))
-                .unwrap_or(body)
-        }
-        _ => body,
-    };
-
     match submitted {
-        Ok(()) => Response {
+        // **MI-P1: the one `SECRET` that crosses MI — finding F-2B.**
+        //
+        // §11.9's `pair.begin` row states the return value as "the `PairingOffer`
+        // material to render", and MI-P1 permits it "only inside a `pair.begin`
+        // response". The published body cannot carry it: it came off the event
+        // stream, which fans out to every subscriber. So the core hands the
+        // response body back through `submit_response`'s **return value**, which
+        // reaches this connection and nothing else, and this shell does not
+        // branch on the operation, fetch the offer, or know it exists.
+        //
+        // `None` is the ordinary case and means "the response is what the stream
+        // carried" — which is every operation but `pair.begin`, and `pair.begin`
+        // itself once its ceremony is no longer in flight.
+        Ok(response) => Response {
             ok: true,
-            // **The body of a read.** `Core::submit` returns `Ok(())` and
-            // publishes the operation's result as a `CommandCompleted` event on
-            // the one ordered stream (F-5), so the result is not *returned* — it
-            // is *published*. Wave 1 read that as "unreachable" and shipped an
+            // **The body of a read.** The core publishes an operation's result
+            // as a `CommandCompleted` event on the one ordered stream (F-5), so
+            // for all but one operation the result is not *returned* — it is
+            // *published*. Wave 1 read that as "unreachable" and shipped an
             // empty `result`; it is reachable, and this is where it is reached.
             //
             // Two facts make the correlation exact rather than a guess: the F-6
             // lock means no other submission is in flight, and `cursor_before`
             // means no earlier completion can match. See `result_for`.
-            result: body,
+            result: response.unwrap_or(published),
             diagnostic: None,
             // **MI-6**, and its predicate is `maps_to_mutating_c1` — NOT
             // `entry.mutating`. See that function: the cursor is a position in

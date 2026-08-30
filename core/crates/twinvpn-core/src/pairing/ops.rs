@@ -70,8 +70,13 @@ pub(crate) fn begin(core: &Core, submission: &Submission) -> Result<Outcome, Box
     state.expire_stale(core.env().now_elapsed().as_micros() / 1_000_000);
 
     // 1. The recorded outcome. One `pairing_id` per key, whatever else changed.
+    //    The response is rebuilt from the offer still in flight, so a retry that
+    //    lost its answer can render the same ceremony rather than being told an
+    //    id it cannot use.
     if let Some(recorded) = state.begun.get(key) {
-        return Ok(Outcome::new(recorded.to_vec(), 1));
+        let recorded = *recorded;
+        let response = response_body(&state, &recorded);
+        return Ok(Outcome::new(recorded.to_vec(), 1).responding(response));
     }
 
     // 2. C-A. `Spake2Exchange` has no implementation and N-15 forbids inventing
@@ -211,10 +216,62 @@ pub(crate) fn begin(core: &Core, submission: &Submission) -> Result<Outcome, Box
     state.offers.insert(pairing_id, offer);
     state.begun.insert(key.clone(), pairing_id);
 
-    // The body is the `pairing_id` and nothing else: PUBLIC, and the offer it
-    // names never crosses the MI. Three effects — a ledger entry, an element
-    // signature, and an offer minted.
-    Ok(Outcome::new(pairing_id.to_vec(), 3))
+    // The **published** body is the `pairing_id` and nothing else: PUBLIC, and
+    // the offer it names never reaches the event stream. The **response** body
+    // is §11.9's, and reaches only the caller — see `response_body`. Three
+    // effects: a ledger entry, an element signature, and an offer minted.
+    let response = response_body(&state, &pairing_id);
+    Ok(Outcome::new(pairing_id.to_vec(), 3).responding(response))
+}
+
+/// The `pair.begin` **response** body — ADR-0017 §11.9 and **MI-P1**.
+///
+/// > "The `PairingOffer` material to render — QR payload or 9-digit SPAKE2
+/// > code. **The one `SECRET` that crosses MI**; see MI-P1."
+///
+/// `pairing_id ‖ dCBOR(offer)`: the 16-byte PUBLIC handle every subsequent
+/// `pair.cancel` / `pair.status` names, followed by the exact octets ADR-0023
+/// **E1** renders as a QR and **E2** renders as Crockford base32. One encoding,
+/// two views — `pairing_offer.cddl` encoding rule 1 is what makes that true, and
+/// it is why nothing here renders: a shell calls
+/// `twinvpn_crypto::pairing_offer::decode` and then `::render_text` or its own
+/// QR encoder over the same bytes.
+///
+/// # MI-P1's three rules, and where each is held
+///
+/// 1. **Only inside a `pair.begin` response, only over the MI channel, never in
+///    any other operation.** This is the only function in the workspace that
+///    copies an offer out of `PairingCeremonies::offers`, it is called from
+///    [`begin`] and nowhere else, and its bytes leave through
+///    [`crate::dispatch::Outcome::response`] — which `Core::submit_response`
+///    **returns** to the one caller and never publishes. `pair.begin`'s
+///    `Outcome::result`, the value that becomes a `CommandCompleted` broadcast
+///    to every subscriber, stays the `pairing_id` alone. [`cancel`] and
+///    [`status`] answer with state bytes and never call this.
+/// 2. **Never logged at any level, never in `diag.log.tail`, never in a Tier-1
+///    bundle, dropped by the client at `not_after_ms`.** The first three hold
+///    because the value never enters the event stream, the Tier-0 ledger or a
+///    `Diagnostic`: there is no path from here to any of them, and
+///    `Outcome`'s hand-written `Debug` redacts the field so a future `{:?}`
+///    cannot open one. The client's deadline is field 7, which these bytes
+///    carry; the agent's own copy is freed by
+///    [`super::PairingCeremonies::expire_stale`].
+/// 3. **Not persisted by either side.** The offer lives in a `BTreeMap` behind
+///    this core's mutex and is written to no store (`architecture.md` S-67:
+///    "non-durable BY REQUIREMENT"). Dropping it zeroizes.
+///
+/// `None` when no ceremony with that `pairing_id` is in flight — a replay after
+/// cancellation or expiry, where ADR-0008's recorded outcome is the `pairing_id`
+/// alone and there is no longer an offer to render. The response then shrinks to
+/// the published body rather than carrying a secret nothing can still use.
+fn response_body(
+    state: &super::PairingCeremonies,
+    pairing_id: &[u8; PAIRING_ID_BYTES],
+) -> Option<Vec<u8>> {
+    let offer = state.offer(pairing_id)?;
+    let mut body = pairing_id.to_vec();
+    body.extend_from_slice(&pairing_offer::encode(offer).ok()?);
+    Some(body)
 }
 
 /// What [`build_offer`] needs, gathered so the signature stays readable.
