@@ -641,6 +641,13 @@ async fn a_duplicate_begin_returns_the_same_ceremony_and_the_same_offer() {
 ///
 /// This is the assertion that would fail if someone "simplified" the response
 /// path by putting the offer in `Outcome::result`.
+///
+/// **The mechanism it pins.** The core builds two bodies for one `pair.begin`:
+/// `Outcome::result`, which `Core::submit_response` *publishes*, and
+/// `Outcome::response`, which it *returns* to the one caller. This test asserts
+/// the divergence in both directions — that the response carries strictly more
+/// than the event did, and that not one byte of the offer (not the secret, and
+/// not the encoded offer around it) reached a subscriber.
 #[tokio::test]
 async fn the_offer_reaches_the_caller_and_never_the_event_stream() {
     let agent = agent(Arc::new(FixtureElement::new()), Some(&["ENROLL"]));
@@ -655,6 +662,11 @@ async fn the_offer_reaches_the_caller_and_never_the_event_stream() {
         .expect("decodes")
         .pairing_secret()
         .to_vec();
+    assert!(
+        !octets.is_empty(),
+        "the response must carry MORE than the pairing_id the stream carries, \
+         or there is no divergence for MI-P1 to govern"
+    );
 
     // Everything a **subscribed MI client** would have received, read through
     // the same fan-out `pump_events` reads. This is the surface MI-P1 rule 1 is
@@ -677,8 +689,20 @@ async fn the_offer_reaches_the_caller_and_never_the_event_stream() {
              client reads (ADR-0017 MI-P1 rule 1)",
             event.topic
         );
+        // The whole encoded offer, not only the secret inside it: field 3's
+        // `tk_pub`, field 4's binding and field 6's hint are not the SECRET but
+        // they are the offer, and a published copy of them is the same defect
+        // with a narrower blast radius.
+        assert!(
+            event.payload.len() < octets.len()
+                || !event.payload.windows(octets.len()).any(|w| w == octets),
+            "the encoded offer reached the {} topic (ADR-0017 MI-P1 rule 1)",
+            event.topic
+        );
     }
-    // And what the stream DID carry for `pair.begin` is the public handle.
+    // And what the stream DID carry for `pair.begin` is the public handle, at
+    // its exact width — an equality, so a body that merely *starts* with the id
+    // fails here.
     assert!(
         delivered
             .iter()

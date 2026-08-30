@@ -270,24 +270,37 @@ fn an_expired_offer_is_freed_rather_than_held_for_the_life_of_the_process() {
     assert_eq!(status_of(&h.core, &first), EXPIRED);
 }
 
-/// **`Core::render_pairing_offer` is the offer's only exit, and it stops when
-/// the ceremony does.**
+/// **`Core::submit_response` is the offer's only exit, it diverges from the
+/// published body, and it stops when the ceremony does.**
 ///
-/// The function the MI server calls for the `pair.begin` response body. It
-/// answers `pairing_id ‖ dCBOR(offer)` while the ceremony is in flight and
-/// `None` afterwards, which is what makes the response shrink to ADR-0008's
-/// recorded outcome rather than carrying a secret nothing can still use.
+/// ADR-0017 §11.9 and MI-P1. The return value carries `pairing_id ‖
+/// dCBOR(offer)` to the caller that submitted, while the `CommandCompleted` the
+/// same call published carries the `pairing_id` alone — the two are asserted
+/// against each other here, because "the response carries more than the event"
+/// is the whole property and a test that read only one of them would not see it.
+///
+/// After the ceremony ends there is no offer to return, so the response shrinks
+/// to ADR-0008's recorded outcome rather than carrying a secret nothing can
+/// still use.
 #[test]
 fn the_response_body_carries_the_offer_only_while_the_ceremony_is_in_flight() {
     let h = enrolled();
-    h.core.submit(&begin(b"key-render")).expect("pair.begin");
-    let pairing_id = pairing_id_from_events(&h.core);
-
     let body = h
         .core
-        .render_pairing_offer(&pairing_id)
-        .expect("a live ceremony renders");
+        .submit_response(&begin(b"key-render"))
+        .expect("pair.begin")
+        .expect("a live ceremony answers with its offer");
+    let pairing_id = pairing_id_from_events(&h.core);
+
+    // The published half: the 16-byte PUBLIC handle, and nothing more.
+    // `pairing_id_from_events` reads the CommandCompleted every subscriber sees
+    // and refuses anything that is not exactly `PAIRING_ID_BYTES` wide.
     assert_eq!(&body[..PAIRING_ID_BYTES], pairing_id);
+    assert!(
+        body.len() > PAIRING_ID_BYTES,
+        "the response must carry MORE than the event did, or MI-P1 has nothing \
+         to govern and no shell can render an offer"
+    );
     let offer = twinvpn_crypto::pairing_offer::decode(&body[PAIRING_ID_BYTES..])
         .expect("the response body carries a decodable offer");
     assert_eq!(offer.pairing_id(), pairing_id);
@@ -295,8 +308,18 @@ fn the_response_body_carries_the_offer_only_while_the_ceremony_is_in_flight() {
     h.core
         .submit(&named(CoreCommand::PairCancel, &pairing_id))
         .expect("pair.cancel");
+    // The same submission again is ADR-0008's replay: the recorded `pairing_id`
+    // is published, and there is no offer left to return.
     assert!(
-        h.core.render_pairing_offer(&pairing_id).is_none(),
-        "a cancelled ceremony has no offer to render"
+        h.core
+            .submit_response(&begin(b"key-render"))
+            .expect("the replay is answered")
+            .is_none(),
+        "a cancelled ceremony has no offer to return"
+    );
+    assert_eq!(
+        pairing_id_from_events(&h.core),
+        pairing_id,
+        "the replay still publishes the original pairing_id (ADR-0008 N-4)"
     );
 }
