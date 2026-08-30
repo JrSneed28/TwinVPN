@@ -23,6 +23,13 @@
 //  … exact defect class R-05". A constant in a Swift file is a constant nobody
 //  runs a test over.
 
+// `SecureEnclave` is CryptoKit's, not Security's: `SecureEnclave.isAvailable`
+// is `static var isAvailable: Bool` in Apple CryptoKit, iOS 13.0+ (against this
+// project's iOS 15.0 floor, so no `@available` guard is owed).
+// <https://developer.apple.com/documentation/cryptokit/secureenclave/isavailable>
+// Missing it is what made `EnclaveBridge.isHardwareBacked` fail to compile with
+// "cannot find 'SecureEnclave' in scope"; `Security` vends `SecKey`, not this.
+import CryptoKit
 import Foundation
 import Security
 import TwinVPNBridge

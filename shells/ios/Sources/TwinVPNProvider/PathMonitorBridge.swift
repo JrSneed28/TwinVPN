@@ -99,9 +99,23 @@ final class PathMonitorBridge {
             "overlay_name_prefix": "utun",
         ]
 
+        // ADR-0011 §11.5's SPLIT mode needs the host's pre-existing upstream, and
+        // **iOS vends no public API that names it** — see `SystemResolvers`, which
+        // measures every candidate and refuses rather than inventing one. So on
+        // this platform `current()` is always `nil` and both keys are OMITTED,
+        // which is "we could not read the list" rather than "this host has none";
+        // `IosPlatformAdapter::posture()` declares the standing gap once, at
+        // startup, as `system_resolvers_readable: false`.
+        //
+        // The branch stays because the fact is owed and the day a public API
+        // exists this is where it lands. Each address is wrapped as
+        // `{"octets": …}`, the shape `pathmon::parse_address` requires — a bare
+        // `[[UInt8]]` was refused as `NWPathMonitor.address.shape`, and because
+        // `parse` is all-or-nothing it would have taken the WHOLE snapshot down,
+        // not just the resolvers.
         if let resolvers = SystemResolvers.current() {
-            snapshot["resolvers_v4"] = resolvers.v4
-            snapshot["resolvers_v6"] = resolvers.v6
+            snapshot["resolvers_v4"] = resolvers.v4.map { ["octets": $0] }
+            snapshot["resolvers_v6"] = resolvers.v6.map { ["octets": $0] }
         }
         // ADR-0010 §11.7: PREF64 from the RFC 8781 RA option. Absent is a
         // DIFFERENT fact from present-with-a-prefix — IPv6-only-with-NAT64 and

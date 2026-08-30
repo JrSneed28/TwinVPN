@@ -1,7 +1,8 @@
 //  PlatformFacts.swift — the four OS readings the bridges hand over.
 //
 //  Authority: ADR-0018 §11.16 (h) and (l); ADR-0010 §11.7 and R1; ADR-0011
-//  DN-20; `docs/networking.md` §5.1, §6.3; `ownership.md` §10.3 and §10.4.
+//  §11.5 and DN-11; `docs/networking.md` §5.1, §6.3; `ownership.md` §10.3 and
+//  §10.4.
 //
 //  ===========================================================================
 //  THE DEFECT THIS FILE CLOSES
@@ -38,9 +39,18 @@
 //  Every reader here returns an optional and every one of them means it. ADR-0010
 //  §11.7: IPv6-only-with-NAT64, IPv6-only-without, and dual-stack are "three
 //  distinct situations with three distinct behaviours", so a missing PREF64 is
-//  omitted rather than reported as a well-known prefix. DN-20 says the same about
+//  omitted rather than reported as a well-known prefix. The same holds for the
 //  resolvers: "we could not read the resolver list" and "this host has no
-//  resolvers" are different, and only the second is safe to act on.
+//  resolvers" are different facts, and only the second is safe to act on —
+//  ADR-0011 DN-11's "every negative outcome is a typed DNS failure, never a
+//  silent one" is the rule, and the fail-closed direction is
+//  `DNS.RESOLUTION.UPSTREAM_UNREACHABLE`'s. (This paragraph cited **DN-20**,
+//  which is about restoration surviving an unhealthy agent and says nothing
+//  about reading. Corrected here rather than carried forward.)
+//
+//  On iOS the resolver list is the one reading no public API answers at all —
+//  see `SystemResolvers` below, and `IosPlatformAdapter::posture()`'s
+//  `system_resolvers_readable`, which declares that once at startup.
 
 import Foundation
 import Security
@@ -186,15 +196,66 @@ enum InterfaceFacts {
 // MARK: - SystemResolvers
 // ===========================================================================
 
-/// The host's configured resolvers, per family.
+/// The host's configured resolvers, per family — **which iOS does not vend**.
 ///
 /// # Why this is read at all
 ///
-/// ADR-0011's SPLIT mode sends default-class queries to "the host's
-/// pre-existing upstream over the underlay" — so the core has to be told what
-/// that upstream is. It is a **fact about the host**, not a policy: the core
-/// decides whether to use it, and DN-20 makes the fail-closed direction the
-/// default when it cannot.
+/// ADR-0011 §11.5's SPLIT mode sends default-class queries to "the host's
+/// pre-existing upstream resolvers", from the stub, over the underlay — so the
+/// core has to be told what that upstream is. It is a **fact about the host**,
+/// not a policy: the core decides whether to use it.
+///
+/// # Why this platform cannot answer, measured API by API
+///
+/// Apple's DTS engineer states the general case outright — *"iOS does not
+/// provide APIs to get per-interface DNS configuration information"* — and adds
+/// that a function absent from the SDK headers (`nw_path_get_dns_servers` is the
+/// example) is private, and using one is *"not supported by Apple (and is likely
+/// to get you rejected by App Review)"*.
+/// <https://developer.apple.com/forums/thread/107861>
+///
+/// | Candidate | Why it does not answer here |
+/// |---|---|
+/// | `SCDynamicStore` (`State:/Network/Global/DNS`) | the **macOS** mechanism. On iOS `SystemConfiguration` vends `SCNetworkReachability` publicly and `SCDynamicStore` as SPI |
+/// | `NEDNSProxyProvider.systemDNSSettings` (iOS 11+) | the one *public* read, and it is a property of a **DNS-proxy** provider — a `dns-proxy` entitlement on a supervised device. ADR-0018 §11.12 makes this an `NEPacketTunnelProvider`, which has no such property |
+/// | `NEDNSSettingsManager`, `NEPacketTunnelNetworkSettings.dnsSettings` | these **write** the resolver configuration (DN-21's iOS row). Neither reads the host's |
+/// | `NWPath` / `NWPathMonitor` | reports interfaces, families, `supportsDNS`, expense and constraint. No resolver list |
+/// | `<resolv.h>`'s BIND-9 API | see below |
+///
+/// # `res_9_ninit(3)`, which this file used to call, and why it is gone
+///
+/// It is what broke the build: no module vends `<resolv.h>` to Swift, so
+/// `__res_9_state`, `res_9_ninit` and `res_9_ndestroy` were *"cannot find … in
+/// scope"*. Reaching them would take a bridging header added on purpose, and
+/// three facts say not to.
+///
+///   1. Apple's DTS: *"My general advice is to **avoid that API wherever
+///      possible**."* <https://developer.apple.com/forums/thread/793921>
+///   2. The header changed shape between Xcode 16.1 and 16.4 — `__RES` from
+///      `19991006` to `20090302` — and a binary built against the newer one
+///      died at launch with `dyld: Symbol not found: ___res_9_state`, expected
+///      in `/usr/lib/libresolv.9.dylib` (same thread). A **VPN provider that
+///      will not start** is a worse outcome than a fact it cannot supply.
+///   3. Where it does run on iOS it mis-reports the IPv6 half: those servers
+///      arrive with `sin_family` set to `AF_UNSPEC` rather than `AF_INET6`
+///      (<https://developer.apple.com/forums/thread/15458>) — precisely the
+///      `_u._ext.nsaddrs` array the deleted body read.
+///
+/// # So this refuses, and the refusal is declared rather than inferred
+///
+/// `nil` is **"we could not read the resolver list"**, which is a different fact
+/// from "this host has no resolvers", and only the second would be safe to act
+/// on. `PathMonitorBridge` therefore omits the keys instead of sending an empty
+/// list, and — because the gap is structural on *every* iOS build rather than a
+/// property of one snapshot — `IosPlatformAdapter::posture()` declares it once,
+/// at startup, as `system_resolvers_readable: false`. That is the crate's stated
+/// rule for a condition the frozen registry has no code for (README §5.1: "where
+/// none does, the fact is a declared posture value") and the shape ADR-0012's
+/// `EnforcementLimits` already uses for iOS's other structural absences.
+///
+/// **Nothing here substitutes a resolver.** No well-known address, no gateway
+/// guess, no `8.8.8.8`: an invented upstream would send SPLIT-mode queries to a
+/// server the user never configured.
 enum SystemResolvers {
     struct Snapshot {
         /// Each address as `[UInt8]`, in the shape the snapshot JSON carries.
@@ -202,48 +263,15 @@ enum SystemResolvers {
         let v6: [[UInt8]]
     }
 
-    /// `nil` when the resolver list cannot be read.
+    /// Always `nil` on iOS. See this type's documentation for every API measured
+    /// against the question and why none of them answers it.
     ///
-    /// **Not an empty snapshot.** ADR-0011 DN-20: "we could not read the
-    /// resolver list" and "this host has no resolvers" are different facts, and
-    /// only the second is safe to act on — the first must leave the previous
-    /// policy governing rather than replace it with an empty one.
-    ///
-    /// On iOS there is no public API for this. `res_ninit(3)` is available and
-    /// reports what the process was launched with, which inside a
-    /// `NEPacketTunnelProvider` is the pre-tunnel configuration — exactly what
-    /// SPLIT mode needs. Where it cannot be read, `nil`.
+    /// Kept as a `Snapshot?`-returning reader rather than deleted, so the fact
+    /// the core is owed stays named at the one place that would supply it — and
+    /// so that a future public API is a change to this function body and nothing
+    /// else.
     static func current() -> Snapshot? {
-        #if canImport(Darwin)
-        var state = __res_9_state()
-        guard res_9_ninit(&state) == 0 else { return nil }
-        defer { res_9_ndestroy(&state) }
-
-        var v4: [[UInt8]] = []
-        var v6: [[UInt8]] = []
-        let count = Int(state.nscount)
-        guard count > 0 else { return nil }
-        withUnsafeBytes(of: state.nsaddr_list) { raw in
-            let list = raw.bindMemory(to: sockaddr_in.self)
-            for index in 0 ..< min(count, list.count) {
-                v4.append(withUnsafeBytes(of: list[index].sin_addr.s_addr, Array.init))
-            }
-        }
-        // `_u._ext.nsaddrs` carries the IPv6 servers; an entry is null where the
-        // corresponding v4 slot was used instead.
-        withUnsafeBytes(of: state._u._ext.nsaddrs) { raw in
-            let list = raw.bindMemory(to: UnsafeMutablePointer<sockaddr_in6>?.self)
-            for index in 0 ..< min(count, list.count) {
-                guard let entry = list[index] else { continue }
-                v6.append(withUnsafeBytes(of: entry.pointee.sin6_addr, Array.init))
-            }
-        }
-        // Both lists empty is "we read the configuration and it named nothing",
-        // which is a real answer and is reported as one.
-        return Snapshot(v4: v4, v6: v6)
-        #else
-        return nil
-        #endif
+        nil
     }
 }
 
