@@ -1,6 +1,6 @@
 {
-  "distPath": "/home/bayba/.npm/_npx/2ed56890c96f58f7/node_modules/@claude-flow/memory/dist/index.js",
+  "distPath": "/home/bayba/.nvm/versions/node/v24.20.0/lib/node_modules/ruflo/node_modules/@claude-flow/memory/dist/index.js",
   "version": "3.0.0-alpha.23",
-  "resolvedBy": "init",
-  "resolvedAt": "2026-08-29T18:18:54.370Z"
+  "resolvedBy": "upgrade",
+  "resolvedAt": "2026-08-29T22:28:52.497Z"
 }

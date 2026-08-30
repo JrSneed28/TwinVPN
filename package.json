@@ -11,7 +11,17 @@
     "typescript": "^7.0.2"
   },
   "overrides": {
-    "better-sqlite3": "12.11.1"
+    "better-sqlite3": "12.11.1",
+    "protobufjs": ">=8.7.2",
+    "uuid": ">=14.0.0",
+    "@opentelemetry/core": ">=2.9.0",
+    "@opentelemetry/resources": ">=2.9.0",
+    "@opentelemetry/sdk-trace-base": ">=2.9.0",
+    "@opentelemetry/propagator-jaeger": ">=2.9.0",
+    "@opentelemetry/sdk-node": ">=0.220.0",
+    "@opentelemetry/exporter-prometheus": ">=0.220.0",
+    "adm-zip": "0.6.0",
+    "sharp": "0.35.3"
   },
   "allowScripts": {
     "onnxruntime-node@1.21.0": true,
@@ -30,6 +40,7 @@
     "agentic-flow@3.0.0-alpha.2": true,
     "agentdb@3.0.0-alpha.20": true,
     "agentdb@1.6.1": true,
-    "tldjs@2.3.2": true
+    "tldjs@2.3.2": true,
+    "onnxruntime-node@1.14.0": true
   }
 }

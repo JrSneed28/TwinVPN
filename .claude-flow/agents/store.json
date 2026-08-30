@@ -374,6 +374,81 @@
       "createdAt": "2026-08-27T19:23:49.574Z",
       "model": "sonnet",
       "modelRoutedBy": "default"
+    },
+    "agent-1788042954098-76429j": {
+      "agentId": "agent-1788042954098-76429j",
+      "agentType": "coder",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-29T22:35:54.098Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1788043012626-jw7sr6": {
+      "agentId": "agent-1788043012626-jw7sr6",
+      "agentType": "coder",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-29T22:36:52.626Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1788043044228-i9p6gd": {
+      "agentId": "agent-1788043044228-i9p6gd",
+      "agentType": "tester",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-29T22:37:24.228Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1788043062695-m45vmg": {
+      "agentId": "agent-1788043062695-m45vmg",
+      "agentType": "tester",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-29T22:37:42.696Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1788043082304-txuuvs": {
+      "agentId": "agent-1788043082304-txuuvs",
+      "agentType": "reviewer",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic",
+        "timeout": 300,
+        "autoTools": true
+      },
+      "createdAt": "2026-08-29T22:38:02.304Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
     }
   },
   "version": "3.0.0"
