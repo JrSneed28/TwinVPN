@@ -79,6 +79,11 @@ android {
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
+                // What the instrumentation needs to survive the APP's R8 pass.
+                // AGP subtracts the app's runtime classpath from the test APK,
+                // so these classes ship only here. Derived with R8's
+                // TraceReferences, not hand-written -- see the file's header.
+                "proguard-androidtest-keep.pro",
             )
             // The androidTest APK gets its own R8 invocation
             // (`minifyReleaseAndroidTestWithR8`), and it does NOT inherit the
@@ -87,7 +92,13 @@ android {
             // refusing `androidx.test`'s compile-only Error Prone annotations.
             // Naming the same file here is what makes that `-dontwarn` reach
             // the task that needs it.
-            testProguardFiles("proguard-rules.pro", "proguard-test-rules.pro")
+            // The test APK's own R8 pass needs the Error Prone `-dontwarn`;
+            // a missing-class error is refused regardless of keep rules. AGP
+            // always emits `-keep class * {*;}` for an application module's
+            // androidTest (ProguardConfigurableTask keepAllForTest), and a
+            // testProguardFiles entry cannot displace it, so nothing here has
+            // to restate it.
+            testProguardFiles("proguard-rules.pro")
             // ADR-0018 §11.3: `panic = "unwind"` in every SHIPPED profile,
             // because F-7's containment needs `catch_unwind` at the boundary.
             // The Rust side sets it; this comment is here so a reader of the

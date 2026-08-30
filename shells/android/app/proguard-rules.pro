@@ -80,21 +80,3 @@
 # release variant is minified. Annotations are not needed at runtime, so
 # silencing them removes no check -- R8 keeps refusing every other missing class.
 -dontwarn com.google.errorprone.annotations.**
-
-# `AndroidJUnitRunner.onCreate` resolves `androidx.tracing.Trace`, and the
-# instrumentation runs IN THE APP PROCESS -- so the class has to survive the
-# APP's R8 pass, not the test APK's. Nothing in `src/main` references it, so R8
-# removes it, and the process dies before a single test method runs:
-#
-#   FATAL EXCEPTION: main  Process: net.twinvpn.android
-#   java.lang.NoClassDefFoundError: Failed resolution of: Landroidx/tracing/Trace;
-#       at androidx.test.runner.AndroidJUnitRunner.onCreate(AndroidJUnitRunner.java:307)
-#
-# Run 33322921169 is that crash. It reaches CI as `INSTRUMENTATION_RESULT:
-# shortMsg=Process crashed.` with no test output at all, which is why the
-# instrumentation log is two lines long and says nothing about the cause.
-#
-# This is the third keep rule in this file for the same reason: R8 shrinks the
-# app without seeing what the instrumentation needs of it.
--keep class androidx.tracing.** { *; }
--dontwarn androidx.tracing.**
