@@ -98,7 +98,7 @@ source "$REPO/build/ci/ci-common-apple.sh"
 if [ "${1:-}" = "--cleanup" ]; then
   echo "=== cleanup: deactivate the extension and return the Mac ==="
   team_id="${TWINVPN_TEAM_ID:-}"
-  ext_bundle_id="${TWINVPN_EXTENSION_BUNDLE_ID:-net.twinvpn.client.tunnel}"
+  ext_bundle_id="${TWINVPN_EXTENSION_BUNDLE_ID:-com.twinvpn.app.sysext}"
   systemextensionsctl list 2>&1 || true
   if [ -n "$team_id" ]; then
     sudo -n systemextensionsctl uninstall "$team_id" "$ext_bundle_id" 2>&1 \
@@ -136,7 +136,18 @@ re-applied after any stop/start or root-volume replacement." >&2
 esac
 
 team_id="${TWINVPN_TEAM_ID:-}"
-ext_bundle_id="${TWINVPN_EXTENSION_BUNDLE_ID:-net.twinvpn.client.tunnel}"
+# THE DEFAULT MUST BE WHAT THIS REPOSITORY ACTUALLY BUILDS, and it was not.
+#
+# It read `net.twinvpn.client.tunnel`, which is the iOS naming and is not a
+# target in `shells/macos/project.yml` at all -- that file builds
+# `com.twinvpn.app.sysext`, prefixed by the containing app's
+# `com.twinvpn.app` because macOS requires a system extension's identifier to
+# be prefixed by its host's. The default is not decoration: the workflow passes
+# `vars.TWINVPN_EXTENSION_BUNDLE_ID` unconditionally and that variable is unset
+# in this repository, so an empty string arrives here and `:-` takes over. A run
+# would have hunted for an extension nobody ever built, and `--cleanup` would
+# have asked `systemextensionsctl` to uninstall a bundle id that does not exist.
+ext_bundle_id="${TWINVPN_EXTENSION_BUNDLE_ID:-com.twinvpn.app.sysext}"
 if [ -z "$team_id" ]; then
   echo "::error::TWINVPN_TEAM_ID is unset. The Team ID is part of the extension's \
 identity and of this criterion's evidence; a run that cannot name it cannot say \
@@ -267,30 +278,21 @@ ARTIFACT_DIGESTS="$(twinvpn_digest_json \
 echo "artifact digests: $ARTIFACT_DIGESTS"
 echo "::endgroup::"
 
-# --------------------------------------------------------------------------
-# THE TWO PATHS, NAMED FROM THE ROUTING TABLE RATHER THAN ASSERTED
-# --------------------------------------------------------------------------
+# THE TWO PATHS, NAMED FROM THE ROUTING TABLE RATHER THAN ASSERTED.
 #
 # `PATH_IDENTITY_PREREQUISITES` (build/acceptance/adjudication.py) requires every
-# criterion that makes an EGRESS claim to attest that it established a protected
-# AND an unprotected path, and to NAME each one. A run where both legs left
-# through the same box proves nothing about interception, however few packets
-# arrived, so the adjudicator refuses the case where the two names are equal.
+# EGRESS criterion to attest that it established a protected AND an unprotected
+# path, and to NAME each. A run where both legs left through the same box proves
+# nothing about interception however few packets arrived, so the adjudicator
+# refuses two equal names -- which is why these are MEASURED. Differing constants
+# would satisfy that check while describing nothing, the exact shape of evidence
+# this gate exists to refuse.
 #
-# These are therefore MEASURED. A pair of differing constants would satisfy the
-# inequality check while describing nothing -- the exact shape of evidence this
-# gate exists to refuse.
-#
-# What is measured is the interface the default route actually points at, plus
-# that interface's IPv4 address. Before `net up` that is the Mac's physical
-# interface; once the system extension is enforcing it is a utun. The difference
-# between those two strings IS the evidence that a second, protected path was
-# established.
-#
-# Prints the identity, or NOTHING if it could not be read. An unreadable route is
-# what a machine that never brought the path up produces, and report.py grades an
-# empty string as unmeasured -- so callers let it fail honestly rather than
-# substituting a placeholder.
+# Measured is the interface the default route points at, plus its IPv4 address.
+# Before `net up` that is the Mac's physical interface; once the extension is
+# enforcing it is a utun, and that difference IS the evidence a second path
+# exists. Prints NOTHING if unreadable: report.py grades an empty string as
+# unmeasured, so the row fails honestly rather than taking a placeholder.
 default_route_identity() {
   local iface addr
   iface="$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }')"
@@ -348,19 +350,36 @@ echo "unprotected path identity: ${UNPROTECTED_PATH_IDENTITY:-<unreadable>}"
 "$PROBE" beacon --seconds 15
 
 echo "::group::invoke the production extension and bring the tunnel up"
-# The production management path. `twinvpn` on macOS talks to the extension,
+# The production management path. The CLI on macOS talks to the extension,
 # which is where PS-22 puts the Core — so this crosses the real boundary rather
 # than calling the bridge in-process.
-TWINVPN="/Applications/TwinVPN.app/Contents/MacOS/twinvpn"
-[ -x "$TWINVPN" ] || TWINVPN="$(command -v twinvpn)"
+#
+# IT IS BUILT HERE, BECAUSE NOTHING ELSE BUILDS IT. This looked for
+# `Contents/MacOS/twinvpn`, then `command -v twinvpn`; neither can ever have
+# existed -- the crate's binary is `twinvpnctl`, `project.yml` copies no CLI into
+# the bundle, and this script ran no `cargo`. The fallback resolved to empty and,
+# as the right-hand side of `||`, took `set -e` with it: the lane died
+# unexplained, after the Mac and the extension were paid for.
+echo "::group::build the shipped management CLI"
+(cd "$REPO/shells/macos" && cargo build --locked --release -p twinvpnctl)
+echo "::endgroup::"
+# A bundle that DOES carry the CLI wins — that is where a packaged product puts
+# it; the freshly built one is the fallback, not the other way round.
+TWINVPN="/Applications/TwinVPN.app/Contents/MacOS/twinvpnctl"
+[ -x "$TWINVPN" ] || TWINVPN="$REPO/shells/macos/target/release/twinvpnctl"
+[ -x "$TWINVPN" ] || {
+  echo "::error::no twinvpnctl to drive the extension with: it is neither in \
+/Applications/TwinVPN.app/Contents/MacOS/ nor at \
+shells/macos/target/release/twinvpnctl after a successful build. The lifecycle \
+below would be driven by nothing." >&2
+  exit 1; }
+echo "management CLI: $TWINVPN"
 "$TWINVPN" --output json status get | tee "$LOGDIR/status-before.json"
 "$TWINVPN" net up
 echo "::endgroup::"
 
-# The PROTECTED leg, named after `net up`. If this comes back equal to the
-# unprotected identity, the extension did not take over the default route and
-# `path_identity_problems` refuses the row -- correctly, because both legs would
-# then be the same path.
+# The PROTECTED leg, after `net up`. Equal to the unprotected identity means the
+# extension never took the default route, and the adjudicator refuses the row.
 PROTECTED_PATH_IDENTITY="$(default_route_identity)"
 echo "protected path identity: ${PROTECTED_PATH_IDENTITY:-<unreadable>}"
 

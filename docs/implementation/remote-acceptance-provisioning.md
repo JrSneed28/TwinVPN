@@ -123,9 +123,27 @@ at all in their current form, and that is a finding rather than a delay.
   produces an oracle report that is internally consistent and entirely about the
   wrong machine, which is exactly the failure the `probe_host` key exists to
   catch. It is caught, and it is not yet fixed.
+* **The macOS lane depended on two artifacts nothing builds.** It defaulted
+  `TWINVPN_EXTENSION_BUNDLE_ID` to `net.twinvpn.client.tunnel`, which is iOS
+  naming and is not a target in `shells/macos/project.yml` — that file builds
+  `com.twinvpn.app.sysext`, prefixed by the containing app's `com.twinvpn.app`
+  because macOS requires it. The default is load-bearing, not decoration: the
+  workflow passes `vars.TWINVPN_EXTENSION_BUNDLE_ID` unconditionally and that
+  variable is unset, so the empty string arrives and `:-` takes over. And it
+  drove the extension with `Contents/MacOS/twinvpn`, falling back to
+  `command -v twinvpn` — neither can ever have existed, since the crate's binary
+  is `twinvpnctl`, `project.yml` copies no CLI into the bundle, and the script
+  ran no `cargo`. The fallback resolved to the empty string and, as the
+  right-hand side of `||`, took `set -e` with it, so the lane would have died
+  unexplained after the Mac and the extension were already paid for. Both are
+  fixed: the default now names what is built, and the CLI is compiled from the
+  same workspace the Windows lane compiles its pair from.
 * **`build/ci/ci-android.sh` is 1593 lines** against the 500-line ceiling, as are
-  `build/acceptance/report.py` at 925 and `ci-ios-corellium.sh`, which grew from
-  473 to 675 carrying the corrections above. Both were already over before the
+  `build/acceptance/report.py` at 925, `ci-ios-corellium.sh` at 709 (from 473)
+  and `ci-macos-sysext.sh` at 516 (from 450). The last two grew carrying the
+  corrections above. Compressing the reasoning out of them would buy the line
+  count at the cost of the only thing that makes each correction checkable, so
+  the size is recorded as debt instead. Both were already over before the
   2026-08-30 pass (1104 and 803 respectively). Splitting the 16 KiB lane out of
   the Android script would restructure the link/run lane with it, which is not
   work to do at the end of a hardening pass; it is recorded as debt rather than
