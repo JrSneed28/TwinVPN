@@ -951,7 +951,23 @@ test-acceptance-gate-logic:
 test-first-wave-gate:
 	@$(MAKE) --no-print-directory test-crypto-integration
 	@$(MAKE) --no-print-directory test-pairing-integration
-	@$(MAKE) --no-print-directory test-mutation
+# `-` ON test-mutation, AND ONLY ON IT.
+#
+# B-1 is DEFERRED past Wave 1 by the integration lead, and `report.py` already
+# grades the F-5 row as deferred and excludes it from the conjunction. But
+# `test-mutation` still exits non-zero -- correctly, it IS undischarged -- and
+# without the `-` that status aborted the whole target before `report.py` ever
+# ran. Run 33352434440 is what that costs: `android-16k` went green for the
+# first time and NO acceptance report was produced to record it, while the
+# upload glob shipped the stale committed report from an old dirty worktree in
+# its place. A deferred row must not be able to destroy the gate's only
+# machine-readable answer to "what is left".
+#
+# Nothing is weakened. The mutation row still runs, still prints, and still
+# appears in the report with its real verdict; `report.py --run` below is what
+# decides this target's exit status, and it counts NOT-EXECUTED against
+# eligibility exactly as it always did.
+	-@$(MAKE) --no-print-directory test-mutation
 	@$(MAKE) --no-print-directory test-acceptance-gate-logic
 	@build/acceptance/report.py --run
 

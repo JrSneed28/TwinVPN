@@ -1542,8 +1542,25 @@ jobs:
           PY
 
 
+      # THE COMMITTED REPORT IS DELETED FIRST, AND THAT IS THE POINT.
+      #
+      # `build/acceptance/first-wave-acceptance.{json,md}` are tracked, so a copy
+      # from whenever someone last ran the report locally is sitting in the
+      # checkout. The upload below globs that path. In run 33352434440 the make
+      # target died before `report.py` ran, and the artifact went out carrying a
+      # report from commit c896d823 that even says "DIRTY WORKTREE -- not release
+      # evidence" -- presented, by its filename and its artifact name, as this
+      # run's answer.
+      #
+      # Stale evidence offered as current is the exact failure this gate exists
+      # to prevent, so remove it and let `if-no-files-found: error` on the upload
+      # turn "no report was produced" into a loud, visible failure instead of a
+      # quiet substitution.
       - name: make test-first-wave-gate
-        run: make test-first-wave-gate
+        run: |
+          rm -f build/acceptance/first-wave-acceptance.json \
+                build/acceptance/first-wave-acceptance.md
+          make test-first-wave-gate
 
       - uses: actions/upload-artifact@v4
         if: always()
