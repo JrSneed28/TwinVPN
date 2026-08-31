@@ -51,8 +51,8 @@ rather than crediting a sentinel-less silence.
 | `WINDOWS-WFP-KILLSWITCH` | oracle + sentinel host + Azure L1 runner `twinvpn-azure-l1` + golden VHDX | blocked |
 | `MACOS-SYSEXT-LIFECYCLE` | oracle + sentinel host + EC2 Mac runner `twinvpn-ec2-mac` + Apple Team ID | blocked |
 | `MACOS-PRODUCTION-SIGNATURE` | EC2 Mac runner + a notarized artifact and its pinned digest | blocked |
-| `IOS-NE-FAIL-CLOSED` | oracle + sentinel host + Corellium project + a signed IPA and its pinned digest | blocked |
-| `IOS-PROFILE-REMOVAL-HONESTY` | Corellium project + signed IPA | blocked |
+| `IOS-NE-FAIL-CLOSED` | oracle + sentinel host + Corellium project + a signed IPA and its pinned digest — **and a mechanism for three injections Corellium does not have** | blocked on capability, not only on provisioning |
+| `IOS-PROFILE-REMOVAL-HONESTY` | Corellium project + signed IPA — **and a way to remove an app-created VPN configuration, which Corellium has no API for** | blocked on capability, not only on provisioning |
 | `IOS-SUPERVISED-ALWAYS-ON` | only if that product mode ships | out of scope |
 
 ### Repository configuration
@@ -77,9 +77,45 @@ repeatable `--resolver <ip>=<id>:<p|u>`, and `--sentinel-token-file`.
 
 ## Known gaps in the probes themselves
 
-Two items are recorded rather than fixed, because neither can be closed without
-infrastructure that does not exist and both are visible in the evidence today.
+These are recorded rather than fixed. Some cannot be closed without
+infrastructure that does not exist; the Corellium items below cannot be closed
+at all in their current form, and that is a finding rather than a delay.
 
+* **Corellium cannot perform three of the five `IOS-NE-FAIL-CLOSED`
+  injections, so that criterion cannot be discharged there as specified.** This
+  is not "not yet wired". `app/crash`, `network/disable` and `vpn/disable`
+  appear nowhere in Corellium's OpenAPI document, nowhere in the generated
+  clients, and nowhere in the WebSocket agent protocol the REST `agent/v1/*`
+  paths bridge to. The SDK's only crash surface is `crash.subscribe`, a
+  listener that waits for a report the OS produces on its own — the agent can
+  observe a crash but cannot cause one. The lane now refuses each of the three
+  by name rather than downgrading the resulting 404 to a warning and opening a
+  SILENCE phase whose premise is false, which is what it did before.
+* **`IOS-PROFILE-REMOVAL-HONESTY`'s removal step has no mechanism either.**
+  Corellium models VPN configuration as a Mobile Configuration Profile and
+  exposes list and delete over `agent/v1/profile/profiles`. TwinVPN installs no
+  `.mobileconfig`: the iOS app creates its configuration itself through
+  `NETunnelProviderManager.saveToPreferences()`
+  (`shells/ios/Sources/TwinVPNApp/VPNPermission.swift`). There is no profile
+  object on the device for that API to address.
+* **Corellium cannot pass launch arguments to an iOS app.**
+  `POST /agent/v1/app/apps/{bundleId}/run` takes the bundle id in the path and
+  defines no request body; the WebSocket protocol's `agent.run(bundleID)` takes
+  only a bundle id, and the variant that accepts more (`runActivity`) is
+  Android-only. The lane's `--ci-start-tunnel` and
+  `--ci-report-protection-state` therefore had no transport, and nothing under
+  `shells/ios/` implemented them either — the trigger was missing at both ends.
+  The chosen replacement is a control file uploaded with
+  `PUT /agent/v1/file/device/{path}`, an endpoint that does exist, read at
+  launch by a CI-only compiled path.
+* **Whether a `NEPacketTunnelProvider` runs at all on a Corellium virtual
+  iPhone is unverified.** No primary source — Corellium's API specification,
+  its SDKs, its support documentation, or upstream — states it either way.
+  Every "VPN" surface Corellium documents is its own project-level OpenVPN for
+  connecting a researcher's machine into the virtual network, which is a
+  different thing wearing the same word. If this premise is false the entire
+  lane is unfounded. It is cheapest to settle with a live smoke test on a trial
+  account, not with more reading.
 * **`ci-ios-corellium.sh` runs the probe on the ubuntu controller, not on the
   iPhone.** It records this honestly as `environment.probe_host: "controller"`,
   and the adjudicator refuses that value — `IOS-NE-FAIL-CLOSED` therefore cannot
@@ -87,8 +123,9 @@ infrastructure that does not exist and both are visible in the evidence today.
   produces an oracle report that is internally consistent and entirely about the
   wrong machine, which is exactly the failure the `probe_host` key exists to
   catch. It is caught, and it is not yet fixed.
-* **`build/ci/ci-android.sh` is 1303 lines** against the 500-line ceiling, as is
-  `build/acceptance/report.py` at 925. Both were already over before the
+* **`build/ci/ci-android.sh` is 1593 lines** against the 500-line ceiling, as are
+  `build/acceptance/report.py` at 925 and `ci-ios-corellium.sh`, which grew from
+  473 to 675 carrying the corrections above. Both were already over before the
   2026-08-30 pass (1104 and 803 respectively). Splitting the 16 KiB lane out of
   the Android script would restructure the link/run lane with it, which is not
   work to do at the end of a hardening pass; it is recorded as debt rather than

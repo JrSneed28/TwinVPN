@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""Every environment key `report.py` demands, emitted by the writer that produces it.
+
+===========================================================================
+THE DEFECT THIS EXISTS FOR
+===========================================================================
+`report.py` grades each platform criterion's `environment` against
+`PREREQUISITES`, and `PATH_IDENTITY_PREREQUISITES` extends that table for every
+criterion in `ORACLE_REQUIRED`. Separately, a shell script under `build/ci/`
+produces the evidence. NOTHING ASSERTED THAT THE TWO AGREED. The checker's
+demands and the producers' output drifted apart in silence:
+`ci-windows-killswitch.sh` emitted none of the five path-identity keys,
+`ci-macos-sysext.sh` emitted one of the five, and `ci-ios-corellium.sh` still
+emits none of the five conditions `IOS-PROFILE-REMOVAL-HONESTY` is about -- it
+collapses them into one local boolean that picks a verdict and is then dropped.
+Every one of those rows would have gone red on the ENVIRONMENT CHECK, before
+the oracle verdict was ever read, on fully provisioned infrastructure.
+
+`test_report_prerequisites.py` could not see it: it grades the CHECKER against
+`evidence_fixtures.py`, and A PRODUCER/CHECKER DIVERGENCE IS INVISIBLE TO A TEST
+WHOSE PRODUCER IS THE FIXTURE. `test_evidence_writers.py` renders the real
+writers and does see the producer -- but it grades whatever the heredoc happens
+to CONTAIN. Neither asks the question this file asks: does the writer emit
+EVERYTHING its criterion requires? That question is the one the drift survived.
+
+===========================================================================
+HOW IT IS ANSWERED, AND WHAT IS AND IS NOT REAL ABOUT IT
+===========================================================================
+Nothing here greps a shell script for a word, and nothing here hand-copies a key
+name. The `environment` object is obtained by RENDERING the writer's own heredoc
+with bash -- `test_evidence_writers.writers()` and `.render()`, reused rather
+than reimplemented -- and the required keys come from the real `PREREQUISITES`,
+after `report.py` has merged `PATH_IDENTITY_PREREQUISITES` into every
+`ORACLE_REQUIRED` criterion. Adding an egress criterion to `ORACLE_REQUIRED`
+therefore extends this file with no edit to it.
+
+REAL: which keys the writer emits. That is read off the rendered JSON, so a key
+in a comment, in a `grep` marker, or in prose does not count -- which matters,
+because `ci-ios-corellium.sh` names `protection_lost_actionable` in the console
+marker it searches for and emits no such key.
+
+NOT CHECKED HERE: the VALUES. `render()` stubs the writer's interpolations, so
+this file is about key coverage only. `ci-ios-corellium.sh` emits
+`"probe_host": "controller"` where `PATH_IDENTITY_PREREQUISITES` accepts only
+`"device"`, and this file passes it. Values are `check_environment`'s job and
+are graded at report time; the failure this file exists to catch is the one that
+happens when there is no value to grade at all.
+
+ALSO NOT CHECKED: whether a writer emits its keys on every branch, and whether a
+criterion has a lane that ever RUNS. A criterion whose script is never invoked
+produces no evidence and lands NOT-EXECUTED, which is `job_results.py`'s
+problem.
+
+===========================================================================
+THE INDIRECT PRODUCER
+===========================================================================
+`ci-windows-killswitch.sh` does not write its own environment inline: it
+interpolates `$environment`, built by `scrape_env` out of the
+`TWINVPN_PRECONDITION <key>=<value>` lines that
+`core/crates/twinvpn-platform-windows/tests/wfp_preconditions.rs` prints. That
+is a bare JSON fragment, so `test_evidence_writers._STUBS` replaces it with
+`"stub_attestation": true` and the rendered environment cannot show
+`privileged`, `bfe_running`, `wfp_write_probe` or `twinvpn_filters_installed`.
+
+Treating that as four missing keys would be a false failure; ignoring it would
+let a genuinely missing one hide. So `SCRAPED` names the file, the keys are
+taken from its `fact("<key>", ...)` CALLS rather than from a text search, and
+three assertions keep the entry honest: the producer must mention the scraped
+file, the extraction must find keys at all, and the rendered environment must
+actually carry the stub marker that says the fragment was stubbed. If any of
+those stops holding, this fails loudly instead of quietly widening.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from adjudication import PATH_IDENTITY_PREREQUISITES  # noqa: E402
+from report import ORACLE_REQUIRED, PREREQUISITES  # noqa: E402
+from test_evidence_writers import render, writers  # noqa: E402
+
+REPO = Path(__file__).resolve().parents[2]
+CI = REPO / "build" / "ci"
+
+# The `fact()` helper in wfp_preconditions.rs is the ONLY thing that prints a
+# `TWINVPN_PRECONDITION` line, so its call sites are the exhaustive list of keys
+# that reach the evidence by that route. A text search would also match the
+# doc comment that names the format.
+FACT = re.compile(r'\bfact\("([A-Za-z0-9_]+)"')
+
+# Files a producer SCRAPES rather than writes inline. See THE INDIRECT PRODUCER.
+SCRAPED: dict[str, tuple[str, ...]] = {
+    "WINDOWS-WFP-KILLSWITCH": (
+        "core/crates/twinvpn-platform-windows/tests/wfp_preconditions.rs",
+    ),
+}
+
+# Criteria with no evidence writer at all. `report.py` marks the supervised row
+# `required=False` because supervised mode is a PRODUCT MODE that may not ship
+# -- but "not required" is not "not checked", and a criterion with no producer
+# is a fact this file states rather than one it discovers by finding no keys.
+UNPRODUCED: dict[str, str] = {
+    "IOS-SUPERVISED-ALWAYS-ON":
+        "supervised/managed Always-On has no lane script; nothing writes "
+        "build/ci/evidence/ios-supervised.json. Closed when that lane lands.",
+}
+
+# THE GAPS THAT ARE OPEN RIGHT NOW, each with what closes it.
+#
+# An allowlist of KNOWN drift, not permission for drift. Every entry is checked
+# from both ends: a key here that `PREREQUISITES` no longer requires fails, and
+# a key here that the writer has SINCE STARTED EMITTING fails too, with an
+# instruction to delete the entry. The list can only shrink, and it cannot rot
+# into a standing exemption.
+KNOWN_GAPS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "IOS-NE-FAIL-CLOSED": (
+        "the leak probe runs on the ubuntu controller, not on the virtual "
+        "iPhone, so ci-ios-corellium.sh has no honest value to write for "
+        "either leg's identity -- it would be attesting the CONTROLLER's "
+        "paths, which is the exact substitution `probe_host` exists to catch. "
+        "Closed by moving the probe onto the DUT. NOT closed by writing the "
+        "keys, and this entry is here rather than the keys for that reason.",
+        ("protected_path_established", "unprotected_path_established",
+         "protected_path_identity", "unprotected_path_identity"),
+    ),
+}
+
+_CACHE: dict[str, list[tuple[str, dict]]] | None = None
+
+
+def producers() -> dict[str, list[tuple[str, dict]]]:
+    """Criterion -> [(script name, the `environment` its writer produces)].
+
+    Rendering is a bash subprocess per writer, so it is done once and cached:
+    every case below reads the same rendering.
+    """
+    global _CACHE
+    if _CACHE is None:
+        _CACHE = {}
+        for script, body, criteria in writers():
+            for criterion in criteria:
+                if criterion not in PREREQUISITES:
+                    continue          # a version-1 writer, or another criterion
+                ev = json.loads(render(body, criterion))
+                env = ev.get("environment")
+                _CACHE.setdefault(criterion, []).append(
+                    (script.name, env if isinstance(env, dict) else {}))
+    return _CACHE
+
+
+def scraped_keys(criterion: str) -> set[str]:
+    keys: set[str] = set()
+    for rel in SCRAPED.get(criterion, ()):
+        keys |= set(FACT.findall((REPO / rel).read_text()))
+    return keys
+
+
+def emitted(criterion: str) -> set[str]:
+    """Every environment key this criterion's evidence can actually carry."""
+    keys = scraped_keys(criterion)
+    for _, env in producers().get(criterion, []):
+        keys |= set(env)
+    return keys
+
+
+class ProducerKeyCoverage(unittest.TestCase):
+    """The checker's demands, checked against what the writers emit."""
+
+    def test_every_criterion_has_a_writer_or_is_declared_unproduced(self):
+        # The totality assertion. A criterion added to `PREREQUISITES` whose
+        # writer nobody wrote is a FAILURE here, not a row that quietly grades
+        # nothing -- which is how a table-driven test rots.
+        self.assertGreater(len(PREREQUISITES), 0)
+        for criterion in sorted(PREREQUISITES):
+            with self.subTest(criterion=criterion):
+                self.assertTrue(
+                    criterion in producers() or criterion in UNPRODUCED,
+                    f"no evidence writer under build/ci/ produces {criterion}, "
+                    f"and it is not declared in UNPRODUCED")
+
+    def test_the_indirect_producer_is_still_indirect(self):
+        # `SCRAPED` is only legitimate while the producer really does build its
+        # environment out of that file. Three ways it could stop being true, all
+        # of which must fail rather than widen the set of keys that look emitted.
+        for criterion, rels in sorted(SCRAPED.items()):
+            with self.subTest(criterion=criterion):
+                self.assertIn(criterion, PREREQUISITES)
+                self.assertTrue(scraped_keys(criterion),
+                                f"no `fact(\"...\")` calls found in "
+                                f"{rels}; the extraction has gone stale and is "
+                                f"now hiding nothing rather than proving it")
+                envs = [env for _, env in producers()[criterion]]
+                self.assertTrue(
+                    any("stub_attestation" in env for env in envs),
+                    f"{criterion}'s rendered environment no longer carries the "
+                    f"`$environment` stub, so the writer emits its keys inline "
+                    f"now: drop its SCRAPED entry and let the render prove it")
+            sources = "\n".join((CI / name).read_text()
+                                for name, _ in producers()[criterion])
+            for rel in rels:
+                path = REPO / rel
+                with self.subTest(criterion=criterion, scraped=path.name):
+                    self.assertTrue(path.is_file(), f"{path} does not exist")
+                    self.assertIn(path.stem, sources,
+                                  f"{criterion}'s writer never mentions "
+                                  f"{path.name}, so it is not a source of that "
+                                  f"criterion's environment")
+
+    def test_every_required_key_is_emitted_by_its_producer(self):
+        # THE CASE THE DRIFT WOULD HAVE FAILED, driven off the real tables so a
+        # key added to `PREREQUISITES` -- or to `PATH_IDENTITY_PREREQUISITES`,
+        # which `report.py` merges into every `ORACLE_REQUIRED` criterion -- is
+        # demanded of the writer without anyone remembering to mirror it here.
+        checked = 0
+        for criterion, keys in sorted(PREREQUISITES.items()):
+            if criterion in UNPRODUCED:
+                continue
+            allowed = KNOWN_GAPS.get(criterion, ("", ()))[1]
+            have = emitted(criterion)
+            scripts = ", ".join(s for s, _ in producers().get(criterion, []))
+            for key in sorted(keys):
+                checked += 1
+                if key in allowed:
+                    continue
+                with self.subTest(criterion=criterion, key=key):
+                    self.assertIn(
+                        key, have,
+                        f"{criterion} requires `{key}` in its evidence's "
+                        f"`environment`, and {scripts} does not emit it. The "
+                        f"row fails the environment check before its verdict "
+                        f"is read, on fully provisioned infrastructure. Fix "
+                        f"the writer; add it to KNOWN_GAPS only if the value "
+                        f"genuinely cannot be measured truthfully yet.")
+        # A run that graded nothing is not a pass: the tables are imported, and
+        # an empty one would make every case above vacuous.
+        self.assertGreater(checked, 30, "the prerequisite tables came back "
+                                        "nearly empty; nothing was graded")
+
+    def test_the_allowlist_names_only_real_requirements(self):
+        # Drift the other way: a key renamed in `PREREQUISITES` leaves behind an
+        # exemption that silently covers nothing.
+        for criterion, (_, keys) in sorted(KNOWN_GAPS.items()):
+            with self.subTest(criterion=criterion):
+                self.assertIn(criterion, PREREQUISITES)
+                self.assertNotIn(criterion, UNPRODUCED)
+            for key in keys:
+                with self.subTest(criterion=criterion, key=key):
+                    self.assertIn(key, PREREQUISITES[criterion],
+                                  f"KNOWN_GAPS exempts {criterion}.{key}, "
+                                  f"which PREREQUISITES no longer requires")
+
+    def test_the_allowlist_is_not_stale(self):
+        # An allowlist that outlives its gap is permanent permission. Every
+        # entry must still BE a gap, so a fix that lands forces the entry out.
+        for criterion, (reason, keys) in sorted(KNOWN_GAPS.items()):
+            have = emitted(criterion)
+            for key in keys:
+                with self.subTest(criterion=criterion, key=key):
+                    self.assertNotIn(
+                        key, have,
+                        f"{criterion}.{key} is emitted now, so the KNOWN_GAPS "
+                        f"entry is stale: delete it. It said: {reason}")
+
+    def test_the_unproduced_criteria_are_still_unproduced(self):
+        # The same staleness rule for a whole missing lane, and the reason it is
+        # separate: "no script writes this" is a different problem from "the
+        # script that writes this forgot a key", and it is detected differently.
+        for criterion, reason in sorted(UNPRODUCED.items()):
+            with self.subTest(criterion=criterion):
+                self.assertIn(criterion, PREREQUISITES)
+                self.assertNotIn(
+                    criterion, producers(),
+                    f"a writer produces {criterion} now; delete its UNPRODUCED "
+                    f"entry so its keys are graded. It said: {reason}")
+
+    def test_path_identity_reaches_every_egress_criterion(self):
+        # `report.py` merges `PATH_IDENTITY_PREREQUISITES` into each
+        # `ORACLE_REQUIRED` criterion at import time, which is what makes a
+        # fifth egress criterion extend this file for free. Pinned here because
+        # everything above depends on that merge: if it stopped, the
+        # path-identity keys would leave the tables and every gap would read as
+        # closed.
+        self.assertGreater(len(ORACLE_REQUIRED), 0)
+        self.assertGreater(len(PATH_IDENTITY_PREREQUISITES), 0)
+        for criterion in sorted(ORACLE_REQUIRED):
+            with self.subTest(criterion=criterion):
+                self.assertLessEqual(set(PATH_IDENTITY_PREREQUISITES),
+                                     set(PREREQUISITES[criterion]))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

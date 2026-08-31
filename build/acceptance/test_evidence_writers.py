@@ -112,6 +112,34 @@ def writers() -> list[tuple[Path, str, list[str]]]:
     return out
 
 
+def hermetic_path() -> str:
+    """`PATH` with Windows interop removed.
+
+    THE PREMISE THIS RESTORES. A writer's `$(...)` substitutions name the tools
+    of the platform it runs ON -- `cmd.exe //c ver`, `xcodebuild`, `codesign`,
+    `rustc` -- and this file renders all of them on ONE host. On a Linux runner
+    that host cannot execute any of them, so every such substitution is empty
+    and the render is about the writer's SHAPE, which is what the cases below
+    grade.
+
+    Under WSL2 that premise is false: Windows interop puts `/mnt/c/WINDOWS/
+    system32` and friends on `PATH`, so `cmd.exe` really runs. From a
+    `\\\\wsl.localhost\\...` working directory it prints a UNC-path warning
+    whose literal backslashes are not a valid JSON escape, and every case that
+    parses the Windows writer fails with `Invalid \\escape` -- a fact about the
+    developer's laptop wearing the costume of a defect in the lane script. It is
+    also slow: each interop call costs seconds.
+
+    Dropping `/mnt/...` is the whole fix. It removes exactly the guest-platform
+    tools and nothing this render legitimately needs -- `git`, `date`, `tr`,
+    `head` and the `digest.sh` helpers are all native and stay reachable -- so
+    it makes this host behave like the runner rather than making the assertion
+    weaker. Nothing is skipped and nothing is loosened.
+    """
+    return ":".join(p for p in os.environ.get("PATH", "").split(":")
+                    if p and not p.startswith("/mnt/"))
+
+
 def render(body: str, criterion: str, env_over: dict | None = None) -> str:
     """Evaluate one writer's heredoc and return the JSON text it produces."""
     names = sorted(set(VARREF.findall(body)))
@@ -129,7 +157,7 @@ def render(body: str, criterion: str, env_over: dict | None = None) -> str:
         lines.append(f"{name}={value!r}".replace("\\'", "'\\''"))
     lines.append("cat <<JSON\n" + body + "JSON")
 
-    env = {**os.environ, **RUN, **(env_over or {})}
+    env = {**os.environ, **RUN, **(env_over or {}), "PATH": hermetic_path()}
     proc = subprocess.run(["bash", "-c", "\n".join(lines)], env=env,
                           capture_output=True, text=True)
     if proc.returncode != 0:

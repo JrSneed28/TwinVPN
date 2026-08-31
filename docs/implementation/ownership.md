@@ -1387,3 +1387,94 @@ because the report finally ran and graded the F-1/F-2 rows it had never reached,
 not because a criterion was relaxed. The five that remain are `NOT-EXECUTED` for
 want of infrastructure, and the standing sentinel host they share does not exist
 in any fleet — see [`remote-acceptance-provisioning.md`](remote-acceptance-provisioning.md).
+
+### 12.6 The rows were not only unprovisioned, they were unpassable — 2026-08-31
+
+Three defects were found by reading the adjudicator against the producers rather
+than by running anything. None needed hardware to find, and every one of them
+would have turned a fully provisioned rig red.
+
+**The path-identity attestation was required of four criteria and emitted by
+none.** `report.py` merges `PATH_IDENTITY_PREREQUISITES` into the prerequisites
+of every criterion in `ORACLE_REQUIRED`, so `WINDOWS-WFP-KILLSWITCH`,
+`MACOS-SYSEXT-LIFECYCLE` and `IOS-NE-FAIL-CLOSED` each had to attest
+`protected_path_established`, `unprotected_path_established`,
+`protected_path_identity` and `unprotected_path_identity`. Not one lane script
+wrote any of them. `ci-windows-killswitch.sh` additionally wrote no `probe_host`
+at all. An unmeasured prerequisite fails exactly as a false one does, so all
+three rows would have failed the environment check *before the oracle verdict
+was ever read* — on a working rig, for a reason having nothing to do with the
+product.
+
+The Windows and macOS lanes now measure both legs from the routing table: the
+default route's interface and address before the tunnel comes up, and again
+after. That difference is the evidence a second path was established, and it is
+measured rather than declared — `path_identity_problems` refuses two equal
+identities, so a pair of differing constants would have satisfied the check
+while describing nothing. An unreadable route writes `false` and an empty
+string, and fails the row honestly.
+
+**`ci-ios-corellium.sh` was written against an API that does not exist.** The
+file's own header said the endpoint paths were "most likely to need correction
+on the first real run". They needed correction before it, and the corrections
+are not cosmetic: the install flow, the run and kill paths, the instance-state
+parse, the reap query and the console endpoint were all wrong, and `app/crash`,
+`network/disable`, `vpn/disable` and `vpn/remove-configuration` do not exist in
+any Corellium surface. See `remote-acceptance-provisioning.md` for the full
+list. The lane previously downgraded each resulting 404 to a warning and opened
+the SILENCE phase anyway. It now refuses by name, because an OBSERVE phase whose
+premise is false reports the falsehood while a SILENCE phase whose premise is
+false passes for free.
+
+The one injection with a real mechanism was also aimed at the wrong process:
+it killed `net.twinvpn.client.tunnel`, which is the *macOS* system extension.
+The iOS provider is `net.twinvpn.client.provider`. Fixing only the path would
+have left the sole working injection killing nothing.
+
+**A regression test now closes the class.**
+`build/acceptance/test_producer_key_coverage.py` asserts that every criterion in
+`PREREQUISITES` has a producer, and that the producer emits every key that
+criterion requires — reading the tables after the merge loop, so a new
+`ORACLE_REQUIRED` entry extends the test with no edit, and rendering each
+writer's own heredoc, so a key that appears only in a comment or a `grep`
+pattern does not count. It found a fourth defect on its first run:
+`IOS-SUPERVISED-ALWAYS-ON` is in `PREREQUISITES` and probed by `report.py`, and
+no script under `build/ci/` writes its evidence at all.
+
+Two smaller things, recorded so they are not rediscovered:
+
+* `test_evidence_writers.py` assumed the rendering host cannot execute the guest
+  platform's tools. That is false under WSL, where Windows interop puts
+  `cmd.exe` on `PATH` and the Windows writer's `$(cmd.exe //c ver ...)` really
+  runs, emitting a UNC path whose backslashes make the rendered JSON invalid.
+  The render is now hermetic.
+* `ci-macos-sysext.sh` defaults `TWINVPN_EXTENSION_BUNDLE_ID` to
+  `net.twinvpn.client.tunnel`, but `shells/macos/project.yml` builds
+  `com.twinvpn.app.sysext`. The repository variable is documented as required,
+  so a configured run is unaffected; an unconfigured one looks for an extension
+  that was never built.
+
+**The iOS test suite does not compile, and that is a larger problem than the
+lane it blocks.** `ProviderHarness`, `DeviceCapabilities` and
+`DiagnosticsHarness` are referenced by all three files in
+`shells/ios/TwinVPNTests/`, by `TwinVPNIntegrationTests/`, and by
+`shells/ios/README.md` §8.1 — and are defined nowhere in this repository, in any
+language. `ProfileRemovalAcceptanceTests.swift` is therefore not a specification
+that a CI path can be factored out of; it is a statement of intent that has
+never been built. Any plan that begins "mirror what the XCTest already asserts"
+has nothing to mirror, and writing those harnesses means committing to
+NetworkExtension semantics — what `currentVPNStatus()` returns after
+configuration removal, what counts as an active enforcement claim — that cannot
+be compiled or run on any machine currently available to this project.
+
+`IOS-PROFILE-REMOVAL-HONESTY`'s evidence plumbing is now correct regardless: the
+lane reads each of the five conditions into its own `environment` key instead of
+folding them into one discarded boolean, and the console markers are named after
+the adjudicator's keys so there is no translation table to drop one. A partial
+failure now names which condition failed. What remains open is the app side —
+nothing prints those markers, and nothing can, until the harnesses exist and a
+trigger mechanism replaces the launch arguments Corellium cannot pass.
+
+None of this provisions anything. The five remaining rows still need the
+machines, accounts and signing identities `remote-acceptance-provisioning.md`
+lists. What changed is that they can now fail for real reasons.

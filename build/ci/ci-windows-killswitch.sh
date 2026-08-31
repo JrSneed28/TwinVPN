@@ -135,6 +135,43 @@ scrape_env() {
 }
 
 # ---------------------------------------------------------------------------
+# THE TWO PATHS, NAMED FROM THE ROUTING TABLE RATHER THAN ASSERTED
+# ---------------------------------------------------------------------------
+#
+# `PATH_IDENTITY_PREREQUISITES` (build/acceptance/adjudication.py) requires every
+# criterion that makes an EGRESS claim to attest that it established a protected
+# AND an unprotected path, and to NAME each one. The reason is the same one the
+# `--path` tags exist for: a run where both legs left through the same box proves
+# nothing about interception, however few packets arrived. The adjudicator
+# refuses the case where the two names are equal.
+#
+# So these are MEASURED, not declared. A pair of differing constants would
+# satisfy the inequality check while describing nothing, which is the exact
+# shape of evidence this gate exists to refuse.
+#
+# What is measured is the interface the default route actually points at, plus
+# that interface's IPv4 address. Before `net up` that is the guest's physical
+# NIC; after it, TwinVPN's tunnel adapter. The difference between those two
+# strings IS the evidence that a second, protected path was established.
+#
+# Prints the identity, or NOTHING if it could not be read. Callers treat the
+# empty string as "not established": an unreadable route is what a machine that
+# never brought the path up produces, and `REQUIRED` in report.py grades an
+# empty string as unmeasured. It must not be papered over with a placeholder.
+default_route_identity() {
+  powershell.exe -NoProfile -NonInteractive -Command '
+    $ErrorActionPreference = "SilentlyContinue"
+    $r = Get-NetRoute -DestinationPrefix "0.0.0.0/0" |
+         Sort-Object -Property RouteMetric | Select-Object -First 1
+    if ($null -eq $r) { exit 0 }
+    $nic = Get-NetAdapter -InterfaceIndex $r.ifIndex
+    $ip  = Get-NetIPAddress -InterfaceIndex $r.ifIndex -AddressFamily IPv4 |
+           Select-Object -First 1
+    "if{0}:{1}:{2}" -f $r.ifIndex, $nic.Name, $ip.IPAddress
+  ' 2>/dev/null | tr -d '\r' | sed -n '1p'
+}
+
+# ---------------------------------------------------------------------------
 # 1-3. baseline, connect, tunnelled
 # ---------------------------------------------------------------------------
 TWINVPN="$REPO/shells/windows/target/release/twinvpnctl.exe"
@@ -219,6 +256,10 @@ any device under test, and set TWINVPN_SENTINEL_HOST to its identity." >&2
 fi
 echo "standing sentinel declared at: $TWINVPN_SENTINEL_HOST"
 
+# The UNPROTECTED leg, named before TwinVPN touches the routing table.
+UNPROTECTED_PATH_IDENTITY="$(default_route_identity)"
+echo "unprotected path identity: ${UNPROTECTED_PATH_IDENTITY:-<unreadable>}"
+
 "$PROBE" phase BASELINE OBSERVE --path u
 "$PROBE" beacon --seconds 15
 
@@ -227,6 +268,13 @@ install_service
 "$TWINVPN" --output json status get | tee "$LOGDIR/status-before.json"
 "$TWINVPN" net up
 echo "::endgroup::"
+
+# The PROTECTED leg, named after `net up` has installed TwinVPN's route. If this
+# comes back equal to the unprotected identity, the tunnel did not take over the
+# default route and `path_identity_problems` will refuse the row -- correctly,
+# because both legs would then be the same path.
+PROTECTED_PATH_IDENTITY="$(default_route_identity)"
+echo "protected path identity: ${PROTECTED_PATH_IDENTITY:-<unreadable>}"
 
 "$PROBE" phase TUNNELLED OBSERVE --path p --disjoint-from BASELINE
 "$PROBE" beacon --seconds 15
@@ -302,6 +350,22 @@ oracle_verdict="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])
                   "$LOGDIR/oracle-report.json")"
 echo "oracle verdict: $oracle_verdict"
 
+# WHY `probe_host` IS HONESTLY `device` HERE, AND IS NOT EVERYWHERE.
+#
+# The key exists because a leak probe run on the CI controller rather than on the
+# device under test measures the CONTROLLER's egress: its attempts are the
+# controller's attempts, its silence is the controller's silence, and the device
+# the criterion is about may have been leaking throughout. Every number in the
+# oracle's report is then about the wrong machine while remaining internally
+# consistent.
+#
+# This script does not have that problem. It refuses to start anywhere but
+# Windows inside the disposable guest (the `uname -s` guard at the top), builds
+# the shipped binaries there, registers and starts `TwinVPNService` there, and
+# runs `$PROBE` there. The guest IS the device under test, so `device` is a
+# statement of fact rather than an aspiration. `ci-ios-corellium.sh` writes
+# `controller` for the opposite and equally honest reason -- do not copy this
+# line into a lane whose probe runs somewhere else.
 environment="$( { scrape_env "$PRECOND_LOG"; printf ", "; scrape_env "$ARMED_LOG"; } )"
 
 cat > "$EVIDENCE" <<JSON
@@ -326,7 +390,12 @@ cat > "$EVIDENCE" <<JSON
   },
   "environment": { $environment,
     "guest_kind": "nested-hyperv-guest",
-    "guest_disposable": true },
+    "guest_disposable": true,
+    "probe_host": "device",
+    "unprotected_path_established": $([ -n "$UNPROTECTED_PATH_IDENTITY" ] && echo true || echo false),
+    "protected_path_established": $([ -n "$PROTECTED_PATH_IDENTITY" ] && echo true || echo false),
+    "unprotected_path_identity": "$UNPROTECTED_PATH_IDENTITY",
+    "protected_path_identity": "$PROTECTED_PATH_IDENTITY" },
   "leak_oracle": {
     "session_id": "$SESSION_ID",
     "url": "$TWINVPN_ORACLE_URL",

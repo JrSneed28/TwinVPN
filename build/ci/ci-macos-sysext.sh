@@ -268,6 +268,38 @@ echo "artifact digests: $ARTIFACT_DIGESTS"
 echo "::endgroup::"
 
 # --------------------------------------------------------------------------
+# THE TWO PATHS, NAMED FROM THE ROUTING TABLE RATHER THAN ASSERTED
+# --------------------------------------------------------------------------
+#
+# `PATH_IDENTITY_PREREQUISITES` (build/acceptance/adjudication.py) requires every
+# criterion that makes an EGRESS claim to attest that it established a protected
+# AND an unprotected path, and to NAME each one. A run where both legs left
+# through the same box proves nothing about interception, however few packets
+# arrived, so the adjudicator refuses the case where the two names are equal.
+#
+# These are therefore MEASURED. A pair of differing constants would satisfy the
+# inequality check while describing nothing -- the exact shape of evidence this
+# gate exists to refuse.
+#
+# What is measured is the interface the default route actually points at, plus
+# that interface's IPv4 address. Before `net up` that is the Mac's physical
+# interface; once the system extension is enforcing it is a utun. The difference
+# between those two strings IS the evidence that a second, protected path was
+# established.
+#
+# Prints the identity, or NOTHING if it could not be read. An unreadable route is
+# what a machine that never brought the path up produces, and report.py grades an
+# empty string as unmeasured -- so callers let it fail honestly rather than
+# substituting a placeholder.
+default_route_identity() {
+  local iface addr
+  iface="$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }')"
+  [ -n "$iface" ] || return 0
+  addr="$(ifconfig "$iface" inet 2>/dev/null | awk '/^[[:space:]]*inet /{ print $2; exit }')"
+  printf '%s:%s' "$iface" "${addr:-no-inet}"
+}
+
+# --------------------------------------------------------------------------
 # 3-6. the enforcement sequence, adjudicated externally
 # --------------------------------------------------------------------------
 "$PROBE" open --platform macos --criterion "$CRITERION"
@@ -308,6 +340,10 @@ any device under test, and set TWINVPN_SENTINEL_HOST to its identity." >&2
 fi
 echo "standing sentinel declared at: $TWINVPN_SENTINEL_HOST"
 
+# The UNPROTECTED leg, named before the extension takes over the routing table.
+UNPROTECTED_PATH_IDENTITY="$(default_route_identity)"
+echo "unprotected path identity: ${UNPROTECTED_PATH_IDENTITY:-<unreadable>}"
+
 "$PROBE" phase BASELINE OBSERVE --path u
 "$PROBE" beacon --seconds 15
 
@@ -320,6 +356,13 @@ TWINVPN="/Applications/TwinVPN.app/Contents/MacOS/twinvpn"
 "$TWINVPN" --output json status get | tee "$LOGDIR/status-before.json"
 "$TWINVPN" net up
 echo "::endgroup::"
+
+# The PROTECTED leg, named after `net up`. If this comes back equal to the
+# unprotected identity, the extension did not take over the default route and
+# `path_identity_problems` refuses the row -- correctly, because both legs would
+# then be the same path.
+PROTECTED_PATH_IDENTITY="$(default_route_identity)"
+echo "protected path identity: ${PROTECTED_PATH_IDENTITY:-<unreadable>}"
 
 "$PROBE" phase TUNNELLED OBSERVE --path p --disjoint-from BASELINE
 "$PROBE" beacon --seconds 15
@@ -411,7 +454,11 @@ cat > "$EVIDENCE" <<JSON
     "systemextensionsctl_state": "activated enabled",
     "developer_mode": true,
     "sentinel_host": "$TWINVPN_SENTINEL_HOST",
-    "probe_host": "device"
+    "probe_host": "device",
+    "unprotected_path_established": $([ -n "$UNPROTECTED_PATH_IDENTITY" ] && echo true || echo false),
+    "protected_path_established": $([ -n "$PROTECTED_PATH_IDENTITY" ] && echo true || echo false),
+    "unprotected_path_identity": "$UNPROTECTED_PATH_IDENTITY",
+    "protected_path_identity": "$PROTECTED_PATH_IDENTITY"
   },
   "leak_oracle": {
     "session_id": "$SESSION_ID",
