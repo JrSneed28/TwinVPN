@@ -1348,3 +1348,42 @@ now blocked on cloud infrastructure instead of physical hardware, which is a
 better blocker but is still a blocker. What changed is that the rows can no
 longer go green dishonestly when someone does provision it. The checklist is
 [`remote-acceptance-provisioning.md`](remote-acceptance-provisioning.md).
+
+### 12.5 The first of the four rows is discharged — 2026-08-31
+
+`ANDROID-16K-PAGE-SIZE` **PASSES**, in run 33367031994, on Google's official
+`google_apis_ps16k` image. It is the first of §12's four replaced rows to close,
+and the first platform criterion in the wave to close on evidence rather than on
+argument. The measured attestation reads `page_size=16384`,
+`system_image_package=system-images;android-36;google_apis_ps16k;x86_64` rev 7,
+`zipalign_p16=true`, `jni_pending_exception=false`, `underlay_excludes_vpn=true`,
+per-ABI `p_align` of 16384 on arm64-v8a and x86_64, and the app's own APK digest.
+
+**Getting there took eight runs, and seven of them failed for a reason that was
+not the product.** That is worth recording, because the pattern is the same one
+§12.4 names and every instance was invisible until something executed:
+
+* R8 deleted `CoreClient.requestNetDown()`, which only androidTest calls — and
+  only this lane builds the test APK against the minified release variant.
+* The image sweep picked `google_apis_playstore_ps16k` by alphabetical accident;
+  it contains `ps16k`, so the adjudicator accepted an image nobody chose.
+* Three separate runs each died on one class R8 had stripped from the app APK,
+  because AGP subtracts the app's runtime classpath from the test APK and the
+  androidTest R8 run sees the app's PRE-R8 classes and cannot warn. A preflight
+  `apkanalyzer` gate now names the whole set at once, before the emulator boots.
+* `the_mapped_libraries_are_recorded` grepped `/proc/self/maps` for the `.so`
+  name. With `useLegacyPackaging = false` the loader maps libraries out of the
+  APK and no `.so` filename appears, so **the assertion could only pass with the
+  extracted packaging that defeats 16 KiB alignment** — a test that demanded the
+  one configuration its own criterion exists to rule out.
+* And the gate destroyed its own report: `make test-first-wave-gate` ran
+  `test-mutation` first, whose deferred non-zero exit aborted the target before
+  `report.py`. The upload then shipped the tracked report from an old dirty
+  worktree under this run's artifact name. Stale evidence offered as current, by
+  the gate built to prevent exactly that.
+
+**Nothing here moved a verdict by weakening one.** Eligibility went 5→22 of 27
+because the report finally ran and graded the F-1/F-2 rows it had never reached,
+not because a criterion was relaxed. The five that remain are `NOT-EXECUTED` for
+want of infrastructure, and the standing sentinel host they share does not exist
+in any fleet — see [`remote-acceptance-provisioning.md`](remote-acceptance-provisioning.md).

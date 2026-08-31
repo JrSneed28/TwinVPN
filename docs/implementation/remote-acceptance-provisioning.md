@@ -47,7 +47,7 @@ rather than crediting a sentinel-less silence.
 
 | Criterion | Needs | State |
 |---|---|---|
-| `ANDROID-16K-PAGE-SIZE` | hosted runner; the four `TWINVPN_RELEASE_*` secrets | **executable** |
+| `ANDROID-16K-PAGE-SIZE` | hosted runner; the four `TWINVPN_RELEASE_*` secrets | **PASS** (run 33367031994) |
 | `WINDOWS-WFP-KILLSWITCH` | oracle + sentinel host + Azure L1 runner `twinvpn-azure-l1` + golden VHDX | blocked |
 | `MACOS-SYSEXT-LIFECYCLE` | oracle + sentinel host + EC2 Mac runner `twinvpn-ec2-mac` + Apple Team ID | blocked |
 | `MACOS-PRODUCTION-SIGNATURE` | EC2 Mac runner + a notarized artifact and its pinned digest | blocked |
