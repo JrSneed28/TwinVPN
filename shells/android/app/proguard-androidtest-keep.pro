@@ -211,6 +211,9 @@
 }
 -keep class kotlin.collections.CollectionsKt {
 }
+-keep class kotlin.collections.CollectionsKt__CollectionsKt {
+  public static void throwCountOverflow();
+}
 -keep class kotlin.collections.CollectionsKt__IterablesKt {
   public static int collectionSizeOrDefault(java.lang.Iterable, int);
 }
@@ -351,6 +354,7 @@
 -keep class kotlin.text.StringsKt__StringsKt {
   public static boolean contains$default(java.lang.CharSequence, java.lang.CharSequence, boolean, int, java.lang.Object);
   public static java.lang.String removePrefix(java.lang.String, java.lang.CharSequence);
+  public static java.lang.String substringAfter$default(java.lang.String, char, java.lang.String, int, java.lang.Object);
   public static java.lang.String substringAfterLast$default(java.lang.String, char, java.lang.String, int, java.lang.Object);
   public static java.lang.String substringBefore$default(java.lang.String, char, java.lang.String, int, java.lang.Object);
 }

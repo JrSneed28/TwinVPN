@@ -258,16 +258,43 @@ class PageSize16kTest {
         NativeBridge.nativeCoreCreate(ByteArray(0)).let { h ->
             if (h != 0L) NativeBridge.nativeCoreDestroy(h)
         }
-        val maps = File("/proc/self/maps").readLines()
-            .filter { it.contains("libtwinvpn_") }
-            .map { it.substringAfterLast(' ') }
-            .distinct()
-        Log.i(TAG, "TWINVPN_ATTESTATION mapped_libraries=${maps.size}")
-        maps.forEach { Log.i(TAG, "mapped: $it") }
+        // THE `.so` NAME IS NOT IN `/proc/self/maps`, AND ITS ABSENCE IS THE
+        // CORRECT PACKAGING.
+        //
+        // This used to grep maps for `libtwinvpn_` and assert two hits. It found
+        // zero, on a run where the libraries had demonstrably loaded -- run
+        // 33348001971, whose logcat carries the linker mapping both of them out
+        // of `base.apk!/lib/x86_64/`. That `apk!/lib/...` spelling appears in the
+        // LINKER'S OWN LOG LINES and never in maps: with
+        // `useLegacyPackaging = false` the loader mmaps each `.so` straight out
+        // of the APK, so the mapping is recorded against the APK path and an
+        // offset, and no `.so` filename appears anywhere.
+        //
+        // The old assertion could therefore only pass when the libraries were
+        // EXTRACTED -- the legacy packaging that defeats 16 KiB alignment. It
+        // demanded the one configuration this criterion exists to rule out.
+        //
+        // So assert what APK-mapped code actually looks like: executable
+        // mappings backed by this app's own APK. That the libraries loaded at
+        // all is proved separately and more strongly by
+        // `the_native_libraries_load_and_leave_no_pending_jni_exception`, whose
+        // `nativeCoreCreate` cannot return a handle unless the `.so` mapped on
+        // this kernel.
+        val pkg = context.packageName
+        val mapLines = File("/proc/self/maps").readLines()
+        val ourApkMappings = mapLines.filter { it.contains(".apk") && it.contains("/$pkg-") }
+        val paths = ourApkMappings.map { it.substringAfterLast(' ') }.distinct()
+        val executable = ourApkMappings.count { line ->
+            line.substringAfter(' ').startsWith("r-xp")
+        }
+        Log.i(TAG, "TWINVPN_ATTESTATION mapped_from_apk=${paths.size} executable_apk_mappings=$executable")
+        paths.forEach { Log.i(TAG, "mapped: $it") }
         assertTrue(
-            "neither TwinVPN library is mapped in this process, so nothing was " +
-                "loaded on the 16 KiB kernel and the criterion is undischarged",
-            maps.size >= 2,
+            "no executable mapping in this process is backed by the app's own " +
+                "APK. With useLegacyPackaging=false the native libraries are " +
+                "mmapped out of the APK, so their absence means nothing was " +
+                "loaded from it on the 16 KiB kernel.",
+            executable >= 1,
         )
     }
 
