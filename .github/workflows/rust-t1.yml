@@ -175,6 +175,29 @@ jobs:
             hashFiles(format('{0}/Cargo.toml', matrix.workspace)) }}-${{
             hashFiles('.github/workflows/rust-t1.yml') }}
 
+      # ------------------------------------------------------------------
+      # THE `lab` WORKSPACE NEEDS UNPRIVILEGED USER NAMESPACES, AND THE
+      # RUNNER DENIES THEM UNTIL ASKED NOT TO.
+      # ------------------------------------------------------------------
+      # twinnet's sandbox agent builds each rig inside an unprivileged user +
+      # net namespace. Ubuntu 24.04 -- which `ubuntu-latest` now is --
+      # restricts those through AppArmor: `unshare(CLONE_NEWUSER)` succeeds,
+      # the process transitions to the `unprivileged_userns` profile, which
+      # denies every capability, and the refusal surfaces afterwards as a
+      # uid_map write failing with EPERM. The agent reports it as "the agent
+      # closed its pipe; it probably could not unshare" and the test panics.
+      #
+      # The 24.04 release notes describe the restriction and give this sysctl
+      # as the way to lift it on a host that needs the namespaces:
+      # https://documentation.ubuntu.com/release-notes/24.04/ ->
+      # "Unprivileged user namespace restrictions".
+      #
+      # `lab` only: no other workspace in this matrix unshares anything, and a
+      # security default is not relaxed on runners that do not need it.
+      - name: allow unprivileged user namespaces
+        if: matrix.workspace == 'lab'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       # `--locked` refuses to move the lockfile. ADR-0018 DP-1 commits one
       # lockfile per workspace and forbids unbounded version ranges; a CI run
       # that silently updated it would make the lockfile decorative.

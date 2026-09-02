@@ -110,6 +110,14 @@ jobs:
             lab
             services
 
+      # twinnet's sandbox agent builds its rigs inside an unprivileged user +
+      # net namespace. Ubuntu 24.04's AppArmor restriction denies the
+      # capabilities that needs, and the agent reports it as "the agent closed
+      # its pipe; it probably could not unshare". See the long note in the
+      # `netlab-rules` job below for the mechanism and the citation.
+      - name: allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: lab workspace tests
         run: cd lab && cargo test --workspace --locked
 
@@ -237,6 +245,29 @@ jobs:
       # traversal result for a class nothing realized.
       - name: install nftables
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables conntrack
+
+      # ===================================================================
+      # THE RUNNER DENIES UNPRIVILEGED USER NAMESPACES UNTIL ASKED NOT TO.
+      # ===================================================================
+      # Ubuntu 24.04 -- which `ubuntu-latest` now is -- restricts unprivileged
+      # user namespaces through AppArmor. `unshare(CLONE_NEWUSER)` still
+      # succeeds; the process transitions to the `unprivileged_userns` profile,
+      # which denies every capability, so the refusal surfaces one step later
+      # at the uid_map write:
+      #
+      #   unshare: write failed /proc/self/uid_map: Operation not permitted
+      #
+      # The 24.04 release notes describe the restriction and give this sysctl
+      # as the way to lift it on a host that needs the namespaces:
+      # https://documentation.ubuntu.com/release-notes/24.04/ ->
+      # "Unprivileged user namespace restrictions".
+      #
+      # This changes one ephemeral runner for the length of one job and is
+      # discarded with the VM. It is written bare, with no existence guard, so
+      # that an image which no longer has the knob fails HERE, next to this
+      # comment, rather than eight steps later as an unexplained EPERM.
+      - name: allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       # ===================================================================
       # EVERY PERSONALITY IS FED TO A REAL `nft`, NOT COMPARED TO A STRING.
