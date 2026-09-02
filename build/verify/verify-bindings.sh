@@ -10,6 +10,11 @@
 # Each language builds against its real protobuf runtime, because a schema
 # feature a runtime cannot express (proto3 explicit presence, a deeply nested
 # oneof, a reserved range) fails at compile, not at generation.
+#
+# The verify_* functions are dispatched by NAME through run() below. The
+# linter cannot follow that, so it reports every one of them as unreachable.
+# A directive before the first command applies to the whole file.
+# shellcheck disable=SC2317
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
@@ -96,7 +101,7 @@ pub mod twinvpn {
     }
 }
 EOF
-  ( cd "$d" && cargo build --offline --quiet 2>/dev/null || cargo build --quiet )
+  ( cd "$d" || exit 1; cargo build --offline --quiet 2>/dev/null || cargo build --quiet )
 }
 
 # --------------------------------------------------------------- Swift -------
@@ -131,7 +136,7 @@ verify_jvm() {
   local base="https://repo1.maven.org/maven2/com/google/protobuf"
   for a in "protobuf-java/$ver/protobuf-java-$ver.jar" \
            "protobuf-kotlin/$ver/protobuf-kotlin-$ver.jar"; do
-    local j="$d/lib/$(basename "$a")"
+    local j; j="$d/lib/$(basename "$a")"
     [ -f "$j" ] || curl -sSL "$base/$a" -o "$j"
   done
   local cp; cp="$(printf '%s:' "$d"/lib/*.jar)"
@@ -191,6 +196,9 @@ run csharp dotnet  verify_csharp
 echo
 # A machine-readable receipt, so the freeze gate reports what was actually
 # verified rather than asserting that the script ran.
+# $verified and $skipped are space-separated lists built by run(); the unquoted
+# expansion is what collapses the leading space and re-joins the words.
+# shellcheck disable=SC2086
 printf '{"verified":[%s],"skipped":[%s],"failed":%s}\n' \
   "$(echo $verified | sed 's/ /","/g; s/^/"/; s/$/"/; s/^""$//')" \
   "$(echo $skipped  | sed 's/ /","/g; s/^/"/; s/$/"/; s/^""$//')" \
