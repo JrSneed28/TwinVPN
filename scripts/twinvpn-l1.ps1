@@ -288,13 +288,29 @@ function Start-Observers([string] $Repo) {
     $pids += (Start-Process -FilePath $bash -ArgumentList @('-lc', $cmd) -PassThru -NoNewWindow `
         -RedirectStandardOutput $sentinelLog `
         -RedirectStandardError  (Join-Path $RunDir 'sentinel.err')).Id
-    Start-Sleep -Seconds 3
-
     $pids -join "`n" | Set-Content -LiteralPath $PidFile
+
     # MEASURED from what the sentinel printed, not from what we passed it.
-    $identity = (Select-String -Path $sentinelLog -Pattern '^TWINVPN_SENTINEL_EGRESS_IDENTITY (.+)$' |
-                 Select-Object -First 1).Matches.Groups[1].Value
-    if (-not $identity) { throw "the sentinel never printed its egress identity; see $sentinelLog" }
+    # Polled rather than slept: git-bash start-up on a cold runner takes longer
+    # than the three seconds the first run allowed, and a fixed sleep turned
+    # that into "Cannot index into a null array" with the sentinel's own error
+    # left unread in a directory nobody uploaded.
+    $identity = $null
+    $deadline = (Get-Date).AddSeconds(45)
+    while (-not $identity -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 2
+        $hit = Select-String -Path $sentinelLog -Pattern '^TWINVPN_SENTINEL_EGRESS_IDENTITY (.+)$' `
+               -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($hit) { $identity = $hit.Matches[0].Groups[1].Value }
+    }
+    if (-not $identity) {
+        foreach ($f in 'sentinel.log', 'sentinel.err', 'oracle.err', 'forwarder-v4.err', 'forwarder-v6.err') {
+            $path = Join-Path $RunDir $f
+            Write-Host "---- $f ----"
+            if (Test-Path $path) { Get-Content -LiteralPath $path -Tail 40 | Write-Host } else { Write-Host '(absent)' }
+        }
+        throw "the sentinel never printed its egress identity within 45 s; its output is above"
+    }
     Write-Host "observers up; sentinel presents $identity"
     return @{ ControlToken = (Get-Content -Raw $controlToken).Trim(); SentinelIdentity = $identity }
 }
@@ -441,13 +457,6 @@ switch ($Action) {
             }
             $exit = $p.ExitCode
 
-            New-Item -ItemType Directory -Path $EvidenceOut -Force | Out-Null
-            $logsOut = Join-Path (Split-Path $EvidenceOut -Parent) 'logs\windows'
-            New-Item -ItemType Directory -Path $logsOut -Force | Out-Null
-            Copy-Item -Path (Join-Path $RunDir '*.out'), (Join-Path $RunDir '*.err'), `
-                            (Join-Path $RunDir 'sentinel.log') `
-                      -Destination $logsOut -Force -ErrorAction SilentlyContinue
-
             if ($exit -ne 0) {
                 throw ("the kill-switch sequence exited $exit. The evidence and logs were " +
                        "still written; read build/ci/evidence/windows-killswitch.json for the " +
@@ -456,6 +465,16 @@ switch ($Action) {
             Write-Host 'kill-switch sequence completed'
         }
         finally {
+            # The observers' output FIRST, on every path: the diagnostics
+            # artifact uploads build/ci/logs/windows/**, and a failure before
+            # the sequence ran used to leave every log in the run directory.
+            try {
+                $logsOut = Join-Path (Split-Path $EvidenceOut -Parent) 'logs\windows'
+                New-Item -ItemType Directory -Path $logsOut -Force | Out-Null
+                Copy-Item -Path (Join-Path $RunDir '*.out'), (Join-Path $RunDir '*.err'), `
+                                (Join-Path $RunDir '*.log') `
+                          -Destination $logsOut -Force -ErrorAction SilentlyContinue
+            } catch { Write-Host "could not copy the run directory's logs: $_" }
             # On every path including a throw and a cancellation. A guest left
             # running holds a differencing disk and, having installed persistent
             # WFP filters, is a machine nobody can reach over the network.
