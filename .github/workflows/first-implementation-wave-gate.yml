@@ -763,87 +763,113 @@ jobs:
   # NOT-EXECUTED, which counts against Phase 5 eligibility exactly as a failure
   # does. Immediately, and by name.
 
+  # =========================================================================
+  # WINDOWS-WFP-KILLSWITCH -- hosted windows-2025 as L1, the device under test
+  # in a disposable nested Hyper-V guest built per run, the leak oracle and
+  # its sentinel in-box on a routed internal segment. No self-hosted runner,
+  # no golden disk, no public oracle, no standing sentinel host, no variable.
+  # See build/ci/jobs/windows-killswitch-hosted.yml and
+  # docs/implementation/remote-acceptance-infrastructure.md sections 1, 2 and 6.
+  # =========================================================================
   windows-killswitch:
     name: windows-killswitch
-    # THE L1 CONTROLLER, and it is deliberately not where the test runs.
-    #
-    # An Azure Windows VM on a size with nested virtualization, registered as a
-    # self-hosted runner. It creates a THROWAWAY L2 Hyper-V guest, runs the
-    # kill-switch sequence inside it over PowerShell Direct, takes the evidence
-    # out and destroys the guest.
-    #
-    # The reason is not isolation hygiene. TwinVPN's Windows kill switch
-    # installs PERSISTENT WFP filters and CB-6 requires that shutdown MUST NOT
-    # remove them -- so a CORRECT fail-closed run ends with the machine unable
-    # to reach the network. On the runner itself that severs the runner agent's
-    # connection to GitHub mid-job: the run is lost, no evidence is uploaded,
-    # and correct product behaviour is indistinguishable from flaky
-    # infrastructure. The L1 runner stays outside the filters for the whole run,
-    # and PowerShell Direct is a VMBus channel that survives the guest cutting
-    # itself off.
-    runs-on: [self-hosted, Windows, twinvpn-azure-l1]
+    # HOSTED, and pinned. `windows-latest` moves between images, and an image
+    # move that dropped the Hyper-V role would change what this job is about
+    # with no diff to point at.
+    runs-on: windows-2025
+    # A cold cargo build of the shell plus the core test binary is the long
+    # pole; the ISO download and the DISM apply add ten to twenty minutes.
     timeout-minutes: 90
     permissions:
       contents: read
-    # Unset the variable and this job skips rather than queues. See the block
-    # above for why that is the honest failure mode.
-    if: ${{ vars.TWINVPN_AZURE_L1_REGISTERED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     defaults:
       run:
         shell: pwsh
-    env:
-      TWINVPN_ORACLE_URL: ${{ vars.TWINVPN_ORACLE_URL }}
-      TWINVPN_ORACLE_TOKEN: ${{ secrets.TWINVPN_ORACLE_TOKEN }}
-      # WHERE THE INDEPENDENT HEARTBEAT RUNS. Not started by this job and not
-      # startable by it: the oracle discards any IPv4/IPv6 sentinel beat whose
-      # source address the device was also seen egressing from, and the L2
-      # guest's switch ordinarily NATs it through this L1 host's own address --
-      # so an L1 heartbeat would be device-sourced. It is a standing
-      # `leak-probe.sh sentinel` on a third machine, and this names it.
-      # `ci-windows-killswitch.sh` refuses to run without it.
-      TWINVPN_SENTINEL_HOST: ${{ vars.TWINVPN_SENTINEL_HOST }}
     steps:
       - uses: actions/checkout@v4
         with:
           clean: true
 
-      # BEFORE a guest is built. Nested virtualization, the switch, the guest
-      # credential and the oracle configuration are all things whose absence
-      # would otherwise surface twenty minutes later as a message about
-      # something else.
-      - name: preflight
+      - name: toolchain versions
         run: |
-          scripts\twinvpn-azure-l1.ps1 -Action preflight `
-            -GoldenVhd '${{ vars.TWINVPN_GOLDEN_VHD }}'
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+          python --version
+          (Get-Service vmms).Status
+          Get-VMSwitch | Format-Table Name, SwitchType
+
+      # Mirrors `windows-link-run`: no `restore-keys` prefix fallback, because a
+      # prefix fallback is exactly the mechanism that serves a cache built with
+      # a different toolchain or lockfile, and a wrong hit is a green build of
+      # the wrong thing. `lab/target` is here too -- the leak oracle now builds
+      # in this job rather than living on a machine somebody provisioned.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            core/target
+            shells/windows/target
+            lab/target
+          key: fwg-killswitch-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'core/Cargo.lock', 'shells/windows/Cargo.lock', 'lab/Cargo.lock', 'build/ci/ci-windows-killswitch.sh') }}
+
+      # BEFORE the guest image is built, so a runner that cannot host one says
+      # so in two minutes rather than after a 5 GB download.
+      - name: preflight
+        run: scripts\twinvpn-l1.ps1 -Action preflight
+
+      # The observer. It runs on this host, beside the guest, on a segment the
+      # guest reaches only through its default route.
+      - name: build the leak oracle
+        run: cargo build --locked --release -p twinoracle
+        working-directory: lab
+
+      # Windows 11 Enterprise LTSC 2024 Evaluation, SHA-256 pinned in
+      # `scripts/twinvpn-l1-image.ps1`, applied to a VHDX with
+      # `Expand-WindowsImage` and made bootable with `bcdboot`. No Windows Setup
+      # pass, and the ISO is deleted once the image exists.
+      - name: build the disposable guest image
+        run: scripts\twinvpn-l1.ps1 -Action build-image
 
       - name: kill-switch sequence in a disposable nested guest
         run: |
-          scripts\twinvpn-azure-l1.ps1 -Action run `
-            -GoldenVhd   '${{ vars.TWINVPN_GOLDEN_VHD }}' `
+          scripts\twinvpn-l1.ps1 -Action run `
             -RepoPath    '${{ github.workspace }}' `
             -EvidenceOut '${{ github.workspace }}\build\ci\evidence'
 
-      # STEP 10, AND IT IS NOT ENOUGH THAT THE CONTROLLER SCRIPT ALSO DOES IT.
+      # STEP 10, AND IT IS NOT ENOUGH THAT THE CONTROLLER ALSO DOES IT.
       #
-      # `twinvpn-azure-l1.ps1 -Action run` destroys the guest in a `finally`,
-      # which covers a throw. It does NOT cover this job being CANCELLED: a
-      # `timeout-minutes` expiry kills pwsh outright and a `finally` never runs.
-      # The guest that survives that is the worst possible one to leave behind --
-      # it is holding a differencing disk AND it has installed persistent WFP
-      # filters (CB-6), so it is a machine nobody can log into over the network
-      # to clean up, on a runner the next run will try to reuse.
+      # `-Action run` destroys the guest in a `finally`, which covers a throw.
+      # It does NOT cover this job being CANCELLED: a `timeout-minutes` expiry
+      # kills pwsh outright and a `finally` never runs. The guest that survives
+      # that holds a differencing disk AND has installed persistent WFP filters
+      # (CB-6), so it is a machine nobody can log into over the network. It also
+      # stops the oracle, the DNS relay and the sentinel and removes the two
+      # internal switches and their firewall rules.
       #
-      # `-Action destroy` is idempotent and succeeds with no such VM, so this
-      # costs nothing on the normal path.
-      - name: destroy the disposable guest
+      # `-Action destroy` is idempotent and succeeds with nothing to destroy, so
+      # it costs nothing on the normal path. The VM name is a constant rather
+      # than a per-invocation GUID for exactly this reason: the old default
+      # computed a fresh name here and tore down nothing.
+      - name: destroy the disposable guest and the lab fabric
         if: always()
-        run: scripts\twinvpn-azure-l1.ps1 -Action destroy
+        run: scripts\twinvpn-l1.ps1 -Action destroy
 
+      # THE EVIDENCE, AND THE ORACLE'S OWN REPORT BESIDE IT.
+      #
+      # `build/ci/evidence/oracle/<session>.json` used to be fetched from the
+      # external oracle by a later job. An in-box oracle dies with this runner,
+      # so the lane writes the oracle's answer unmodified and it is uploaded
+      # here; `report.py` reads it from that directory either way.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: evidence-windows-killswitch
-          path: build/ci/evidence/windows-killswitch.json
+          path: |
+            build/ci/evidence/windows-killswitch.json
+            build/ci/evidence/oracle/*.json
           # `warn`, not `ignore`. A criterion job that finished without writing
           # its evidence file is a real defect -- the script did not reach its
           # own write -- and `ignore` made that indistinguishable from a job that
@@ -853,11 +879,14 @@ jobs:
           if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
-        if: failure()
+        if: always()
         with:
-          # `oracle-report.json` is the oracle's own record: source addresses of
-          # OUR OWN beacons, timestamps and counts. No key, no pairing secret,
-          # no token, no tunnel plaintext, no capture.
+          # The guest transcript, the oracle's stdout and stderr, the sentinel's
+          # log and the precondition output. Source addresses of OUR OWN
+          # beacons, timestamps and counts: no key, no pairing secret, no token,
+          # no tunnel plaintext, no capture. Uploaded on success as well as
+          # failure, because a run that is blocked on product wiring is the
+          # normal outcome today and its logs are the point.
           name: diagnostics-windows-killswitch
           path: build/ci/logs/windows/**
           if-no-files-found: ignore
@@ -1318,14 +1347,14 @@ jobs:
       # for twenty-four hours rather than failing, and the gate would sit
       # pending instead of returning a verdict.
       #
-      # Two of these are hosted and cannot queue at all. The three that are not
-      # -- `windows-killswitch`, `macos-sysext`, `macos-signature` -- are gated
-      # on a repository variable, so an unregistered rig makes them SKIP. A
+      # Since 2026-09-02 every job here is hosted and cannot queue at all. Only
+      # `macos-signature` is gated on a variable (the notarized product's URL,
+      # an Apple Developer Program fact), so it SKIPS by name when unset. A
       # skipped `needs:` is satisfied under `always()`, so the gate still
       # returns promptly, and the skipped job wrote no evidence, so its row
       # reads NOT-EXECUTED and counts against eligibility exactly as a failure
-      # does. Same strictness, no deadlock, and the evidence now comes from
-      # THIS run rather than being imported from another one.
+      # does. The two criteria with no executor have no job at all; report.py
+      # names why.
       - windows-killswitch
       - android-16k
       - ios-acceptance
@@ -1457,9 +1486,13 @@ jobs:
 
       - name: collect platform evidence
         run: |
-          mkdir -p build/ci/evidence
-          find build/ci/evidence-download -name '*.json' -exec cp {} build/ci/evidence/ \;
-          ls -la build/ci/evidence/
+          mkdir -p build/ci/evidence build/ci/evidence/oracle
+          # Oracle session reports written by an in-box lane travel as
+          # `oracle/<session>.json` inside that lane's evidence artifact; they
+          # go where report.py reads them, not into the platform-evidence dir.
+          find build/ci/evidence-download -path '*/oracle/*.json' -exec cp {} build/ci/evidence/oracle/ \;
+          find build/ci/evidence-download -name '*.json' -not -path '*/oracle/*' -exec cp {} build/ci/evidence/ \;
+          ls -la build/ci/evidence/ build/ci/evidence/oracle/
 
       # THE JOB OUTCOMES, WRITTEN WHERE report.py CAN READ THEM.
       #
@@ -1530,8 +1563,9 @@ jobs:
         run: |
           mkdir -p build/ci/evidence/oracle
           if [ -z "${TWINVPN_ORACLE_URL:-}" ] || [ -z "${TWINVPN_ORACLE_TOKEN:-}" ]; then
-            echo "::warning::no leak oracle is configured; every criterion that" \
-                 "makes an egress claim will read FAIL for want of an adjudicator"
+            echo "no external leak oracle is configured; in-box lanes upload their" \
+                 "own session reports under build/ci/evidence/oracle/ and those are" \
+                 "what report.py adjudicates -- $(ls build/ci/evidence/oracle/ 2>/dev/null | wc -l | tr -d ' ') present"
             exit 0
           fi
           python3 - <<'PY'

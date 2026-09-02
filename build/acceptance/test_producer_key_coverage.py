@@ -178,15 +178,6 @@ PRODUCER_PINS: dict[str, tuple[str, ...]] = {
 # instruction to delete the entry. The list can only shrink, and it cannot rot
 # into a standing exemption.
 KNOWN_GAPS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "WINDOWS-WFP-KILLSWITCH": (
-        "the two topology keys arrived with the in-box fabric and the lane is "
-        "being rewritten to build that fabric in the same change. It is the "
-        "one criterion that CAN measure them -- it stands up the oracle and "
-        "the sentinel it attests -- so this entry is short-lived by "
-        "construction and PRODUCER_PINS names the file that closes it: "
-        "build/ci/ci-windows-killswitch.sh.",
-        ("oracle_topology", "sentinel_egress_identity"),
-    ),
 }
 
 _CACHE: dict[str, list[tuple[str, dict]]] | None = None
