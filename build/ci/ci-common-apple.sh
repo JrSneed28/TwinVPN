@@ -387,3 +387,92 @@ apple_transitions_from() {
     | sort -u \
     | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))'
 }
+
+# ---------------------------------------------------------------------------
+# Select and boot an iOS simulator, and print its UDID on stdout.
+#
+#   SIM_UDID="$(apple_boot_ios_simulator "$LOGDIR/simulators.log")"
+#
+# ONE DEFINITION, because two lanes now need it. `ci-ios.sh` (link/run) and
+# `ci-ios-acceptance.sh` both boot a simulator under the same product
+# constraint, and two copies of the selection rule are two things that can
+# drift — which on this rule would show up as one lane silently testing a
+# runtime the product does not support.
+#
+# WHAT IS PINNED AND WHAT DELIBERATELY IS NOT.
+#
+#   * The iOS VERSION floor IS asserted, because it is a product constraint:
+#     ADR-0018 §11.9 row 1 fixes the minimum at iOS 15, and a runtime below it
+#     would be testing a configuration this product does not support.
+#   * The DEVICE MODEL is NOT pinned. §11.9 rows 1 and 2 make iPadOS a distinct
+#     FARM entry rather than a distinct binary, and no simulator model can
+#     discharge either row — so pinning one here would imply a coverage claim
+#     the simulator cannot support.
+#
+# Everything a human reads goes to STDERR, because stdout is the UDID and a
+# caller captures it. A banner on stdout would become part of the identifier —
+# the defect `run_check` in ci-macos-signature.sh already shipped once.
+# ---------------------------------------------------------------------------
+apple_boot_ios_simulator() {
+  local list_log="$1" udid
+
+  mkdir -p "$(dirname "$list_log")"
+  xcrun simctl list devices available > "$list_log" 2>&1
+  cat "$list_log" >&2
+
+  udid="$(xcrun simctl list devices available --json \
+    | python3 -c '
+import json, sys
+data = json.load(sys.stdin)["devices"]
+best = None
+for runtime, devices in data.items():
+    if "iOS" not in runtime:
+        continue
+    # com.apple.CoreSimulator.SimRuntime.iOS-18-2 -> (18, 2)
+    tail = runtime.rsplit(".", 1)[-1].removeprefix("iOS-")
+    try:
+        version = tuple(int(part) for part in tail.split("-"))
+    except ValueError:
+        continue
+    if version < (15,):
+        continue          # ADR-0018 §11.9 row 1: iOS 15 is the floor
+    for device in devices:
+        if device.get("isAvailable") and "iPhone" in device.get("name", ""):
+            if best is None or version > best[0]:
+                best = (version, device["udid"])
+if best is None:
+    sys.exit("no available iPhone simulator at iOS 15 or newer")
+print(best[1])
+')" || return 1
+
+  echo "simulator: $udid" >&2
+  xcrun simctl boot "$udid" >&2
+  xcrun simctl bootstatus "$udid" -b >&2
+  printf '%s' "$udid"
+}
+
+# ---------------------------------------------------------------------------
+# The RUNTIME a booted simulator is running, as a human string ("iOS 26.5").
+#
+# Read off the device the run actually used rather than from configuration, so
+# the attestation names the runtime that executed the suite. Prints `unknown`
+# rather than failing: an unreadable runtime is a thinner attestation, not a
+# reason to destroy a run's evidence.
+# ---------------------------------------------------------------------------
+apple_ios_simulator_runtime() {
+  local udid="$1"
+
+  xcrun simctl list devices available --json \
+    | python3 -c '
+import json, sys
+udid = sys.argv[1]
+data = json.load(sys.stdin)["devices"]
+for runtime, devices in data.items():
+    for device in devices:
+        if device.get("udid") == udid:
+            tail = runtime.rsplit(".", 1)[-1]
+            print("iOS " + tail.removeprefix("iOS-").replace("-", "."))
+            raise SystemExit(0)
+print("unknown")
+' "$udid" 2>/dev/null || echo unknown
+}

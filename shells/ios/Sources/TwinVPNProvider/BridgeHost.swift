@@ -258,22 +258,11 @@ final class BridgeHost {
                 semaphore.signal()
                 return
             }
-            if let proto = manager.protocolConfiguration as? NETunnelProviderProtocol {
-                proto.includeAllNetworks = decoded.includeAllNetworks
-                proto.excludeLocalNetworks = decoded.excludeLocalNetworks
-                // The programme travels verbatim so `installed_enforcement`
-                // reads back the SAME bytes Rust rendered. Re-serialising it
-                // here would let the read-back differ from the write for a
-                // reason nobody could see.
-                var config = proto.providerConfiguration ?? [:]
-                config[EnforcementProgramme.configurationKey] = bytes
-                proto.providerConfiguration = config
-            }
-            manager.onDemandRules = decoded.makeOnDemandRules()
-            // ADR-0012's iOS row and ADR-0022 §11.10 both fix this to false: a
-            // system that may disconnect on demand may leave the device
-            // unprotected on a network it decided was fine.
-            manager.isOnDemandEnabled = true
+            // The field copy is `EnforcementInstaller`'s, so that the same
+            // write the extension performs can be asserted against the app's
+            // without a device. What stays here is the part that needs one:
+            // the load above and the save below.
+            EnforcementInstaller.apply(decoded, verbatim: bytes, to: manager)
             manager.saveToPreferences { saveError in
                 result = saveError
                 semaphore.signal()
@@ -296,9 +285,8 @@ final class BridgeHost {
         var loadFailure: Error?
         NETunnelProviderManager.loadAllFromPreferences { managers, error in
             loadFailure = error
-            if let proto = managers?.first?.protocolConfiguration as? NETunnelProviderProtocol {
-                installed = proto.providerConfiguration?[
-                    EnforcementProgramme.configurationKey] as? Data
+            if let manager = managers?.first {
+                installed = EnforcementInstaller.installedProgrammeBytes(in: manager)
             }
             semaphore.signal()
         }

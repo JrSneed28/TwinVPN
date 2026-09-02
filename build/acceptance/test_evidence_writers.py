@@ -182,9 +182,13 @@ class EvidenceWriters(unittest.TestCase):
 
     def test_every_writer_is_discovered(self):
         # If the heredoc form ever changes, every case below would silently
-        # grade an empty list. Nine writers, in nine scripts that ship one each.
+        # grade an empty list. Ten writers, in ten scripts that ship one each --
+        # the tenth is `ci-ios-acceptance.sh`, whose single heredoc is shared by
+        # both hosted-simulator rows (`IOS-FAILCLOSED-CONFIGURATION` and
+        # `IOS-PROFILE-REMOVAL-HONESTY`) exactly as `ci-ios-corellium.sh`'s is
+        # shared by its two.
         found = writers()
-        self.assertEqual(len(found), 9, [str(p) for p, _, _ in found])
+        self.assertEqual(len(found), 10, [str(p) for p, _, _ in found])
 
     def test_rendered_evidence_is_valid_json(self):
         for script, body, criteria in writers():
