@@ -28,7 +28,6 @@
 # so there is no egress claim to adjudicate. It is NOT in `report.py`'s
 # `ORACLE_REQUIRED`, and adding it would silently demand path-identity keys
 # this lane cannot produce truthfully.
-#
 # ===========================================================================
 # HOW "EVALUATED" IS TOLD FROM "LOADED"
 # ===========================================================================
@@ -51,7 +50,6 @@
 # connect. Evaluations flat means the kernel never stepped in -- how the
 # 2026-09-02 run exposed the wildcard-reference defect (G-35).
 #
-# First executed on hosted macos-26 on 2026-09-02 (it found G-35).
 
 set -euo pipefail
 
