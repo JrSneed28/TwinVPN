@@ -97,6 +97,7 @@ $ErrorActionPreference = 'Stop'
 
 $Here      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RunDir    = Join-Path $VmRoot 'run'
+$OraclePort = 8080   # see Start-Observers: port 80 belongs to HTTP.sys on Windows
 $BaseVhd   = Join-Path $VmRoot 'base.vhdx'
 $DiffVhd   = Join-Path $RunDir "$VmName.vhdx"
 $PidFile   = Join-Path $RunDir 'observers.pid'
@@ -232,13 +233,38 @@ function Start-Observers([string] $Repo) {
     if (-not (Test-Path $oracle)) { throw "twinoracle.exe was not built at $oracle" }
     $pids = @()
 
+    # WHO ELSE IS ON THESE PORTS, recorded before any bind so a refusal names
+    # its cause. Internet Connection Sharing (the `SharedAccess` service, which
+    # backs Hyper-V's Default Switch / WSL NAT) runs a DNS proxy on UDP 53 of
+    # every internal-switch address; this job uses neither the Default Switch
+    # nor WSL, so it is stopped for the job on an ephemeral runner.
+    $ics = Get-Service SharedAccess -ErrorAction SilentlyContinue
+    if ($ics -and $ics.Status -eq 'Running') {
+        Write-Host 'stopping Internet Connection Sharing (SharedAccess) for the job: it holds UDP 53 on internal switches'
+        Stop-Service SharedAccess -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host '--- listeners on the ports this lane binds, before binding ---'
+    Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalPort -in 80, 8080, 8443 } |
+        Format-Table LocalAddress, LocalPort, OwningProcess -AutoSize | Out-String | Write-Host
+    Get-NetUDPEndpoint -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalPort -eq 53 } |
+        Format-Table LocalAddress, LocalPort, OwningProcess -AutoSize | Out-String | Write-Host
+
     # THE ORACLE. The control plane is on LOOPBACK, not on the beacon surface:
     # its own module docs say to bind it to a management address, and here the
     # only client is this host. The guest therefore cannot reach the control
     # plane at all, which is stronger than the guest merely not holding a token.
+    # PORT 8080, NOT 80, AND SAID SO IN THE ADVERTISED URL. The first hosted run
+    # died with WSAEACCES (10013) binding a listener: on Windows, port 80 is
+    # held by HTTP.sys for any process that reserved a URL prefix, and a bind
+    # by anyone else is refused rather than shared. Nothing about the criterion
+    # depends on the port; the guest beacons at whatever URL the oracle hands
+    # the controller. Port 53 has no such owner once ICS is stopped (below).
     $oracleArgs = @(
         'serve', '--control', '127.0.0.1:8443', '--control-token-file', $controlToken,
-        '--http4', "$($OracleV4):80", '--http6', "[$OracleV6]:80",
+        '--http4', "$($OracleV4):$OraclePort", '--http6', "[$OracleV6]:$OraclePort",
+        '--advertise-port', "$OraclePort",
         '--dns4',  "$($OracleV4):53", '--dns6',  "[$OracleV6]:53",
         '--zone', $Zone, '--advertise-v4', $OracleV4, '--advertise-v6', $OracleV6,
         '--sentinel-max-gap-ms', '15000', '--sentinel-token-file', $sentinelToken,
@@ -270,8 +296,9 @@ function Start-Observers([string] $Repo) {
     }
 
     Start-Sleep -Seconds 3
-    if (-not (Test-NetConnection -ComputerName $OracleV4 -Port 80 -InformationLevel Quiet -WarningAction SilentlyContinue)) {
-        throw "the oracle is not listening on $($OracleV4):80. See $RunDir\oracle.err."
+    if (-not (Test-NetConnection -ComputerName $OracleV4 -Port $OraclePort -InformationLevel Quiet -WarningAction SilentlyContinue)) {
+        Write-Host '---- oracle.err ----'; Get-Content -LiteralPath (Join-Path $RunDir 'oracle.err') -ErrorAction SilentlyContinue | Write-Host
+        throw "the oracle is not listening on $($OracleV4):$OraclePort. See $RunDir\oracle.err."
     }
 
     # THE SENTINEL, from the SECOND identities on switch B. `--source` pins them
@@ -282,7 +309,7 @@ function Start-Observers([string] $Repo) {
     $sentinelLog = Join-Path $RunDir 'sentinel.log'
     $cmd = ("cd '$(ConvertTo-BashPath $Repo)' && build/ci/leak-probe.sh sentinel " +
             "--token-file '$(ConvertTo-BashPath $sentinelToken)' " +
-            "--beacon-v4 'http://$OracleV4/b' --beacon-v6 'http://[$OracleV6]/b' " +
+            "--beacon-v4 'http://$($OracleV4):$OraclePort/b' --beacon-v6 'http://[$OracleV6]:$OraclePort/b' " +
             "--zone $Zone --source $SentinelV4 --source $SentinelV6 " +
             "--dns-server $ResolverV4 --interval-ms 2000")
     $pids += (Start-Process -FilePath $bash -ArgumentList @('-lc', $cmd) -PassThru -NoNewWindow `

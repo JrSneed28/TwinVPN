@@ -13,6 +13,9 @@ import socket, sys
 try:
     with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=2):
         print("open")
+except OSError as exc:
+    import errno
+    print("closed:%s:%s" % (type(exc).__name__, errno.errorcode.get(exc.errno, exc.errno)))
 except Exception as exc:                                # noqa: BLE001
     print("closed:%s" % type(exc).__name__)
 PY
@@ -40,20 +43,20 @@ loopback_control_probe() {
   control_port_file="$1/pf-anchor-control-port"
   rm -f "$control_port_file"
   python3 - "$control_port_file" <<'PY' &
-  import socket, sys, time
-  srv = socket.socket()
-  srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-  srv.bind(("127.0.0.1", 0))
-  srv.listen(4)
-  with open(sys.argv[1], "w") as fh:
-      fh.write(str(srv.getsockname()[1]))
-  srv.settimeout(15)
-  deadline = time.time() + 15
-  while time.time() < deadline:
-      try:
-          srv.accept()[0].close()
-      except OSError:
-          break
+import socket, sys, time
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 0))
+srv.listen(4)
+with open(sys.argv[1], "w") as fh:
+    fh.write(str(srv.getsockname()[1]))
+srv.settimeout(15)
+deadline = time.time() + 15
+while time.time() < deadline:
+    try:
+        srv.accept()[0].close()
+    except OSError:
+        break
 PY
   control_pid=$!
   for _ in $(seq 1 30); do [ -s "$control_port_file" ] && break; sleep 0.2; done

@@ -174,10 +174,10 @@ async fn open_session(req: &http::Request, state: &Shared, cfg: &Serve) -> (u16,
         session_id: id,
         beacon_v4: cfg
             .advertise_v4
-            .map(|a| format!("http://{a}/b/{probe_token}")),
+            .map(|a| beacon_url(&a.to_string(), cfg.advertise_port, &probe_token)),
         beacon_v6: cfg
             .advertise_v6
-            .map(|a| format!("http://[{a}]/b/{probe_token}")),
+            .map(|a| beacon_url(&format!("[{a}]"), cfg.advertise_port, &probe_token)),
         dns_suffix: format!("{}.{}", probe_token, cfg.zone),
         zone: cfg.zone.clone(),
         min_attempts,
@@ -289,10 +289,10 @@ async fn claim_sentinel(
     let out = SentinelResponse {
         sentinel_beacon_v4: cfg
             .advertise_v4
-            .map(|a| format!("http://{a}/b/{sentinel_token}")),
+            .map(|a| beacon_url(&a.to_string(), cfg.advertise_port, &sentinel_token)),
         sentinel_beacon_v6: cfg
             .advertise_v6
-            .map(|a| format!("http://[{a}]/b/{sentinel_token}")),
+            .map(|a| beacon_url(&format!("[{a}]"), cfg.advertise_port, &sentinel_token)),
         sentinel_zone: cfg.zone.clone(),
         sentinel_token,
     };
@@ -325,4 +325,14 @@ async fn fetch_report(id: &str, state: &Shared) -> (u16, String) {
         200,
         serde_json::to_string(&s.report()).expect("serialisable"),
     )
+}
+
+/// `http://<host>/b/<token>`, carrying the port only when it is not the
+/// scheme default so a public deployment's URLs read exactly as before.
+fn beacon_url(host: &str, port: u16, token: &str) -> String {
+    if port == 80 {
+        format!("http://{host}/b/{token}")
+    } else {
+        format!("http://{host}:{port}/b/{token}")
+    }
 }

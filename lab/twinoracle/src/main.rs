@@ -78,6 +78,12 @@ struct Serve {
     advertise_v4: Option<std::net::Ipv4Addr>,
     #[arg(long)]
     advertise_v6: Option<std::net::Ipv6Addr>,
+    /// The TCP port the advertised beacon URLs carry. Defaults to 80, which is
+    /// what a public deployment binds; an in-box deployment on a host whose
+    /// port 80 is held by another service (Windows HTTP.sys is the known case)
+    /// binds `--http4`/`--http6` elsewhere and advertises that port here.
+    #[arg(long, default_value_t = 80)]
+    advertise_port: u16,
     /// The widest gap between sentinel beats that still counts as the oracle
     /// having been continuously listening. REQUIRED: this is a property of the
     /// sentinel's cadence, which is a property of THIS DEPLOYMENT — not of the
@@ -226,7 +232,7 @@ async fn main() -> std::io::Result<()> {
 
     {
         let (state, cfg, token) = (state.clone(), cfg.clone(), token.clone());
-        let listener = TcpListener::bind(cfg.control).await?;
+        let listener = TcpListener::bind(cfg.control).await.map_err(|e| std::io::Error::new(e.kind(), format!("bind {}: {e}", cfg.control)))?;
         tracing::info!(addr = %cfg.control, "control plane listening");
         tasks.push(tokio::spawn(async move {
             loop {
@@ -248,7 +254,7 @@ async fn main() -> std::io::Result<()> {
         // guess. `TcpListener::bind` on a `[::]` address under tokio inherits
         // the OS default, so the deployment MUST set `net.ipv6.bindv6only=1`;
         // the mapped-address check below is the belt to that braces.
-        let listener = TcpListener::bind(addr).await?;
+        let listener = TcpListener::bind(addr).await.map_err(|e| std::io::Error::new(e.kind(), format!("bind {}: {e}", addr)))?;
         tracing::info!(%addr, family = family.as_str(), "beacon listening");
         tasks.push(tokio::spawn(async move {
             loop {
@@ -265,7 +271,7 @@ async fn main() -> std::io::Result<()> {
         let Some(addr) = addr else { continue };
         let state = state.clone();
         let cfg = cfg.clone();
-        let sock = UdpSocket::bind(addr).await?;
+        let sock = UdpSocket::bind(addr).await.map_err(|e| std::io::Error::new(e.kind(), format!("bind {}: {e}", addr)))?;
         tracing::info!(%addr, "dns listening");
         tasks.push(tokio::spawn(
             async move { dns_loop(sock, state, cfg).await },

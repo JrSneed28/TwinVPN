@@ -43,17 +43,13 @@
 # counter moved — the counter being the load-bearing half, because a failed
 # connect alone is equally well explained by a host with no route.
 #
-# THE CONTROL IS LOOPBACK, AND IT IS ONLY A SANITY CHECK. It rules out
-# "everything failed" (the stack still connects), no more: the boot anchor has
-# no default deny and 127.0.0.1 is in neither protected table, so loopback
-# survives whether or not the anchor is evaluated. What PROVES evaluation is
-# the anchor's own counters: `pfctl -a twinvpn -s labels` field 2 (evaluations)
-# and field 3 (packets) on `twinvpn.deny.v4`/`.v6` must both rise across the
-# covered connect. Evaluations flat means the kernel never stepped into the
-# anchor -- which is exactly how the 2026-09-02 run exposed the wildcard
-# reference defect (see packaging/pf.conf.include). A control that left the
-# machine would measure the runner's internet path, about which this criterion
-# says nothing.
+# THE CONTROL IS LOOPBACK AND ONLY A SANITY CHECK: the boot anchor has no
+# default deny and 127.0.0.1 is in neither table, so loopback survives whether
+# or not the anchor is evaluated. What PROVES evaluation is the anchor's own
+# counters: `pfctl -a twinvpn -s labels` evaluations (field 2) AND packets
+# (field 3) on `twinvpn.deny.v4`/`.v6` must both rise across the covered
+# connect. Evaluations flat means the kernel never stepped in -- how the
+# 2026-09-02 run exposed the wildcard-reference defect (G-35).
 #
 # First executed on hosted macos-26 on 2026-09-02 (it found G-35).
 
@@ -278,20 +274,23 @@ deny_v6_before="$(label_packets twinvpn.deny.v6 "$LOGDIR/pf-labels-before.txt")"
 eval_v4_before="$(label_evals twinvpn.deny.v4 "$LOGDIR/pf-labels-before.txt")"
 eval_v6_before="$(label_evals twinvpn.deny.v6 "$LOGDIR/pf-labels-before.txt")"
 
-# THE IPv6 PROBE NEEDS A ROUTE, AND THE ROUTE IS A PRECONDITION, NOT THE CLAIM.
-# A hosted runner has no IPv6 egress and no route covering the ULA prefix, so
-# without one the kernel returns ENETUNREACH before pf is consulted and emits
-# nothing. The claim under test is what pf does with a packet, so a route via
-# en0 is installed for the probe and removed afterwards; pf sees the SYN on
-# output before neighbour discovery can fail. Recorded in the log either way.
+# THE IPv6 PROBE NEEDS A ROUTE, A PRECONDITION AND NOT THE CLAIM: a hosted
+# runner has no route to the ULA prefix, so without one the kernel returns
+# ENETUNREACH before pf is consulted. pf sees the SYN on output before
+# neighbour discovery can fail. Recorded in the log either way.
+# A route alone was not enough: with no global IPv6 address on the interface
+# connect() has no source and fails before output, so a ULA source OUTSIDE
+# the covered prefix is aliased too. Both are removed afterwards.
 probe_v6_iface="$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }')"
-probe_v6_route=false
-if [ -n "$probe_v6_iface" ] \
-   && sudo -n route -n add -inet6 "${PROBE_V6%::1}::/48" -interface "$probe_v6_iface" \
-        > "$LOGDIR/pf-probe-route.txt" 2>&1; then
-  probe_v6_route=true
+probe_v6_route=false; probe_v6_alias=false
+PROBE_V6_SRC="fd77:7717:d0c:ffff::2"
+if [ -n "$probe_v6_iface" ]; then
+  if sudo -n ifconfig "$probe_v6_iface" inet6 "$PROBE_V6_SRC" prefixlen 64 alias \
+       > "$LOGDIR/pf-probe-route.txt" 2>&1; then probe_v6_alias=true; fi
+  if sudo -n route -n add -inet6 "${PROBE_V6%::1}::/48" -interface "$probe_v6_iface" \
+       >> "$LOGDIR/pf-probe-route.txt" 2>&1; then probe_v6_route=true; fi
 fi
-echo "IPv6 probe route via ${probe_v6_iface:-<no default interface>}: installed=$probe_v6_route"
+echo "IPv6 probe via ${probe_v6_iface:-<no default interface>}: source alias=$probe_v6_alias route=$probe_v6_route"
 route -n get "$PROBE_V4" > "$LOGDIR/pf-route-v4.txt" 2>&1 || true
 route -n get -inet6 "$PROBE_V6" > "$LOGDIR/pf-route-v6.txt" 2>&1 || true
 
@@ -307,6 +306,9 @@ echo "control connect 127.0.0.1 -> $control_probe"
 sudo -n pfctl -a twinvpn -s labels > "$LOGDIR/pf-labels-after.txt" 2>&1 || true
 if [ "$probe_v6_route" = true ]; then
   sudo -n route -n delete -inet6 "${PROBE_V6%::1}::/48" >> "$LOGDIR/pf-probe-route.txt" 2>&1 || true
+fi
+if [ "$probe_v6_alias" = true ]; then
+  sudo -n ifconfig "$probe_v6_iface" inet6 "$PROBE_V6_SRC" -alias >> "$LOGDIR/pf-probe-route.txt" 2>&1 || true
 fi
 # THE DIAGNOSTICS THAT SEPARATE "loaded" FROM "evaluated", kept every run:
 # per-rule evaluation counters in the main ruleset and inside the anchor, the
