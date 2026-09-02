@@ -102,7 +102,11 @@ function Get-GuestAdapter {
 }
 
 function Assert-OffLink([string] $Address, [string] $Gateway) {
+    # Find-NetRoute returns TWO objects: the source NetIPAddress it selected,
+    # then the NetRoute. Run 6 took the first and read an empty NextHop off an
+    # address object; only the route object carries a DestinationPrefix.
     $route = Find-NetRoute -RemoteIPAddress $Address -ErrorAction SilentlyContinue |
+             Where-Object { $_.PSObject.Properties['DestinationPrefix'] } |
              Select-Object -First 1
     if (-not $route) { throw "the guest has no route at all to $Address" }
     $next = $route.NextHop
