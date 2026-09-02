@@ -402,6 +402,24 @@ class OracleAdjudication(GateCase):
 class JobOutcome(GateCase):
     """`failure`, `cancelled`, `skipped`, missing and NOT-EXECUTED are each their own red."""
 
+    def test_the_ios_rows_are_graded_on_the_ios_acceptance_job(self):
+        # Both simulator stems come from one job. Run 33685840037 (2026-09-02)
+        # had both evidence files present, `ios-acceptance: success`, and read
+        # both rows as "never scheduled" because the lookup used the stem.
+        self.assertGreen("ios-failclosed-configuration",
+                         "IOS-FAILCLOSED-CONFIGURATION",
+                         fx.ios_failclosed_configuration(),
+                         jobs={"ios-acceptance": "success"})
+        self.assertGreen("ios-profile-removal", "IOS-PROFILE-REMOVAL-HONESTY",
+                         fx.ios_profile_removal(),
+                         jobs={"ios-acceptance": "success"})
+        verdict, detail, _ = self.probe("ios-profile-removal",
+                                        "IOS-PROFILE-REMOVAL-HONESTY",
+                                        fx.ios_profile_removal(), None,
+                                        {"ios-acceptance": "failure"})
+        self.assertNotEqual(verdict, report.PASS)
+        self.assertIn("ios-acceptance", detail)
+
     def test_a_skipped_job_is_red_and_says_so(self):
         # The dangerous one: an unregistered self-hosted runner makes the job
         # skip, and a skip is the absence that looks most like routine absence.

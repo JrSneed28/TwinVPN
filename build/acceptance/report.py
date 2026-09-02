@@ -465,6 +465,16 @@ for _criterion in ORACLE_REQUIRED:
 # signature check would only teach a job to write it untruthfully.
 ARTIFACT_ONLY = {"MACOS-PRODUCTION-SIGNATURE"}
 
+# WHICH JOB WROTE A STEM, where the two differ. Every other evidence file is
+# named after the job that wrote it; the hosted simulator job writes both iOS
+# rows from one xcodebuild session per row, so both stems are graded on the
+# `ios-acceptance` job's outcome. Without this the report asked for a job named
+# after the stem, found none, and read a green run as never scheduled.
+JOB_FOR_STEM = {
+    "ios-failclosed-configuration": "ios-acceptance",
+    "ios-profile-removal": "ios-acceptance",
+}
+
 # Criteria for which NO EXECUTOR EXISTS, and the one sentence that says which
 # capability is missing. These rows have no job in the workflow at all, so they
 # read NOT-EXECUTED; that is the truthful verdict and it counts against Phase 5
@@ -614,7 +624,7 @@ def probe_criterion(stem: str, criterion: str, require_privileged: bool = False)
     # one that most resembles routine absence and is the least routine thing in
     # the list. "No evidence" is true of all four and useful about none of them.
     results = job_results.load(EVIDENCE_DIR)
-    job_problem = job_results.problem(stem, criterion, results)
+    job_problem = job_results.problem(JOB_FOR_STEM.get(stem, stem), criterion, results)
     if not path.is_file():
         why = job_problem or (
             "no job outcome was recorded either, so nothing says whether it "
