@@ -55,8 +55,7 @@
 # machine would measure the runner's internet path, about which this criterion
 # says nothing.
 #
-# NOTHING HERE HAS RUN. Written on a Linux host with no macOS. `install.sh`
-# says the same of itself, and this is the lane that changes that.
+# First executed on hosted macos-26 on 2026-09-02 (it found G-35).
 
 set -euo pipefail
 
@@ -301,7 +300,6 @@ probe_v6="$(connect_probe "$PROBE_V6" "$PROBE_PORT")"
 echo "connect $PROBE_V4:$PROBE_PORT   -> $probe_v4"
 echo "connect [$PROBE_V6]:$PROBE_PORT -> $probe_v6"
 
-# THE CONTROL (pf-probe.sh); the header says what it does and does not prove.
 control_probe="$(loopback_control_probe "$LOGDIR")"
 echo "control connect 127.0.0.1 -> $control_probe"
 
