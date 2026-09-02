@@ -658,7 +658,12 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             build/ci/android-target
-          key: fwg-android-${{ hashFiles('rust-toolchain.toml', 'core/Cargo.lock', 'shells/android/jni/Cargo.lock', 'shells/android/**/*.gradle.kts', 'shells/android/gradle/libs.versions.toml', 'build/ci/ci-android.sh') }}
+          key: >-
+            fwg-android-${{ hashFiles('rust-toolchain.toml',
+            'core/Cargo.lock', 'shells/android/jni/Cargo.lock',
+            'shells/android/**/*.gradle.kts',
+            'shells/android/gradle/libs.versions.toml',
+            'build/ci/ci-android.sh') }}
 
       - name: make ci-android
         run: make ci-android
@@ -774,7 +779,7 @@ jobs:
       run:
         shell: pwsh
     env:
-      TWINVPN_ORACLE_URL:   ${{ vars.TWINVPN_ORACLE_URL }}
+      TWINVPN_ORACLE_URL: ${{ vars.TWINVPN_ORACLE_URL }}
       TWINVPN_ORACLE_TOKEN: ${{ secrets.TWINVPN_ORACLE_TOKEN }}
       # WHERE THE INDEPENDENT HEARTBEAT RUNS. Not started by this job and not
       # startable by it: the oracle discards any IPv4/IPv6 sentinel beat whose
@@ -911,8 +916,8 @@ jobs:
       - name: 16 KiB page-size lifecycle on the official emulator image
         env:
           TWINVPN_RELEASE_STORE_PASSWORD: ${{ secrets.TWINVPN_RELEASE_STORE_PASSWORD }}
-          TWINVPN_RELEASE_KEY_ALIAS:      ${{ secrets.TWINVPN_RELEASE_KEY_ALIAS }}
-          TWINVPN_RELEASE_KEY_PASSWORD:   ${{ secrets.TWINVPN_RELEASE_KEY_PASSWORD }}
+          TWINVPN_RELEASE_KEY_ALIAS: ${{ secrets.TWINVPN_RELEASE_KEY_ALIAS }}
+          TWINVPN_RELEASE_KEY_PASSWORD: ${{ secrets.TWINVPN_RELEASE_KEY_PASSWORD }}
         # ONE invocation. `--reset` does not stop the run -- it clears the
         # stale AVD, evidence and logs and then falls through -- so calling the
         # script twice would build, boot and instrument twice.
@@ -967,10 +972,10 @@ jobs:
       contents: read
     if: ${{ vars.TWINVPN_CORELLIUM_ENABLED == 'true' }}
     env:
-      CORELLIUM_API_TOKEN:  ${{ secrets.CORELLIUM_API_TOKEN }}
+      CORELLIUM_API_TOKEN: ${{ secrets.CORELLIUM_API_TOKEN }}
       CORELLIUM_PROJECT_ID: ${{ vars.CORELLIUM_PROJECT_ID }}
-      TWINVPN_TEAM_ID:      ${{ vars.TWINVPN_TEAM_ID }}
-      TWINVPN_ORACLE_URL:   ${{ vars.TWINVPN_ORACLE_URL }}
+      TWINVPN_TEAM_ID: ${{ vars.TWINVPN_TEAM_ID }}
+      TWINVPN_ORACLE_URL: ${{ vars.TWINVPN_ORACLE_URL }}
       TWINVPN_ORACLE_TOKEN: ${{ secrets.TWINVPN_ORACLE_TOKEN }}
       # The standing heartbeat, declared rather than started -- this runner runs
       # the probe, so a sentinel started here would share its source address and
@@ -1102,17 +1107,17 @@ jobs:
       group: twinvpn-ec2-mac
       cancel-in-progress: false
     env:
-      TWINVPN_TEAM_ID:             ${{ vars.TWINVPN_TEAM_ID }}
+      TWINVPN_TEAM_ID: ${{ vars.TWINVPN_TEAM_ID }}
       TWINVPN_EXTENSION_BUNDLE_ID: ${{ vars.TWINVPN_EXTENSION_BUNDLE_ID }}
-      TWINVPN_ORACLE_URL:          ${{ vars.TWINVPN_ORACLE_URL }}
-      TWINVPN_ORACLE_TOKEN:        ${{ secrets.TWINVPN_ORACLE_TOKEN }}
+      TWINVPN_ORACLE_URL: ${{ vars.TWINVPN_ORACLE_URL }}
+      TWINVPN_ORACLE_TOKEN: ${{ secrets.TWINVPN_ORACLE_TOKEN }}
       # The standing heartbeat, declared rather than started -- and this is the
       # lane where that is most obviously forced: the EC2 Mac IS the device
       # under test, so any beat it sent would travel the stack the criterion
       # says cannot emit a packet. `ci-macos-sysext.sh` refuses to run without
       # it. The real enforcement is the oracle's: no beats is no continuity,
       # which is INCONCLUSIVE and never a quiet pass.
-      TWINVPN_SENTINEL_HOST:       ${{ vars.TWINVPN_SENTINEL_HOST }}
+      TWINVPN_SENTINEL_HOST: ${{ vars.TWINVPN_SENTINEL_HOST }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1495,7 +1500,7 @@ jobs:
       # fails the job at the line responsible.
       - name: fetch the leak-oracle reports for this run's sessions
         env:
-          TWINVPN_ORACLE_URL:   ${{ vars.TWINVPN_ORACLE_URL }}
+          TWINVPN_ORACLE_URL: ${{ vars.TWINVPN_ORACLE_URL }}
           TWINVPN_ORACLE_TOKEN: ${{ secrets.TWINVPN_ORACLE_TOKEN }}
         run: |
           mkdir -p build/ci/evidence/oracle
