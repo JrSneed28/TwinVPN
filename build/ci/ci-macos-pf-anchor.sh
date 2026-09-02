@@ -35,20 +35,25 @@
 # Four facts, because each of the first three holds on a wholly unprotected
 # host. pf is ENABLED (`pfctl -s info`), since an anchor in a disabled filter
 # is dead text. It is REFERENCED (`pfctl -s rules` carries `anchor
-# "twinvpn/*"`), since pf evaluates an anchor only where the main ruleset calls
+# "twinvpn"` -- the exact form; the wildcard evaluates only children, G-35),
+# since pf evaluates an anchor only where the main ruleset calls
 # it and that line lives in /etc/pf.conf, which only `install.sh` writes. It
 # has RULES and the read-back TABLES `ksd`'s W-24 query parses. And it DROPS
 # PACKETS: a connect into each covered prefix fails AND that family's deny
 # counter moved — the counter being the load-bearing half, because a failed
 # connect alone is equally well explained by a host with no route.
 #
-# THE CONTROL IS LOOPBACK, AND THAT IS ITS STRENGTH. A control has to rule out
-# "everything failed", and loopback does precisely because it is not exempt:
-# Apple's stock /etc/pf.conf carries no `set skip on lo0` and `set` is illegal
-# inside an anchor, so the only reason a loopback connection survives while this
-# anchor is loaded is its own class-8 `pass quick on lo0` rule. A control that
-# left the machine would measure the runner's internet path, about which this
-# criterion says nothing.
+# THE CONTROL IS LOOPBACK, AND IT IS ONLY A SANITY CHECK. It rules out
+# "everything failed" (the stack still connects), no more: the boot anchor has
+# no default deny and 127.0.0.1 is in neither protected table, so loopback
+# survives whether or not the anchor is evaluated. What PROVES evaluation is
+# the anchor's own counters: `pfctl -a twinvpn -s labels` field 2 (evaluations)
+# and field 3 (packets) on `twinvpn.deny.v4`/`.v6` must both rise across the
+# covered connect. Evaluations flat means the kernel never stepped into the
+# anchor -- which is exactly how the 2026-09-02 run exposed the wildcard
+# reference defect (see packaging/pf.conf.include). A control that left the
+# machine would measure the runner's internet path, about which this criterion
+# says nothing.
 #
 # NOTHING HERE HAS RUN. Written on a Linux host with no macOS. `install.sh`
 # says the same of itself, and this is the lane that changes that.
@@ -83,26 +88,8 @@ mkdir -p "$LOGDIR" "$(dirname "$EVIDENCE")"
 [ "$(uname -s)" = "Darwin" ] || {
   echo "::error::ci-macos-pf-anchor.sh must run on macOS" >&2; exit 2; }
 
-# One TCP connect, hard 2 s ceiling; prints `open` or `closed:<reason>`. A pf
-# `block drop` is SILENT, so a covered-prefix probe times out rather than being
-# refused — which is why the caller never reads this on its own.
-connect_probe() {
-  python3 - "$1" "$2" <<'PY'
-import socket, sys
-try:
-    with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=2):
-        print("open")
-except Exception as exc:                                # noqa: BLE001
-    print("closed:%s" % type(exc).__name__)
-PY
-}
-
-# The packets pf counted for one label, summed over every rule carrying it.
-# `pfctl -s labels` prints `<label> <evaluations> <packets> <bytes> …`, which is
-# what `pfread::parse_labels` reads; both tolerate trailing columns.
-label_packets() {
-  awk -v want="$1" '$1 == want { sum += $3 } END { print sum + 0 }' "${2:-/dev/null}"
-}
+# shellcheck disable=SC1091
+. "$REPO/build/ci/pf-probe.sh"   # connect_probe, label_packets, label_evals, loopback_control_probe
 
 # --- --cleanup: `if: always()`, and it checks itself -----------------------
 #
@@ -253,7 +240,10 @@ echo "::group::what the kernel actually holds"
 # and not `grep`: grep exits 1 on no match and a measurement has no `|| true`.
 pf_enabled="$(awk '/^[[:space:]]*Status:[[:space:]]+Enabled/ { f = 1 } \
   END { print (f ? "true" : "false") }' "$LOGDIR/pf-info.txt")"
-anchor_referenced="$(awk '/anchor/ && /twinvpn/ { f = 1 } \
+# The EXACT form. `anchor "twinvpn/*"` also contains the word, and it is the
+# form that evaluates nothing (packaging/pf.conf.include); a check that accepted
+# it is how an inert anchor read as referenced.
+anchor_referenced="$(awk '$0 ~ /^[[:space:]]*anchor "twinvpn"([[:space:]]|$)/ { f = 1 } \
   END { print (f ? "true" : "false") }' "$LOGDIR/pf-main-rules.txt")"
 anchor_rule_count="$(awk '/^[[:space:]]*(block|pass|match)[[:space:]]/ { n++ } \
   END { print n + 0 }' "$LOGDIR/pf-anchor-rules.txt")"
@@ -281,62 +271,70 @@ echo "::group::a packet into each covered prefix, and one that is not"
 # A ROUTE IS A PRECONDITION FOR THE PROOF AND NOT PART OF THE CLAIM. pf sees a
 # packet only if the kernel produced one; with no route the connect fails with
 # ENETUNREACH before the filter is consulted, the deny counter cannot move, and
-# this lane reports that it could not demonstrate the drop. Deliberately not a
-# route this script installs: manufacturing one would make the probe a test of
-# the route table. If the IPv6 half comes back red, the fix is a runner with
-# IPv6 egress.
+# this lane reports that it could not demonstrate the drop. The IPv6 probe
+# route installed below is a precondition for producing a packet at all, not a
+# part of the claim; the claim is decided by the anchor's own counters.
 deny_v4_before="$(label_packets twinvpn.deny.v4 "$LOGDIR/pf-labels-before.txt")"
 deny_v6_before="$(label_packets twinvpn.deny.v6 "$LOGDIR/pf-labels-before.txt")"
+eval_v4_before="$(label_evals twinvpn.deny.v4 "$LOGDIR/pf-labels-before.txt")"
+eval_v6_before="$(label_evals twinvpn.deny.v6 "$LOGDIR/pf-labels-before.txt")"
+
+# THE IPv6 PROBE NEEDS A ROUTE, AND THE ROUTE IS A PRECONDITION, NOT THE CLAIM.
+# A hosted runner has no IPv6 egress and no route covering the ULA prefix, so
+# without one the kernel returns ENETUNREACH before pf is consulted and emits
+# nothing. The claim under test is what pf does with a packet, so a route via
+# en0 is installed for the probe and removed afterwards; pf sees the SYN on
+# output before neighbour discovery can fail. Recorded in the log either way.
+probe_v6_iface="$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }')"
+probe_v6_route=false
+if [ -n "$probe_v6_iface" ] \
+   && sudo -n route -n add -inet6 "${PROBE_V6%::1}::/48" -interface "$probe_v6_iface" \
+        > "$LOGDIR/pf-probe-route.txt" 2>&1; then
+  probe_v6_route=true
+fi
+echo "IPv6 probe route via ${probe_v6_iface:-<no default interface>}: installed=$probe_v6_route"
+route -n get "$PROBE_V4" > "$LOGDIR/pf-route-v4.txt" 2>&1 || true
+route -n get -inet6 "$PROBE_V6" > "$LOGDIR/pf-route-v6.txt" 2>&1 || true
 
 probe_v4="$(connect_probe "$PROBE_V4" "$PROBE_PORT")"
 probe_v6="$(connect_probe "$PROBE_V6" "$PROBE_PORT")"
 echo "connect $PROBE_V4:$PROBE_PORT   -> $probe_v4"
 echo "connect [$PROBE_V6]:$PROBE_PORT -> $probe_v6"
 
-# THE CONTROL: a loopback listener this job starts — the header says why
-# loopback is the right one and why it cannot be mistaken for egress.
-control_port_file="$LOGDIR/pf-anchor-control-port"
-rm -f "$control_port_file"
-python3 - "$control_port_file" <<'PY' &
-import socket, sys, time
-srv = socket.socket()
-srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-srv.bind(("127.0.0.1", 0))
-srv.listen(4)
-with open(sys.argv[1], "w") as fh:
-    fh.write(str(srv.getsockname()[1]))
-srv.settimeout(15)
-deadline = time.time() + 15
-while time.time() < deadline:
-    try:
-        srv.accept()[0].close()
-    except OSError:
-        break
-PY
-control_pid=$!
-for _ in $(seq 1 30); do [ -s "$control_port_file" ] && break; sleep 0.2; done
-control_probe="closed:NoListener"
-if [ -s "$control_port_file" ]; then
-  control_probe="$(connect_probe 127.0.0.1 "$(cat "$control_port_file")")"
-fi
-kill "$control_pid" 2>/dev/null || true
-wait "$control_pid" 2>/dev/null || true
+# THE CONTROL (pf-probe.sh); the header says what it does and does not prove.
+control_probe="$(loopback_control_probe "$LOGDIR")"
 echo "control connect 127.0.0.1 -> $control_probe"
 
 # shellcheck disable=SC2024
 sudo -n pfctl -a twinvpn -s labels > "$LOGDIR/pf-labels-after.txt" 2>&1 || true
+if [ "$probe_v6_route" = true ]; then
+  sudo -n route -n delete -inet6 "${PROBE_V6%::1}::/48" >> "$LOGDIR/pf-probe-route.txt" 2>&1 || true
+fi
+# THE DIAGNOSTICS THAT SEPARATE "loaded" FROM "evaluated", kept every run:
+# per-rule evaluation counters in the main ruleset and inside the anchor, the
+# anchor tree, and the two tables' contents.
+# shellcheck disable=SC2024
+{ sudo -n pfctl -vvs rules; echo '--- anchor twinvpn ---'; sudo -n pfctl -a twinvpn -vvs rules
+  echo '--- anchors ---'; sudo -n pfctl -s Anchors -v
+  echo '--- twinvpn_protected_v4 ---'; sudo -n pfctl -a twinvpn -t twinvpn_protected_v4 -T show
+  echo '--- twinvpn_protected_v6 ---'; sudo -n pfctl -a twinvpn -t twinvpn_protected_v6 -T show
+} > "$LOGDIR/pf-evaluations.txt" 2>&1 || true
 deny_v4_after="$(label_packets twinvpn.deny.v4 "$LOGDIR/pf-labels-after.txt")"
 deny_v6_after="$(label_packets twinvpn.deny.v6 "$LOGDIR/pf-labels-after.txt")"
-echo "twinvpn.deny.v4 packets: $deny_v4_before -> $deny_v4_after"
-echo "twinvpn.deny.v6 packets: $deny_v6_before -> $deny_v6_after"
+eval_v4_after="$(label_evals twinvpn.deny.v4 "$LOGDIR/pf-labels-after.txt")"
+eval_v6_after="$(label_evals twinvpn.deny.v6 "$LOGDIR/pf-labels-after.txt")"
+echo "twinvpn.deny.v4 evaluations: $eval_v4_before -> $eval_v4_after  packets: $deny_v4_before -> $deny_v4_after"
+echo "twinvpn.deny.v6 evaluations: $eval_v6_before -> $eval_v6_after  packets: $deny_v6_before -> $deny_v6_after"
 
-# BOTH HALVES, BOTH FAMILIES. The connect failing says a packet did not get
-# through; the counter moving says THIS ANCHOR is why. KS-5 gives no partial
-# credit: one family without the other is non-conforming, not degraded.
+# BOTH HALVES, BOTH FAMILIES, BOTH COUNTERS. The connect failing says a packet
+# did not get through (a pf drop is silent on macOS, so it reads as a timeout);
+# evaluations rising says the kernel stepped into THIS ANCHOR; packets rising
+# says this rule is why. KS-5 gives no partial credit: one family without the
+# other is non-conforming, not degraded.
 covered_refused=false
 if [ "${probe_v4#closed}" != "$probe_v4" ] && [ "${probe_v6#closed}" != "$probe_v6" ] \
-   && [ "$deny_v4_after" -gt "$deny_v4_before" ] \
-   && [ "$deny_v6_after" -gt "$deny_v6_before" ]; then
+   && [ "$eval_v4_after" -gt "$eval_v4_before" ] && [ "$deny_v4_after" -gt "$deny_v4_before" ] \
+   && [ "$eval_v6_after" -gt "$eval_v6_before" ] && [ "$deny_v6_after" -gt "$deny_v6_before" ]; then
   covered_refused=true
 fi
 control_ok=false
@@ -479,6 +477,8 @@ cat > "$EVIDENCE" <<JSON
     "build/ci/logs/macos/pf-anchor-rules.txt",
     "build/ci/logs/macos/pf-anchor-tables.txt",
     "build/ci/logs/macos/pf-labels-before.txt",
+    "build/ci/logs/macos/pf-evaluations.txt", "build/ci/logs/macos/pf-probe-route.txt",
+    "build/ci/logs/macos/pf-route-v4.txt", "build/ci/logs/macos/pf-route-v6.txt",
     "build/ci/logs/macos/pf-labels-after.txt", "build/ci/logs/macos/xctest-root.log"
   ],
   "notes": "$notes",

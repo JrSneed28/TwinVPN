@@ -501,7 +501,8 @@ echo "::group::enforcement is really EVALUATED"
 #     happily and every rule in it is then dead text. Nothing in this lane runs
 #     `pfctl -E`, so that is the default state of an uninstalled host.
 #   * the anchor loaded but never REFERENCED. pf evaluates an anchor only where
-#     the main ruleset calls it, and the `anchor "twinvpn/*"` line lives in
+#     the main ruleset calls it by its exact name -- `anchor "twinvpn"`; the
+#     wildcard form evaluates only child anchors (G-35) -- and that line lives in
 #     /etc/pf.conf, which only `shells/macos/packaging/install.sh` writes.
 #
 # So the two facts are asked separately, the way `ksd`'s own W-24 read-back

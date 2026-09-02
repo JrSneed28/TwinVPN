@@ -118,7 +118,8 @@ REQUIRED = {
         "of the criterion. Look first at whether "
         "shells/macos/packaging/install.sh validated the rendered anchor with "
         "`pfctl -n -f` and spliced /etc/pf.conf, whether `pfctl -s rules` still "
-        "carries the anchor \"twinvpn/*\" reference, and whether the connect "
+        "carries the exact anchor \"twinvpn\" reference (the wildcard form is inert), "
+        "and whether the deny-label evaluations and packets both rose on the connect "
         "into the covered prefix was refused while the control connect "
         "succeeded -- build/ci/logs/macos/ has all three",
     "macos-signature":

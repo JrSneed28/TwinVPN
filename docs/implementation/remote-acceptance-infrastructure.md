@@ -320,8 +320,12 @@ passwordless sudo, no oracle, no sentinel, no Team ID and no Apple entitlement,
 the lane runs `shells/macos/packaging/install.sh` — the only thing that
 validates the rendered anchor with `pfctl -n -f`, splices `/etc/pf.conf` and
 runs `pfctl -E` — then `ksd --apply-boot-anchor` and `ksd --status`, and proves:
-pf is **enabled**; the `anchor "twinvpn/*"` reference is present **in the main
-ruleset**, the check the sysext lane got wrong; the anchor's rules and its
+pf is **enabled**; the `anchor "twinvpn"` reference is present **in the main
+ruleset** (the exact form: the wildcard `anchor "twinvpn/*"` the package used
+to write evaluates only child anchors and never the anchor's own rules, so
+the boot anchor was inert on every Mac until 2026-09-02 — G-35); the anchor's
+`twinvpn.deny.*` labels show **evaluations and packets both rising** across a
+covered connect; the anchor's rules and its
 posture, generation and per-family scope tables are non-empty; a connect into a
 covered prefix is **refused** while a control connect **succeeds**. It also runs
 the existing `TwinVPNBridgeTests` target as root, driving `tvb_ext_start`

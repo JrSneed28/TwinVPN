@@ -320,7 +320,9 @@ PREREQUISITES = {
     #
     # `pf_enabled` alone is not the criterion. An anchor can be loaded and never
     # evaluated, so `anchor_referenced_in_main_ruleset` asserts `pfctl -s rules`
-    # still carries the `anchor "twinvpn/*"` line, `anchor_rule_count` asserts
+    # still carries the exact `anchor "twinvpn"` line -- not the wildcard form,
+    # which evaluates only child anchors and left the boot anchor inert until
+    # 2026-09-02 (ownership.md G-35) -- `anchor_rule_count` asserts
     # the anchor is not empty (see POSITIVE_COUNTS: a loaded anchor with zero
     # rules forbids nothing), and the two connect booleans are the behavioural
     # check -- refused into the covered prefix, and, as its own control,

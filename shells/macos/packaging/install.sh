@@ -47,7 +47,13 @@ readonly OP_GROUP="_twinvpn_op"
 # The two lines spliced into /etc/pf.conf. Kept identical to
 # `packaging/pf.conf.include`, whose header explains WHERE in the file they must
 # land and why the wrong section is a total-loss failure.
-readonly PF_ANCHOR_LINE='anchor "twinvpn/*"'
+# NO WILDCARD. `anchor "twinvpn/*"` evaluates only the CHILD anchors attached
+# under `twinvpn` and never the rules loaded into `twinvpn` itself (pf.conf(5)
+# ANCHORS; xnu bsd/net/pf.c pf_step_into_anchor). The rules are loaded into the
+# bare anchor by the line below and by the daemon, so the wildcard form was a
+# no-op on every Mac -- found by MACOS-PF-BOOT-ANCHOR on 2026-09-02, when the
+# deny counters never moved. ADR-0012 section 11.6 names the anchor `twinvpn`.
+readonly PF_ANCHOR_LINE='anchor "twinvpn"'
 readonly PF_LOAD_LINE='load anchor "twinvpn" from "/etc/twinvpn/pf.anchor"'
 
 here() { cd "$(dirname "${BASH_SOURCE[0]}")" && pwd; }
@@ -234,7 +240,12 @@ mv -f "${anchor_tmp}" "${ANCHOR_FILE}"
 #    firewall" does not remove us and we do not remove them.
 # ---------------------------------------------------------------------------
 say "/etc/pf.conf"
-if grep -qF "${PF_LOAD_LINE}" "${PF_CONF}"; then
+# BOTH lines are the sentinel. A host installed before 2026-09-02 carries the
+# load line beside an inert `anchor "twinvpn/*"`; testing the load line alone
+# would leave it unprotected while reporting success. Only the MISSING line is
+# appended: a second `load anchor` would load the file twice and double the
+# rule count.
+if grep -qF "${PF_ANCHOR_LINE}" "${PF_CONF}" && grep -qF "${PF_LOAD_LINE}" "${PF_CONF}"; then
     say "the anchor reference is already present; leaving ${PF_CONF} untouched"
 else
     # Keep a restore point. ADR-0016 R-27 requires uninstall to "restore every
@@ -248,8 +259,8 @@ else
     {
         printf '\n# --- TwinVPN (ADR-0012 KS-19). Installed by the TwinVPN package.\n'
         printf '# Removing these two lines disarms boot-window leak protection.\n'
-        printf '%s\n' "${PF_ANCHOR_LINE}"
-        printf '%s\n' "${PF_LOAD_LINE}"
+        grep -qF "${PF_ANCHOR_LINE}" "${PF_CONF}" || printf '%s\n' "${PF_ANCHOR_LINE}"
+        grep -qF "${PF_LOAD_LINE}" "${PF_CONF}" || printf '%s\n' "${PF_LOAD_LINE}"
     } >> "${pf_tmp}"
 
     # Validate the WHOLE file, not just our lines. An anchor statement in the
