@@ -93,60 +93,59 @@ if [ "$MODE" = "print-xcode-path" ]; then
 fi
 
 # --------------------------------------------------------------------------
-# --cleanup: runs under `if: always()`, so it must be idempotent, must tolerate
-# a run that never got started, and must not itself fail the job.
+# --cleanup: runs under `if: always()`, so it must be idempotent and must
+# tolerate a run that never got started.
 #
-# It tears down what a PRIVILEGED run can leave behind on a self-hosted Mac:
-# a running system extension, an owner-tagged `pf` anchor, and the overlay
-# interface. It deliberately does NOT flush `pf` wholesale — ADR-0012 CB-6 puts
-# the rule set in the OS's custody and KS-19's boot anchor is PACKAGE-owned
-# (PS-7); a cleanup that removed it would leave the runner less protected than
-# it found it, and `twinvpn-unblock` is the sanctioned removal path (KS-20a).
+# It tears down what a PRIVILEGED run can leave behind on a self-hosted Mac: the
+# owner-tagged `pf` anchor and the /etc/pf.conf reference to it. It deliberately
+# does NOT flush `pf` wholesale — ADR-0012 CB-6 puts the rule set in the OS's
+# custody and KS-19's boot anchor is PACKAGE-owned (PS-7); a cleanup that
+# removed a third party's rules would leave the runner less protected than it
+# found it.
+#
+# IT NOW FAILS WHEN THE HOST IS STILL ENFORCING. The old rule here was "must not
+# itself fail the job", which is right for a teardown that ran into the failure
+# it was cleaning up after and wrong for the one thing a teardown is FOR: if
+# TwinVPN enforcement is still installed when this returns, the next job on this
+# machine inherits our firewall, and that must not be a line in a log nobody
+# reads. Everything else stays non-fatal.
 # --------------------------------------------------------------------------
 if [ "$MODE" = "cleanup" ]; then
   echo "=== cleanup: returning the runner to a known state ==="
   mkdir -p "$LOGDIR"
+  rm -f "$LOGDIR/cleanup-failed"
   {
     echo "--- systemextensionsctl list (before) ---"
     systemextensionsctl list 2>&1 || echo "(systemextensionsctl unavailable)"
 
-    # The owner-tagged anchor, and ONLY it. `twinvpn-unblock` is the
-    # package-owned, privileged removal command KS-20a defines for exactly this;
-    # using it rather than raw `pfctl -F` means the cleanup path and the
-    # supported recovery path are the same code.
-    # The target directory is asked for, never assumed: this repository shares
-    # one CARGO_TARGET_DIR across its workspaces.
-    unblock=""
-    if command -v cargo >/dev/null; then
-      target_dir="$(cd "$SHELL_DIR" && cargo metadata --format-version 1 --no-deps 2>/dev/null \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null || true)"
-      for candidate in "$target_dir/release/twinvpn-unblock" "$target_dir/debug/twinvpn-unblock"; do
-        [ -x "$candidate" ] && { unblock="$candidate"; break; }
-      done
-    fi
-    if [ -n "$unblock" ]; then
-      # `sudo -n`: a teardown must never block waiting for a password. This is
-      # the one place a non-zero status is tolerated and it is NOT a proof path
-      # — `if: always()` teardown that failed the job would hide the real
-      # failure it was cleaning up after.
-      sudo -n "$unblock" --yes 2>&1 \
-        || echo "(twinvpn-unblock reported a failure or sudo was unavailable; see above)"
-    else
-      echo "(twinvpn-unblock not built in this run; nothing owner-tagged to remove)"
-    fi
+    # The owner-tagged anchor, and ONLY it — through the one function both
+    # macOS teardowns share (`apple_remove_twinvpn_anchor`, ci-common-apple.sh),
+    # whose header records what this block used to do instead: call
+    # `twinvpn-unblock --yes`, a flag that has never existed, behind an `|| echo`
+    # that swallowed the usage error on every path. The anchor was therefore
+    # never removed and nobody found out.
+    #
+    # A NON-ZERO STATUS IS NOW RECORDED. It stays out of the pipeline's own exit
+    # status — this is an `if: always()` teardown and failing it would hide the
+    # failure it was cleaning up after — but "enforcement is still installed" is
+    # not a detail to bury either, so it is marked here and read after the tee.
+    apple_remove_twinvpn_anchor "$LOGDIR" || touch "$LOGDIR/cleanup-failed"
 
-    # The overlay interface, if a run left one. `ifconfig <utun> destroy` is the
-    # documented way; a missing interface is not an error here.
-    if ifconfig utun7 >/dev/null 2>&1; then
-      sudo -n ifconfig utun7 destroy 2>&1 || echo "(utun7 would not destroy)"
-    fi
-
-    echo "--- routes mentioning utun7 ---"
-    netstat -rn 2>/dev/null | grep -F utun7 || echo "(none)"
+    # NO `ifconfig utunN destroy`. This block had `utun7` hard-coded, guarded
+    # only by the interface existing — and utun indices are assigned
+    # DYNAMICALLY, so on a host where something else owns utun7 the teardown
+    # destroyed a stranger's tunnel. Nothing here knows which utun, if any, was
+    # ours: the extension owns its interface and macOS reclaims it when the
+    # process goes, which is the correct owner for that cleanup.
 
     echo "--- systemextensionsctl list (after) ---"
     systemextensionsctl list 2>&1 || echo "(systemextensionsctl unavailable)"
   } | tee "$LOGDIR/cleanup.log"
+  if [ -f "$LOGDIR/cleanup-failed" ]; then
+    echo "::error::cleanup left TwinVPN enforcement on this host; see \
+$LOGDIR/cleanup.log" >&2
+    exit 1
+  fi
   echo "=== cleanup done ==="
   exit 0
 fi
