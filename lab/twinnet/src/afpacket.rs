@@ -70,6 +70,10 @@ impl PacketSocket {
                 detail: format!("socket(AF_PACKET, SOCK_RAW) failed: {err}"),
             });
         }
+        // SAFETY: `sockaddr_ll` is a C struct of integers and a byte array. It
+        // has no niche and no field whose validity excludes zero, so the
+        // all-zero bit pattern is a value of the type; the three fields `bind`
+        // reads are assigned on the three lines below.
         let mut addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
         addr.sll_family = libc::AF_PACKET as u16;
         addr.sll_protocol = (libc::ETH_P_ALL as u16).to_be();
@@ -110,6 +114,11 @@ impl PacketSocket {
     ///
     /// [`NetError::Os`] if the kernel refuses the membership.
     pub fn set_promiscuous(&self) -> Result<()> {
+        // SAFETY: `packet_mreq` is three integers and an address byte array,
+        // none of which excludes zero, so the all-zero bit pattern is a value
+        // of the type. The two fields this request is made of are assigned
+        // below, and `PACKET_MR_PROMISC` is a membership in no particular
+        // address, so the zeroed `mr_alen` and `mr_address` are what it means.
         let mut mreq: libc::packet_mreq = unsafe { std::mem::zeroed() };
         mreq.mr_ifindex = self.ifindex;
         mreq.mr_type = libc::PACKET_MR_PROMISC as u16;
@@ -188,6 +197,9 @@ impl PacketSocket {
     /// [`NetError::Os`] for any read failure that is not a timeout.
     pub fn recv(&self, buf: &mut [u8]) -> Result<Option<usize>> {
         loop {
+            // SAFETY: no field of `sockaddr_ll` excludes zero, so the all-zero
+            // bit pattern is a value of the type. This one is an out-parameter
+            // that `recvfrom` fills in below before `sll_pkttype` is read.
             let mut addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
             let mut len = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
             // SAFETY: `buf` is a caller-owned slice whose length is passed
@@ -223,6 +235,10 @@ impl PacketSocket {
     ///
     /// [`NetError::Os`] for any write failure.
     pub fn send(&self, frame: &[u8]) -> Result<usize> {
+        // SAFETY: no field of `sockaddr_ll` excludes zero, so the all-zero bit
+        // pattern is a value of the type; every field `sendto` reads is
+        // assigned on the lines below, and the tail of `sll_addr` past
+        // `sll_halen` is the padding the kernel ignores.
         let mut addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
         addr.sll_family = libc::AF_PACKET as u16;
         addr.sll_ifindex = self.ifindex;

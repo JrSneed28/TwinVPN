@@ -131,10 +131,20 @@ pub fn run(
     set_nonblocking_read_timeout(&tun);
 
     let started = Instant::now();
-    // SAFETY: `try_clone` on the descriptor the tunnel owns; both handles are
-    // dropped at the end of this function and neither outlives it.
     let mut tun_read = tun;
-    let mut tun_write = unsafe { File::from_raw_fd(libc::dup(tun_read.as_raw_fd())) };
+    // SAFETY: `dup` takes a descriptor this function owns and returns an
+    // integer; it is checked below before anything is built from it.
+    let cloned = unsafe { libc::dup(tun_read.as_raw_fd()) };
+    if cloned < 0 {
+        return Err(NetError::os(
+            "duplicating the tunnel descriptor",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: `dup` returned a fresh descriptor, so this `File` is its only
+    // owner and closing it does not touch `tun_read`'s. Both handles are
+    // dropped at the end of this function and neither outlives it.
+    let mut tun_write = unsafe { File::from_raw_fd(cloned) };
     // `None` until the far end learns where its peer actually is.
     let learned: Mutex<Option<SocketAddr>> = Mutex::new(peer);
 
