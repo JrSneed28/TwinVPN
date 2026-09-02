@@ -231,9 +231,7 @@ echo "::group::what the kernel actually holds"
 # and not `grep`: grep exits 1 on no match and a measurement has no `|| true`.
 pf_enabled="$(awk '/^[[:space:]]*Status:[[:space:]]+Enabled/ { f = 1 } \
   END { print (f ? "true" : "false") }' "$LOGDIR/pf-info.txt")"
-# The EXACT form. `anchor "twinvpn/*"` also contains the word, and it is the
-# form that evaluates nothing (packaging/pf.conf.include); a check that accepted
-# it is how an inert anchor read as referenced.
+# The EXACT form: `anchor "twinvpn/*"` evaluates nothing (G-35) and must not pass.
 anchor_referenced="$(awk '$0 ~ /^[[:space:]]*anchor "twinvpn"([[:space:]]|$)/ { f = 1 } \
   END { print (f ? "true" : "false") }' "$LOGDIR/pf-main-rules.txt")"
 anchor_rule_count="$(awk '/^[[:space:]]*(block|pass|match)[[:space:]]/ { n++ } \
@@ -270,22 +268,18 @@ deny_v6_before="$(label_packets twinvpn.deny.v6 "$LOGDIR/pf-labels-before.txt")"
 eval_v4_before="$(label_evals twinvpn.deny.v4 "$LOGDIR/pf-labels-before.txt")"
 eval_v6_before="$(label_evals twinvpn.deny.v6 "$LOGDIR/pf-labels-before.txt")"
 
-# THE IPv6 PROBE NEEDS A ROUTE, A PRECONDITION AND NOT THE CLAIM: a hosted
-# runner has no route to the ULA prefix, so without one the kernel returns
-# ENETUNREACH before pf is consulted. pf sees the SYN on output before
-# neighbour discovery can fail. Recorded in the log either way.
-# A route alone was not enough: with no global IPv6 address on the interface
-# connect() has no source and fails before output, so a ULA source OUTSIDE
-# the covered prefix is aliased too. Both are removed afterwards.
+# THE IPv6 PROBE NEEDS A ROUTE AND A SOURCE, preconditions and not the claim:
+# a hosted runner has no route to the ULA prefix and no global IPv6 address,
+# so without both the kernel fails connect() before pf is consulted. A ULA
+# source OUTSIDE the covered prefix is aliased and a route added; both are
+# removed afterwards and recorded in the log either way.
 probe_v6_iface="$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }')"
 probe_v6_route=false; probe_v6_alias=false
 PROBE_V6_SRC="fd77:7717:d0c:ffff::2"
 if [ -n "$probe_v6_iface" ]; then
   if sudo -n ifconfig "$probe_v6_iface" inet6 "$PROBE_V6_SRC" prefixlen 64 alias \
        > "$LOGDIR/pf-probe-route.txt" 2>&1; then probe_v6_alias=true; fi
-  # DAD: a fresh alias is TENTATIVE for about a second and unusable as a
-  # source until then; connect() then fails with EHOSTUNREACH before output
-  # and no packet reaches pf (the 2026-09-02 third run). Wait it out.
+  # DAD: a fresh alias is tentative for a second and unusable as a source.
   for _ in $(seq 1 20); do
     ifconfig "$probe_v6_iface" inet6 2>/dev/null | grep -F "$PROBE_V6_SRC" | grep -qv tentative && break
     sleep 0.5
