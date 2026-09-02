@@ -84,11 +84,21 @@ fn the_posture_is_declared_at_startup_rather_than_discovered_by_a_user() {
     let (parts, _rec) = parts(TunnelProvenance::OsProvidedFlow);
     let adapter = MacosPlatformAdapter::new(parts);
     let posture = adapter.posture();
-    // `pfctl` is absent on this host, which is itself the fact worth declaring:
-    // the shell turns it into a startup refusal rather than arming without a
-    // firewall (ADR-0012 §8, PS-18).
-    assert!(!posture.pfctl_present);
-    assert!(!posture.route_binary_present);
+    // Both binaries are PROBED, so the posture must say what the filesystem
+    // holds, whatever that is: on this host their absence is the fact the shell
+    // turns into a startup refusal rather than arming without a firewall
+    // (ADR-0012 §8, PS-18); on a hosted Linux runner net-tools puts `route(8)`
+    // at `/sbin/route`; on macOS itself both exist. Asserting absence was a
+    // claim about the test host, not about the adapter, and it failed T3 every
+    // night it ran.
+    assert_eq!(
+        posture.pfctl_present,
+        std::path::Path::new(twinvpn_platform_macos::netcfg::PFCTL_BIN).exists()
+    );
+    assert_eq!(
+        posture.route_binary_present,
+        std::path::Path::new(twinvpn_platform_macos::netcfg::ROUTE_BIN).exists()
+    );
     assert!(posture.ks9_complete);
     // §11.16 (l): reported TRUTHFULLY. `AbsentElement` has no element and says so.
     assert_eq!(
