@@ -19,6 +19,8 @@ three of these produce a confident "protected" while packets leave:
 So the observation moves **off the device**. `twinoracle` runs somewhere the
 device under test can reach only by emitting a packet that actually left it, and
 it records what arrived, from which address, on which family, and when.
+"External" here means external to the device under test, which is the whole of
+the claim — it need not be a different machine (§3.1).
 
 > **"Zero unauthorized egress" is a statement made by a third party, or it is not
 > a statement at all.**
@@ -39,14 +41,71 @@ hear the device *before* its silence means anything, so:
   `INCONCLUSIVE`, whatever the `SILENCE` phases show;
 * `INCONCLUSIVE` is **not a pass**, and `build/acceptance/report.py` counts it
   against Phase 5 eligibility exactly as a failure;
-* `build/ci/leak-probe.sh` refuses a beacon target on loopback or an RFC 1918
-  address, because egress to the machine you are testing is not egress.
+* `build/ci/leak-probe.sh` refuses a beacon target on loopback or link-local, on
+  **both** families, and refuses any address the probe host itself owns, because
+  egress to the machine you are testing is not egress. A non-global target is
+  accepted only under `TWINVPN_ORACLE_TOPOLOGY=in-box` (§3.1).
 
 `tests/verdict.rs` is where each of those is a runnable check.
 
 ---
 
 ## 3. Deployment
+
+Two shapes. **In-box (§3.1) is what the acceptance gate uses as of 2026-09-02**;
+the public deployment (§3.2) is the alternative and is what the flag reference
+below describes.
+
+The binary builds on Windows as well as Linux: `random_id` uses `getrandom`
+rather than opening `/dev/urandom`, so an oracle can run on the same Windows
+runner that drives a nested guest. Windows also defaults `IPV6_V6ONLY` to on, so
+the listener split §3.3 depends on is satisfied there without a sysctl.
+
+### 3.1 In-box deployment on one runner
+
+The oracle, the sentinel and the DNS forwarders run on the runner that drives
+the device under test, on address space that runner creates for the run. There
+is no cloud instance, no public address and no delegated zone. **Independence is
+then structural rather than asserted:** `is_dut_sourced` compares source
+addresses for exact membership, so a fabric with **no NAT anywhere between the
+device and the observer** satisfies it by construction.
+
+Four rules, and each of them is load-bearing:
+
+* **Listeners go on a second, ROUTED segment** that the device reaches only
+  through its default route. **Never on-link with the device.** A correct kill
+  switch permits the device's own link by design — the local-network class is
+  ALLOW in every routing mode — so an on-link oracle is permitted *correctly*
+  and the SILENCE phase then fails for a reason that is not a leak.
+* **The sentinel beats from a second host identity on that segment**, disjoint
+  from every address the device presents. It no longer needs a separate machine.
+* **A stateless per-leg DNS forwarder replaces the delegated zone** — one for
+  the unprotected leg and one for the protected leg, each named in
+  `--resolver <ip>=<id>:<p|u>`, with the device's `nameserver` rewritten when
+  the tunnel comes up. **No forwarder may retry, cache or health-check:** one
+  that retransmits on its own manufactures a DNS arrival during a SILENCE phase,
+  which this process records as a leak and the acceptance report turns into a
+  FAIL against the product.
+* **The control plane is driven by the controller, never by the device.** A
+  correct kill switch blocks the device's control POSTs during the armed window,
+  and dropped attempt increments push the session under `attempt_minimums` —
+  INCONCLUSIVE for the opposite of the real reason. Exempt only the control
+  address from the kill switch; never a beacon address.
+
+Four address ranges the listeners and the sentinel must avoid, because a correct
+product permits or denies them for reasons that have nothing to do with the
+criterion: **link-local** (`169.254.0.0/16`, `fe80::/10`), **anything on-link
+with the device**, **`100.64.0.0/10`** and **`fd7c:9e5d:2a10::/48`** — the last
+two being the Tier-1 baseline deny floor, blocked in both postures, so a beacon
+there could never arrive even through a working tunnel.
+
+The session's evidence records which shape produced it. `oracle_topology` is
+`in-box` or `external`, and `sentinel_egress_identity` is the measured identity
+the sentinel presented, which the acceptance adjudicator requires to differ from
+both path identities. `sentinel_host` stays what it has always been: free text,
+echoed for a human, gated by nothing (§4.2).
+
+### 3.2 Public deployment — the alternative
 
 One small instance with **a public IPv4 address, a public IPv6 address**, and
 the beacon zone delegated to it.
@@ -90,18 +149,21 @@ Four listeners, and the split is not cosmetic:
 | `--dns4` / `--dns6` | the beacon zone, answered authoritatively with TTL 0 so a cached answer cannot stop the next beacon leaving |
 | `--control` | bind it to a **management address**. Nothing on the data plane can reach it, so a device that leaks cannot also rewrite the record of its leak |
 
-### 3.1 Two things the host must be configured for
+### 3.3 Two things the host must be configured for
 
-* **`net.ipv6.bindv6only=1`.** A dual-stack socket accepts IPv4 connections and
-  reports them as `::ffff:a.b.c.d`, which would make the family of the
-  observation a guess. The process also normalises v4-mapped peers and records
-  them as IPv4 — belt to that braces — but the socket option is the fix.
-* **The zone must be delegated.** `leak.oracle.twinvpn.example. NS <this host>`
-  in the parent zone. Without delegation the DNS beacons never arrive, every
-  session is `INCONCLUSIVE` for `dns`, and no criterion that makes a DNS claim
-  can pass — which is the correct outcome, loudly.
+* **`net.ipv6.bindv6only=1`**, on Linux. A dual-stack socket accepts IPv4
+  connections and reports them as `::ffff:a.b.c.d`, which would make the family
+  of the observation a guess. The process also normalises v4-mapped peers and
+  records them as IPv4 — belt to that braces — but the socket option is the fix.
+  Windows defaults `IPV6_V6ONLY` to on, so there it needs nothing.
+* **The zone must be delegated**, in the §3.2 deployment only.
+  `leak.oracle.twinvpn.example. NS <this host>` in the parent zone. Without
+  delegation the DNS beacons never arrive, every session is `INCONCLUSIVE` for
+  `dns`, and no criterion that makes a DNS claim can pass — which is the correct
+  outcome, loudly. In-box, the per-leg forwarders take this role: the device
+  resolves through them, and they are what the `--resolver` map names.
 
-### 3.2 What the source address means, per family
+### 3.4 What the source address means, per family
 
 IPv4 and IPv6 beacons arrive **from the device**, so their source addresses
 carry the `sources_disjoint_from` / `sources_subset_of` constraints — the ones
@@ -212,13 +274,17 @@ data-plane listeners on a cadence.
   two.
 * Where it runs is the whole claim, and the oracle cannot verify it. Pass
   `{"host": "..."}` to `/sentinel` and it is echoed into the report as
-  `sentinel_host`, to be read by a human rather than trusted by a check.
-* **Per-session or standing.** By default each session mints its own token. For
-  a criterion where no host in the CI job is independent of the device — an EC2
-  Mac testing its own system extension *is* the device — run a standing sentinel
-  against `--sentinel-token-file` instead: its beats are recorded in every
-  **open** session, because "the listeners were alive" is a fact about the oracle
-  rather than about any one run.
+  `sentinel_host`, to be read by a human rather than trusted by a check. The
+  checkable form of that claim lives outside this process: the lane measures the
+  identity its sentinel presented into `sentinel_egress_identity`, and the
+  acceptance adjudicator refuses one equal to either path identity.
+* **Per-session or standing.** By default each session mints its own token. A
+  standing sentinel run against `--sentinel-token-file` has its beats recorded
+  in every **open** session, because "the listeners were alive" is a fact about
+  the oracle rather than about any one run. That mode was introduced for
+  criteria where no host in the CI job looked independent of the device; under
+  the §3.1 topology the lane's own runner *is* independent by address, so the
+  per-session token is the ordinary choice again.
 * Continuity for family `F` over a SILENCE phase `[t0, t1]` holds iff every
   consecutive gap in `{t0} ∪ beats(F) ∪ {t1}` is `<= sentinel_max_gap_ms`.
   Anchoring at **both** ends is what catches an oracle that died at the start of
@@ -309,5 +375,6 @@ believes what it recorded.
 
 The parsers are deliberately hostile-input-shaped: the DNS parser refuses a
 compression pointer in a QNAME rather than following it, drops anything
-malformed, and is tested against truncated packets, because this socket is
-reachable from the internet and will be scanned.
+malformed, and is tested against truncated packets. In the §3.2 deployment this
+socket is reachable from the internet and will be scanned; in the §3.1 one it is
+reachable by a device whose whole purpose in the run is to try to reach it.
