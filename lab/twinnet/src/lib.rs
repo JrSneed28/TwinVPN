@@ -95,6 +95,6 @@ pub mod sandbox;
 pub mod traffic;
 pub mod tun;
 
-pub use error::{NetError, Result};
+pub use error::{NetError, Result, UNAVAILABLE_EXIT_CODE};
 pub use observer::{Capture, Escape, LeakPolicy, Prefix, Reason, Strictness};
 pub use sandbox::{ProcHandle, Ran, Sandbox};

@@ -76,5 +76,14 @@ impl NetError {
     }
 }
 
+/// The exit code a `twinnet` process uses for [`NetError::Unavailable`].
+///
+/// A named constant rather than a `3` in two files, because the two ends read
+/// it in opposite directions: the binary's `main` writes it, and [`crate::Sandbox`]
+/// reads it back off an agent that died before it could say anything. If those
+/// two ever disagreed, "this host cannot" would arrive as "this rig is broken"
+/// and panic a suite that should have skipped.
+pub const UNAVAILABLE_EXIT_CODE: u8 = 3;
+
 /// The crate's result alias.
 pub type Result<T> = std::result::Result<T, NetError>;

@@ -47,9 +47,11 @@ use crate::proto::{Request, Response};
 ///
 /// # Errors
 ///
-/// [`NetError::Unavailable`] when the kernel refuses the unshare — an
-/// unprivileged-userns-disabled host is a host this laboratory cannot run on,
-/// and that must never be reported as a passing scenario.
+/// [`NetError::Unavailable`] when this host refuses the namespace — at the
+/// `unshare` itself, or at one of the privileged steps inside it, which is
+/// where a host that restricts unprivileged user namespaces actually says no
+/// (see [`refused`]). A host this laboratory cannot run on must never be
+/// reported as a passing scenario.
 pub fn enter() -> Result<()> {
     // SAFETY: `getuid`/`getgid` cannot fail and take no arguments.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
@@ -71,11 +73,11 @@ pub fn enter() -> Result<()> {
     // process may not write `gid_map` while `setgroups` is permitted, because
     // that would let it drop out of a group it was confined to.
     fs::write("/proc/self/setgroups", "deny")
-        .map_err(|e| NetError::os("denying setgroups in the new user namespace", e))?;
+        .map_err(|e| refused("denying setgroups in the new user namespace", e))?;
     fs::write("/proc/self/uid_map", format!("0 {uid} 1\n"))
-        .map_err(|e| NetError::os("writing uid_map", e))?;
+        .map_err(|e| refused("writing uid_map", e))?;
     fs::write("/proc/self/gid_map", format!("0 {gid} 1\n"))
-        .map_err(|e| NetError::os("writing gid_map", e))?;
+        .map_err(|e| refused("writing gid_map", e))?;
 
     make_run_writable()?;
 
@@ -86,6 +88,35 @@ pub fn enter() -> Result<()> {
         .args(["link", "set", "lo", "up"])
         .status();
     Ok(())
+}
+
+/// Classifies a step that only succeeds if the new user namespace granted this
+/// process the capabilities of its root.
+///
+/// **A permission error here is the host, not this code.** A kernel that
+/// restricts unprivileged user namespaces need not refuse the `unshare` itself:
+/// on the `ubuntu-24.04` runner it does not. The namespace is created, the
+/// process is left in it holding nothing, and the refusal surfaces at the first
+/// privileged step — `setgroups` answered `EACCES` for this agent (job
+/// 100262708025) and `uid_map` answered `EPERM` for `util-linux`'s `unshare`
+/// on the same runner (job 100262707810). That is [`NetError::Unavailable`] by
+/// §3.1: a facility this host cannot provide, which a test skips on.
+///
+/// Everything else stays [`NetError::Os`], which panics a test rather than
+/// skipping it. A `uid_map` this code wrote in the wrong format fails `EINVAL`,
+/// and a defect must never be able to buy itself a quiet suite.
+fn refused(step: &'static str, e: std::io::Error) -> NetError {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        return NetError::Unavailable {
+            facility: "network-namespaces",
+            detail: format!(
+                "{step}: {e}. The unshare itself succeeded, so this host creates the \
+                 namespace and then denies it the capabilities that make it usable; \
+                 `kernel.apparmor_restrict_unprivileged_userns=0` restores them."
+            ),
+        };
+    }
+    NetError::os(step, e)
 }
 
 /// Mounts a private `tmpfs` over `/run` and creates `/run/netns`.
@@ -106,7 +137,7 @@ fn make_run_writable() -> Result<()> {
         )
     };
     if rc != 0 {
-        return Err(NetError::os(
+        return Err(refused(
             "making the mount namespace private",
             std::io::Error::last_os_error(),
         ));
@@ -208,7 +239,16 @@ pub fn serve<R: BufRead, W: Write>(input: R, mut output: W) -> Result<()> {
     Ok(())
 }
 
-fn write_line<W: Write>(output: &mut W, response: &Response) -> Result<()> {
+/// Writes one response line to the control pipe.
+///
+/// Public because the binary uses it for the one response the serving loop
+/// cannot produce: the failure of [`enter`] itself, which happens before there
+/// is a loop to be in.
+///
+/// # Errors
+///
+/// [`NetError::Os`] if the pipe cannot be written or flushed.
+pub fn write_line<W: Write>(output: &mut W, response: &Response) -> Result<()> {
     let encoded = serde_json::to_string(response).expect("Response is always encodable");
     writeln!(output, "{encoded}").map_err(|e| NetError::os("writing an agent response", e))?;
     output
@@ -415,6 +455,39 @@ fn wait(id: u64, timeout_ms: u64, table: &mut HashMap<u64, Spawned>) -> Response
                     unavailable: false,
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Error, ErrorKind};
+
+    use super::refused;
+
+    #[test]
+    fn a_denied_privileged_step_is_the_host_and_skips() {
+        let e = refused("writing uid_map", Error::from(ErrorKind::PermissionDenied));
+        assert!(
+            e.is_unavailable(),
+            "a host that denies the uid_map write forbids unprivileged user \
+             namespaces, and a test must skip on that rather than panic: {e}"
+        );
+        assert!(
+            e.to_string().contains("writing uid_map"),
+            "the skip has to name the step that was refused: {e}"
+        );
+    }
+
+    #[test]
+    fn any_other_failure_stays_a_defect() {
+        for kind in [ErrorKind::InvalidInput, ErrorKind::NotFound] {
+            let e = refused("writing uid_map", Error::from(kind));
+            assert!(
+                !e.is_unavailable(),
+                "{kind:?} is not a host refusal; calling it one would let a defect \
+                 buy itself a quiet suite"
+            );
         }
     }
 }

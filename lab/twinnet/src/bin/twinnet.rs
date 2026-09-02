@@ -337,11 +337,30 @@ fn main() -> std::process::ExitCode {
     let result = match cli.command {
         // MUST be first: `unshare(CLONE_NEWUSER)` is refused from a
         // multi-threaded process, and clap has not started one.
-        Command::Agent => agent::enter().and_then(|()| {
-            let stdin = std::io::stdin();
-            let stdout = std::io::stdout();
-            agent::serve(stdin.lock(), stdout.lock())
-        }),
+        Command::Agent => match agent::enter() {
+            Ok(()) => {
+                let stdin = std::io::stdin();
+                let stdout = std::io::stdout();
+                agent::serve(stdin.lock(), stdout.lock())
+            }
+            // The test holding the other end of this pipe would otherwise see
+            // only that it closed, and would have to describe the reason
+            // instead of quoting it. Say it on the pipe first.
+            Err(e) => {
+                let response = twinnet::proto::Response::Error {
+                    // `Unavailable`'s own framing is re-applied by the sandbox
+                    // on the far side; what has to survive the crossing is the
+                    // step that was refused and the errno it was refused with.
+                    message: match &e {
+                        twinnet::NetError::Unavailable { detail, .. } => detail.clone(),
+                        other => other.to_string(),
+                    },
+                    unavailable: e.is_unavailable(),
+                };
+                let _ = agent::write_line(&mut std::io::stdout().lock(), &response);
+                Err(e)
+            }
+        },
         Command::Capabilities => agent::enter().map(|()| {
             for fact in probe::probe_all() {
                 let mark = if fact.available {
@@ -551,7 +570,7 @@ fn main() -> std::process::ExitCode {
             // condition did not hold" without parsing a message. §3.1's rule,
             // carried all the way to the process boundary.
             if e.is_unavailable() {
-                std::process::ExitCode::from(3)
+                std::process::ExitCode::from(twinnet::UNAVAILABLE_EXIT_CODE)
             } else {
                 std::process::ExitCode::FAILURE
             }

@@ -17,7 +17,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-use crate::error::{NetError, Result};
+use crate::error::{NetError, Result, UNAVAILABLE_EXIT_CODE};
 use crate::proto::{Fact, Request, Response};
 
 /// A handle on a spawned process inside the sandbox.
@@ -106,6 +106,19 @@ impl Sandbox {
         };
         sandbox.facts = match sandbox.request(&Request::Probe)? {
             Response::Probe { facts } => facts,
+            // The agent answers its own startup failure on this pipe before it
+            // exits, so the reason a host refused it arrives here as the errno
+            // that host produced rather than as a description of one.
+            Response::Error {
+                message,
+                unavailable: true,
+            } => {
+                return Err(NetError::Unavailable {
+                    facility: "network-namespaces",
+                    detail: message,
+                })
+            }
+            Response::Error { message, .. } => return Err(NetError::Agent(message)),
             other => {
                 return Err(NetError::Agent(format!(
                     "expected a probe report, got {other:?}"
@@ -176,25 +189,76 @@ impl Sandbox {
     ///
     /// # Errors
     ///
-    /// [`NetError::Agent`] if the pipe closes or the answer is undecodable.
+    /// [`NetError::Unavailable`] if the agent died because this host refused it
+    /// a namespace; [`NetError::Agent`] if it died for any other reason or the
+    /// answer is undecodable.
     pub fn request(&mut self, req: &Request) -> Result<Response> {
         let line = serde_json::to_string(req).expect("Request is always encodable");
-        writeln!(self.stdin, "{line}").map_err(|e| NetError::os("writing to the agent", e))?;
-        self.stdin
-            .flush()
-            .map_err(|e| NetError::os("flushing to the agent", e))?;
+        // A write that fails is the same event as a read that returns nothing —
+        // the agent is gone, and which side noticed first is a race between its
+        // exit and this write. Both go to the same classifier.
+        if writeln!(self.stdin, "{line}")
+            .and_then(|()| self.stdin.flush())
+            .is_err()
+        {
+            return Err(self.agent_died("writing to the agent"));
+        }
         let mut buf = String::new();
         let n = self
             .stdout
             .read_line(&mut buf)
             .map_err(|e| NetError::os("reading from the agent", e))?;
         if n == 0 {
-            return Err(NetError::Agent(
-                "the agent closed its pipe; it probably could not unshare".to_owned(),
-            ));
+            return Err(self.agent_died("reading from the agent"));
         }
         serde_json::from_str(&buf)
             .map_err(|e| NetError::Agent(format!("undecodable response `{}`: {e}", buf.trim())))
+    }
+
+    /// Why the control channel stopped answering — read off the agent, not
+    /// inferred from the silence.
+    ///
+    /// This used to answer "the agent closed its pipe; it probably could not
+    /// unshare", which is a guess, and a guess is spelled [`NetError::Agent`],
+    /// which [`crate::rigs`]' callers treat as a defect and panic on. On the
+    /// `ubuntu-24.04` runner the guess was right and the classification was
+    /// wrong, so four scenarios failed a suite they should have skipped (jobs
+    /// 100262708025 and 100262707660).
+    ///
+    /// The exit status settles it. `twinnet`'s `main` exits
+    /// [`UNAVAILABLE_EXIT_CODE`] for an error that `is_unavailable` and nothing
+    /// else does, deliberately, so §3.1's distinction survives the process
+    /// boundary. Every other status stays `Agent` and still panics: an agent
+    /// that died of a defect must not be able to buy a skip with its silence.
+    fn agent_died(&mut self, what: &str) -> NetError {
+        // Bounded, for the same reason `Drop`'s wait is: an agent wedged on a
+        // child that ignores `SIGKILL` must not wedge the suite behind it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let status = loop {
+            match self.child.try_wait() {
+                Ok(Some(s)) => break Some(s),
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                _ => break None,
+            }
+        };
+        match status.as_ref().and_then(std::process::ExitStatus::code) {
+            Some(code) if code == i32::from(UNAVAILABLE_EXIT_CODE) => NetError::Unavailable {
+                facility: "network-namespaces",
+                detail: format!(
+                    "{what}: the agent exited {code}, the code it reserves for a facility \
+                     this host cannot provide; its own diagnosis is on stderr"
+                ),
+            },
+            Some(code) => {
+                NetError::Agent(format!("{what}: the agent exited {code} without answering"))
+            }
+            None => NetError::Agent(match status {
+                Some(s) => format!("{what}: the agent was terminated ({s})"),
+                None => format!("{what}: the agent stopped answering and did not exit"),
+            }),
+        }
     }
 
     /// Runs a command, optionally inside a namespace, and returns what it did.
