@@ -107,6 +107,17 @@ jobs:
   local-plane:
     name: a real leg, a real token, a real relay
     runs-on: ubuntu-latest
+    # `make plane-up` runs `infra-check`, which runs `docker compose config`,
+    # and compose interpolates the WHOLE file before doing anything, so the
+    # `${VAR:?}` guards on the stack's credentials bite here exactly as they
+    # do in t2-post-merge.yml's `topology-up`. Same values, same reasoning:
+    # NONE OF THESE IS A SECRET. They are literals in a public workflow file
+    # for a stack that lives for the length of this job on this runner.
+    env:
+      TWINVPN_PG_PASSWORD: ci-not-a-credential
+      TWINVPN_CP_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_control?sslmode=disable
+      TWINVPN_PRESENCE_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_presence?sslmode=disable
+      TWINVPN_RELAYDIR_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_relay_directory?sslmode=disable
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
