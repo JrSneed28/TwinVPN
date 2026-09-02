@@ -109,6 +109,25 @@ jobs:
     name: bring the stack up — dual stack and IPv6-only
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # ------------------------------------------------------------------
+    # Every `docker compose` subcommand interpolates the WHOLE file first,
+    # `ps` and `down` included, so the `${VAR:?}` guards on the secrets bite
+    # in every step and not only in the two that start something. These were
+    # set on the `up` steps alone, which left `ps`, `exec` and `down` failing
+    # at interpolation before they reached the daemon. Job scope is the scope
+    # the guards actually have.
+    #
+    # NONE OF THESE IS A SECRET. They are literals in a public workflow file,
+    # they configure a stack that exists for the length of this job on this
+    # runner, and nothing they authenticate is reachable from outside it. A
+    # real credential would come from `secrets.*`, which is exactly why these
+    # do not.
+    # ------------------------------------------------------------------
+    env:
+      TWINVPN_PG_PASSWORD: ci-not-a-credential
+      TWINVPN_CP_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_control?sslmode=disable
+      TWINVPN_PRESENCE_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_presence?sslmode=disable
+      TWINVPN_RELAYDIR_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_relay_directory?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
@@ -158,11 +177,6 @@ jobs:
       # NO database — infra/README.md §2.2.
       # ------------------------------------------------------------------
       - name: dual-stack — up
-        env:
-          TWINVPN_PG_PASSWORD: ci-not-a-credential
-          TWINVPN_CP_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_control?sslmode=disable
-          TWINVPN_PRESENCE_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_presence?sslmode=disable
-          TWINVPN_RELAYDIR_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_relay_directory?sslmode=disable
         run: |
           set -euo pipefail
           docker compose up -d --wait --wait-timeout 180 \
@@ -217,11 +231,6 @@ jobs:
       # and fails here, which is the entire point.
       # ------------------------------------------------------------------
       - name: IPv6-only — up
-        env:
-          TWINVPN_PG_PASSWORD: ci-not-a-credential
-          TWINVPN_CP_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_control?sslmode=disable
-          TWINVPN_PRESENCE_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_presence?sslmode=disable
-          TWINVPN_RELAYDIR_DATABASE_URL: postgres://twinvpn:ci-not-a-credential@postgres:5432/twinvpn_relay_directory?sslmode=disable
         run: |
           set -euo pipefail
           docker compose -f docker-compose.yml -f infra/compose/ipv6-only.yml \

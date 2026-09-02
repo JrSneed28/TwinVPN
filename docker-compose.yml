@@ -224,7 +224,7 @@ services:
     environment:
       # NO SECRET HAS A DEFAULT. `:?` makes an unset password a startup error
       # with a readable message, never a silent fallback to a known value.
-      POSTGRES_PASSWORD: ${TWINVPN_PG_PASSWORD:?TWINVPN_PG_PASSWORD must be set - copy infra/.env.example to .env and choose a value}
+      POSTGRES_PASSWORD: ${TWINVPN_PG_PASSWORD:?TWINVPN_PG_PASSWORD must be set - copy infra/env.example to .env and choose a value}
       POSTGRES_USER: ${TWINVPN_PG_USER:-twinvpn}
       POSTGRES_DB: ${TWINVPN_PG_DATABASE:-twinvpn_control}
       # Deterministic collation so a local run and CI sort identically.
