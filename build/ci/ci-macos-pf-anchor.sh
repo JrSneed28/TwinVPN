@@ -265,16 +265,14 @@ deny_v6_before="$(label_packets twinvpn.deny.v6 "$LOGDIR/pf-labels-before.txt")"
 eval_v4_before="$(label_evals twinvpn.deny.v4 "$LOGDIR/pf-labels-before.txt")"
 eval_v6_before="$(label_evals twinvpn.deny.v6 "$LOGDIR/pf-labels-before.txt")"
 
-# THE IPv6 PROBE NEEDS A SOURCE AND A NEXT HOP, preconditions and not the
-# claim: a hosted runner has neither for the ULA prefix, so without them the
-# kernel fails connect() before pf is consulted. Both are removed afterwards.
+# THE IPv6 PROBE NEEDS A SOURCE AND A NEXT HOP (preconditions, not the claim):
+# a hosted runner has neither for the ULA prefix. Both are removed afterwards.
 probe_v6_iface="$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }')"
 probe_v6_route=false; probe_v6_alias=false
 PROBE_V6_SRC="fd77:7717:d0c:ffff::2"
 if [ -n "$probe_v6_iface" ]; then
   if sudo -n ifconfig "$probe_v6_iface" inet6 "$PROBE_V6_SRC" prefixlen 64 alias \
        > "$LOGDIR/pf-probe-route.txt" 2>&1; then probe_v6_alias=true; fi
-  # DAD: a fresh alias is tentative for a second and unusable as a source.
   for _ in $(seq 1 20); do
     ifconfig "$probe_v6_iface" inet6 2>/dev/null | grep -F "$PROBE_V6_SRC" | grep -qv tentative && break
     sleep 0.5
