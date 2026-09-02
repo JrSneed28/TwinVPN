@@ -878,12 +878,19 @@ fn w24_the_abi_carries_the_ruleset_read_back_and_the_recovery_entry_point() {
              removing it would be an abi_major break, not a minor one"
         );
     }
-    assert_eq!(
-        twinvpn_core::ABI_MINOR,
-        2,
-        "W-24's two entries were an ADDITION, so VR-1 makes them a minor bump. \
-         A shell compiled against minor 1 reads its own shorter struct and is \
-         unaffected; the number is what tells it which entries it may expect"
+    // W-24 landed at minor 2, and every later addition under VR-1 (7df64d7's
+    // `tw_core_submit_response` took it to 3) raises the number again without
+    // touching these entries. So the tripwire is a floor, not an equality: an
+    // equality would fire on the NEXT legitimate addition, which is what it did
+    // the first time this workspace ran in CI, while a minor that went BELOW 2
+    // would mean the entries' own minor was rewritten, which is the defect.
+    assert!(
+        twinvpn_core::ABI_MINOR >= 2,
+        "W-24's two entries were an ADDITION at minor 2, so VR-1 makes the minor \
+         at least 2 for as long as they exist. A shell compiled against minor 1 \
+         reads its own shorter struct and is unaffected; the number is what tells \
+         it which entries it may expect. Got {}",
+        twinvpn_core::ABI_MINOR
     );
 
     // Both halves agree: the platform trait answers, and so does the ABI over a
