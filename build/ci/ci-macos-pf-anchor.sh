@@ -225,7 +225,10 @@ echo "::endgroup::"
 
 # --- 3. ksd, the boot-path job itself ---
 echo "::group::ksd --apply-boot-anchor and --status"
-[ -x "$KSD" ] || { echo "::error::install.sh did not place $KSD" >&2; exit 1; }
+# `sudo -n test`, not `[ -x ]`: install.sh makes the store root 0700 root:wheel
+# (its own header, "the store root ... root:wheel, 0700"), so the unprivileged
+# runner user cannot even stat the file it is about to have root execute.
+sudo -n test -x "$KSD" || { echo "::error::install.sh did not place $KSD" >&2; exit 1; }
 ksd_apply_exit=0
 sudo -n "$KSD" --apply-boot-anchor 2>&1 | tee "$LOGDIR/ksd-apply.log" \
   || ksd_apply_exit=${PIPESTATUS[0]}

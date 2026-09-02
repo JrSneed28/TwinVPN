@@ -220,6 +220,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.twinvpn.client.acceptancetests
+        # This bundle is ad-hoc SIGNED (unlike TwinVPNIntegrationTests, which
+        # sets CODE_SIGNING_ALLOWED: NO), and codesign refuses a bundle with no
+        # Info.plist. Generate one rather than commit a second plist to drift.
+        GENERATE_INFOPLIST_FILE: YES
         LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/Frameworks/$(PLATFORM_NAME)
         OTHER_LDFLAGS: $(inherited) -ltwinvpn_core_lite
         SWIFT_INCLUDE_PATHS: $(inherited) $(SRCROOT)/Sources/TwinVPNBridge/include
