@@ -453,9 +453,17 @@ cross-check:
 # cannot require: no MSVC tree, no lane, and the banner says which it got. That
 # is the same rule the rest of this target follows -- report the coverage you
 # actually have.
-	@win_vc=$$(ls -d "/mnt/c/Program Files/Microsoft Visual Studio/"*/*/VC/Tools/MSVC/*/ 2>/dev/null | sort -V | tail -1); \
+#
+# The `|| true` on each probe is load-bearing. .SHELLFLAGS runs every recipe
+# under `-eu -o pipefail`; on a host with no /mnt/c the glob does not expand,
+# `ls` exits 2, `2>/dev/null` hides the message but not the status, pipefail
+# carries it through `sort | tail`, and `-e` aborts the recipe BEFORE the `else`
+# branch below can print NOT CHECKED. That killed the whole cross-check job on
+# its first CI run with `Error 2` and no output, taking the macOS, iOS, Android
+# and Swift lanes after it down with it.
+	@win_vc=$$(ls -d "/mnt/c/Program Files/Microsoft Visual Studio/"*/*/VC/Tools/MSVC/*/ 2>/dev/null | sort -V | tail -1 || true); \
 	win_sdk="/mnt/c/Program Files (x86)/Windows Kits/10"; \
-	win_sdkv=$$(ls "$$win_sdk/Include" 2>/dev/null | sort -V | tail -1); \
+	win_sdkv=$$(ls "$$win_sdk/Include" 2>/dev/null | sort -V | tail -1 || true); \
 	if [ -f build/toolchain/env.sh ]; then . build/toolchain/env.sh; fi; \
 	if [ -n "$$win_vc" ] && [ -n "$$win_sdkv" ] && command -v clang-cl >/dev/null; then \
 	  echo "==> cross-check shells/windows twinvpnsvc ($(WIN_TARGET)), core-host"; \
