@@ -35,6 +35,39 @@ use twinlab::capability::HostCapabilities;
 use twinlab::nat::{expected_class, Personality, PortMap, Traversability, TRAVERSABILITY_MD};
 use twinlab_scenarios::{all, by_id, ScenarioFamily};
 
+/// `println!`, minus the panic when the reader has walked away.
+///
+/// Every line this binary prints goes through here, because every subcommand
+/// can be read by something that stops reading. `lab-t1` pipes `list` into
+/// `head -1` and `capabilities` into `tee`: the first closes the pipe after one
+/// line, and Rust ignores `SIGPIPE`, so the next write returns `EPIPE` and
+/// `println!` unwraps it into "failed printing to stdout: Broken pipe". That is
+/// how a command which had already produced the line its consumer wanted exited
+/// 101 and failed the step (job 100262708050).
+///
+/// A closed stdout is the consumer saying it has enough, so the error is
+/// dropped and the command finishes on its own terms. The exit code then still
+/// means what it says — §3.1's three-way answer reaches the shell, instead of
+/// being overwritten by a panic on the way out.
+macro_rules! outln {
+    () => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout().lock());
+    }};
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout().lock(), $($arg)*);
+    }};
+}
+
+/// `print!`, on the same terms as [`outln`].
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout().lock(), $($arg)*);
+    }};
+}
+
 #[derive(Parser)]
 #[command(
     name = "twinlab-scenarios",
@@ -157,19 +190,19 @@ fn conformance() -> std::process::ExitCode {
             match twinlab_scenarios::runner::nat64_conformance() {
                 Ok((true, evidence)) => {
                     passed += 1;
-                    println!("  {:<18} PASS         {}", p.name(), evidence.join("; "));
+                    outln!("  {:<18} PASS         {}", p.name(), evidence.join("; "));
                 }
                 Ok((false, evidence)) => {
                     blocked.push(p.name());
-                    println!("  {:<18} FAIL         {}", p.name(), evidence.join("; "));
+                    outln!("  {:<18} FAIL         {}", p.name(), evidence.join("; "));
                 }
                 Err(e) if e.is_unavailable() => {
                     blocked.push(p.name());
-                    println!("  {:<18} UNAVAILABLE  {e}", p.name());
+                    outln!("  {:<18} UNAVAILABLE  {e}", p.name());
                 }
                 Err(e) => {
                     blocked.push(p.name());
-                    println!("  {:<18} ERROR        {e}", p.name());
+                    outln!("  {:<18} ERROR        {e}", p.name());
                 }
             }
             continue;
@@ -177,7 +210,7 @@ fn conformance() -> std::process::ExitCode {
         match twinlab_scenarios::runner::conformance(p) {
             Ok((report, disagreements)) if disagreements.is_empty() => {
                 passed += 1;
-                println!(
+                outln!(
                     "  {:<18} PASS         mapping {:?}, filtering {:?}, mapped {}",
                     p.name(),
                     report.mapping,
@@ -187,7 +220,7 @@ fn conformance() -> std::process::ExitCode {
             }
             Ok((_, disagreements)) => {
                 blocked.push(p.name());
-                println!(
+                outln!(
                     "  {:<18} FAIL         {}",
                     p.name(),
                     disagreements.join("; ")
@@ -195,23 +228,23 @@ fn conformance() -> std::process::ExitCode {
             }
             Err(e) if e.is_unavailable() => {
                 blocked.push(p.name());
-                println!("  {:<18} UNAVAILABLE  {e}", p.name());
+                outln!("  {:<18} UNAVAILABLE  {e}", p.name());
             }
             Err(e) => {
                 blocked.push(p.name());
-                println!("  {:<18} ERROR        {e}", p.name());
+                outln!("  {:<18} ERROR        {e}", p.name());
             }
         }
     }
-    println!(
+    outln!(
         "\n{passed} of {} personalities passed §3.4.2's conformance suite.",
         Personality::ALL.len()
     );
     if blocked.is_empty() {
-        println!("Rule L-1 permits a traversal, leak or relay test against any of them.");
+        outln!("Rule L-1 permits a traversal, leak or relay test against any of them.");
         std::process::ExitCode::SUCCESS
     } else {
-        println!(
+        outln!(
             "Rule L-1 FORBIDS a traversal, leak or relay test against: {}",
             blocked.join(", ")
         );
@@ -229,11 +262,11 @@ fn run_scenario(id: &str) -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     };
     let outcome = run(&scenario);
-    println!("{}  {}", outcome.status(), scenario.id);
+    outln!("{}  {}", outcome.status(), scenario.id);
     match &outcome {
         Execution::Pass { evidence } => {
             for line in evidence {
-                println!("  {line}");
+                outln!("  {line}");
             }
             std::process::ExitCode::SUCCESS
         }
@@ -242,32 +275,32 @@ fn run_scenario(id: &str) -> std::process::ExitCode {
             observed,
             evidence,
         } => {
-            println!("  expected: {expected}");
-            println!("  observed: {observed}");
+            outln!("  expected: {expected}");
+            outln!("  observed: {observed}");
             for line in evidence {
-                println!("  {line}");
+                outln!("  {line}");
             }
             std::process::ExitCode::FAILURE
         }
         Execution::Void { disagreements } => {
-            println!(
+            outln!(
                 "  a middlebox failed its §3.4.2 conformance suite, so this result is \
                  evidence of nothing (rule L-1, control V10):"
             );
             for d in disagreements {
-                println!("  {d}");
+                outln!("  {d}");
             }
             std::process::ExitCode::from(4)
         }
         Execution::Unavailable { detail } => {
-            println!("  {detail}");
-            println!("  This is NOT a pass. §3.1: a facility this host cannot provide yields");
-            println!("  Unavailable, never a green line.");
+            outln!("  {detail}");
+            outln!("  This is NOT a pass. §3.1: a facility this host cannot provide yields");
+            outln!("  Unavailable, never a green line.");
             std::process::ExitCode::from(3)
         }
         Execution::NotExecutable { family, needs } => {
-            println!("  the `{family}` family has no procedure in this runner yet.");
-            println!("  needs: {needs}");
+            outln!("  the `{family}` family has no procedure in this runner yet.");
+            outln!("  needs: {needs}");
             std::process::ExitCode::from(3)
         }
     }
@@ -289,11 +322,11 @@ fn nat_ruleset(class: &str, external: &str, internal: &str) -> std::process::Exi
     // command EMITS a ruleset, it does not apply one. Whether this host
     // can realize it is `plan`'s question, and answering it twice in
     // two places is how the two answers come to disagree.
-    println!("# personality: {}", p.name());
+    outln!("# personality: {}", p.name());
     for f in p.required_facilities() {
-        println!("# requires: {}", f.name());
+        outln!("# requires: {}", f.name());
     }
-    print!("{}", p.ruleset(external, internal, None));
+    out!("{}", p.ruleset(external, internal, None));
     std::process::ExitCode::SUCCESS
 }
 
@@ -317,28 +350,28 @@ fn impair_argv(spec: &str, dev: &str) -> std::process::ExitCode {
         );
         return std::process::ExitCode::FAILURE;
     };
-    println!("{}", argv.join(" "));
+    outln!("{}", argv.join(" "));
     std::process::ExitCode::SUCCESS
 }
 
 /// The NAT class-pair matrix, generated from `docs/networking.md` §3.2.
 fn matrix() -> std::process::ExitCode {
     let m = Traversability::parse(TRAVERSABILITY_MD);
-    print!("{:<18}", "local \\ remote");
+    out!("{:<18}", "local \\ remote");
     for p in Personality::ALL {
-        print!("{:<20}", p.name());
+        out!("{:<20}", p.name());
     }
-    println!();
+    outln!();
     for a in Personality::ALL {
-        print!("{:<18}", a.name());
+        out!("{:<18}", a.name());
         for b in Personality::ALL {
             let c =
                 expected_class(&m, a, b, PortMap::None).map_or("-", twinlab::OutcomeClass::name);
-            print!("{c:<20}");
+            out!("{c:<20}");
         }
-        println!();
+        outln!();
     }
-    println!(
+    outln!(
         "\ngenerated from docs/networking.md §3.2 — §3.3 requires exactly that, so a \
                  change to the matrix changes the lab"
     );
@@ -356,18 +389,18 @@ fn main() -> std::process::ExitCode {
 
     match Cli::parse().command {
         Command::Capabilities => {
-            print!("{}", HostCapabilities::probe().summary());
+            out!("{}", HostCapabilities::probe().summary());
             // The sandbox's own probe, which is the one a run actually gets:
             // `twinlab` probes from this process, and this process cannot create
             // a named namespace or open a raw socket. `twinnet`'s agent can,
             // because it unshares first, and what it reports is what a scenario
             // will find. Printing only the first would understate the host;
             // printing only the second would hide the difference between them.
-            println!("\ninside the twinnet sandbox:");
+            outln!("\ninside the twinnet sandbox:");
             match twinnet::Sandbox::start() {
                 Ok(sb) => {
                     for fact in sb.facts() {
-                        println!(
+                        outln!(
                             "  {:<20} {:<11} {}",
                             fact.facility,
                             if fact.available {
@@ -379,7 +412,7 @@ fn main() -> std::process::ExitCode {
                         );
                     }
                 }
-                Err(e) => println!("  the sandbox could not start: {e}"),
+                Err(e) => outln!("  the sandbox could not start: {e}"),
             }
             std::process::ExitCode::SUCCESS
         }
@@ -395,7 +428,7 @@ fn main() -> std::process::ExitCode {
                 if want.is_some_and(|w| w != s.family) {
                     continue;
                 }
-                println!(
+                outln!(
                     "{:<34} {:<12} {:<10} {}",
                     s.id,
                     s.determinism.name(),
@@ -412,7 +445,7 @@ fn main() -> std::process::ExitCode {
         Command::Matrix => matrix(),
         Command::Show { id } => {
             if let Some(s) = by_id(&id) {
-                print!("{}", s.to_toml());
+                out!("{}", s.to_toml());
                 std::process::ExitCode::SUCCESS
             } else {
                 eprintln!("no scenario `{id}`");
@@ -431,11 +464,11 @@ fn main() -> std::process::ExitCode {
                 return std::process::ExitCode::FAILURE;
             };
             let host = HostCapabilities::probe();
-            println!("{} ({})", s.id, s.determinism.name());
-            println!("  purpose: {}", s.purpose);
-            println!("  needs:");
+            outln!("{} ({})", s.id, s.determinism.name());
+            outln!("  purpose: {}", s.purpose);
+            outln!("  needs:");
             for f in s.required_facilities() {
-                println!(
+                outln!(
                     "    {:<20} {}",
                     f.name(),
                     if host.has(f) {
@@ -446,8 +479,8 @@ fn main() -> std::process::ExitCode {
                 );
             }
             match s.runnable_on(&host) {
-                Ok(()) => println!("  verdict: runnable on this host"),
-                Err(v) => println!(
+                Ok(()) => outln!("  verdict: runnable on this host"),
+                Err(v) => outln!(
                     "  verdict: {v:?}\n           this is an ABSENCE OF EVIDENCE, not a pass \
                      and not a failure"
                 ),
