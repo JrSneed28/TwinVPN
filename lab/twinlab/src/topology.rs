@@ -443,12 +443,25 @@ impl LinuxNamespaceBackend {
                 }
             }
         }
-        for n in topology.nodes.iter().filter(|n| n.forwarding) {
-            // Both families, always. A v4-only forwarding node is the exact
-            // asymmetry ADR-0010 R1 forbids, and it is invisible until a v6
-            // scenario fails for no apparent reason.
-            for key in ["net.ipv4.ip_forward=1", "net.ipv6.conf.all.forwarding=1"] {
-                self.runner.run_in(Some(&n.name), "sysctl", &["-w", key])?;
+        for n in &topology.nodes {
+            // Both families, always, and BOTH VALUES. A v4-only forwarding node
+            // is the exact asymmetry ADR-0010 R1 forbids, and it is invisible
+            // until a v6 scenario fails for no apparent reason.
+            //
+            // Writing `0` matters as much as writing `1`. A new namespace
+            // inherits the initial namespace's `all` devconf, `ip_forward`
+            // included (`net/ipv4/devinet.c`, `devinet_init_net`), so on a host
+            // running Docker every node here would arrive forwarding — and a
+            // node that forwards without being asked to carries traffic around
+            // whatever this topology put in the path. `twinnet::fabric` had
+            // exactly that defect and it cost two NAT scenarios on a runner
+            // (job 100276849297); this is the same realizer's copy of it.
+            let on = u8::from(n.forwarding);
+            for key in [
+                format!("net.ipv4.ip_forward={on}"),
+                format!("net.ipv6.conf.all.forwarding={on}"),
+            ] {
+                self.runner.run_in(Some(&n.name), "sysctl", &["-w", &key])?;
             }
         }
         Ok(())

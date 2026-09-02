@@ -157,3 +157,90 @@ fn n_apdm_apdf_rand_allocates_per_destination_tuple() {
 fn n_apdm_apdf_seq_allocates_per_destination_tuple_monotonically() {
     conformance_for(&PERSONALITIES[5]);
 }
+
+// ===========================================================================
+// The negative control for every test above: a middlebox that is not the only
+// forwarder in its namespace is not the thing being measured.
+// ===========================================================================
+
+/// A node built for a middlebox does not forward, and one that also forwards is
+/// refused rather than measured.
+///
+/// **The defect this holds shut.** A new network namespace does not start
+/// neutral — Linux copies the initial namespace's `all` devconf into it
+/// (`net/ipv4/devinet.c`, `devinet_init_net`), and `net.ipv4.ip_forward` is a
+/// member of that block. A host running Docker has `ip_forward=1`, so every
+/// namespace this laboratory created on such a host arrived forwarding, and the
+/// `cpe` node then had two forwarders in it: the kernel and `twinnet::nat`. The
+/// kernel usually won the race, the reflector observed the client's PRIVATE
+/// address, and the CGNAT and dual-stack scenarios failed on a GitHub runner
+/// while passing on a developer host whose `ip_forward` was `0`
+/// (job 100276849297).
+///
+/// The failure was silent in the only way that matters: the middlebox ran, its
+/// counters moved, and every conformance test above would have gone on
+/// reporting a personality that the kernel had already carried the traffic
+/// around. So the assertion is in two halves — the fabric turns forwarding off,
+/// and the middlebox refuses to start if anything turns it back on.
+///
+/// The forwarding state is INJECTED, so this runs on a host whose own
+/// `ip_forward` is `0` — which is every host that never saw the defect.
+#[test]
+fn a_middlebox_refuses_a_namespace_whose_kernel_forwards_around_it() {
+    let Some(mut rig) = common::or_skip(
+        "kernel-forwarding",
+        common::build("kernel-forwarding", false),
+    ) else {
+        return; // The skip reason was printed by the rig.
+    };
+    let read = |rig: &mut common::Rig, knob: &str| -> String {
+        rig.sb
+            .must(Some("cpe"), &["cat", knob])
+            .expect("a node's forwarding knob must be readable")
+            .trim()
+            .to_owned()
+    };
+    for knob in twinnet::nat::FORWARDING_KNOBS {
+        assert_eq!(
+            read(&mut rig, knob),
+            "0",
+            "the fabric left `{knob}` at whatever the host donated. A middlebox node \
+             must be built NOT forwarding, whatever the initial namespace's value is"
+        );
+    }
+
+    let cfg = common::nat_config(&rig, &PERSONALITIES[3]);
+    let start = |rig: &mut common::Rig| {
+        let mut fabric =
+            std::mem::replace(&mut rig.fabric, twinnet::fabric::Fabric::new(&rig.scratch));
+        let out = fabric.start_nat(&mut rig.sb, "cpe", &cfg);
+        rig.fabric = fabric;
+        out
+    };
+
+    for knob in twinnet::nat::FORWARDING_KNOBS {
+        rig.sb
+            .must(Some("cpe"), &["sh", "-c", &format!("echo 1 > {knob}")])
+            .expect("the injection must take");
+        let err = start(&mut rig)
+            .err()
+            .unwrap_or_else(|| panic!("`{knob}` was 1 and the middlebox started anyway"));
+        let text = err.to_string();
+        assert!(
+            text.contains(knob),
+            "the refusal must name the knob that is on: {text}"
+        );
+        assert!(
+            !err.is_unavailable(),
+            "a namespace this rig built wrong is a defect in the rig, not a facility \
+             this host lacks — spelling it `Unavailable` would buy a silent skip: {text}"
+        );
+        rig.sb
+            .must(Some("cpe"), &["sh", "-c", &format!("echo 0 > {knob}")])
+            .expect("the injection must be reversible");
+    }
+
+    // The positive control, and the reason the refusals above are about the
+    // knob rather than about anything else in this rig.
+    start(&mut rig).expect("with forwarding off, the same middlebox must start");
+}

@@ -47,11 +47,27 @@ pub enum Facility {
     EbpfTcClassifier,
     /// A container runtime, for the service artifacts `infra/` composes.
     Containers,
+    /// Whether the kernel forwarding state of a namespace this laboratory
+    /// creates is **ours to set** rather than the host's to donate.
+    ///
+    /// A new namespace does not start neutral: Linux copies the initial
+    /// namespace's `all` devconf into it, and `net.ipv4.ip_forward` is a member
+    /// of that block (`net/ipv4/devinet.c`, `devinet_init_net`; IPv6 does the
+    /// same in `addrconf_init_net`). So on a host running Docker — which turns
+    /// `ip_forward` on when its daemon starts — every namespace arrives
+    /// forwarding, and a userspace middlebox placed in one has the kernel
+    /// racing it for every frame.
+    ///
+    /// This is probed rather than assumed because it is the difference between
+    /// a NAT personality being realized and a scenario measuring the kernel:
+    /// the runner that found it passed the `network-namespaces`, `veth` and
+    /// `af-packet` rows and still could not realize a middlebox.
+    ForwardingControl,
 }
 
 impl Facility {
     /// Every facility, so a report cannot silently omit one.
-    pub const ALL: [Facility; 10] = [
+    pub const ALL: [Facility; 11] = [
         Facility::NetworkNamespaces,
         Facility::Veth,
         Facility::Bridge,
@@ -62,6 +78,7 @@ impl Facility {
         Facility::Ipv6,
         Facility::EbpfTcClassifier,
         Facility::Containers,
+        Facility::ForwardingControl,
     ];
 
     /// The name used in a run record and in a skip message.
@@ -78,6 +95,7 @@ impl Facility {
             Facility::Ipv6 => "ipv6",
             Facility::EbpfTcClassifier => "ebpf-tc-classifier",
             Facility::Containers => "containers",
+            Facility::ForwardingControl => "forwarding-control",
         }
     }
 }
@@ -164,6 +182,12 @@ impl HostCapabilities {
             unavailable(Facility::Ipv6, "requires network namespaces")
         };
 
+        let forwarding = if netns.available {
+            probe_forwarding_control(&mut runner)
+        } else {
+            unavailable(Facility::ForwardingControl, "requires network namespaces")
+        };
+
         let nftables = probe_tool(Facility::Nftables, "nft");
         let conntrack = probe_tool(Facility::Conntrack, "conntrack");
         let ebpf = probe_tool(Facility::EbpfTcClassifier, "bpftool");
@@ -186,6 +210,7 @@ impl HostCapabilities {
         Self {
             probes: vec![
                 netns, veth, bridge, netem, shaping, nftables, conntrack, ipv6, ebpf, containers,
+                forwarding,
             ],
             kernel,
         }
@@ -260,6 +285,43 @@ fn probe_netns(runner: &mut Runner) -> Probe {
             evidence: "unshare --user --net --map-root-user succeeded".to_owned(),
         },
         Err(e) => unavailable(Facility::NetworkNamespaces, &e.to_string()),
+    }
+}
+
+/// What a fresh namespace's kernel forwarding state is, and whether it can be
+/// changed.
+///
+/// **This one publishes its measurement, not just its verdict.** The other
+/// probes answer "can this host do X"; this one also has to answer "and what
+/// did it hand us", because the value a namespace inherits is the whole reason
+/// [`Facility::ForwardingControl`] exists. A runner that reports
+/// `AVAILABLE … came up ip_forward=1` is telling the reader that its namespaces
+/// arrive forwarding and that every topology in this laboratory is turning that
+/// off — which is exactly the fact that was missing while two NAT scenarios
+/// failed on it.
+fn probe_forwarding_control(runner: &mut Runner) -> Probe {
+    // `sysctl` first, /proc as the fallback, matching what `twinnet::fabric`
+    // does — a probe that used a mechanism the fabric does not would answer a
+    // question nobody asked.
+    let script = "\
+        v4=$(cat /proc/sys/net/ipv4/ip_forward); \
+        v6=$(cat /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null || echo absent); \
+        { sysctl -qw net.ipv4.ip_forward=0 2>/dev/null || \
+          echo 0 > /proc/sys/net/ipv4/ip_forward; } && \
+        after=$(cat /proc/sys/net/ipv4/ip_forward) && \
+        echo \"a fresh namespace came up ip_forward=$v4 \
+ipv6.conf.all.forwarding=$v6; writing 0 left ip_forward=$after\" && \
+        [ \"$after\" = 0 ]";
+    match runner.run(
+        "unshare",
+        &["--user", "--net", "--map-root-user", "sh", "-c", script],
+    ) {
+        Ok(out) => Probe {
+            facility: Facility::ForwardingControl,
+            available: true,
+            evidence: String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+        },
+        Err(e) => unavailable(Facility::ForwardingControl, &e.to_string()),
     }
 }
 

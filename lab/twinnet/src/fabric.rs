@@ -187,31 +187,48 @@ impl Fabric {
     /// device that can leak a peer's packet onto its own LAN, and §3.2 makes the
     /// device namespace the thing whose stack must look ordinary.
     ///
+    /// # Both values are written, and that is the point
+    ///
+    /// This used to write `1` for a forwarding node and leave a non-forwarding
+    /// one alone, on the assumption that a fresh namespace does not forward.
+    /// **A fresh namespace forwards if the host does.** Linux copies the whole
+    /// `all` devconf block into a new namespace at creation
+    /// (`net/ipv4/devinet.c`, `devinet_init_net`: `memcpy(all,
+    /// init_net.ipv4.devconf_all, …)` — the default arm of
+    /// `net.core.devconf_inherit_init_net`), and `net.ipv4.ip_forward` *is*
+    /// `all.forwarding`. IPv6 does the same in `addrconf_init_net`.
+    ///
+    /// So on any host running Docker — which sets `net.ipv4.ip_forward=1` when
+    /// the daemon starts — every namespace in this laboratory came up
+    /// forwarding. A `cpe` node then had two forwarders in it: the kernel and
+    /// [`crate::nat`], racing for the same frame. The kernel usually won, the
+    /// reflector observed the client's PRIVATE address, and two scenarios in
+    /// `address_families_and_cgnat.rs` failed on a runner while passing on a
+    /// developer host whose `ip_forward` happened to be `0` (job
+    /// 100276849297).
+    ///
+    /// The value a node gets is now this rig's decision in both directions.
+    ///
     /// # Errors
     ///
     /// [`NetError::Mechanism`] naming the `ip` invocation that failed.
     pub fn node(&mut self, sb: &mut Sandbox, name: &str, forwarding: bool) -> Result<()> {
         sb.must(None, &["ip", "netns", "add", name])?;
         sb.must(Some(name), &["ip", "link", "set", "lo", "up"])?;
-        if forwarding {
-            sb.must(Some(name), &["sysctl", "-qw", "net.ipv4.ip_forward=1"])
-                .or_else(|_| {
-                    // A namespace without `sysctl` still has /proc; the write is the
-                    // same operation and the fallback keeps a minimal image usable.
-                    sb.must(
-                        Some(name),
-                        &["sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"],
-                    )
-                })?;
-            sb.must(
-                Some(name),
-                &[
-                    "sh",
-                    "-c",
-                    "echo 1 > /proc/sys/net/ipv6/conf/all/forwarding",
-                ],
-            )?;
-        }
+        let on = u8::from(forwarding);
+        let sysctl = format!("net.ipv4.ip_forward={on}");
+        let write_v4 = format!("echo {on} > /proc/sys/net/ipv4/ip_forward");
+        // Writing `all` is enough for both families and for interfaces created
+        // later: the kernel propagates an `all.forwarding` write to the default
+        // devconf and to every existing device.
+        let write_v6 = format!("echo {on} > /proc/sys/net/ipv6/conf/all/forwarding");
+        sb.must(Some(name), &["sysctl", "-qw", &sysctl])
+            .or_else(|_| {
+                // A namespace without `sysctl` still has /proc; the write is the
+                // same operation and the fallback keeps a minimal image usable.
+                sb.must(Some(name), &["sh", "-c", &write_v4])
+            })?;
+        sb.must(Some(name), &["sh", "-c", &write_v6])?;
         self.nodes.push(name.to_owned());
         Ok(())
     }
@@ -627,10 +644,17 @@ impl Fabric {
     /// Starts a middlebox in `node`, and returns the path its snapshot will be
     /// written to.
     ///
+    /// Refuses a node whose kernel forwards. [`crate::nat::run`] refuses the
+    /// same thing when the process starts, but that refusal reaches a caller as
+    /// a middlebox that is simply not there — a missing snapshot, or a punch
+    /// that fails for no stated reason. The check is repeated here so the rig
+    /// answers with the cause instead of the symptom.
+    ///
     /// # Errors
     ///
-    /// [`NetError::Malformed`] if the configuration contradicts itself;
-    /// [`NetError::Unavailable`] if raw sockets are refused.
+    /// [`NetError::Malformed`] if the configuration contradicts itself or the
+    /// node's kernel forwards; [`NetError::Unavailable`] if raw sockets are
+    /// refused.
     pub fn start_nat(
         &mut self,
         sb: &mut Sandbox,
@@ -638,6 +662,22 @@ impl Fabric {
         cfg: &NatConfig,
     ) -> Result<(ProcHandle, PathBuf)> {
         cfg.validate().map_err(NetError::Malformed)?;
+        let read = crate::nat::FORWARDING_KNOBS
+            .iter()
+            .map(|knob| {
+                // A knob a kernel does not have is not evidence of forwarding;
+                // an unreadable one reads as `0` and the middlebox's own check
+                // is the backstop.
+                let ran = sb.run(Some(node), &["cat", knob])?;
+                Ok((*knob, if ran.ok() { ran.stdout } else { "0".to_owned() }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let values: Vec<(&str, &str)> = read.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        if let Some(why) = crate::nat::forwarding_conflict(&values) {
+            return Err(NetError::Malformed(format!(
+                "the middlebox for `{node}` was not started: {why}"
+            )));
+        }
         let stats = self.scratch.join(format!("nat-{node}.json"));
         let mut cfg = cfg.clone();
         cfg.stats_path = Some(stats.display().to_string());

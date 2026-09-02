@@ -201,6 +201,70 @@ impl Shared {
     }
 }
 
+/// The two `procfs` files that say whether the kernel of a namespace forwards.
+///
+/// Named here rather than spelled at each of the two readers, because the two
+/// read them from different namespaces: [`run`] reads its own, and
+/// [`crate::fabric::Fabric::start_nat`] reads the node's through the sandbox
+/// agent. A pair that drifted apart would leave one of the two guards checking
+/// the wrong thing.
+pub const FORWARDING_KNOBS: [&str; 2] = [
+    "/proc/sys/net/ipv4/ip_forward",
+    "/proc/sys/net/ipv6/conf/all/forwarding",
+];
+
+/// Why this middlebox must not run in this namespace, or `None`.
+///
+/// **A middlebox owns the forwarding path or it is not a middlebox.** This
+/// process moves frames between two interfaces itself; if the kernel of the
+/// same namespace also forwards, every packet has two ways out and the
+/// untranslated one usually wins the race. The observable result is a NAT that
+/// appears to be in the path and translates nothing: the far end sees the
+/// client's private address, the client's peer punches at an address that is
+/// not routable, and the scenario reports a traversal failure that has nothing
+/// to do with traversal.
+///
+/// That happened (job 100276849297). It is a fail-open shape — the laboratory
+/// ran a scenario as if a middlebox were realizing it — so the answer is to
+/// refuse, naming the knob and the value, rather than to translate what the
+/// kernel has not already carried away.
+///
+/// Takes the file *contents* rather than reading them, so both readers share
+/// one decision and a test can inject the state no host here has.
+#[must_use]
+pub fn forwarding_conflict(values: &[(&str, &str)]) -> Option<String> {
+    let on: Vec<&str> = values
+        .iter()
+        .filter(|(_, v)| v.trim() != "0")
+        .map(|(k, _)| *k)
+        .collect();
+    if on.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "the kernel of this namespace forwards ({} is not 0), so it would carry \
+         frames around this middlebox untranslated and the scenario would measure \
+         the kernel rather than the personality. A fresh namespace inherits these \
+         from the initial one (net/ipv4/devinet.c, devinet_init_net), so a host \
+         running Docker hands every namespace ip_forward=1; the topology must set \
+         them to 0 for a node that has a middlebox in it",
+        on.join(" and ")
+    ))
+}
+
+/// Reads [`FORWARDING_KNOBS`] in this process's own namespace.
+fn own_forwarding_conflict() -> Option<String> {
+    let read: Vec<(&str, String)> = FORWARDING_KNOBS
+        .iter()
+        // A knob that cannot be read is not evidence of forwarding: a kernel
+        // built without IPv6 has no such file, and refusing to start there
+        // would be a refusal about a family the scenario never used.
+        .filter_map(|k| std::fs::read_to_string(k).ok().map(|v| (*k, v)))
+        .collect();
+    let borrowed: Vec<(&str, &str)> = read.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    forwarding_conflict(&borrowed)
+}
+
 /// Runs the middlebox until the process is signalled.
 ///
 /// Two threads, one per direction, sharing the mapping table. A single-threaded
@@ -211,9 +275,13 @@ impl Shared {
 ///
 /// [`crate::error::NetError::Unavailable`] if either raw socket cannot be
 /// opened, [`crate::error::NetError::Malformed`] if the configuration
-/// contradicts itself.
+/// contradicts itself or if the kernel of this namespace forwards as well —
+/// see [`forwarding_conflict`].
 pub fn run(cfg: NatConfig) -> Result<()> {
     cfg.validate().map_err(crate::error::NetError::Malformed)?;
+    if let Some(why) = own_forwarding_conflict() {
+        return Err(crate::error::NetError::Malformed(why));
+    }
     let mut inside = PacketSocket::open(&cfg.inside_if)?;
     let mut outside = PacketSocket::open(&cfg.outside_if)?;
     inside.set_promiscuous()?;
@@ -755,4 +823,61 @@ fn next_hop(shared: &Shared, addr: IpAddr) -> [u8; 6] {
         .get(&addr)
         .copied()
         .unwrap_or(shared.cfg.outside_peer_mac)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{forwarding_conflict, FORWARDING_KNOBS};
+
+    const V4: &str = FORWARDING_KNOBS[0];
+    const V6: &str = FORWARDING_KNOBS[1];
+
+    #[test]
+    fn a_namespace_that_forwards_nothing_lets_the_middlebox_run() {
+        assert_eq!(forwarding_conflict(&[(V4, "0\n"), (V6, "0\n")]), None);
+    }
+
+    #[test]
+    fn either_family_forwarding_is_enough_to_refuse_and_the_reason_names_it() {
+        for (v4, v6, expected) in [("1\n", "0\n", V4), ("0\n", "1\n", V6)] {
+            let why = forwarding_conflict(&[(V4, v4), (V6, v6)])
+                .unwrap_or_else(|| panic!("ip_forward={v4:?} v6={v6:?} must refuse"));
+            assert!(
+                why.contains(expected),
+                "the refusal must name the knob that is on, so a reader turns the \
+                 right one off: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn both_families_forwarding_are_reported_together_and_not_one_at_a_time() {
+        // A refusal naming only the first would send a reader round the loop
+        // twice for one topology defect.
+        let why = forwarding_conflict(&[(V4, "1"), (V6, "1")]).expect("two knobs on must refuse");
+        assert!(why.contains(V4) && why.contains(V6), "{why}");
+    }
+
+    #[test]
+    fn a_knob_that_does_not_exist_is_not_read_as_forwarding() {
+        // A kernel built without IPv6 has no such file, and refusing there
+        // would be a refusal about a family the scenario never used. Both
+        // readers drop a knob they cannot read, so an absent one arrives here
+        // as an absent entry.
+        assert_eq!(forwarding_conflict(&[]), None);
+        assert_eq!(forwarding_conflict(&[(V4, "0")]), None);
+    }
+
+    #[test]
+    fn a_value_that_is_not_recognisably_off_is_refused_rather_than_assumed_off() {
+        // The only safe reading of a knob whose value this cannot make sense of
+        // is that the kernel might forward. A middlebox is the wrong place to
+        // guess in the permissive direction.
+        for odd in ["", "  \n", "2", "on"] {
+            assert!(
+                forwarding_conflict(&[(V4, odd)]).is_some(),
+                "`{odd:?}` was treated as forwarding-off"
+            );
+        }
+    }
 }
