@@ -76,7 +76,7 @@ jobs:
 
       - name: fmt
         run: |
-          for w in core services shells/linux lab; do
+          for w in core services shells/linux lab tests; do
             echo "::group::fmt $w"
             (cd "$w" && cargo fmt --all -- --check)
             echo "::endgroup::"
@@ -85,11 +85,13 @@ jobs:
   # =========================================================================
   # Build, clippy and test — one job per workspace, in parallel.
   #
-  # ADR-0018 §11.12 / ownership.md §1: four SEPARATE cargo workspaces, on
-  # purpose, "so that no domain silently acquires another's dependency graph".
+  # ADR-0018 §11.12 / ownership.md §1: SEPARATE cargo workspaces, on purpose,
+  # "so that no domain silently acquires another's dependency graph".
   # Splitting the CI matrix the same way means a failure names its workspace,
   # and a workspace's build time is its own domain's problem rather than
-  # everyone's.
+  # everyone's. The list is the Makefile's WORKSPACES, all five: `tests` was
+  # missing here while `make test-rust` ran it, so a cross-component assertion
+  # that went stale on 2026-08-29 was first seen by T2 on 2026-09-02.
   # =========================================================================
   workspace:
     name: ${{ matrix.workspace }}
@@ -98,7 +100,7 @@ jobs:
     strategy:
       fail-fast: false           # V7-adjacent: see every failing workspace at once
       matrix:
-        workspace: [core, services, shells/linux, lab]
+        workspace: [core, services, shells/linux, lab, tests]
     steps:
       - uses: actions/checkout@v4
 
