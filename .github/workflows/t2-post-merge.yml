@@ -241,8 +241,23 @@ jobs:
           # otelcol_processor_* series only exist once the processors are built
           # into a running pipeline. Their presence proves the config parsed and
           # the filter/redaction chain is live, which a config-file lint cannot.
+          #
+          # One awk, not `grep ... | head -20`: under `pipefail`, head closes
+          # the pipe after twenty lines, the upstream wget dies of SIGPIPE, and
+          # the step fails with exit 2. That was dormant only because the
+          # collector had fewer than twenty matching series in the seconds
+          # after start - it began failing as soon as the step ran a little
+          # later in the collector's life and the batch processor's histogram
+          # buckets had appeared. So the old shape failed on TOO MUCH
+          # evidence and passed on the right amount, which is backwards. awk
+          # reads the whole stream, prints the first twenty as the receipt,
+          # and fails when there is NO evidence, which is the real assertion.
           docker compose exec -T prometheus wget -q -O - "http://otel-collector:8888/metrics" \
-            | grep -E '^otelcol_(process_uptime|processor)' | head -20
+            | awk '/^otelcol_(process_uptime|processor)/ { n++; if (n <= 20) print }
+                   END { if (n == 0) {
+                           print "no otelcol_processor_* series: the pipeline is not live" > "/dev/stderr"
+                           exit 1
+                         } }'
           echo "collector pipelines are live"
 
       - name: dual-stack — down
