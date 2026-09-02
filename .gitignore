@@ -25,6 +25,11 @@ __pycache__/
 build/toolchain/*.log
 build/verify/.work/
 
+# Pinned third-party payloads a lane downloads at run time and verifies against
+# a SHA-256 it carries (the Windows kill-switch lane's guest shell). Fetched,
+# never committed: the digest is the provenance, not the checkout.
+build/ci/.cache/
+
 # Cargo build output (four workspaces: core, services, shells/linux, lab)
 target/
 **/target/

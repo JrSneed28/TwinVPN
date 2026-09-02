@@ -34,43 +34,32 @@
 #   * a SENTINEL, which is NOT this device. See the block below.
 #
 # ===========================================================================
-# THE SENTINEL, AND WHY IT IS A STANDING PROCESS RATHER THAN A CI STEP
+# THE SENTINEL
 # ===========================================================================
-# The attempt count closes the "the probe stopped trying" hole. It does not
-# close the "the ORACLE stopped listening" hole: an oracle that died, a listener
-# that stopped binding, a data-plane route that broke mid-run all produce a
-# perfect SILENCE phase from a completely unprotected device.
+# Independence is SOURCE-ADDRESS DISJOINTNESS and the oracle checks it, which
+# admits a standing process on a third machine and an in-box fabric with
+# disjoint addresses, and nothing else. The reasoning, both deployments, the
+# residual weakness of the in-box one and `cmd_sentinel` itself all live in
+# build/ci/leak-probe-sentinel.sh, sourced below.
 #
-# So an independent heartbeat runs continuously: a source that is NOT the DUT
-# and whose packets do not traverse the DUT's network, hitting the same three
-# listeners on a fixed cadence with a `sentinel_token` distinct from every
-# `probe_token`. A SILENCE phase is creditable only if every gap in the beats
-# over that window is inside the oracle's `--sentinel-max-gap-ms`. Absent beats
-# are NEVER read as continuity -- a family with zero beats is not continuous,
-# and the oracle returns INCONCLUSIVE.
+# ===========================================================================
+# WHO HOLDS THE CONTROL TOKEN -- THE CONTROLLER, NEVER THE DEVICE
+# ===========================================================================
+# A CORRECT kill switch blocks every packet the device originates while armed,
+# and the control plane is reached by a packet. A device that posts its own
+# phase boundaries and attempt counts therefore loses exactly the ARMED
+# window's posts, the session looks like it tried FEWER times than it did, and
+# the oracle reads that shortfall as INCONCLUSIVE: the evidence destroyed by
+# the product working. `TWINVPN_ORACLE_CONTROL_BY=controller` splits them --
 #
-# IT IS NOT STARTED BY ANY CI JOB, AND THAT IS THE CORRECTION.
+#   CONTROLLER (holds TWINVPN_ORACLE_TOKEN):  open, phase, attempts, close,
+#                                             report, sentinel, sentinel-claim
+#   DEVICE     (holds no control credential): beacon --counts-file
 #
-# A per-session sentinel started by the job needs a host that is not the DUT,
-# and the oracle now CHECKS that rather than assuming it: an IPv4/IPv6 beat
-# whose source address the device was also observed egressing from is not
-# counted as continuity, and one arriving during a SILENCE phase is a FAIL. Two
-# of the three lanes cannot satisfy that from inside the job --
-#
-#   * `ios-corellium` runs both the probe and any job-started sentinel on the
-#     same ubuntu controller, so they share a source address;
-#   * `macos-sysext` runs on the EC2 Mac, which IS the DUT;
-#   * `windows-killswitch` looks safe (L1 host vs L2 guest) and is not, if the
-#     guest's switch NATs through the L1 host -- which is the ordinary Hyper-V
-#     configuration and would make every beat device-sourced.
-#
-# So the heartbeat is a STANDING process on a third machine, run with
-# `leak-probe.sh sentinel` below against the long-lived token the oracle was
-# started with (`--sentinel-token-file`). Its beats are recorded in every
-# currently-open session, because "the listeners were alive" is a fact about the
-# oracle rather than about any one run. The CI jobs only DECLARE where it runs,
-# via TWINVPN_SENTINEL_HOST, and refuse to produce evidence without it -- the
-# real enforcement is the oracle's, which reports no beats as no continuity.
+# -- so the device writes its counts to a file the controller reads back over a
+# management channel and posts. `probe_host` stays `device` because every
+# beacon still leaves the device; what moved is the bookkeeping, not the
+# egress. Ambiguous combinations are fatal, not half-applied: see `cmd_beacon`.
 #
 # ===========================================================================
 # PATH IDENTITY
@@ -105,6 +94,11 @@
 #   leak-probe.sh close
 #   leak-probe.sh report > build/ci/evidence/oracle/<session>.json
 #
+# Split across a controller and a device (build/ci/ci-windows-killswitch.sh):
+# the controller exports TWINVPN_ORACLE_CONTROL_BY=controller and runs `open`,
+# `phase`, `attempts --from-file`, `close` and `report`; the device runs only
+# `beacon --seconds N --counts-file <path>` and hands the file back.
+#
 # State lives in build/ci/evidence/oracle/session.env so the steps above may be
 # separate CI steps, or separate processes inside a disposable guest.
 #
@@ -113,6 +107,9 @@
 #   leak-probe.sh sentinel --token-file /etc/twinoracle/sentinel-token \
 #     --beacon-v4 http://198.51.100.7/b --beacon-v6 'http://[2001:db8::7]/b' \
 #     --zone leak.oracle.twinvpn.example
+#
+# `leak-probe.sh --self-check` runs the beacon-target rule against fabricated
+# hosts and the mode refusals against this script itself. It needs no oracle.
 
 set -euo pipefail
 
@@ -127,6 +124,37 @@ PATHTAG="$ORACLE_DIR/path-tag"
 mkdir -p "$ORACLE_DIR"
 
 die() { echo "::error::leak-probe: $*" >&2; exit 1; }
+
+# `twinvpn_python`, because the interpreter is called `python.exe` on a hosted
+# Windows runner and `python3` on every other host this runs on. One definition,
+# beside the other shared shell helpers.
+# shellcheck disable=SC1091
+. "$REPO/build/ci/digest.sh"
+
+# THE TWO CHECKED RULES: is the beacon target off the device, and are these
+# attempt counts something the device under test wrote that we may trust. Both
+# have a security consequence and both have a self-check.
+# shellcheck disable=SC1091
+. "$REPO/build/ci/leak-probe-rules.sh"
+# The sentinel half: `cmd_sentinel`, `cmd_sentinel_claim`, and the argument for
+# why a heartbeat that is not independent is worse than no heartbeat.
+# shellcheck disable=SC1091
+. "$REPO/build/ci/leak-probe-sentinel.sh"
+
+# Which half of the split this process is. `controller` means the control token
+# lives here and the beacons happen on another machine; anything else means the
+# legacy shape, where one process does both.
+control_by() { printf '%s' "${TWINVPN_ORACLE_CONTROL_BY:-probe}"; }
+
+assert_known_mode() {
+  case "$(control_by)" in
+    probe|controller) : ;;
+    *) die "TWINVPN_ORACLE_CONTROL_BY is '$(control_by)'; it must be \
+'controller' (this process holds the control token and something else beacons) \
+or unset/'probe' (this process does both). An unrecognised value would silently \
+pick one of them." ;;
+  esac
+}
 
 need_env() {
   [ -n "${TWINVPN_ORACLE_URL:-}" ] || die "TWINVPN_ORACLE_URL is unset"
@@ -150,16 +178,17 @@ load_state() {
   . "$STATE"
 }
 
-# jq is NOT assumed. This runs inside a disposable Windows guest and on an EC2
-# Mac, and adding a package install to a fail-closed proof path is a way for the
-# proof path to fail for reasons unrelated to the product. Python 3 is on every
-# runner this repository uses, and `report.py` already requires it.
+# jq is NOT assumed. This runs on a CI controller, inside a disposable Windows
+# guest and on an EC2 Mac, and adding a package install to a fail-closed proof
+# path is a way for the proof path to fail for reasons unrelated to the product.
+# Python 3 is on every host this repository uses, under one of two names --
+# `twinvpn_python` is the ladder.
 json_get() {
-  python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$1"
+  twinvpn_python -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$1"
 }
 
 cmd_open() {
-  need_env
+  assert_known_mode; need_env
   local platform="" criterion=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -204,14 +233,25 @@ cmd_open() {
   [ -n "$TWINVPN_ORACLE_PROBE_TOKEN" ] && [ -n "$TWINVPN_ORACLE_ZONE" ] \
     || die "the oracle returned no probe_token/zone pair, so no DNS beacon name \
 can be constructed and the DNS family would silently record zero attempts: $resp"
-  # THE BEACON TARGET IS NOT ALLOWED TO BE A LOOPBACK OR PRIVATE ADDRESS.
-  # An oracle on the same host as the device observes nothing -- loopback egress
-  # is not egress -- and a kill switch that permits it would still pass.
-  case "$TWINVPN_ORACLE_BEACON_V4" in
-    *//127.*|*//10.*|*//192.168.*|*//169.254.*|*//localhost*)
-      die "the oracle advertises $TWINVPN_ORACLE_BEACON_V4, which is not off-device. \
-Egress to it is not egress and cannot discharge a kill-switch criterion." ;;
-  esac
+  # THE BEACON TARGET, ON BOTH FAMILIES. See build/ci/leak-probe-target.sh for
+  # the rule and for why it is no longer a private-address blocklist.
+  #
+  # Rule 3 -- "an address this host owns" -- is checked HERE only when this
+  # process is also the one that beacons. In controller mode the controller
+  # legitimately owns the oracle's addresses, and checking them here would
+  # refuse the correct topology while telling us nothing about the device; the
+  # device applies rule 3 itself, in `cmd_beacon`.
+  local own=""
+  if [ "$(control_by)" != "controller" ]; then
+    own="$(host_addresses)" || die "this host's own addresses cannot be \
+enumerated, so the beacon target cannot be checked against them. That check is \
+the one that survives a topology change and it must not be skipped."
+  fi
+  local problem
+  problem="$(beacon_target_problem "the oracle's IPv4 beacon" "$TWINVPN_ORACLE_BEACON_V4" "$own")"
+  [ -z "$problem" ] || die "$problem."
+  problem="$(beacon_target_problem "the oracle's IPv6 beacon" "$TWINVPN_ORACLE_BEACON_V6" "$own")"
+  [ -z "$problem" ] || die "$problem."
   echo "session $TWINVPN_ORACLE_SESSION opened for $criterion on $platform (attempt $run_attempt)"
 }
 
@@ -256,8 +296,23 @@ cmd_phase() {
 # A ladder rather than one command, because the three hosts that run this do not
 # share one: git-bash on Windows has `nslookup`, macOS has `dscacheutil` and
 # `nslookup`, Linux has `getent`. `python3` is the floor.
+# The optional second argument names the server to ask, and exists for the
+# SENTINEL alone: a heartbeat host whose system resolver knows nothing about the
+# beacon zone emits DNS beats that never arrive, which the oracle reports as no
+# DNS continuity -- a fact about the heartbeat host, read as one about the
+# device. It is deliberately NOT offered to `cmd_beacon`: the DEVICE must
+# resolve the way a user does, through whatever resolver its own stack chose,
+# because that is the path a leak takes.
 resolve_once() {
-  local name="$1"
+  local name="$1" server="${2:-}"
+  if [ -n "$server" ]; then
+    command -v nslookup >/dev/null 2>&1 || die "a resolver was named \
+($server) and this host has no nslookup to send the query with. Falling back to \
+the system resolver would silently ask a different server and report a gap the \
+network never had."
+    nslookup "$name" "$server" >/dev/null 2>&1 || true
+    return 0
+  fi
   if command -v nslookup >/dev/null 2>&1; then
     nslookup "$name" >/dev/null 2>&1 || true
   elif command -v getent >/dev/null 2>&1; then
@@ -293,14 +348,43 @@ reads as INCONCLUSIVE rather than as a pass."
 }
 
 cmd_beacon() {
-  need_env; load_state
-  local seconds=10
+  assert_known_mode
+  local seconds=10 counts_file=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --seconds) seconds="$2"; shift 2 ;;
+      --seconds)     seconds="$2";     shift 2 ;;
+      --counts-file) counts_file="$2"; shift 2 ;;
       *) die "beacon: unknown flag $1" ;;
     esac
   done
+
+  # THE TWO HALVES MUST AGREE, AND A DISAGREEMENT IS FATAL RATHER THAN GUESSED.
+  # Posting from a device the kill switch is about to block loses the ARMED
+  # window's counts; writing a file nobody reads loses them just as completely
+  # and does it silently.
+  if [ "$(control_by)" = "controller" ]; then
+    [ -n "$counts_file" ] || die "TWINVPN_ORACLE_CONTROL_BY=controller says the \
+control token is not on this machine, so this beacon cannot post its attempt \
+counts. Pass --counts-file <path> and have the controller post the file with \
+\`leak-probe.sh attempts --from-file\`."
+  else
+    [ -z "$counts_file" ] || die "--counts-file was given but \
+TWINVPN_ORACLE_CONTROL_BY is not 'controller', so nothing would ever post the \
+file and this window's attempts would vanish. Set it, or drop the flag."
+    need_env
+  fi
+  load_state
+
+  # RULE 3, HERE, BECAUSE THIS IS THE ONE COMMAND THAT ONLY EVER RUNS ON THE
+  # DEVICE. A beacon aimed at an address this machine holds never leaves it.
+  local own problem
+  own="$(host_addresses)" || die "this device's own addresses cannot be \
+enumerated, so the beacon target cannot be checked against them."
+  for problem in "$(beacon_target_problem "the IPv4 beacon" "$TWINVPN_ORACLE_BEACON_V4" "$own")" \
+                 "$(beacon_target_problem "the IPv6 beacon" "$TWINVPN_ORACLE_BEACON_V6" "$own")"; do
+    [ -z "$problem" ] || die "$problem."
+  done
+
   local tag="n"
   [ -f "$PATHTAG" ] && tag="$(cat "$PATHTAG")"
 
@@ -333,73 +417,46 @@ cmd_beacon() {
     resolve_once "$seq.$TWINVPN_ORACLE_PROBE_TOKEN.$tag.$TWINVPN_ORACLE_ZONE"
     sleep 1
   done
-  post_attempts "$n4" "$n6" "$ndns"
+  if [ -n "$counts_file" ]; then
+    # A FILE, not a post. The controller reads it back over the management
+    # channel -- PowerShell Direct in the Windows lane -- which is exactly the
+    # channel the kill switch cannot touch.
+    printf 'ipv4=%s\nipv6=%s\ndns=%s\n' "$n4" "$n6" "$ndns" > "$counts_file"
+  else
+    post_attempts "$n4" "$n6" "$ndns"
+  fi
   echo "beaconed for ${seconds}s (path=$tag; attempts ipv4=$n4 ipv6=$n6 dns=$ndns)"
 }
 
-# ---------------------------------------------------------------------------
-# THE SENTINEL -- a standing process, run on a machine that is not any DUT
-# ---------------------------------------------------------------------------
+# The controller half of the split: post counts the DEVICE measured.
 #
-# FOREGROUND, and no session. It is a systemd unit or a container entrypoint on
-# a third machine, not a CI step: see the header for why a job-started sentinel
-# cannot satisfy the oracle's independence check in any of the three lanes. It
-# needs no control-plane credential, only the long-lived token the oracle was
-# started with (`--sentinel-token-file`), so the machine running it holds
-# nothing that could open, close or read a session.
-#
-# The token comes from a FILE, never a flag: a token on a command line is in
-# every `ps` listing on the host.
-cmd_sentinel() {
-  local token_file="" v4="" v6="" zone="" interval_ms=2000 token nap seq=0
+# THE FILE CROSSES A TRUST BOUNDARY. It was written on the device under test,
+# which is the machine whose honesty the whole criterion is about, so it is
+# parsed rather than sourced and every field must be a plain non-negative
+# integer. Over-reporting cannot manufacture a pass -- arrivals are still
+# counted by the oracle alone -- but a shell-injectable file would be a way to
+# run the device's text on the controller.
+cmd_attempts() {
+  need_env; load_state
+  local file="" counts
   while [ $# -gt 0 ]; do
     case "$1" in
-      --token-file)  token_file="$2"; shift 2 ;;
-      --beacon-v4)   v4="$2";         shift 2 ;;
-      --beacon-v6)   v6="$2";         shift 2 ;;
-      --zone)        zone="$2";       shift 2 ;;
-      --interval-ms) interval_ms="$2"; shift 2 ;;
-      *) die "sentinel: unknown flag $1" ;;
+      --from-file) file="$2"; shift 2 ;;
+      *) die "attempts: unknown flag $1" ;;
     esac
   done
-  [ -n "$token_file" ] && [ -n "$zone" ] \
-    || die "sentinel needs --token-file and --zone (and at least one of \
---beacon-v4 / --beacon-v6). All four come from the oracle's own configuration; \
-the sentinel is part of the deployment, not of a run."
-  [ -f "$token_file" ] || die "no sentinel token at $token_file"
-  token="$(tr -d ' \t\r\n' < "$token_file")"
-  [ -n "$v4" ] || [ -n "$v6" ] || die "sentinel needs at least one beacon URL"
-
-  # THE GUARD. A sentinel on the device under test proves the DUT can reach the
-  # oracle, which is the one thing a SILENCE phase asserts is impossible. The
-  # disposable Windows guest marks itself, so that case is refused outright; for
-  # the rest, placement is the operator's decision and the oracle now CHECKS it
-  # -- a beat from an address the device was seen egressing from is discarded as
-  # continuity and reported as a FAIL inside SILENCE.
-  [ "${TWINVPN_DISPOSABLE_GUEST:-}" != "1" ] \
-    || die "this is the disposable guest, which is the DEVICE UNDER TEST"
-
-  # `sleep` takes fractional seconds on every shell this runs under. Computed
-  # once rather than per beat, so a slow arithmetic expansion cannot stretch the
-  # cadence past the oracle's sentinel_max_gap_ms and report a gap the network
-  # never had.
-  nap="$(python3 -c 'import sys; print(int(sys.argv[1])/1000.0)' "$interval_ms")"
-  echo "sentinel beating every ${interval_ms}ms into $zone (ctrl-c to stop)"
-  while :; do
-    seq=$((seq + 1))
-    [ -n "$v4" ] && curl -4 -sS --max-time 3 -o /dev/null "$v4/$token/$seq" 2>/dev/null || true
-    [ -n "$v6" ] && curl -6 -sS --max-time 3 -o /dev/null "$v6/$token/$seq" 2>/dev/null || true
-    # NO PATH TAG. `dns::beacon_labels` treats the last label before the zone as
-    # a path tag only when it is `p` or `u`; any other letter is not stripped, so
-    # it becomes the TOKEN and the real token becomes part of the sequence. A
-    # `.s` label here would make every DNS beat unmatchable -- reported as a dead
-    # sentinel that was in fact alive, and every session INCONCLUSIVE. The token
-    # alone already says which index a beat belongs to, and a sentinel has no
-    # path to declare.
-    resolve_once "$seq.$token.$zone"
-    sleep "$nap"
-  done
+  [ -n "$file" ] || die "attempts needs --from-file <path>"
+  [ -f "$file" ] || die "no attempt counts at $file. The device's beacon window \
+either never ran or never wrote them, and posting nothing is safer than posting \
+a guess -- the oracle reads a shortfall as INCONCLUSIVE."
+  counts="$(attempt_counts_from_file "$file")" \
+    || die "$file does not carry three non-negative integers as ipv4=/ipv6=/dns=. \
+It came from the device under test and is not trusted enough to be sourced."
+  # shellcheck disable=SC2086
+  post_attempts $counts
+  echo "posted attempts from the device ($counts)"
 }
+
 
 cmd_close() {
   need_env; load_state
@@ -415,14 +472,25 @@ cmd_report() {
 cmd_session_id() { load_state; printf '%s\n' "$TWINVPN_ORACLE_SESSION"; }
 
 case "${1:-}" in
-  open)       shift; cmd_open "$@" ;;
-  phase)      shift; cmd_phase "$@" ;;
-  beacon)     shift; cmd_beacon "$@" ;;
-  sentinel)   shift; cmd_sentinel "$@" ;;
-  close)      shift; cmd_close ;;
-  report)     shift; cmd_report ;;
-  session-id) shift; cmd_session_id ;;
+  open)           shift; cmd_open "$@" ;;
+  phase)          shift; cmd_phase "$@" ;;
+  beacon)         shift; cmd_beacon "$@" ;;
+  attempts)       shift; cmd_attempts "$@" ;;
+  sentinel)       shift; cmd_sentinel "$@" ;;
+  sentinel-claim) shift; cmd_sentinel_claim "$@" ;;
+  close)          shift; cmd_close ;;
+  report)         shift; cmd_report ;;
+  session-id)     shift; cmd_session_id ;;
+  # No oracle, no session, no network: the refusals that must never silently
+  # pass, driven against fabricated hosts and against this script itself.
+  --self-check)
+    ok=0
+    leak_probe_target_self_check || ok=1
+    leak_probe_mode_self_check   || ok=1
+    leak_probe_sentinel_self_check || ok=1
+    [ "$ok" -eq 0 ] && echo "leak-probe self-check passed"
+    exit "$ok" ;;
   *)
-    echo "usage: leak-probe.sh {open|phase|beacon|sentinel|close|report|session-id} ..." >&2
+    echo "usage: leak-probe.sh {open|phase|beacon|attempts|sentinel|sentinel-claim|close|report|session-id|--self-check} ..." >&2
     exit 2 ;;
 esac

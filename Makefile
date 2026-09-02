@@ -947,8 +947,26 @@ ci-macos-signature:
 # between the acceptance report and a green row produced on a 4 KiB emulator or
 # an unprivileged Windows host, so it has a test of its own that builds
 # evidence which is perfect except for one thing and asserts the row is refused.
+#
+# THE OTHER THREE WERE WRITTEN AND THEN NEVER RUN BY ANYTHING.
+#
+# `test_producer_key_coverage.py` is the file that catches a lane forgetting an
+# environment key the checker demands -- the exact drift that would have failed
+# every platform row on fully provisioned infrastructure -- and nothing invoked
+# it: `test_report_prerequisites.py` star-imports two sibling modules and not
+# this one, and no workflow named it. It passed today and nothing would have
+# noticed if it stopped.
+#
+# The two `--self-check` entry points are the runnable halves of rules with a
+# security consequence: whether a beacon target is off the device, and whether
+# the lab DNS relay ever sends a datagram nobody asked for (a retry inside a
+# SILENCE phase manufactures a leak and fails the row against the product).
+# Neither needs an oracle, a network or a device.
 test-acceptance-gate-logic:
 	@build/acceptance/test_report_prerequisites.py
+	@build/acceptance/test_producer_key_coverage.py
+	@build/ci/leak-probe.sh --self-check
+	@build/ci/dns-forward.py --self-check
 
 # The whole gate: every host-independent blocker, executed, plus verification
 # of the machine-readable platform CI evidence. Non-zero unless every required
