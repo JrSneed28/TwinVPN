@@ -40,13 +40,10 @@
 # counter moved — the counter being the load-bearing half, because a failed
 # connect alone is equally well explained by a host with no route.
 #
-# THE CONTROL IS LOOPBACK AND ONLY A SANITY CHECK: the boot anchor has no
-# default deny and 127.0.0.1 is in neither table, so loopback survives whether
-# or not the anchor is evaluated. What PROVES evaluation is the anchor's own
-# counters: `pfctl -a twinvpn -s labels` evaluations (field 2) AND packets
-# (field 3) on `twinvpn.deny.v4`/`.v6` must both rise across the covered
-# connect. Evaluations flat means the kernel never stepped in -- how the
-# 2026-09-02 run exposed the wildcard-reference defect (G-35).
+# THE CONTROL IS LOOPBACK AND ONLY A SANITY CHECK: 127.0.0.1 is in neither
+# table, so it survives whether or not the anchor is evaluated. What PROVES
+# evaluation is the anchor's own label counters: evaluations AND packets on
+# `twinvpn.deny.v4`/`.v6` must both rise across the covered connect (G-35).
 #
 
 set -euo pipefail
@@ -268,11 +265,9 @@ deny_v6_before="$(label_packets twinvpn.deny.v6 "$LOGDIR/pf-labels-before.txt")"
 eval_v4_before="$(label_evals twinvpn.deny.v4 "$LOGDIR/pf-labels-before.txt")"
 eval_v6_before="$(label_evals twinvpn.deny.v6 "$LOGDIR/pf-labels-before.txt")"
 
-# THE IPv6 PROBE NEEDS A ROUTE AND A SOURCE, preconditions and not the claim:
-# a hosted runner has no route to the ULA prefix and no global IPv6 address,
-# so without both the kernel fails connect() before pf is consulted. A ULA
-# source OUTSIDE the covered prefix is aliased and a route added; both are
-# removed afterwards and recorded in the log either way.
+# THE IPv6 PROBE NEEDS A SOURCE AND A NEXT HOP, preconditions and not the
+# claim: a hosted runner has neither for the ULA prefix, so without them the
+# kernel fails connect() before pf is consulted. Both are removed afterwards.
 probe_v6_iface="$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }')"
 probe_v6_route=false; probe_v6_alias=false
 PROBE_V6_SRC="fd77:7717:d0c:ffff::2"
@@ -285,8 +280,14 @@ if [ -n "$probe_v6_iface" ]; then
     sleep 0.5
   done
   ifconfig "$probe_v6_iface" inet6 >> "$LOGDIR/pf-probe-route.txt" 2>&1 || true
-  if sudo -n route -n add -inet6 "${PROBE_V6%::1}::/48" -interface "$probe_v6_iface" \
-       >> "$LOGDIR/pf-probe-route.txt" 2>&1; then probe_v6_route=true; fi
+  # VIA A STATIC NEIGHBOUR: an on-link route left the SYN on neighbour
+  # discovery and connect() failed before pf ran; a link-local gateway with a
+  # static ndp entry needs no resolution, so the packet reaches pf's output.
+  PROBE_V6_GW="fe80::dead:beef:1%$probe_v6_iface"
+  if sudo -n ndp -s "$PROBE_V6_GW" 02:00:00:00:be:ef >> "$LOGDIR/pf-probe-route.txt" 2>&1 \
+     && sudo -n route -n add -inet6 "${PROBE_V6%::1}::/48" "$PROBE_V6_GW" \
+          >> "$LOGDIR/pf-probe-route.txt" 2>&1; then probe_v6_route=true; fi
+  ndp -an >> "$LOGDIR/pf-probe-route.txt" 2>&1 || true
 fi
 echo "IPv6 probe via ${probe_v6_iface:-<no default interface>}: source alias=$probe_v6_alias route=$probe_v6_route"
 route -n get "$PROBE_V4" > "$LOGDIR/pf-route-v4.txt" 2>&1 || true
@@ -304,6 +305,7 @@ echo "control connect 127.0.0.1 -> $control_probe"
 sudo -n pfctl -a twinvpn -s labels > "$LOGDIR/pf-labels-after.txt" 2>&1 || true
 if [ "$probe_v6_route" = true ]; then
   sudo -n route -n delete -inet6 "${PROBE_V6%::1}::/48" >> "$LOGDIR/pf-probe-route.txt" 2>&1 || true
+  sudo -n ndp -d "$PROBE_V6_GW" >> "$LOGDIR/pf-probe-route.txt" 2>&1 || true
 fi
 if [ "$probe_v6_alias" = true ]; then
   sudo -n ifconfig "$probe_v6_iface" inet6 "$PROBE_V6_SRC" -alias >> "$LOGDIR/pf-probe-route.txt" 2>&1 || true

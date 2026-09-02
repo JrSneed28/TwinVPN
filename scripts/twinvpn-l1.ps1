@@ -154,6 +154,12 @@ function ConvertTo-BashPath([string] $Path) {
 }
 
 function Get-GuestCredential {
+    # Imported BY PATH when autoload fails: under a PSModulePath that a
+    # foreign shell rewrote, `ConvertTo-SecureString` is "found but the module
+    # could not be loaded", and the full path needs no search.
+    if (-not (Get-Command ConvertTo-SecureString -ErrorAction SilentlyContinue)) {
+        Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security') -ErrorAction Stop
+    }
     $pw = $env:TWINVPN_GUEST_PASSWORD
     if (-not $pw) { throw 'TWINVPN_GUEST_PASSWORD is not in this process environment; -Action run sets it for its children.' }
     New-Object System.Management.Automation.PSCredential(

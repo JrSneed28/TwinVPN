@@ -130,7 +130,13 @@ done
 
 L1PS="$(cygpath -w "$REPO/scripts/twinvpn-l1.ps1")"
 l1() {
-  powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$L1PS" "$@" 2>&1 | tr -d '\r'
+  # pwsh (PowerShell 7), the engine the job's own steps run the controller
+  # under, and with MSYS told not to rewrite PSModulePath: launched from
+  # git-bash, Windows PowerShell 5.1 could not load Microsoft.PowerShell.Security
+  # ("found ... but the module could not be loaded") and ConvertTo-SecureString
+  # vanished with it, which is how run 4 died copying the payload.
+  MSYS2_ENV_CONV_EXCL="PSModulePath${MSYS2_ENV_CONV_EXCL:+;$MSYS2_ENV_CONV_EXCL}" \
+  pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$L1PS" "$@" 2>&1 | tr -d '\r'
 }
 # Every guest step's output is teed into one log: the precondition facts, the
 # lifecycle markers and the `net up` refusal are all scraped back out of it.
