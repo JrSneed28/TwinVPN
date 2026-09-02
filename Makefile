@@ -861,7 +861,7 @@ proof: proof-register proof-oracles proof-mutants
 .PHONY: test-crypto-integration test-pairing-integration test-mutation \
         ci-linux ci-windows ci-macos ci-ios ci-android test-first-wave-gate \
         ci-windows-killswitch ci-android-16k ci-macos-sysext \
-        ci-macos-signature ci-ios-corellium test-acceptance-gate-logic \
+        ci-macos-signature test-acceptance-gate-logic \
         first-wave-report
 
 # F-1. The crypto core must be exercised by the real producer/consumer paths,
@@ -942,8 +942,6 @@ ci-macos-sysext:
 ci-macos-signature:
 	@build/ci/ci-macos-signature.sh
 
-ci-ios-corellium:
-	@build/ci/ci-ios-corellium.sh
 
 # The gate's own gate. `report.py`'s prerequisite table is the only thing
 # between the acceptance report and a green row produced on a 4 KiB emulator or

@@ -128,6 +128,17 @@ UNPRODUCED: dict[str, str] = {
         "the hosted pf lane is build/ci/ci-macos-pf-anchor.sh and does not "
         "exist yet; nothing writes build/ci/evidence/macos-pf-anchor.json. "
         "PRODUCER_PINS names the file. Closed when that lane lands.",
+    "IOS-NE-FAIL-CLOSED":
+        "no executor exists: the packet tunnel provider does not run in the "
+        "simulator, Corellium could not perform three of the five injections, "
+        "and the Corellium lane script was removed on 2026-09-02. Nothing "
+        "writes build/ci/evidence/ios-ne-failclosed.json. Closed when a "
+        "provisioned device lane exists, not before.",
+    "IOS-PROFILE-REMOVAL-HONESTY":
+        "redefined as simulator logic; its producer is the --acceptance mode "
+        "of build/ci/ci-ios.sh, being written in parallel with this table, and "
+        "the Corellium lane that used to write ios-profile-removal.json is "
+        "gone. PRODUCER_PINS names ci-ios.sh. Closed when that branch lands.",
 }
 
 # THE LANE SCRIPTS THE RECONCILED CRITERIA ARE BEING WRITTEN TO, PINNED BY NAME.
@@ -182,21 +193,6 @@ PRODUCER_PINS: dict[str, tuple[str, ...]] = {
 # instruction to delete the entry. The list can only shrink, and it cannot rot
 # into a standing exemption.
 KNOWN_GAPS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "IOS-NE-FAIL-CLOSED": (
-        "the leak probe runs on the ubuntu controller, not on the device, so "
-        "the existing lane has no honest value to write for either leg's "
-        "identity -- it would be attesting the CONTROLLER's paths, which is "
-        "the exact substitution `probe_host` exists to catch. The topology and "
-        "the sentinel's egress identity are unmeasurable for the same reason, "
-        "and this criterion additionally has NO EXECUTOR at all: it needs a "
-        "provisioned iPhone whose IPA keeps the packet-tunnel-provider "
-        "entitlement. Closed by moving the probe onto a DUT that exists. NOT "
-        "closed by writing the keys, and this entry is here rather than the "
-        "keys for that reason.",
-        ("protected_path_established", "unprotected_path_established",
-         "protected_path_identity", "unprotected_path_identity",
-         "oracle_topology", "sentinel_egress_identity"),
-    ),
     "MACOS-SYSEXT-LIFECYCLE": (
         "the two topology keys arrived with the in-box fabric, and this "
         "criterion has NO EXECUTOR to measure them on: activation needs "
@@ -214,17 +210,6 @@ KNOWN_GAPS: dict[str, tuple[str, tuple[str, ...]]] = {
         "construction and PRODUCER_PINS names the file that closes it: "
         "build/ci/ci-windows-killswitch.sh.",
         ("oracle_topology", "sentinel_egress_identity"),
-    ),
-    "IOS-PROFILE-REMOVAL-HONESTY": (
-        "the criterion was redefined as SIMULATOR logic, so its producer is "
-        "build/ci/ci-ios.sh rather than the device lane that names it today. "
-        "The device lane correctly emits none of the simulator attestation: it "
-        "does not run on a simulator, and a device lane writing "
-        "`execution: simulator` would be the exact conflation the pins exist "
-        "to prevent. Closed when ci-ios.sh writes "
-        "build/ci/evidence/ios-profile-removal.json -- PRODUCER_PINS names it.",
-        ("execution", "os_enforcement_exercised", "assertion_source",
-         "simulator_runtime", "xcode_version", "test_count"),
     ),
 }
 
