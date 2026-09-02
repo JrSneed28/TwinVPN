@@ -858,6 +858,11 @@ fn the_compiled_in_reason_registry_agrees_with_the_frozen_file() {
 // ---------------------------------------------------------------------------
 
 #[test]
+// The minor is a constant and the floor below is asserted ON that constant
+// on purpose: it is a tripwire that must fire on the day the number is
+// rewritten, and clippy's `assertions_on_constants` cannot tell that from a
+// leftover `assert!(true)`.
+#[allow(clippy::assertions_on_constants)]
 fn w24_the_abi_carries_the_ruleset_read_back_and_the_recovery_entry_point() {
     // **W-24, INVERTED rather than deleted.** This test used to assert the
     // getter's ABSENCE and said in terms: "this test fails if the vtable ever
