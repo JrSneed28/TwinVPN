@@ -246,6 +246,104 @@ apple_require_xcodegen() {
 }
 
 # ---------------------------------------------------------------------------
+# The macOS teardown: remove TwinVPN's enforcement, and CHECK that it is gone.
+#
+#   apple_remove_twinvpn_anchor <logdir>
+#
+# Returns 0 when the kernel holds no TwinVPN enforcement afterwards and 1 when
+# it still does. Every caller is an `if: always()` teardown, so it prints what
+# it did rather than dying — but its STATUS is the answer and must be read.
+#
+# ===========================================================================
+# THE TEARDOWN THAT HAD NEVER WORKED
+# ===========================================================================
+# `ci-macos.sh` called `sudo -n twinvpn-unblock --yes` behind a
+# `|| echo "(twinvpn-unblock reported a failure…)"`. There is no `--yes` flag
+# and there must not be one: `shells/macos/twinvpn-unblock/src/main.rs` states
+# ADR-0017 MI-13(2) in its own header — "a `--yes`-style non-interactive flag
+# MUST NOT exist, and none does" — so every invocation exited 2 on usage, the
+# `|| echo` swallowed it, and the owner-tagged anchor was never removed. On a
+# long-lived self-hosted Mac each run inherited the previous run's firewall.
+#
+# THE REAL CONTRACT, and why CI cannot satisfy it. `--confirm-unprotected`
+# (ADR-0012 KS-21(3), a flag rather than a prompt per ADR-0023 EM-38) AND a
+# terminal on standard input, because MI-13(1) makes this "a local interactive
+# act" that "will not run from cron, a timer, a service unit or any other
+# automation" (EM-72). A CI teardown IS automation, so exit 4 —
+# `MGMT.DISARM_NO_LOCAL_AUTHORITY` — is the CORRECT answer and not a defect.
+# It is invoked once anyway, so the refusal is recorded rather than assumed,
+# and no pty is forged: that would defeat the one control separating a human
+# from a scheduler.
+#
+# So the removal CI can honestly perform is the package's own:
+#   * `pfctl -a twinvpn -f /dev/null` — the same single transaction
+#     `netcfg::remove_owner_tagged_anchor` performs, touching no rule outside
+#     the anchor. pf is NEVER flushed wholesale: ADR-0012 §11.11 and CB-6, a
+#     host's own firewall is not ours to remove.
+#   * /etc/pf.conf restored from `install.sh`'s own restore point, which
+#     ADR-0016 R-27 requires the uninstall path to use.
+#   * the KS-19 LaunchDaemon booted out, because leaving it re-arms the host at
+#     the next boot — the residual `twinvpn-unblock` itself warns about.
+#   * and then a READ-BACK, W-24's discipline applied to removal: the anchor
+#     must be gone from what `pfctl` says, never from the fact that a flush
+#     returned zero.
+# ---------------------------------------------------------------------------
+apple_remove_twinvpn_anchor() {
+  local logdir="${1:-.}"
+  local unblock="/usr/local/sbin/twinvpn-unblock"
+  local pf_conf="/etc/pf.conf" pf_orig="/etc/pf.conf.twinvpn-orig"
+  local label="com.twinvpn.ksd"
+  local rc=0 unblock_rc=0
+
+  mkdir -p "$logdir"
+
+  if [ -x "$unblock" ]; then
+    sudo -n "$unblock" --status || echo "(twinvpn-unblock --status failed)"
+    sudo -n "$unblock" --confirm-unprotected < /dev/null || unblock_rc=$?
+    echo "twinvpn-unblock exit $unblock_rc (4 = MGMT.DISARM_NO_LOCAL_AUTHORITY,\
+ the documented refusal of automation; the package removal below is what CI can do)"
+  else
+    echo "(twinvpn-unblock is not installed on this host)"
+  fi
+
+  sudo -n pfctl -a twinvpn -f /dev/null 2>&1 \
+    || echo "(emptying the twinvpn anchor failed)"
+
+  if [ -f "$pf_orig" ]; then
+    sudo -n cp -p "$pf_orig" "$pf_conf" && echo "restored $pf_conf from $pf_orig"
+    sudo -n rm -f "$pf_orig"
+    sudo -n pfctl -f "$pf_conf" 2>&1 || echo "(pf refused the restored $pf_conf)"
+  else
+    echo "(no $pf_orig, so nothing on this host spliced $pf_conf)"
+  fi
+
+  sudo -n launchctl bootout "system/$label" 2>/dev/null \
+    || echo "(the $label job was not loaded)"
+  sudo -n rm -f "/Library/LaunchDaemons/$label.plist"
+
+  sudo -n pfctl -s rules 2>&1 | tee "$logdir/pf-rules-after-cleanup.txt" || true
+  sudo -n pfctl -a twinvpn -s rules 2>&1 \
+    | tee "$logdir/pf-anchor-rules-after-cleanup.txt" || true
+  # `awk` and not `grep`, for the reason the header below gives.
+  if awk '/anchor/ && /twinvpn/ { f = 1 } END { exit !f }' \
+       "$logdir/pf-rules-after-cleanup.txt"; then
+    echo "::error::/etc/pf.conf still references the twinvpn anchor" >&2
+    rc=1
+  fi
+  if awk '/^[[:space:]]*(block|pass)[[:space:]]/ { f = 1 } END { exit !f }' \
+       "$logdir/pf-anchor-rules-after-cleanup.txt"; then
+    echo "::error::the twinvpn pf anchor still holds rules" >&2
+    rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::TwinVPN enforcement is STILL INSTALLED on this host, so the \
+next job on it inherits our firewall. The sanctioned removal is \
+\`sudo twinvpn-unblock --confirm-unprotected\` from a terminal (ADR-0012 KS-20a)." >&2
+  fi
+  return "$rc"
+}
+
+# ---------------------------------------------------------------------------
 # WHY A FAILURE HAS TO BE ECHOED A SECOND TIME
 #
 # In run 33286355061 the iOS job refused with "the shared core did not compile

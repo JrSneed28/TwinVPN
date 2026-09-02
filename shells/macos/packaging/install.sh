@@ -10,12 +10,19 @@
 # rows (store root, backup exclusion).
 #
 # =============================================================================
-# THIS SCRIPT HAS NEVER BEEN EXECUTED.
+# THIS SCRIPT HAS NEVER BEEN EXECUTED — but there is now a lane that runs it.
 #
-# It is written on a Linux host with no macOS, no `pfctl`, no `launchctl`, no
+# It was written on a Linux host with no macOS, no `pfctl`, no `launchctl`, no
 # `dscl`, no `tmutil` and no way to run it. Every command is written from the
-# documented interface; none has been observed to work. Treat a green read of
-# this file as a review, never as a test.
+# documented interface; as of this writing none has been observed to work, so a
+# green read of this file is a review and never a test.
+#
+# `build/ci/ci-macos-pf-anchor.sh` (`MACOS-PF-BOOT-ANCHOR`) executes it as root
+# on a GitHub-hosted `macos-26` runner and then asserts, against pf itself, that
+# the anchor is loaded AND evaluated. That lane is where the first real
+# execution happens and where corrections to this file will come from. Nothing
+# in it skips a validation step here: the `pfctl -n -f` gates and the `pfctl -E`
+# arm below are the point of running it at all.
 # =============================================================================
 #
 # Idempotent by construction: running it twice must leave the host in the same
@@ -175,6 +182,15 @@ install -o root -g wheel -m 0755 \
 # ADR-0023 EM-11/EM-42 all use — with `twinvpnctl` kept beside it as a
 # compatibility alias. `ln -sfn` rather than a second copy: one file to sign,
 # one file to replace on upgrade, and no way for the two names to drift apart.
+#
+# CREATED ONLY IF ABSENT, unlike /usr/local/sbin above. macOS does not ship
+# /usr/local at all, so on a clean host or a CI runner this directory may not
+# exist and `install` would fail with ENOENT. Where it DOES exist it is left
+# exactly as found: on many machines Homebrew owns it, and an `install -d`
+# that chowned it to root:wheel would break every later `brew` call — an
+# installer that "normalizes" somebody else's directory is the same class of
+# defect as one that normalizes their /etc/pf.conf.
+[[ -d /usr/local/bin ]] || install -d -o root -g wheel -m 0755 /usr/local/bin
 install -o root -g wheel -m 0755 \
     "${SRC}/../target/release/twinvpnctl" "/usr/local/bin/twinvpn"
 ln -sfn twinvpn "/usr/local/bin/twinvpnctl"

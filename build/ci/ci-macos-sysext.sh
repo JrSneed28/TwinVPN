@@ -24,29 +24,49 @@
 # and the conflation this splits was worth more than the duplication.
 #
 # ===========================================================================
-# WHERE IT RUNS: AN AWS EC2 MAC SELF-HOSTED RUNNER
+# WHY THIS LANE CANNOT RUN ANYWHERE TODAY, AND WHY SIP IS NOT THE REASON
 # ===========================================================================
-# GitHub's hosted macOS runners cannot do this. `systemextensionsctl developer
-# on` requires SIP to be configured, and no hosted Mac lets a job reach Recovery
-# mode. EC2 Mac is the only commercial Mac host that exposes SIP configuration
-# without physical access:
+# THE OLD PREMISE, CORRECTED. This header used to say that hosted macOS runners
+# cannot do this because `systemextensionsctl developer on` needs SIP
+# configured and no hosted Mac reaches Recovery. That is wrong on its own
+# terms: **GitHub's hosted macOS images already ship with SIP DISABLED** —
+# `actions/runner-images` #8162 recorded macos-13 as the first, and a public
+# `macos-26-arm64` run on 2026-09-01 prints "System Integrity Protection
+# status: disabled". The pre-flight below would pass on `macos-26` today.
 #
-#     aws ec2 create-mac-system-integrity-protection-modification-task
-#     aws ec2 describe-mac-modification-tasks
+# So SIP was never the blocker. Three others are, each sufficient on its own,
+# on ANY Mac, hosted or owned:
 #
-# Two facts about that decide how this script behaves:
+#   1. TWO GUI APPROVALS. The System Settings toggle under General > Login
+#      Items & Extensions > Network Extensions, and then the VPN configuration
+#      consent dialog `NETunnelProviderManager.saveToPreferences` raises. Apple
+#      documents developer mode as relaxing the extension's LOCATION check and
+#      SIP-disabled as relaxing the NOTARIZATION check; neither is documented
+#      as relaxing APPROVAL, and the only supported non-interactive route is an
+#      MDM `com.apple.system-extension-policy` payload. `security
+#      authorizationdb write <right> allow` — the one scripted route to the
+#      admin authentication behind the toggle — fails with -60005 on macos-15
+#      and later (`runner-images` #11893).
+#   2. THE ENTITLEMENT IS NOT GRANTED. `packaging/TwinVPNTunnel.entitlements`
+#      requests `packet-tunnel-provider-systemextension` and its own header
+#      says Apple has not granted it. There is no build to activate.
+#   3. THERE IS NO NON-NETWORKEXTENSION TUNNEL PATH.
+#      `core/crates/twinvpn-platform-macos/src/utun.rs:436` returns `ENOSYS`.
 #
-#   * SIP STATE IS VOLUME-SCOPED. A stop/start re-enables it and a replaced root
-#     volume does not inherit it, and it does not travel in an AMI or a snapshot.
-#     So the instance is long-lived and never stopped — and this script asserts
-#     `csrutil status` as a PRE-FLIGHT rather than trusting the provisioning,
-#     because a silently re-enabled SIP fails deep inside activation with a
-#     message about the extension rather than about SIP.
-#   * FILEVAULT MUST STAY OFF and there must be exactly one bootable volume, or
-#     the modification task leaves the host unbootable. Not this script's job,
-#     but it is why the runner is provisioned once and left alone.
+# None is an infrastructure problem and none is bought with a Mac. The lane
+# reads NOT-EXECUTED, which is the truthful state; its job is to be CORRECT
+# WHEN IT RUNS rather than to be runnable.
 #
-# `docs/implementation/self-hosted-runners.md` carries the provisioning detail.
+# The part a hosted runner CAN carry is a different criterion:
+# `build/ci/ci-macos-pf-anchor.sh` (`MACOS-PF-BOOT-ANCHOR`) installs the KS-19
+# boot artifact and lets Apple's own pf evaluate it as root on `macos-26`, with
+# no oracle, no sentinel, no Team ID and no approval. Separate criterion,
+# separate evidence file: folding it in here would be the conflation the August
+# 2026 split of the macOS row exists to prevent.
+#
+# The pre-flight below still asserts `csrutil status` — a fully enabled SIP
+# does refuse developer mode, and failing there is cheaper than failing inside
+# activation. It is necessary and nowhere near sufficient.
 #
 # ===========================================================================
 # WHY THE EGRESS CLAIM IS NOT MADE HERE
@@ -121,17 +141,36 @@ sip_config="$(csrutil status 2>&1 | tr -d '\n' | tr -s ' ')"
 echo "macOS: $macos_version"
 echo "SIP:   $sip_config"
 
+# PRIVILEGE AND FLEET, MEASURED. Both were constants in the heredoc below —
+# `privileged: true` and `runner_kind: "self-hosted"` — the same class of defect
+# as `systemextensionsctl_state`: always present, always plausible, never read
+# from anything. `sudo -n id -u` is the question this lane depends on, since it
+# installs to /Applications, turns developer mode on and reads pf that way.
+# `RUNNER_ENVIRONMENT` is GitHub's own answer and its vocabulary is exactly the
+# schema's; the floor is only reached off Actions, where nothing sets it.
+sudo_uid="$(sudo -n id -u 2>/dev/null || true)"
+privileged=false
+if [ "$sudo_uid" = "0" ]; then privileged=true; fi
+runner_kind="${TWINVPN_RUNNER_KIND:-${RUNNER_ENVIRONMENT:-self-hosted}}"
+echo "privileged (sudo -n id -u): $privileged"
+echo "runner kind:                $runner_kind"
+
 # `csrutil status` on a fully enabled system prints "System Integrity
 # Protection status: enabled." — and with that, `systemextensionsctl developer
-# on` is refused and the activation below cannot happen. Fail HERE, naming the
-# EC2 API that changes it, rather than 20 minutes later inside xcodebuild.
+# on` is refused and the activation below cannot happen. Fail HERE rather than
+# 20 minutes later inside xcodebuild.
+#
+# NECESSARY, NOT SUFFICIENT, and the header says why at length: a hosted
+# `macos-26` image passes this check today and still cannot activate an
+# extension, because the approvals and the entitlement are what bind. A reader
+# who takes a green pre-flight as "the lane can run here" has read it backwards.
 case "$sip_config" in
   *"status: enabled."*)
     echo "::error::SIP is fully enabled, so systemextensionsctl developer mode is \
-unavailable and no extension can be activated on this host. On EC2 Mac, run \
-\`aws ec2 create-mac-system-integrity-protection-modification-task\` and poll \
-\`describe-mac-modification-tasks\`; SIP state is VOLUME-scoped, so it must be \
-re-applied after any stop/start or root-volume replacement." >&2
+unavailable and no extension can be activated on this host. This is the FIRST \
+of this lane's obstacles and not the largest: the two GUI approvals and the \
+ungranted packet-tunnel-provider-systemextension entitlement remain after it is \
+cleared. See this script's header." >&2
     exit 1 ;;
 esac
 
@@ -162,7 +201,34 @@ observations would be indistinguishable from a working enforcement path." >&2
     exit 2
   fi
 done
-apple_toolchain_banner
+
+# WHERE THE ORACLE STANDS, and WHOSE ADDRESS THE HEARTBEAT ARRIVES FROM. Two
+# facts the adjudicator requires of every oracle-backed criterion, and neither
+# is derivable from the oracle's own report.
+#
+# `oracle_topology` separates an oracle the device can only reach by emitting a
+# packet that LEFT it from one on the same host, bridge or NAT — where a
+# SILENCE phase is a statement about a network segment rather than about
+# egress. `external` is this lane's design and the default.
+#
+# `sentinel_egress_identity` is the heartbeat's source address as the oracle
+# sees it. Refused when unset rather than defaulted: the oracle discards any
+# beat whose source the device was also seen egressing from, so an undeclared
+# sentinel cannot be checked for independence at all. `TWINVPN_SENTINEL_HOST`
+# names the machine; this names the address, and on a NAT they differ.
+oracle_topology="${TWINVPN_ORACLE_TOPOLOGY:-external}"
+sentinel_egress_identity="${TWINVPN_SENTINEL_EGRESS_IDENTITY:-}"
+if [ -z "$sentinel_egress_identity" ]; then
+  echo "::error::TWINVPN_SENTINEL_EGRESS_IDENTITY is unset. The oracle credits a \
+SILENCE phase only when an INDEPENDENT heartbeat proves it was still listening, \
+and independence is decided by comparing the sentinel's egress source address \
+against the device's. A run that cannot name that address cannot have its \
+heartbeat checked for independence, so its silence is unattributable. Set it to \
+the public source address the sentinel's beats arrive from." >&2
+  exit 2
+fi
+
+apple_toolchain_banner macosx
 echo "::endgroup::"
 
 # --------------------------------------------------------------------------
@@ -202,7 +268,24 @@ echo "::endgroup::"
 # 2. activate the REAL extension, and confirm with systemextensionsctl
 # --------------------------------------------------------------------------
 echo "::group::activate the system extension"
-sudo systemextensionsctl developer on
+# DEVELOPER MODE, AND THE EVIDENCE RECORDS WHAT THIS COMMAND ANSWERED.
+#
+# `developer_mode` was the literal `true` in the heredoc below. It is now the
+# exit status of the command that turns it on, captured rather than assumed:
+# `systemextensionsctl developer on` is refused on a host where SIP forbids it,
+# and a lane that wrote `true` regardless would be describing a mode it never
+# entered. The output goes to a log so the value has a printed answer behind it.
+developer_rc=0
+# SC2024 is correct and is what is wanted: the redirect is performed by THIS
+# shell, into a log directory this unprivileged user owns, so the file does not
+# end up root-owned for the upload step. Only the command needs privilege.
+# shellcheck disable=SC2024
+sudo systemextensionsctl developer on > "$LOGDIR/sysext-developer.log" 2>&1 \
+  || developer_rc=$?
+cat "$LOGDIR/sysext-developer.log"
+developer_mode=false
+if [ "$developer_rc" -eq 0 ]; then developer_mode=true; fi
+echo "developer mode enabled: $developer_mode (exit $developer_rc)"
 # The app's own activation request. NOT `systemextensionsctl install`, which
 # does not exist: activation is `OSSystemExtensionRequest.activationRequest`,
 # issued by the container app, and driving it through the app is what makes this
@@ -220,6 +303,27 @@ for _ in $(seq 1 60); do
 done
 systemextensionsctl list > "$LOGDIR/sysext-list.txt" 2>&1 || true
 echo "systemextensionsctl: $sysext_state"
+
+# THE STATE THE EVIDENCE CARRIES IS THE STATE THAT WAS READ.
+#
+# The heredoc below wrote the literal `"activated enabled"`. The case that
+# follows meant it was not a lie — but the value in the file came from nowhere,
+# and a guard that is later relaxed leaves a constant nobody notices has
+# stopped being checked.
+#
+# `systemextensionsctl list` prints one TAB-separated row per extension ending
+# in a bracketed state (`… TwinVPN [activated enabled]`). The bracketed token
+# is extracted because that is the field, and because a raw tab is not legal
+# inside a JSON string — the whole row would produce a file no parser accepts.
+# A row with no brackets is recorded with its tabs folded, which is a truthful
+# "this is what it said" and fails the prerequisite.
+sysext_state_measured="$(printf '%s' "$sysext_state" \
+  | sed -n 's/.*\[\([^]]*\)\].*/\1/p')"
+if [ -z "$sysext_state_measured" ]; then
+  sysext_state_measured="$(printf '%s' "$sysext_state" | tr '\t' ' ' | tr -s ' ')"
+fi
+echo "state, as recorded: ${sysext_state_measured:-<the extension is not listed>}"
+
 case "$sysext_state" in
   *"activated enabled"*) : ;;
   *)
@@ -386,15 +490,51 @@ echo "protected path identity: ${PROTECTED_PATH_IDENTITY:-<unreadable>}"
 "$PROBE" phase TUNNELLED OBSERVE --path p --disjoint-from BASELINE
 "$PROBE" beacon --seconds 15
 
-echo "::group::enforcement is really installed"
-# The OS's own answer, captured as evidence rather than as reassurance. It says
-# which rules exist; the oracle says what left the machine, and only the second
-# one decides the row.
-sudo -n pfctl -sr        > "$LOGDIR/pf-rules.txt"    2>&1 || true
-sudo -n pfctl -s Anchors > "$LOGDIR/pf-anchors.txt"  2>&1 || true
-if ! grep -qi twinvpn "$LOGDIR/pf-anchors.txt"; then
-  echo "::error::no TwinVPN pf anchor is installed after net up, so the silence \
-measured below would be the silence of an unprotected host" >&2
+echo "::group::enforcement is really EVALUATED"
+# THIS CHECK USED TO PASS ON AN INERT ANCHOR.
+#
+# It grepped `pfctl -s Anchors` for `twinvpn` and called that "enforcement is
+# really installed". An anchor that EXISTS is not an anchor that RUNS, and two
+# states go green under the old form over a wholly unprotected host:
+#
+#   * pf switched off. `pfctl -a twinvpn -f -` loads into a DISABLED filter
+#     happily and every rule in it is then dead text. Nothing in this lane runs
+#     `pfctl -E`, so that is the default state of an uninstalled host.
+#   * the anchor loaded but never REFERENCED. pf evaluates an anchor only where
+#     the main ruleset calls it, and the `anchor "twinvpn/*"` line lives in
+#     /etc/pf.conf, which only `shells/macos/packaging/install.sh` writes.
+#
+# So the two facts are asked separately, the way `ksd`'s own W-24 read-back
+# asks them (`shells/macos/ksd/src/main.rs`'s `read_back`). Either alone is the
+# silence of an unprotected host. The oracle still decides the row.
+# SC2024 throughout: the redirect is this shell's and lands in a directory the
+# unprivileged CI user owns, which is deliberate — only `pfctl` needs root, and
+# a root-owned log is one the upload step cannot read.
+# shellcheck disable=SC2024
+{
+  sudo -n pfctl -s info    > "$LOGDIR/pf-info.txt"     2>&1 || true
+  sudo -n pfctl -s rules   > "$LOGDIR/pf-rules.txt"    2>&1 || true
+  sudo -n pfctl -s Anchors > "$LOGDIR/pf-anchors.txt"  2>&1 || true
+  sudo -n pfctl -a twinvpn -s rules > "$LOGDIR/pf-twinvpn-rules.txt" 2>&1 || true
+}
+
+# `Status: Enabled for 0 days 00:04:11   Debug: Urgent` — only the word after
+# `Status:` is read, which is what `pfread::parse_status` does.
+pf_enabled="$(awk '/^[[:space:]]*Status:[[:space:]]+Enabled/ { found = 1 } \
+  END { print (found ? "true" : "false") }' "$LOGDIR/pf-info.txt")"
+# The reference, from the MAIN ruleset. `awk` and not `grep`, because grep
+# exits 1 on no match and this script has no `|| true` to spare.
+anchor_referenced="$(awk '/anchor/ && /twinvpn/ { found = 1 } END { print (found ? "true" : "false") }' \
+  "$LOGDIR/pf-rules.txt")"
+echo "pf enabled:                        $pf_enabled"
+echo "anchor referenced in main ruleset: $anchor_referenced"
+if [ "$pf_enabled" != true ] || [ "$anchor_referenced" != true ]; then
+  echo "::error::the TwinVPN pf anchor is not being EVALUATED after net up: pf \
+enabled=$pf_enabled, referenced from the main ruleset=$anchor_referenced. An \
+anchor loaded into a disabled filter, or loaded and never referenced from \
+/etc/pf.conf, is dead text — so the silence measured below would be the silence \
+of an unprotected host. /etc/pf.conf's reference is installed by \
+shells/macos/packaging/install.sh and by nothing else." >&2
   "$PROBE" close || true
   exit 1
 fi
@@ -410,8 +550,20 @@ if [ -n "$ext_pid" ]; then
   sudo kill -9 "$ext_pid"
   echo "killed the extension process (pid $ext_pid)"
 else
-  echo "::warning::no process matched $ext_bundle_id; killing the tunnel interface instead"
-  sudo ifconfig utun7 destroy 2>/dev/null || true
+  # REFUSED, NOT SUBSTITUTED. The fallback was `sudo ifconfig utun7 destroy`,
+  # wrong twice over: utun indices are assigned DYNAMICALLY — a macOS runner
+  # image already carries a `utun0` holding an IPv6 default route — so a
+  # hard-coded index destroys nothing or destroys someone else's interface,
+  # and the second takes the host's networking with it. It is also a different
+  # injection: this invariant is about the AUTHORITY disappearing, and tearing
+  # down an interface under a healthy extension tests the OS instead.
+  echo "::error::no process matched $ext_bundle_id, so the tunnel-failure \
+injection this criterion is about did not happen. There is no substitute: \
+destroying a utun by index is a different injection over an interface this lane \
+cannot name, and the SILENCE phase below would be measuring an extension that \
+was never killed." >&2
+  "$PROBE" close || true
+  exit 1
 fi
 echo "::endgroup::"
 
@@ -450,9 +602,9 @@ cat > "$EVIDENCE" <<JSON
   "platform": "macos",
   "criterion": "$CRITERION",
   "job_name": "${GITHUB_JOB:-macos-sysext-lifecycle}",
-  "runner": "${RUNNER_NAME:-ec2-mac}",
-  "runner_kind": "self-hosted",
-  "privileged": true,
+  "runner": "${RUNNER_NAME:-local}",
+  "runner_kind": "$runner_kind",
+  "privileged": $privileged,
   "github_run_id": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"$GITHUB_RUN_ID\"" || echo null),
   "github_run_attempt": $(twinvpn_run_attempt_json),
   "repository": $(twinvpn_repository_json),
@@ -470,9 +622,13 @@ cat > "$EVIDENCE" <<JSON
     "sip_config": "$sip_config",
     "team_id": "$team_id",
     "extension_bundle_id": "$ext_bundle_id",
-    "systemextensionsctl_state": "activated enabled",
-    "developer_mode": true,
+    "systemextensionsctl_state": "$sysext_state_measured",
+    "developer_mode": $developer_mode,
+    "pf_enabled": $pf_enabled,
+    "anchor_referenced_in_main_ruleset": $anchor_referenced,
     "sentinel_host": "$TWINVPN_SENTINEL_HOST",
+    "sentinel_egress_identity": "$sentinel_egress_identity",
+    "oracle_topology": "$oracle_topology",
     "probe_host": "device",
     "unprotected_path_established": $([ -n "$UNPROTECTED_PATH_IDENTITY" ] && echo true || echo false),
     "protected_path_established": $([ -n "$PROTECTED_PATH_IDENTITY" ] && echo true || echo false),
@@ -496,7 +652,11 @@ cat > "$EVIDENCE" <<JSON
   "test_exit_code": 0,
   "artifacts": [
     "build/ci/logs/macos/sysext-list.txt",
+    "build/ci/logs/macos/sysext-developer.log",
+    "build/ci/logs/macos/pf-info.txt",
+    "build/ci/logs/macos/pf-rules.txt",
     "build/ci/logs/macos/pf-anchors.txt",
+    "build/ci/logs/macos/pf-twinvpn-rules.txt",
     "build/ci/logs/macos/oracle-report.json"
   ],
   "notes": "DEVELOPER MODE. This run says nothing about production signing or notarization; that is MACOS-PRODUCTION-SIGNATURE, which is a separate criterion with its own evidence file. graceful_shutdown is false because the extension was killed rather than asked to stop.",
