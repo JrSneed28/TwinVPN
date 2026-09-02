@@ -65,6 +65,7 @@ $Counts  = Join-Path $Root 'counts.env'
 $GuestV4   = '10.77.0.10'; $GuestV4Len = 24; $GatewayV4 = '10.77.0.1'
 $GuestV6   = 'fd77:7717:d0c::10'; $GuestV6Len = 64; $GatewayV6 = 'fd77:7717:d0c::1'
 $OracleV4  = '10.78.0.1'
+$OraclePort = 8080   # twinvpn-l1.ps1 binds and advertises 8080; port 80 belongs to HTTP.sys on L1
 $OracleV6  = 'fd78:7717:d0c::1'
 $ResolverV4 = '10.78.0.53'
 $ResolverV6 = 'fd78:7717:d0c::53'
@@ -123,12 +124,21 @@ function Assert-Reachable([string] $Address) {
     # BEFORE any phase, and fatal. Zero arrivals because the kill switch worked
     # and zero arrivals because the oracle was never reachable are the same
     # bytes; this is what keeps them apart on the guest's side.
-    $ok = Test-NetConnection -ComputerName $Address -Port 80 -InformationLevel Quiet -WarningAction SilentlyContinue
+    $ok = Test-NetConnection -ComputerName $Address -Port $OraclePort -InformationLevel Quiet -WarningAction SilentlyContinue
     if (-not $ok) {
-        throw ("the guest cannot reach the oracle's HTTP listener at $Address " +
+        # Which hop failed, before throwing: the guest's own gateway on the
+        # link (L1), then the routed oracle address. Run 7 probed port 80 after
+        # the oracle had moved to 8080 and could not tell the two apart.
+        foreach ($hop in @($GatewayV4, $GatewayV6, $Address)) {
+            $r = Test-NetConnection -ComputerName $hop -WarningAction SilentlyContinue
+            Say ("hop $hop ping=" + $r.PingSucceeded)
+        }
+        $r = Test-NetConnection -ComputerName $Address -Port $OraclePort -WarningAction SilentlyContinue
+        Say ("tcp $Address`:$OraclePort succeeded=" + $r.TcpTestSucceeded + " via " + $r.InterfaceAlias + " source " + $r.SourceAddress.IPAddress)
+        throw ("the guest cannot reach the oracle's HTTP listener at $Address`:$OraclePort " +
                "before arming. Every SILENCE phase after this would be vacuous.")
     }
-    Say "oracle reachable: $Address tcp/80"
+    Say "oracle reachable: $Address tcp/$OraclePort"
 }
 
 switch ($Step) {
