@@ -82,7 +82,11 @@ param(
     # `if: always()` destroy step computed a name that had never existed and
     # tore down nothing.
     [string] $VmName = 'twinvpn-ks',
-    [string] $VmRoot = 'C:\twinvpn-l1',
+    # Defaults to `twinvpn-l1` on whichever of C: and D: has more room: the
+    # hosted fleet's free space varies by several GB run to run (run 5 saw
+    # 28.5 GB on C: where run 4 saw 34.5), and D: is the larger workspace disk
+    # on some images.
+    [string] $VmRoot = '',
 
     [string] $Step, [string] $Arg1, [string] $Arg2,
     [string] $LocalPath, [string] $RemotePath,
@@ -96,6 +100,11 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $Here      = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $VmRoot) {
+    $roomiest = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -in 'C', 'D' } |
+                Sort-Object Free -Descending | Select-Object -First 1
+    $VmRoot = Join-Path ($roomiest.Root) 'twinvpn-l1'
+}
 $RunDir    = Join-Path $VmRoot 'run'
 $OraclePort = 8080   # see Start-Observers: port 80 belongs to HTTP.sys on Windows
 $BaseVhd   = Join-Path $VmRoot 'base.vhdx'

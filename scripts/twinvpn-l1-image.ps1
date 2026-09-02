@@ -92,7 +92,11 @@ function Get-PinnedIso([string] $Path) {
 }
 
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
-Assert-Space 'C' ($SizeGB - 10)
+# MEASURED, not the disk's nominal size: run 4 applied the image at 18.3 GB
+# beside the 4.8 GB ISO, and the ISO is removed once applied, so the peak is
+# about 23 GB plus the guest's differencing disk. The dynamic VHDX's 40 GB
+# ceiling is never reached.
+Assert-Space ((Split-Path -Qualifier $WorkDir).TrimEnd(':')) 25
 
 $iso = Join-Path $WorkDir 'win11-ltsc-eval.iso'
 Get-PinnedIso $iso
