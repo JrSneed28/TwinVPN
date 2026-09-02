@@ -312,7 +312,13 @@ function Start-Observers([string] $Repo) {
             "--beacon-v4 'http://$($OracleV4):$OraclePort/b' --beacon-v6 'http://[$OracleV6]:$OraclePort/b' " +
             "--zone $Zone --source $SentinelV4 --source $SentinelV6 " +
             "--dns-server $ResolverV4 --interval-ms 2000")
-    $pids += (Start-Process -FilePath $bash -ArgumentList @('-lc', $cmd) -PassThru -NoNewWindow `
+    # THROUGH A SCRIPT FILE, NOT `-lc "<command>"`. Start-Process joins its
+    # argument list with spaces and quotes nothing, so a command containing
+    # spaces reached bash as `-lc cd` plus stray words: bash ran `cd`, exited
+    # zero, and both logs stayed empty for two runs. A file has no quoting.
+    $sentinelScript = Join-Path $RunDir 'sentinel.sh'
+    Set-Content -LiteralPath $sentinelScript -Value ("#!/usr/bin/env bash`nset -euo pipefail`n" + $cmd + "`n") -NoNewline
+    $pids += (Start-Process -FilePath $bash -ArgumentList @('--login', (ConvertTo-BashPath $sentinelScript)) -PassThru -NoNewWindow `
         -RedirectStandardOutput $sentinelLog `
         -RedirectStandardError  (Join-Path $RunDir 'sentinel.err')).Id
     $pids -join "`n" | Set-Content -LiteralPath $PidFile
@@ -477,8 +483,12 @@ switch ($Action) {
 
             Write-Host 'running the kill-switch sequence from this host against the guest'
             $repoSh = ConvertTo-BashPath $RepoPath
+            # A script file, for the reason Start-Observers gives.
+            $sequenceScript = Join-Path $RunDir 'sequence.sh'
+            Set-Content -LiteralPath $sequenceScript `
+                -Value "#!/usr/bin/env bash`nset -euo pipefail`ncd '$repoSh' && build/ci/ci-windows-killswitch.sh`n" -NoNewline
             $p = Start-Process -FilePath $bash -PassThru -NoNewWindow `
-                 -ArgumentList @('-lc', "cd '$repoSh' && build/ci/ci-windows-killswitch.sh")
+                 -ArgumentList @('--login', (ConvertTo-BashPath $sequenceScript))
             if (-not $p.WaitForExit($RunTimeoutMinutes * 60 * 1000)) {
                 $p.Kill(); throw "the kill-switch sequence did not finish within $RunTimeoutMinutes minutes"
             }

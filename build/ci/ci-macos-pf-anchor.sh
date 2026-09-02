@@ -25,9 +25,7 @@
 #
 # NO ORACLE, DELIBERATELY. The anchor denies `100.64.0.0/10` (RFC 6598) and
 # `fd7c:9e5d:2a10::/48` (AP-1's pinned ULA); neither reaches a public observer,
-# so there is no egress claim to adjudicate. It is NOT in `report.py`'s
-# `ORACLE_REQUIRED`, and adding it would silently demand path-identity keys
-# this lane cannot produce truthfully.
+# so there is no egress claim to adjudicate and it is NOT in `ORACLE_REQUIRED`.
 # ===========================================================================
 # HOW "EVALUATED" IS TOLD FROM "LOADED"
 # ===========================================================================
@@ -285,6 +283,14 @@ PROBE_V6_SRC="fd77:7717:d0c:ffff::2"
 if [ -n "$probe_v6_iface" ]; then
   if sudo -n ifconfig "$probe_v6_iface" inet6 "$PROBE_V6_SRC" prefixlen 64 alias \
        > "$LOGDIR/pf-probe-route.txt" 2>&1; then probe_v6_alias=true; fi
+  # DAD: a fresh alias is TENTATIVE for about a second and unusable as a
+  # source until then; connect() then fails with EHOSTUNREACH before output
+  # and no packet reaches pf (the 2026-09-02 third run). Wait it out.
+  for _ in $(seq 1 20); do
+    ifconfig "$probe_v6_iface" inet6 2>/dev/null | grep -F "$PROBE_V6_SRC" | grep -qv tentative && break
+    sleep 0.5
+  done
+  ifconfig "$probe_v6_iface" inet6 >> "$LOGDIR/pf-probe-route.txt" 2>&1 || true
   if sudo -n route -n add -inet6 "${PROBE_V6%::1}::/48" -interface "$probe_v6_iface" \
        >> "$LOGDIR/pf-probe-route.txt" 2>&1; then probe_v6_route=true; fi
 fi
