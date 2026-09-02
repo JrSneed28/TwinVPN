@@ -190,8 +190,9 @@ impl KeychainStore {
         let dictionary = cf_dictionary()?;
         let service = cf_string(&self.spec.service)?;
         let account = cf_string(account)?;
-        // SAFETY of every `set`: the statics are CF strings CF owns for the life
-        // of the process, and each local is live until the end of this function.
+        // SAFETY: for every `set` below, the key statics are CF strings CF owns
+        // for the life of the process, and each value local is live until the
+        // end of this function.
         unsafe {
             set(
                 &dictionary,

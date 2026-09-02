@@ -359,7 +359,15 @@ pub(crate) fn apply_protections(ptr: *mut u8, len: usize) -> LockedMemoryReport 
     // attributes of that range. Every return value is checked; none of these
     // calls can invalidate `ptr`.
     let swap_locked = unsafe { libc::mlock(ptr.cast(), len) } == 0;
+    // SAFETY: the same range, unchanged by the call above — `mlock` moves no
+    // pages and returns no memory. `MADV_DONTDUMP` only clears the range's
+    // dumpable bit; an unknown advice value is `EINVAL`, which is a return code
+    // and not a memory effect.
     let dump_excluded = unsafe { libc::madvise(ptr.cast(), len, MADV_DONTDUMP) } == 0;
+    // SAFETY: the same range again, for the same reason. `MADV_WIPEONFORK` only
+    // marks the range to be replaced by zero pages in a `fork(2)` CHILD; it
+    // reads and writes nothing in this address space, and a kernel that does not
+    // know the value answers `EINVAL`.
     let wipe_on_fork = unsafe { libc::madvise(ptr.cast(), len, MADV_WIPEONFORK) } == 0;
     LockedMemoryReport {
         swap_locked,

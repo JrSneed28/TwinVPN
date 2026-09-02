@@ -327,10 +327,13 @@ impl crate::netcfg::ResolverEngine for DynamicStoreEngine {
         let dictionary: CFDictionaryRef = owned.as_ptr().cast();
         let servers_key = cf_string("ServerAddresses")?;
         let search_key = cf_string("SearchDomains")?;
-        // SAFETY: `dictionary` is the live dictionary held by `owned`; both keys
-        // are live `CFString`s. `CFDictionaryGetValue` follows the Get Rule, so
-        // the results are BORROWS and are not released.
+        // SAFETY: `dictionary` is the live dictionary held by `owned` and
+        // `servers_key` is a live `CFString`. `CFDictionaryGetValue` follows the
+        // Get Rule, so the result is a BORROW and is not released.
         let servers = unsafe { CFDictionaryGetValue(dictionary, servers_key.as_ptr()) };
+        // SAFETY: the same live dictionary — the Get above retained nothing and
+        // released nothing — and `search_key` is a live `CFString`. Get Rule
+        // again, so this result is a borrow too.
         let search = unsafe { CFDictionaryGetValue(dictionary, search_key.as_ptr()) };
         Ok(RestorePoint {
             service_id: service_id.to_owned(),

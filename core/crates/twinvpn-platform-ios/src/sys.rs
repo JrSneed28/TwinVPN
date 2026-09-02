@@ -78,11 +78,11 @@ mod imp {
 
     /// The suspend-**inclusive** reading, in microseconds.
     pub fn continuous_micros() -> Option<u64> {
+        let mut timebase = MachTimebaseInfo::default();
         // SAFETY: `mach_timebase_info` writes two `u32`s into the struct we
         // supply, which is a live, correctly-aligned `MachTimebaseInfo` on this
         // stack frame for the whole call. It takes no ownership and stores no
         // pointer.
-        let mut timebase = MachTimebaseInfo::default();
         let rc = unsafe { mach_timebase_info(core::ptr::addr_of_mut!(timebase)) };
         if rc != 0 || timebase.denom == 0 {
             return None;
