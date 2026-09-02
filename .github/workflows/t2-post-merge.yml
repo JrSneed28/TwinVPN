@@ -208,13 +208,32 @@ jobs:
       - name: dual-stack — the observability stack actually answers
         run: |
           set -euo pipefail
-          curl -fsS "http://127.0.0.1:19090/-/ready" >/dev/null && echo "prometheus ready"
-          curl -fsS "http://127.0.0.1:13100/ready"   >/dev/null && echo "loki ready"
-          curl -fsS "http://127.0.0.1:13200/ready"   >/dev/null && echo "tempo ready"
-          curl -fsS "http://127.0.0.1:13000/api/health" >/dev/null && echo "grafana healthy"
+          # ------------------------------------------------------------
+          # `curl ... && echo` DOES NOT FAIL THE STEP. Bash exempts a
+          # command from `set -e` when it is not the last one in an `&&`
+          # list, so loki and tempo answered /ready with 503, printed
+          # `curl: (22)`, and this step went green anyway - the only two
+          # that were really checked were prometheus (whose failure would
+          # have been masked the same way) and the final command, whose
+          # status is the step's status regardless of `set -e`.
+          #
+          # The 503 is legitimate and transient: both hold /ready down for
+          # their own post-start grace window, and `up --wait` cannot wait
+          # it out because neither image carries a HEALTHCHECK. So the
+          # probe has to retry - and when the retries run out it has to
+          # fail, which calling it as a plain command is what restores.
+          # ------------------------------------------------------------
+          ready() {
+            curl -fsS --retry 20 --retry-delay 2 --retry-all-errors "$1" >/dev/null
+            echo "$2"
+          }
+          ready "http://127.0.0.1:19090/-/ready"    "prometheus ready"
+          ready "http://127.0.0.1:13100/ready"      "loki ready"
+          ready "http://127.0.0.1:13200/ready"      "tempo ready"
+          ready "http://127.0.0.1:13000/api/health" "grafana healthy"
           # The collector's health_check extension, not a TCP probe.
-          docker compose exec -T prometheus wget -q -O - "http://otel-collector:13133" >/dev/null \
-            && echo "otel-collector health_check extension answers"
+          docker compose exec -T prometheus wget -q -O - "http://otel-collector:13133" >/dev/null
+          echo "otel-collector health_check extension answers"
 
       - name: dual-stack — the redaction pipeline is loaded, not just present
         run: |
@@ -263,10 +282,18 @@ jobs:
       - name: IPv6-only — services answer over v6
         run: |
           set -euo pipefail
-          curl -fsS "http://[::1]:19090/-/ready" >/dev/null && echo "prometheus ready over v6"
-          curl -fsS "http://[::1]:13100/ready"   >/dev/null && echo "loki ready over v6"
-          curl -fsS "http://[::1]:13200/ready"   >/dev/null && echo "tempo ready over v6"
-          curl -fsS "http://[::1]:13000/api/health" >/dev/null && echo "grafana healthy over v6"
+          # Same retry-and-really-fail shape as the dual-stack probe above,
+          # and for the same reason - see the comment there. This is the step
+          # that proves the [::1] publications carry traffic to a container
+          # that has no IPv4 address left to serve it from.
+          ready() {
+            curl -fsS --retry 20 --retry-delay 2 --retry-all-errors "$1" >/dev/null
+            echo "$2"
+          }
+          ready "http://[::1]:19090/-/ready"    "prometheus ready over v6"
+          ready "http://[::1]:13100/ready"      "loki ready over v6"
+          ready "http://[::1]:13200/ready"      "tempo ready over v6"
+          ready "http://[::1]:13000/api/health" "grafana healthy over v6"
 
       - name: IPv6-only — down
         if: always()
