@@ -118,12 +118,6 @@ UNPRODUCED: dict[str, str] = {
     "IOS-SUPERVISED-ALWAYS-ON":
         "supervised/managed Always-On has no lane script; nothing writes "
         "build/ci/evidence/ios-supervised.json. Closed when that lane lands.",
-    "IOS-FAILCLOSED-CONFIGURATION":
-        "the hosted simulator lane is build/ci/ci-ios.sh and is being written "
-        "in parallel with this table; nothing writes "
-        "build/ci/evidence/ios-failclosed-configuration.json yet. PRODUCER_PINS "
-        "names the file, so this entry is a statement of the gap and not a "
-        "substitute for it. Closed when that branch lands.",
     "MACOS-PF-BOOT-ANCHOR":
         "the hosted pf lane is build/ci/ci-macos-pf-anchor.sh and does not "
         "exist yet; nothing writes build/ci/evidence/macos-pf-anchor.json. "
@@ -134,11 +128,6 @@ UNPRODUCED: dict[str, str] = {
         "and the Corellium lane script was removed on 2026-09-02. Nothing "
         "writes build/ci/evidence/ios-ne-failclosed.json. Closed when a "
         "provisioned device lane exists, not before.",
-    "IOS-PROFILE-REMOVAL-HONESTY":
-        "redefined as simulator logic; its producer is the --acceptance mode "
-        "of build/ci/ci-ios.sh, being written in parallel with this table, and "
-        "the Corellium lane that used to write ios-profile-removal.json is "
-        "gone. PRODUCER_PINS names ci-ios.sh. Closed when that branch lands.",
 }
 
 # THE LANE SCRIPTS THE RECONCILED CRITERIA ARE BEING WRITTEN TO, PINNED BY NAME.
@@ -164,7 +153,7 @@ UNPRODUCED: dict[str, str] = {
 PRODUCER_PINS: dict[str, tuple[str, ...]] = {
     # Both simulator rows come out of the existing iOS lane, which today is the
     # version-1 link/run writer only.
-    "build/ci/ci-ios.sh": (
+    "build/ci/ci-ios-acceptance.sh": (
         "IOS-FAILCLOSED-CONFIGURATION", "IOS-PROFILE-REMOVAL-HONESTY",
         "TwinVPN.app/TwinVPN", "execution", "assertion_source",
         "simulator_runtime", "xcode_version", "test_count",

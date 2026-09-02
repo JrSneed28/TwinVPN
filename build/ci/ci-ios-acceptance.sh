@@ -316,9 +316,18 @@ case_result() {
 # something that did not happen, and `$executed_v` is false unless the suite
 # passed in full.
 # --------------------------------------------------------------------------
+# The `environment` map is written LITERALLY in the heredoc rather than
+# assembled by a helper: `build/acceptance/test_producer_key_coverage.py`
+# derives what a producer emits by rendering this heredoc, and a key that only
+# exists inside a shell function is invisible to it. Every value is either a
+# constant this lane is structurally incapable of violating (no provider runs
+# in a simulator) or a fact read off the machine. The five honesty booleans
+# are `$h_*`: each is its own case's result on the profile-removal row and is
+# `null` -- not measured -- on the configuration row, whose suite does not
+# assert them.
 write_evidence() {
   local file="$1" criterion="$2" verdict="$3" transitions="$4"
-  local environment="$5" test_command="$6" test_exit_code="$7"
+  local count="$5" test_command="$6" test_exit_code="$7"
   local compiled_v="$8" linked_v="$9" executed_v="${10}"
 
   cat > "$EVIDENCE_DIR/$file" <<JSON
@@ -343,7 +352,24 @@ write_evidence() {
     "sdk_simulator": "iphonesimulator $(xcrun --sdk iphonesimulator --show-sdk-version 2>/dev/null || echo unknown)",
     "macos": "$(sw_vers -productVersion 2>/dev/null || echo unknown)"
   },
-  "environment": { $environment },
+  "environment": {
+    "execution": "simulator",
+    "real_network_extension_invoked": false,
+    "os_enforcement_exercised": false,
+    "device_kind": "ios-simulator",
+    "simulator_runtime": "$SIM_RUNTIME",
+    "simulator_udid": "$SIM_UDID",
+    "xcode_version": "$XCODE_VERSION",
+    "product_mode": "consumer",
+    "entitlement_packet_tunnel_provider": false,
+    "assertion_source": "in-process-object-state",
+    "test_count": $count,
+    "reported_not_protected": $h_reported_not_protected,
+    "green_shield_impossible": $h_green_shield_impossible,
+    "connected_state_cleared": $h_connected_state_cleared,
+    "protection_lost_actionable": $h_protection_lost_actionable,
+    "no_continued_killswitch_claim": $h_no_continued_killswitch_claim
+  },
   "leak_oracle": null,
   "compiled": $compiled_v,
   "linked_real_core": $linked_v,
@@ -360,26 +386,6 @@ write_evidence() {
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 JSON
-}
-
-# The attestation both rows share, verbatim. Every value is either a constant
-# this lane is structurally incapable of violating (no provider runs in a
-# simulator) or a fact read off the machine.
-common_environment() {
-  local count="$1"
-  cat <<ENV
-"execution": "simulator",
-    "real_network_extension_invoked": false,
-    "os_enforcement_exercised": false,
-    "device_kind": "ios-simulator",
-    "simulator_runtime": "$SIM_RUNTIME",
-    "simulator_udid": "$SIM_UDID",
-    "xcode_version": "$XCODE_VERSION",
-    "product_mode": "consumer",
-    "entitlement_packet_tunnel_provider": false,
-    "assertion_source": "in-process-object-state",
-    "test_count": $count
-ENV
 }
 
 # ==========================================================================
@@ -430,6 +436,11 @@ fi
 add_note "hosted SIMULATOR run. No NetworkExtension provider can be activated in the simulator -- it uses the macOS kernel for networking -- so NO tunnel was started, NO OS enforcement was exercised and NO egress was observed or claimed. Every assertion read in-process object state. The device rows IOS-NE-FAIL-CLOSED and the real Settings-removal journey are NOT discharged here and remain open"
 
 # -- IOS-FAILCLOSED-CONFIGURATION -----------------------------------------
+# The configuration suite asserts none of the five honesty conditions, so the
+# row records them as null (not measured) rather than as a value.
+h_reported_not_protected=null; h_green_shield_impossible=null
+h_connected_state_cleared=null; h_protection_lost_actionable=null
+h_no_continued_killswitch_claim=null
 config_executed=false
 config_verdict="FAIL"
 if [ "$linked" = true ] && [ "$config_rc" -eq 0 ] && [ "$config_count" -gt 0 ]; then
@@ -440,7 +451,7 @@ elif [ "$config_count" -eq 0 ]; then
 fi
 write_evidence "ios-failclosed-configuration.json" "IOS-FAILCLOSED-CONFIGURATION" \
   "$config_verdict" "$config_transitions" \
-  "$(common_environment "$config_count")" \
+  "$config_count" \
   "$config_command" "$config_rc" \
   "$compiled" "$linked" "$config_executed"
 
@@ -449,14 +460,12 @@ write_evidence "ios-failclosed-configuration.json" "IOS-FAILCLOSED-CONFIGURATION
 # The five booleans are each their own case's result, so a suite in which four
 # passed and one failed writes four `true` and one `false` -- and the row fails
 # on the one, naming it. A run in which the case was never found writes `false`.
-honesty_env=""
 all_honest=true
 for entry in "${HONESTY_CASES[@]}"; do
   key="${entry%%:*}"
   value="$(case_result "${entry#*:}" "$removal_results")"
   [ "$value" = true ] || all_honest=false
-  honesty_env="${honesty_env},
-    \"$key\": $value"
+  printf -v "h_$key" '%s' "$value"
 done
 
 removal_executed=false
@@ -473,7 +482,7 @@ elif [ "$all_honest" != true ]; then
 fi
 write_evidence "ios-profile-removal.json" "IOS-PROFILE-REMOVAL-HONESTY" \
   "$removal_verdict" "$removal_transitions" \
-  "$(common_environment "$removal_count")$honesty_env" \
+  "$removal_count" \
   "$removal_command" "$removal_rc" \
   "$compiled" "$linked" "$removal_executed"
 
