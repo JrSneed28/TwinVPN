@@ -151,6 +151,10 @@ def macos_signature(**env_over) -> dict:
         "signature_intact": True,
         "notarized": True,
         "stapled": True,
+        # The nested extension's ticket, which the three above cannot speak for:
+        # spctl assesses only the top-level bundle and the ticket is stapled to
+        # the outer one.
+        "sysext_notarized": True,
     }
     env.update(env_over)
     # ARTIFACT-ONLY: it inspects a downloaded product and drives no lifecycle,

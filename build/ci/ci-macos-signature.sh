@@ -28,17 +28,30 @@
 #                                       the Team ID, recorded rather than
 #                                       assumed, so a run signed by the wrong
 #                                       team is visible instead of merely green.
-#   spctl -a -vvv --type install        GATEKEEPER's answer. This is the one a
-#                                       user's Mac actually asks, and it is the
+#   spctl -a -vvv --type execute        GATEKEEPER's answer to the LAUNCH
+#                                       question — the one a user's Mac asks the
+#                                       first time the app is opened, and the
 #                                       only check here that consults the
-#                                       notarization service's ticket.
+#                                       notarization service's ticket. `execute`
+#                                       is the assessment type for a .app;
+#                                       `install` is for an installer package
+#                                       and was the wrong question, see below.
 #   stapler validate                    the ticket is ATTACHED to the bundle. An
 #                                       app that notarized but was never stapled
 #                                       works online and fails on a Mac with no
 #                                       network — a defect that is invisible to
 #                                       every other check in this list.
+#   codesign -R="notarized"             the NESTED .systemextension is covered by
+#     --check-notarization              a notarization ticket. `spctl` and
+#                                       `stapler validate` both refuse a nested
+#                                       bundle by design (TN2206: assessment is
+#                                       a top-level operation, and the ticket is
+#                                       stapled to the OUTER bundle), so the
+#                                       claim that the shipped extension is
+#                                       notarized has to be put to codesign
+#                                       directly or it is not put at all.
 #
-# All four, or the criterion is not discharged. `codesign --verify` passing on
+# All five, or the criterion is not discharged. `codesign --verify` passing on
 # an unnotarized build is the exact false comfort this file exists to remove.
 #
 # ===========================================================================
@@ -119,22 +132,66 @@ echo "artifact digests: $ARTIFACT_DIGESTS"
 # than `set -e` stopping at the first failure. A report that says "the signature
 # is intact, notarization is missing, stapling is missing" is worth more than one
 # that says only the first thing that went wrong.
+#
+# ITS STDOUT IS THE BOOLEAN AND NOTHING ELSE. Every caller is a `$( )`
+# assignment, so anything this function prints for a human is captured into the
+# variable instead of reaching the console: the group markers and the log went
+# to stdout, and `signature_intact` therefore held `::group::codesign-verify\n…`
+# rather than `true`. That is not a cosmetic defect -- the value is interpolated
+# into the evidence heredoc in a BARE position, so the file was not valid JSON,
+# no comparison against `true` could ever succeed, and the row was FAIL on a
+# perfectly signed product. The console output goes to stderr, which is where
+# this script already writes its `::error::` commands and which the runner folds
+# into the job log the same way.
 run_check() {
   local name="$1"; shift
-  echo "::group::$name"
+  echo "::group::$name" >&2
   set +e
   "$@" > "$LOGDIR/sig-$name.log" 2>&1
   local rc=$?
   set -e
-  cat "$LOGDIR/sig-$name.log"
-  echo "::endgroup::"
+  cat "$LOGDIR/sig-$name.log" >&2
+  echo "::endgroup::" >&2
   [ "$rc" -eq 0 ] && echo "true" || echo "false"
 }
 
 signature_intact="$(run_check codesign-verify codesign --verify --deep --strict --verbose=2 "$APP")"
 _="$(run_check codesign-display codesign -dvvv --entitlements - "$APP")"
-gatekeeper_accepted="$(run_check spctl spctl -a -vvv --type install "$APP")"
-stapled="$(run_check stapler xcrun stapler validate "$APP")"
+gatekeeper_accepted="$(run_check spctl spctl -a -vvv --type execute "$APP")"
+stapled="$(run_check stapler xcrun stapler validate -v "$APP")"
+
+# THE NESTED SYSTEM EXTENSION, WHICH NOTHING ABOVE ACTUALLY ASKED ABOUT.
+#
+# `codesign --verify --deep` covers the nested bundle's SIGNATURE, and the
+# containing app's ticket covers its notarization -- but neither of the two
+# checks that consult a ticket can be pointed AT it: assessment is a top-level
+# operation and the ticket is stapled to the outer bundle, so `spctl` and
+# `stapler validate` on a .systemextension fail by design rather than by defect
+# (TN2206). Running either here would produce a red row about the tool.
+#
+# `codesign -R="notarized" --check-notarization` is the one that can be asked of
+# nested code: it evaluates the bundle against the `notarized` requirement, which
+# is satisfied only by a ticket that names this cdhash. Exit 3 is the interesting
+# failure -- correctly signed, and in nobody's ticket.
+#
+# Matched by GLOB, not by name. The bundle is expected to be
+# com.twinvpn.app.sysext.systemextension (shells/macos/project.yml), but a lane
+# that hard-codes the identifier goes green on a renamed extension by finding
+# nothing, which is the failure mode this whole file exists to remove.
+sysext="$(find "$APP/Contents/Library/SystemExtensions" -maxdepth 1 \
+  -name '*.systemextension' -print -quit 2>/dev/null || true)"
+if [ -n "$sysext" ]; then
+  sysext_notarized="$(run_check codesign-sysext \
+    codesign -vvvv -R="notarized" --check-notarization "$sysext")"
+else
+  # FAIL CLOSED. An app bundle with no extension in it is not a product whose
+  # extension is notarized; it is a product that would ship without the thing
+  # this criterion is ultimately about.
+  echo "::error::no *.systemextension under \
+$APP/Contents/Library/SystemExtensions, so the notarization of the shipped \
+extension cannot be checked and must not be assumed" >&2
+  sysext_notarized=false
+fi
 
 # WHO, from the display output. `codesign -dvvv` writes to stderr, which
 # `run_check` captured into the log, so this reads the file rather than re-running.
@@ -145,16 +202,27 @@ observed_team="$(tr -d '\r' < "$LOGDIR/sig-codesign-display.log" \
 
 # NOTARIZATION IS GATEKEEPER'S ANSWER, NOT A SEPARATE COMMAND.
 #
-# There is no local "is this notarized" query: `spctl -a --type install`
-# consults the ticket (stapled, or fetched from Apple), and its acceptance IS
-# the notarization check. Deriving it rather than inventing a second probe keeps
-# the evidence honest about what was actually asked.
+# There is no local "is this notarized" query for a whole app: `spctl -a --type
+# execute` consults the ticket -- stapled, or fetched from Apple by syspolicyd,
+# because the Developer ID assessment rule ends in "and notarized" -- and its
+# acceptance IS the notarization check. Deriving it rather than inventing a
+# second probe keeps the evidence honest about what was actually asked.
+#
+# WHICH IS ALSO WHY THE TYPE MATTERS. `--type install` assesses the installation
+# of an INSTALLER PACKAGE (spctl(8): "execute to assess code execution, install
+# to assess installation of an installer package"), and Apple DTS has said twice
+# that it is not the right question for a .app (forums 728267, 822378). It did
+# not fail loudly: with no xar to read, the policy engine falls through to the
+# code-evaluation path against the install rule table, where a notarized
+# Developer ID Application leaf happens to match. So the lane got a plausible
+# answer to a question no user's Mac asks, from a fallback nobody documented.
 notarized="$gatekeeper_accepted"
 
 echo
 echo "signature intact:     $signature_intact"
 echo "gatekeeper accepted:  $gatekeeper_accepted"
 echo "stapled:              $stapled"
+echo "sysext notarized:     $sysext_notarized (${sysext:-<no extension found>})"
 echo "authority:            ${signing_authority:-<none>}"
 echo "team identifier:      ${observed_team:-<none>} (expected $team_id)"
 
@@ -163,10 +231,21 @@ team_matches=false
 
 verdict="FAIL"
 if [ "$signature_intact" = true ] && [ "$gatekeeper_accepted" = true ] \
-   && [ "$stapled" = true ] && [ "$team_matches" = true ]; then
+   && [ "$stapled" = true ] && [ "$sysext_notarized" = true ] \
+   && [ "$team_matches" = true ]; then
   verdict="PASS"
 fi
 
+# THE TOOLCHAIN IS PINNED BY THE TWO THINGS THAT SHIP THE TOOLS, because neither
+# tool will state its own version. `codesign --version` does not exist -- there
+# is no such option in codesign(1) -- so an unknown-option usage message on
+# stderr was being captured and recorded as if it were a version string, which is
+# the failure mode this whole evidence format exists to prevent: a field that is
+# always present, always plausible and never true. codesign ships with macOS and
+# stapler ships with Xcode, so the OS build and the Xcode version pin both.
+# `xcodebuild` is flattened to one line and tolerated when absent: on a
+# CLT-only host it writes to stderr and prints nothing, and an empty string is a
+# truthful "not recorded" where a shell error string would not be.
 cat > "$EVIDENCE" <<JSON
 {
   "schema_version": 2,
@@ -183,8 +262,9 @@ cat > "$EVIDENCE" <<JSON
   "github_run_url": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/$GITHUB_RUN_ID\"" || echo null),
   "commit": "$(cd "$REPO" && git rev-parse HEAD)",
   "toolchain": {
-    "codesign": "$(codesign --version 2>&1 | head -1)",
-    "macos": "$macos_version"
+    "macos": "$macos_version",
+    "macos_build": "$(sw_vers -buildVersion)",
+    "xcode": "$(xcodebuild -version 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')"
   },
   "environment": {
     "macos_version": "$macos_version",
@@ -195,6 +275,8 @@ cat > "$EVIDENCE" <<JSON
     "gatekeeper_accepted": $gatekeeper_accepted,
     "notarized": $notarized,
     "stapled": $stapled,
+    "sysext_notarized": $sysext_notarized,
+    "sysext_path": "${sysext:-}",
     "bundle_path": "$APP"
   },
   "leak_oracle": null,
@@ -207,7 +289,7 @@ cat > "$EVIDENCE" <<JSON
   "graceful_shutdown": true,
   "test_command": "build/ci/ci-macos-signature.sh $APP",
   "test_exit_code": $([ "$verdict" = PASS ] && echo 0 || echo 1),
-  "artifacts": ["build/ci/logs/macos/sig-codesign-verify.log","build/ci/logs/macos/sig-spctl.log","build/ci/logs/macos/sig-stapler.log"],
+  "artifacts": ["build/ci/logs/macos/sig-codesign-verify.log","build/ci/logs/macos/sig-spctl.log","build/ci/logs/macos/sig-stapler.log","build/ci/logs/macos/sig-codesign-sysext.log"],
   "notes": "This criterion inspects a built artifact and runs nothing. loaded/invoked_core/received_result are FALSE and are supposed to be: executing the product is MACOS-SYSEXT-LIFECYCLE's claim, and report.py does not require the execution booleans for this criterion.",
   "verdict": "$verdict",
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -220,6 +302,7 @@ cat "$EVIDENCE"
 
 [ "$verdict" = "PASS" ] || {
   echo "::error::$CRITERION did not pass: signature_intact=$signature_intact \
-gatekeeper=$gatekeeper_accepted stapled=$stapled team_matches=$team_matches" >&2
+gatekeeper=$gatekeeper_accepted stapled=$stapled \
+sysext_notarized=$sysext_notarized team_matches=$team_matches" >&2
   exit 1
 }

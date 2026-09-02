@@ -46,6 +46,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -87,6 +88,9 @@ _STUBS = {
 # in build/ci/ uses exactly this form and nothing else in those scripts does.
 HEREDOC = re.compile(r"^[ \t]*cat > (?P<dest>\S+) <<JSON\n(?P<body>.*?)^JSON$",
                      re.MULTILINE | re.DOTALL)
+# The function whose stdout BECOMES four of the signature writer's booleans.
+# See the case at the bottom of this file for why that is worth extracting.
+CHECK_RUNNER = re.compile(r"^run_check\(\) \{\n.*?^\}$", re.MULTILINE | re.DOTALL)
 VARREF = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
 
 # `test_report_prerequisites.py` star-imports this module to keep ONE command
@@ -239,6 +243,40 @@ class EvidenceWriters(unittest.TestCase):
                     self.assertEqual(set(ev) - allowed, set())
         # The six version-2 criteria of the wave, and no fewer.
         self.assertGreaterEqual(seen, 6)
+
+    def test_the_signature_lanes_check_runner_returns_only_the_boolean(self):
+        # THE HALF `render()` STUBS, WHICH IS WHERE THE VALUES COME FROM.
+        #
+        # Everything above grades the SHAPE of the heredoc, with every
+        # interpolation replaced by `null`. That is deliberate and it is also a
+        # blind spot: `ci-macos-signature.sh` interpolates four booleans in BARE
+        # position, and each of them is `$(run_check ...)`. The function printed
+        # its `::group::` markers and the whole captured log to STDOUT, so the
+        # command substitution swallowed them and `signature_intact` held
+        # `::group::codesign-verify\n…\ntrue` -- not valid JSON in that position,
+        # never equal to `true`, and invisible to every other case here.
+        #
+        # So the function is extracted from the lane and RUN, against a command
+        # that succeeds and one that fails. It is the smallest thing that fails
+        # if the console output ever returns to stdout.
+        fn = CHECK_RUNNER.search((CI / "ci-macos-signature.sh").read_text())
+        self.assertIsNotNone(fn, "run_check() is no longer extractable from "
+                                 "ci-macos-signature.sh; this case is grading "
+                                 "nothing")
+        with tempfile.TemporaryDirectory() as tmp:
+            for command, expected in (("true", True), ("false", False)):
+                with self.subTest(command=command):
+                    proc = subprocess.run(
+                        ["bash", "-c", "set -euo pipefail\n"
+                                       f"LOGDIR={tmp}\n{fn.group(0)}\n"
+                                       f'printf %s "$(run_check probe {command})"'],
+                        capture_output=True, text=True)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertIs(json.loads(proc.stdout), expected)
+                    # And the human output is not merely gone: it still reaches
+                    # the job log, on the stream this lane already writes its
+                    # `::error::` commands to.
+                    self.assertIn("::group::probe", proc.stderr)
 
     def test_a_local_run_names_no_repository_rather_than_inventing_one(self):
         # `null`, never a guess: a developer's laptop is not a run of any

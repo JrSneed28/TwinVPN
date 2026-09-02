@@ -300,6 +300,13 @@ PREREQUISITES = {
         # query for it. Stapling is separate and is the one that fails offline.
         "notarized": (True,),
         "stapled": (True,),
+        # AND THE NESTED EXTENSION'S OWN TICKET. The three above are answers
+        # about the TOP-LEVEL bundle: `spctl` assesses only a top-level bundle
+        # and the ticket is stapled to the outer one, so neither says anything
+        # about the .systemextension a user's Mac has to load separately.
+        # `codesign -R="notarized" --check-notarization` is the question that
+        # can be put to nested code, and this is where its answer is required.
+        "sysext_notarized": (True,),
     },
     "IOS-NE-FAIL-CLOSED": {
         "real_network_extension_invoked": (True,),

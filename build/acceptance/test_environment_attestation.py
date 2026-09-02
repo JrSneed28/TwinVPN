@@ -164,6 +164,21 @@ class EnvironmentAttestation(GateCase):
         self.assertRefused("macos-signature", "MACOS-PRODUCTION-SIGNATURE",
                            fx.macos_signature(stapled=False))
 
+    def test_macos_product_whose_nested_extension_is_unticketed_is_refused(self):
+        # A signed, notarized, stapled APP whose .systemextension is in nobody's
+        # ticket. Every other key in the file is true and the top-level checks
+        # cannot see it: `spctl` assesses only the outer bundle, and the ticket
+        # `stapler validate` finds is the outer bundle's. The row must be red on
+        # the extension alone, and it must also be red when nothing measured it
+        # -- an app bundle with no extension in it writes `false`, not nothing.
+        detail = self.assertRefused("macos-signature",
+                                    "MACOS-PRODUCTION-SIGNATURE",
+                                    fx.macos_signature(sysext_notarized=False))
+        self.assertIn("sysext_notarized", detail)
+        ev = fx.macos_signature()
+        del ev["environment"]["sysext_notarized"]
+        self.assertRefused("macos-signature", "MACOS-PRODUCTION-SIGNATURE", ev)
+
     def test_lifecycle_evidence_cannot_discharge_the_signature_criterion(self):
         # A green developer-mode lifecycle once read as "the signed, notarized
         # product works". These are two criteria now, and neither file can be
