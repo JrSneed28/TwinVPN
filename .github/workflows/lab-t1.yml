@@ -69,6 +69,13 @@ jobs:
         with:
           workspaces: lab
 
+      # The lanes below run with this knob set (see `netlab-rules` for the
+      # mechanism and the citation), so the probe describes the runner AS THE
+      # LANES SEE IT. Without it this job would publish "network-namespaces
+      # unavailable" while three sibling jobs go on to use them.
+      - name: allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       # Published as a log, not asserted. The set of facilities a runner
       # provides is the runner's property and changes without our involvement;
       # turning it into an assertion would make an image update look like a
