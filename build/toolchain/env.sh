@@ -1,5 +1,14 @@
 # Source this to put every pinned TwinVPN toolchain on PATH.
 #
+# shellcheck shell=sh
+#
+# The directive above, and not a shebang: this file is SOURCED and never
+# executed. `sh` and not `bash` because the Makefile sources it from a
+# recipe, where the shell is /bin/sh -- so a bashism here is a real defect
+# and shellcheck should say so. Without the directive shellcheck stops at
+# SC2148 ("your shell is unknown") and reports nothing about the file at
+# all, which is how the CI lint step failed on a file with no findings.
+#
 # All four install USER-LOCAL (no sudo). Versions are pinned here and asserted by
 # `make bootstrap`: ADR-0018 §11.3 requires the Rust toolchain to be "one exact
 # version ... advanced only by a reviewed commit that re-runs the full §11.9
