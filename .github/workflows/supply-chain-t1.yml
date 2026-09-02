@@ -143,34 +143,244 @@ jobs:
       # This job produces the count and the diff. It does not - and must not -
       # decide whether the increase is acceptable: that is a named human's job
       # under ADR-0018 DP-4, and a bot that approved it would be the review.
+      #
+      # COUNTS BLOCKS is the operative phrase, and the first version of this
+      # step did not. It grepped for the WORD `unsafe`, so its 865 "occurrences"
+      # were 628 blocks, 104 `unsafe fn` / `unsafe impl` / `unsafe extern`
+      # DECLARATIONS - which DP-4 does not ask a `// SAFETY:` of, and which
+      # clippy's own `missing_safety_doc` already governs - and 127 lines of
+      # prose and string literal that merely mention the word. It then looked
+      # for `SAFETY:` in a FIXED five-line window, which cannot see past this
+      # repository's own multi-line justifications. The two errors compounded:
+      # the first run to reach CI raised 230 annotations, of which 115 were
+      # comments, 86 were declarations, and the rest were blocks whose
+      # justification was real and simply too long to fit the window.
+      #
+      # The rule below counts blocks, blanks comments and literals before
+      # looking, and searches upward to the first blank line or completed
+      # statement instead of a fixed distance. It is pinned by a fixture that
+      # runs before the tree does, because a text rule with no failing case is
+      # a green square that means nothing.
       # ------------------------------------------------------------------
       - name: census
         run: |
           set -euo pipefail
-          count_unsafe() {
-            grep -rn --include='*.rs' -E '(^|[^A-Za-z_])unsafe([^A-Za-z_]|$)' \
-              core services shells lab 2>/dev/null | grep -v 'forbid(unsafe_code)' | wc -l
+
+          tmp="${RUNNER_TEMP:-$(mktemp -d)}"
+          census="$tmp/dp4-census.py"
+
+          # The rule, in one place. DP-4 asks for a justification on every unsafe BLOCK,
+          # so this counts blocks -- not the word `unsafe`, which also appears in
+          # `unsafe fn` and `unsafe impl` declarations, in prose comments, and inside
+          # string literals. Comments and literals are blanked before the search, so a
+          # file that merely TALKS about `unsafe { ... }` is not a finding.
+          cat > "$census" <<'PY'
+          """ADR-0018 DP-4: census of `unsafe` BLOCKS and their `// SAFETY:` justifications."""
+          import re
+          import sys
+          from pathlib import Path
+
+          RAW = re.compile(r'(?:b|c)?r(#*)"')
+          CHAR = re.compile(r"'(?:\\.|[^\\'])'")
+          BLOCK = re.compile(r"\bunsafe\s*\{")
+
+
+          def scrub(src):
+              """Blank every comment, string and char literal, preserving offsets."""
+              out = list(src)
+              i, n = 0, len(src)
+
+              def blank(a, b):
+                  for k in range(a, b):
+                      if out[k] != "\n":
+                          out[k] = " "
+
+              while i < n:
+                  if src.startswith("//", i):
+                      j = src.find("\n", i)
+                      j = n if j < 0 else j
+                      blank(i, j)
+                      i = j
+                  elif src.startswith("/*", i):
+                      depth, j = 1, i + 2
+                      while j < n and depth:
+                          if src.startswith("/*", j):
+                              depth, j = depth + 1, j + 2
+                          elif src.startswith("*/", j):
+                              depth, j = depth - 1, j + 2
+                          else:
+                              j += 1
+                      blank(i, j)
+                      i = j
+                  elif (m := RAW.match(src, i)) is not None:
+                      close = '"' + m.group(1)
+                      j = src.find(close, m.end())
+                      j = n if j < 0 else j + len(close)
+                      blank(i, j)
+                      i = j
+                  elif src[i] == '"':
+                      j = i + 1
+                      while j < n:
+                          if src[j] == "\\":
+                              j += 2
+                          elif src[j] == '"':
+                              j += 1
+                              break
+                          else:
+                              j += 1
+                      blank(i, j)
+                      i = j
+                  elif src[i] == "'" and (m := CHAR.match(src, i)) is not None:
+                      blank(i, m.end())
+                      i = m.end()
+                  else:
+                      i += 1
+              return "".join(out)
+
+
+          def justified(raw, bare, at):
+              """True if `SAFETY:` is attached to the block on 0-based line `at`.
+
+              Attached means: on the block's own line, or on a line above it, searching
+              upwards and stopping at the first blank line or completed statement. The
+              stop is what keeps the rule honest -- a `SAFETY:` written for some OTHER
+              finished statement does not justify this block, however few lines away it
+              is -- and searching to that stop rather than a fixed number of lines is
+              what lets a justification be as long as it needs to be.
+              """
+              for k in range(at, -1, -1):
+                  if "SAFETY:" in raw[k]:
+                      return True
+                  if k < at and (not raw[k].strip() or bare[k].rstrip().endswith(";")):
+                      return False
+              return False
+
+
+          def census(roots):
+              for root in roots:
+                  # A root that is not there yields no blocks and no complaint, which is
+                  # the one way this job could report a green zero while checking nothing.
+                  if not Path(root).is_dir():
+                      sys.exit(f"dp4-census: {root} is not a directory")
+                  for path in sorted(Path(root).rglob("*.rs")):
+                      src = path.read_text(encoding="utf-8", errors="replace")
+                      code = scrub(src)
+                      raw, bare = src.splitlines(), code.splitlines()
+                      for m in BLOCK.finditer(code):
+                          line = code.count("\n", 0, m.start()) + 1
+                          yield str(path), line, justified(raw, bare, line - 1)
+
+
+          for path, line, ok in census(sys.argv[1:]):
+              print(f"{path}:{line}:{'OK' if ok else 'MISSING'}")
+          PY
+
+          # ------------------------------------------------------------------
+          # SELF-CHECK, and it runs BEFORE the tree does.
+          #
+          # A census is only worth its verdict if the rule behind it can neither widen
+          # into noise nor narrow into a green square that means nothing. The previous
+          # rule did both at once -- it counted 865 "occurrences" of which 127 were
+          # prose and 104 were declarations, and its five-line lookback could not see
+          # past this repository's own multi-line justifications -- and nothing noticed,
+          # because a text rule with no fixture has no failing case.
+          #
+          # So the fixture states both halves as code: every construct that must NOT be
+          # a finding, and every one that must be. The expected output is exact. Adding
+          # a case is a deliberate edit to both lists; drifting is not possible quietly.
+          # ------------------------------------------------------------------
+          fixture="$tmp/dp4-fixture"
+          rm -rf "$fixture"
+          mkdir -p "$fixture"
+          cat > "$fixture/cases.rs" <<'RS'
+          #![forbid(unsafe_code)]
+          // Not findings: the word `unsafe` in prose, including `unsafe { }` written out
+          // in a comment the way this line writes it, and every DECLARATION form.
+          /// Doc comments say `unsafe { }` too.
+          pub unsafe fn declared() {}
+          unsafe impl Send for Thing {}
+          unsafe trait Marker {}
+          unsafe extern "C" {
+              fn imported();
           }
-          head_count="$(count_unsafe)"
-          echo "unsafe occurrences on HEAD: ${head_count}"
+          const TEXT: &str = "unsafe { still_not_a_block() }";
+          const RAWTEXT: &str = r#"unsafe { nor_this() }"#;
 
-          echo "### DP-4 unsafe census" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`unsafe\` occurrences on HEAD: **${head_count}**" >> "$GITHUB_STEP_SUMMARY"
+          fn justified_directly() {
+              // SAFETY: the comment sits against the block.
+              unsafe { imported() }
+          }
 
-          # Every occurrence must carry a SAFETY justification on a nearby line.
+          fn justified_at_length() {
+              // SAFETY: a justification worth reading is longer than five lines, which
+              // is what the old window could see. This one is deliberately longer than
+              // that so the fixture fails if anyone reintroduces a fixed lookback:
+              // line four,
+              // line five,
+              // line six.
+              let _ = unsafe { imported() };
+          }
+
+          fn justified_once_for_a_list() {
+              let _ = [
+                  // SAFETY: one justification, and the whole list is its subject.
+                  unsafe { imported() },
+                  unsafe { imported() },
+              ];
+          }
+
+          fn justified_on_its_own_line() {
+              unsafe { imported() } // SAFETY: trailing is still attached.
+          }
+
+          fn borrowed_from_a_finished_statement() {
+              // SAFETY: this justifies the statement below it and nothing after it.
+              let _ = 1;
+              let _ = unsafe { imported() };
+          }
+
+          fn unjustified() {
+              unsafe { imported() }
+          }
+          RS
+
+          expected="$fixture/cases.rs:16:OK
+          $fixture/cases.rs:26:OK
+          $fixture/cases.rs:32:OK
+          $fixture/cases.rs:33:OK
+          $fixture/cases.rs:38:OK
+          $fixture/cases.rs:44:MISSING
+          $fixture/cases.rs:48:MISSING"
+
+          actual="$(python3 "$census" "$fixture")"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error title=DP-4 census self-check::The census rule no longer agrees with its own fixture. It has widened or narrowed; fix the rule or amend the fixture deliberately."
+            diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
+            exit 1
+          fi
+          echo "self-check OK: the rule counts blocks, ignores declarations, prose and literals, and still fires on an unjustified block"
+
+          # ------------------------------------------------------------------
+          # The tree.
+          # ------------------------------------------------------------------
+          python3 "$census" core services shells lab > "$tmp/head.txt"
+          head_count="$(wc -l < "$tmp/head.txt" | tr -d ' ')"
+          echo "unsafe blocks on HEAD: ${head_count}"
+
+          {
+            echo "### DP-4 unsafe census"
+            echo ""
+            echo "\`unsafe\` **blocks** on HEAD: **${head_count}**"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
           missing=0
           while IFS= read -r hit; do
             file="${hit%%:*}"
             rest="${hit#*:}"
             line="${rest%%:*}"
-            start=$(( line > 5 ? line - 5 : 1 ))
-            if ! sed -n "${start},${line}p" "$file" | grep -q 'SAFETY:'; then
-              echo "::error file=${file},line=${line}::unsafe block without a // SAFETY: justification (ADR-0018 DP-4)"
-              missing=$(( missing + 1 ))
-            fi
-          done < <(grep -rn --include='*.rs' -E '(^|[^A-Za-z_])unsafe([^A-Za-z_]|$)' \
-                     core services shells lab 2>/dev/null | grep -v 'forbid(unsafe_code)' || true)
+            echo "::error file=${file},line=${line}::unsafe block without a // SAFETY: justification (ADR-0018 DP-4)"
+            missing=$(( missing + 1 ))
+          done < <(grep ':MISSING$' "$tmp/head.txt" || true)
 
           if [ "${missing}" -gt 0 ]; then
             echo "${missing} unsafe block(s) lack a // SAFETY: justification"
@@ -179,17 +389,22 @@ jobs:
 
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
             git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}"
-            # `git grep` against the ref directly - no worktree, no checkout,
-            # nothing to leave behind and nothing to get wrong.
-            base_count="$(git grep -h -E '(^|[^A-Za-z_])unsafe([^A-Za-z_]|$)' \
-                            "origin/${GITHUB_BASE_REF}" -- \
-                            'core/**/*.rs' 'services/**/*.rs' 'shells/**/*.rs' 'lab/**/*.rs' \
-                          2>/dev/null | grep -vc 'forbid(unsafe_code)' || echo 0)"
-            echo "unsafe occurrences on ${GITHUB_BASE_REF}: ${base_count}"
+            # The base ref is counted BY THE SAME SCRIPT, because a count produced by a
+            # different rule cannot be subtracted from this one. `git archive` gives the
+            # four roots as a tree without touching the worktree and without a checkout
+            # to undo.
+            base="$tmp/base"
+            rm -rf "$base"
+            mkdir -p "$base"
+            git archive "origin/${GITHUB_BASE_REF}" core services shells lab | tar -x -C "$base"
+            base_count="$(python3 "$census" "$base/core" "$base/services" "$base/shells" "$base/lab" | wc -l | tr -d ' ')"
+            echo "unsafe blocks on ${GITHUB_BASE_REF}: ${base_count}"
             if [ "${head_count}" -gt "${base_count}" ]; then
               echo "::warning title=DP-4 net increase in unsafe::${base_count} -> ${head_count}. ADR-0018 DP-4 requires a SECURITY-owner reviewer for a net increase. This job reports; it does not approve."
-              echo "" >> "$GITHUB_STEP_SUMMARY"
-              echo "> **NET INCREASE** ${base_count} → ${head_count}. ADR-0018 DP-4 requires a SECURITY-owner reviewer." >> "$GITHUB_STEP_SUMMARY"
+              {
+                echo ""
+                echo "> **NET INCREASE** ${base_count} → ${head_count}. ADR-0018 DP-4 requires a SECURITY-owner reviewer."
+              } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
             fi
           fi
 
