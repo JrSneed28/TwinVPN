@@ -38,14 +38,43 @@
 #                                               # {"app-release.apk":"..",...}
 #   twinvpn_run_attempt_json                    # "2" or null
 #   twinvpn_repository_json                     # "owner/name" or null
+#   twinvpn_python -c '...'                     # the interpreter, resolved
 
 # NO `set -e` HERE. This file is sourced into scripts that set their own
 # options, and changing a caller's shell options from a helper is how a helper
 # starts deciding when its caller exits.
 
+# PYTHON 3, BY WHICHEVER NAME THIS HOST HAS IT UNDER.
+#
+# `python3` is the floor for leak-probe.sh, report.py and the fallback below,
+# and on a GitHub-hosted WINDOWS runner the interpreter on PATH is `python.exe`
+# -- `python3` is not guaranteed to exist there at all. A lane that assumed the
+# name would fail inside a phase with "command not found", which reads as a
+# probe that ran and found nothing. Resolved once, cached in the environment,
+# and fatal when there is no Python 3 rather than falling through to Python 2.
+twinvpn_python() {
+  if [ -z "${TWINVPN_PYTHON:-}" ]; then
+    local candidate
+    for candidate in python3 python; do
+      command -v "$candidate" >/dev/null 2>&1 || continue
+      "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info[0] == 3 else 1)' \
+        >/dev/null 2>&1 || continue
+      TWINVPN_PYTHON="$candidate"
+      export TWINVPN_PYTHON
+      break
+    done
+  fi
+  if [ -z "${TWINVPN_PYTHON:-}" ]; then
+    echo "::error::no Python 3 interpreter on PATH (tried python3, python). \
+Every evidence path in build/ci/ needs one." >&2
+    return 1
+  fi
+  "$TWINVPN_PYTHON" "$@"
+}
+
 # The command differs on every host this repository runs on and NONE of them has
 # all four: Linux and git-bash have `sha256sum`, macOS has `shasum`, a bare
-# Windows shell has `certutil`. `python3` is the floor and is already a hard
+# Windows shell has `certutil`. Python 3 is the floor and is already a hard
 # dependency of leak-probe.sh and report.py, so the ladder always terminates.
 twinvpn_sha256() {
   local file="$1"
@@ -62,7 +91,7 @@ and the evidence would name bytes that do not exist" >&2
     # Chunked, deliberately. An IPA is tens of megabytes and reading one into a
     # single `bytes` on a runner with a constrained agent is a way for the
     # digest step to be the thing that fails.
-    python3 - "$file" <<'PY'
+    twinvpn_python - "$file" <<'PY'
 import hashlib, sys
 h = hashlib.sha256()
 with open(sys.argv[1], "rb") as fh:

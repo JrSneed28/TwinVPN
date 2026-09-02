@@ -47,6 +47,12 @@ name = "twinoracle"
 path = "src/main.rs"
 
 [dependencies]
+# The platform CSPRNG, for session ids and probe tokens. Direct rather than
+# `/dev/urandom`: the Windows kill-switch lane runs this process on the CI
+# runner beside its nested guest, and a hard-coded Unix device path would panic
+# there on the first session. Already in `lab/Cargo.lock` via `rand`, `quinn`
+# and `crypto-bigint`, so this adds an edge and no new crate.
+getrandom  = "0.4.3"
 clap       = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }

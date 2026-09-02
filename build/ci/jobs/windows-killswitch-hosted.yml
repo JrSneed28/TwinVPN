@@ -1,0 +1,163 @@
+# build/ci/jobs/windows-killswitch-hosted.yml
+#
+# The Windows kill-switch job, as a fragment: paste it under `jobs:` in
+# `.github/workflows/first-implementation-wave-gate.yml`, at this indentation,
+# replacing the existing `windows-killswitch:` job. It is kept here rather than
+# only in `.github/workflows/` so that the job and the scripts it calls are
+# reviewed together and by the same owner; the workflow that includes it is the
+# integration owner's.
+#
+# WHAT CHANGED, AND WHY THE JOB GOT SHORTER
+#
+# The old job needed four things nobody has: a self-hosted Azure VM registered
+# under `[self-hosted, Windows, twinvpn-azure-l1]`, a golden VHDX at
+# `vars.TWINVPN_GOLDEN_VHD`, an externally hosted leak oracle at
+# `vars.TWINVPN_ORACLE_URL` with `secrets.TWINVPN_ORACLE_TOKEN`, and a standing
+# sentinel process on a third machine named by `vars.TWINVPN_SENTINEL_HOST`. It
+# was gated on `vars.TWINVPN_AZURE_L1_REGISTERED`, so with none of them present
+# it SKIPPED and the row read NOT-EXECUTED.
+#
+# All four now happen inside the job on a hosted runner:
+#
+#   * the hosted `windows-2025` image ships the Hyper-V role, Hyper-V-PowerShell,
+#     HypervisorPlatform and VirtualMachinePlatform, installed at image-build
+#     time with `bcdedit /set hypervisorschedulertype root`, so a nested guest
+#     needs no feature install and no reboot;
+#   * `-Action build-image` builds the guest from a Microsoft evaluation ISO
+#     pinned by SHA-256, with in-box tooling only;
+#   * `-Action run` stands up two internal switches, the leak oracle, a
+#     stateless DNS relay and the sentinel on this host, with an address plan
+#     that keeps every observer OFF-LINK for the guest;
+#   * no repository variable gates the job, so it cannot silently skip. If the
+#     hypervisor is missing the job FAILS, by name, in `preflight`.
+#
+# WHAT IT STILL CANNOT DO. `twinvpnctl net up` refuses today with
+# AUTH.IDENTITY_MISSING -- the device has no overlay allocation -- so the row is
+# a measured FAIL that names its blocker rather than a PASS. The lane runs the
+# whole sequence anyway and records what each step actually did; when the
+# product wiring lands, nothing here changes.
+#
+# NESTED VIRTUALIZATION ON HOSTED RUNNERS IS EXPLICITLY UNSUPPORTED BY GITHUB
+# ("experimental and done at your own risk"). That is why every failure path
+# below produces a named error instead of a green row, and why the destroy step
+# runs under `if: always()`.
+
+  windows-killswitch:
+    name: windows-killswitch
+    # HOSTED, and pinned. `windows-latest` moves between images, and an image
+    # move that dropped the Hyper-V role would change what this job is about
+    # with no diff to point at.
+    runs-on: windows-2025
+    # A cold cargo build of the shell plus the core test binary is the long
+    # pole; the ISO download and the DISM apply add ten to twenty minutes.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - name: toolchain versions
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+          python --version
+          (Get-Service vmms).Status
+          Get-VMSwitch | Format-Table Name, SwitchType
+
+      # Mirrors `windows-link-run`: no `restore-keys` prefix fallback, because a
+      # prefix fallback is exactly the mechanism that serves a cache built with
+      # a different toolchain or lockfile, and a wrong hit is a green build of
+      # the wrong thing. `lab/target` is here too -- the leak oracle now builds
+      # in this job rather than living on a machine somebody provisioned.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            core/target
+            shells/windows/target
+            lab/target
+          key: fwg-killswitch-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'core/Cargo.lock', 'shells/windows/Cargo.lock', 'lab/Cargo.lock', 'build/ci/ci-windows-killswitch.sh') }}
+
+      # BEFORE the guest image is built, so a runner that cannot host one says
+      # so in two minutes rather than after a 5 GB download.
+      - name: preflight
+        run: scripts\twinvpn-l1.ps1 -Action preflight
+
+      # The observer. It runs on this host, beside the guest, on a segment the
+      # guest reaches only through its default route.
+      - name: build the leak oracle
+        run: cargo build --locked --release -p twinoracle
+        working-directory: lab
+
+      # Windows 11 Enterprise LTSC 2024 Evaluation, SHA-256 pinned in
+      # `scripts/twinvpn-l1-image.ps1`, applied to a VHDX with
+      # `Expand-WindowsImage` and made bootable with `bcdboot`. No Windows Setup
+      # pass, and the ISO is deleted once the image exists.
+      - name: build the disposable guest image
+        run: scripts\twinvpn-l1.ps1 -Action build-image
+
+      - name: kill-switch sequence in a disposable nested guest
+        run: |
+          scripts\twinvpn-l1.ps1 -Action run `
+            -RepoPath    '${{ github.workspace }}' `
+            -EvidenceOut '${{ github.workspace }}\build\ci\evidence'
+
+      # STEP 10, AND IT IS NOT ENOUGH THAT THE CONTROLLER ALSO DOES IT.
+      #
+      # `-Action run` destroys the guest in a `finally`, which covers a throw.
+      # It does NOT cover this job being CANCELLED: a `timeout-minutes` expiry
+      # kills pwsh outright and a `finally` never runs. The guest that survives
+      # that holds a differencing disk AND has installed persistent WFP filters
+      # (CB-6), so it is a machine nobody can log into over the network. It also
+      # stops the oracle, the DNS relay and the sentinel and removes the two
+      # internal switches and their firewall rules.
+      #
+      # `-Action destroy` is idempotent and succeeds with nothing to destroy, so
+      # it costs nothing on the normal path. The VM name is a constant rather
+      # than a per-invocation GUID for exactly this reason: the old default
+      # computed a fresh name here and tore down nothing.
+      - name: destroy the disposable guest and the lab fabric
+        if: always()
+        run: scripts\twinvpn-l1.ps1 -Action destroy
+
+      # THE EVIDENCE, AND THE ORACLE'S OWN REPORT BESIDE IT.
+      #
+      # `build/ci/evidence/oracle/<session>.json` used to be fetched from the
+      # external oracle by a later job. An in-box oracle dies with this runner,
+      # so the lane writes the oracle's answer unmodified and it is uploaded
+      # here; `report.py` reads it from that directory either way.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-windows-killswitch
+          path: |
+            build/ci/evidence/windows-killswitch.json
+            build/ci/evidence/oracle/*.json
+          # `warn`, not `ignore`. A criterion job that finished without writing
+          # its evidence file is a real defect -- the script did not reach its
+          # own write -- and `ignore` made that indistinguishable from a job that
+          # was never going to produce one. It stays non-fatal because the row is
+          # already going to read NOT-EXECUTED, and a second red here would bury
+          # the first.
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          # The guest transcript, the oracle's stdout and stderr, the sentinel's
+          # log and the precondition output. Source addresses of OUR OWN
+          # beacons, timestamps and counts: no key, no pairing secret, no token,
+          # no tunnel plaintext, no capture. Uploaded on success as well as
+          # failure, because a run that is blocked on product wiring is the
+          # normal outcome today and its logs are the point.
+          name: diagnostics-windows-killswitch
+          path: build/ci/logs/windows/**
+          if-no-files-found: ignore
