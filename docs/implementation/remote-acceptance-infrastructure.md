@@ -10,499 +10,499 @@ runner. Every requirement below is derived from a step in
 for it. A blocker that can only be closed by someone with a machine in a room is
 a purchasing decision wearing an engineering costume.
 
-`self-hosted-runners.md` describes the arrangement this replaced — three
-physical machines plus a phone — and is kept for the reasoning it records about
-why each row needed what it needed.
+**This is the current specification, dated 2026-09-02. It supersedes the
+arrangement of 2026-08-30 this file used to describe**, which needed an AWS EC2
+Mac, an Azure L1 self-hosted runner, a Corellium virtual iPhone, a standing
+sentinel host and a public oracle host. **None of them is required now. Zero
+self-hosted runners and zero repository variables are the design, not a gap.**
+The only external inputs left are the four Apple Developer Program facts in §4.3
+— release-pipeline facts, not infrastructure — and the one job that reads them
+skips by name when they are unset. `self-hosted-runners.md` records the
+arrangement before that one.
 
 ---
 
-## 0. What every criterion now carries, and why
-
-Two mechanisms, applied to every row in the `Platform criteria` section of the
-acceptance report. Neither existed under the old arrangement.
-
-### 0.1 The environment attestation
+## 0. The environment attestation
 
 Every boolean in a platform evidence file describes what the TEST did. **None of
-them describes whether the machine was capable of the claim.** These all
-produced well-formed, entirely green evidence:
+them describes whether the machine was capable of the claim.** A Windows run
+whose caller was never elevated, an Android 16 KiB run on a 4096-byte-page
+emulator, and a macOS run where activation silently failed all produced
+well-formed, green evidence. So each criterion names the `environment` keys that
+must be present and must hold, `report.py`'s `PREREQUISITES` carries them, and
+they are checked **before any test result is read**;
+`test_report_prerequisites.py` is the runnable proof, one case per hole.
 
-* a Windows kill-switch run whose caller was never actually elevated, so no
-  filter was ever installed and the "armed" window was an unprotected host that
-  happened to have no network;
-* an Android 16 KiB run on a 4096-byte-page emulator, where the alignment flag
-  the criterion is about was applied to every ABI and exercised by nothing;
-* a macOS extension run where activation silently failed.
+---
 
-So each criterion names the `environment` keys that must be present and must
-hold, `build/acceptance/report.py`'s `PREREQUISITES` table carries them, and
-they are checked **before any test result is read**. An environment that failed
-its prerequisite attestation cannot produce a green criterion.
-`build/acceptance/test_report_prerequisites.py` is the runnable proof of that,
-one case per hole.
-
-### 0.2 The external leak oracle
+## 1. The leak oracle — in-box, on the lane's own runner
 
 No criterion that makes an egress claim is adjudicated by the platform under
-test. `lab/twinoracle` runs off-device; the acceptance job fetches its verdict
-**from the oracle**, keyed by a session id the evidence recorded. See
-`lab/twinoracle/README.md` for deployment — it is a prerequisite for three of
-the five criteria and its absence makes them fail, never pass.
+test: `lab/twinoracle` runs off the device, and the acceptance job fetches its
+verdict **from the oracle**, keyed by a session id the evidence recorded. Since
+2026-09-02 "off the device" means a different address on the same runner rather
+than a different machine. **No cloud instance, no public address, no delegated
+DNS zone, no standing sentinel host** — the oracle, the sentinel and two per-leg
+DNS forwarders run on the runner driving the device under test, on address space
+that runner creates for the run. `lab/twinoracle/README.md` §3 carries both.
+
+### 1.1 Why in-box is stronger here, not weaker
+
+The oracle's code has never contained an address-class restriction: it compares
+source addresses for set membership and equality and nothing else, and
+`is_dut_sourced` (`lab/twinoracle/src/evidence.rs:295-297`) is the whole
+independence check. Independence is therefore **address disjointness**, and a
+fabric allocating the device's and the sentinel's addresses out of two segments
+with **no NAT anywhere between them** satisfies it by construction rather than
+by assertion — what the `ponytail:` comment at `evidence.rs:292-294` already
+names as the upgrade path from the old deployment, where a device behind the
+sentinel's NAT would still have passed.
+
+It is also the only way the IPv6 leg can be exercised at all: hosted runners
+have no usable global IPv6 egress
+([actions/runner-images#668](https://github.com/actions/runner-images/issues/668),
+opened 2020-04-03; [actions/runner#402](https://github.com/actions/runner/issues/402)),
+while `ORACLE_FAMILY_MINIMUM_ATTEMPTS` demands 60 IPv6 attempts from every
+oracle-backed criterion. An internal segment carries ULA IPv6 with no uplink.
+
+### 1.2 The topology, and the parts of it that are load-bearing
+
+* **The oracle listens on a second, ROUTED segment**, reached only through the
+  device's default route. **It must not be on-link with the device** — see the
+  local-network row of §1.3: an on-link oracle would be permitted **correctly**,
+  and the SILENCE phase would fail for a reason that is not a leak.
+* **The sentinel beats from a second host identity on that segment**, disjoint
+  from every address the device presents.
+* **A stateless per-leg DNS forwarder replaces the delegated zone** — one per
+  leg, each named in the oracle's `--resolver <ip>=<id>:<p|u>` map, with the
+  device's `nameserver` rewritten when the tunnel comes up so
+  `dns_identity_distinct` stays a measurement. **The forwarders must not retry,
+  cache or health-check:** one that retransmits on its own manufactures a DNS
+  arrival during SILENCE, which the oracle records as a leak and the report
+  turns into a FAIL against the product. This is the most dangerous detail here.
+* **The control plane is driven by the controller, never by the device.** A
+  correct kill switch blocks the device's control POSTs during ARMED, and
+  dropped attempt increments push the session under its 60-attempt floor to
+  INCONCLUSIVE — the opposite of the truth.
+
+### 1.3 Four address ranges the oracle and the sentinel must avoid
+
+| Range | Why |
+|---|---|
+| `169.254.0.0/16` and `fe80::/10` | link-local is permitted on every non-overlay interface at `weight::LINK_LOCAL = 7_500` (`filters.rs:406`, prefixes at `:611`) |
+| anything **on-link** with the device | class 4 permits `config.on_link_prefixes` at `weight::LOCAL_NETWORK = 7_000` whenever `local_network_access` is set, its default in all three routing modes (`wfp/mod.rs:576`, `filters.rs:418`) |
+| `100.64.0.0/10` | in the Tier-1 baseline deny floor, blocked in **both** postures, so the TUNNELLED leg could never arrive (`wfp/mod.rs:666`) |
+| `fd7c:9e5d:2a10::/48` | the IPv6 half of that floor (`wfp/mod.rs:674`) |
+
+### 1.4 What the evidence now carries
+
+Two new flat scalar `environment` keys on every oracle-backed criterion, both
+measured, both in `PREREQUISITES`: **`oracle_topology`**, `in-box` or
+`external`; and **`sentinel_egress_identity`**, the identity the sentinel
+presented, which **must differ from both path identities**.
+`sentinel_independence_problems` in `build/acceptance/adjudication.py` refuses
+one that is absent, empty, or equal to either path identity — the same shape as
+`path_identity_problems`, for the same reason: two equal strings are not two
+hosts. `sentinel_host` in the oracle report stays **informational and ungated**,
+a self-declared string that `test_report_prerequisites.py` carries a deliberate
+tripwire to keep ungated.
+
+`leak-probe.sh cmd_open` now expresses the real invariant instead of a partial
+blocklist: it refuses loopback and link-local **on both families** — the old
+glob inspected no IPv6 beacon at all, and omitted `172.16.0.0/12` and
+`198.18.0.0/15` — refuses any beacon address the probe host owns, and accepts a
+non-global target only under `TWINVPN_ORACLE_TOPOLOGY=in-box`, so the in-box
+deployment must declare itself.
+
+**This narrows what an oracle-backed criterion claims, and the narrowing is
+real.** It proves the device's stack refused to originate the connection and
+that a party the device cannot reach on-link observed nothing during SILENCE
+while its listeners were provably alive. It no longer proves the public internet
+was unreachable — for a kill switch enforced at connect time those are the same
+decision point — and a same-host sentinel cannot detect a broken route to the
+oracle, there being none to break. Both losses are bounded and named here.
 
 ---
 
-## 1. The leak oracle — required by three criteria
+## 2. `WINDOWS-WFP-KILLSWITCH` — hosted `windows-2025`, guest built per run
 
-One small cloud instance. Public IPv4 **and** public IPv6, plus a delegated DNS
-zone. Deployment, the socket layout, and the two host settings that are easy to
-get wrong are in `lab/twinoracle/README.md`.
+**Runner:** `windows-2025`, GitHub-hosted, as L1. No `twinvpn-azure-l1` label,
+no `TWINVPN_AZURE_L1_REGISTERED`, no `TWINVPN_GOLDEN_VHD`.
 
-Repository configuration:
+### 2.1 Why there are still two machines, and why both are the runner
 
-| Name | Kind | Value |
-|---|---|---|
-| `TWINVPN_ORACLE_URL` | variable | the control-plane base URL, e.g. `https://oracle.example:8443` |
-| `TWINVPN_ORACLE_TOKEN` | **secret** | the control bearer token, ≥ 32 characters |
-
-The oracle's control listener should be reachable only from the runners and the
-GitHub Actions egress ranges. Its data-plane listeners must be reachable from
-the public internet — that is the entire point.
-
----
-
-## 2. `WINDOWS-WFP-KILLSWITCH` — Azure L1 + a disposable nested guest
-
-**Runner label:** `[self-hosted, Windows, twinvpn-azure-l1]`.
-**Gate variable:** `TWINVPN_AZURE_L1_REGISTERED=true`.
-
-### 2.1 Why there are two machines and not one
-
-TwinVPN's Windows kill switch installs **persistent** WFP filters, and ADR-0018
-CB-6 with ADR-0022 §11.4 require that "shutdown MUST NOT remove enforcement". A
+The Windows kill switch installs **persistent** WFP filters, and ADR-0018 CB-6
+with ADR-0022 §11.4 require that "shutdown MUST NOT remove enforcement". A
 **correct** fail-closed run therefore ends with the machine unable to reach the
-network.
+network, which on the runner itself severs the runner agent mid-job: the run is
+lost and correct product behaviour is indistinguishable from flaky
+infrastructure. The L1/L2 split stands; L1 is now the hosted runner and L2 is
+built from an ISO.
 
-On the runner itself that severs the runner agent's connection to GitHub
-mid-job: the run is lost, no evidence is uploaded, and correct product behaviour
-is indistinguishable from flaky infrastructure. So:
+**The on-runner alternative — exempt the runner agent and test in place — is
+ruled out by the product's own filters, not by taste.** Every block TwinVPN
+installs is a **hard** block: `FilterFlags` carries exactly two fields,
+`persistent` and `boot_time` (`wfp/mod.rs:396`, `:405`), no `clear_action_right`
+exists anywhere in the crate, and Microsoft's filter-arbitration rules give a
+block with no override right as one whose traffic "cannot be permitted at
+another sub-layer". No permit at any sublayer or weight keeps the runner agent
+alive — and one that did would grant the CI harness unrestricted egress in the
+very window the criterion asserts nothing may leave.
 
-* **L1** is the Azure VM registered as the runner. It never runs the test.
-* **L2** is a throwaway Hyper-V guest created per run from a differencing disk
-  over a golden VHDX, driven over **PowerShell Direct** — a VMBus channel that
-  does not use the guest's network stack and therefore survives the guest
-  cutting itself off — and destroyed in a `finally` block on every path.
+### 2.2 The hypervisor is on the image — measured, not assumed
 
-`build/ci/ci-windows-killswitch.sh` refuses to run without
-`TWINVPN_DISPOSABLE_GUEST=1`, which only the controller sets. Running it by hand
-on L1 is therefore not possible by accident.
+`Hyper-V` with all sub-features, `Hyper-V-PowerShell`, `HypervisorPlatform` and
+`VirtualMachinePlatform` are installed at image-build time on `windows-2025` and
+`windows-2022` (`actions/runner-images`, `toolset-2025.json` and
+`Install-WindowsFeatures.ps1`, read 2026-09-02), and that script ends with
+`bcdedit /set hypervisorschedulertype root`.
 
-### 2.2 L1 requirements
+Measured on this repository on **2026-09-02**, run **33679011635**, scratch
+branch `spike/hosted-hyperv`, on hosted `windows-2025`: the Hyper-V role is live
+(`vmms` **Running**, root scheduler); **34.5 GB free** on `C:`, against a
+documented 14 GB figure that is stale; a **Generation 2 guest reaches
+`Running`**; and an **internal switch carries two IPv4 and two ULA IPv6 host
+identities**, which is what §1.2's routed second segment is built from.
 
-* **A VM size with nested virtualization.** Dv3/Ev3 or later; any v4/v5 series.
-  The Av2, Dv2 and Ev2 sizes cannot host a guest at all, and the failure mode
-  without this check is a guest that installs fine and never boots, with a
-  message that sends people to look at the golden image.
-* The Hyper-V role, and a virtual switch named by `-SwitchName` (default
-  `twinvpn-guest`) through which the guest can reach the leak oracle. **Without
-  egress the oracle observes nothing and every session is `INCONCLUSIVE`.**
-* A guest credential exported once, as the machine's own account:
-  `Get-Credential | Export-CliXml C:\Hyper-V\secrets\guest.cred.xml`. Not a
-  password on a command line — an argument is visible in the process list.
+**GitHub documents nested virtualization on hosted runners as unsupported and
+experimental** — "done at your own risk, we offer no guarantees regarding
+stability, performance, or compatibility". So the lane produces **NOT-EXECUTED
+with a named reason if the hypervisor fails, never a green row:** a capability
+measured on one run is not a supported platform, and the difference belongs in
+the evidence. Do not create an **external** VM switch either — Azure does not do
+Layer 2, so a switch bound to the runner's NIC leaves the guest with no DHCP.
 
-### 2.3 The golden VHDX
+### 2.3 The guest image is built per run, and the binaries are copied in
 
-A licensed Windows install, **never domain-joined** (it is going to be cut off
-the network on purpose), carrying: the pinned Rust toolchain, **Git for
-Windows** (the controller runs `bash.exe` inside the guest), Python 3, and the
-VS Build Tools with the MSVC toolset.
+The golden VHDX existed only because the guest had to build the product. It no
+longer does, so the guest collapses to a stock Windows with one local
+administrator, which an evaluation ISO gives directly: Windows 11 Enterprise
+LTSC 2024 evaluation media, **SHA-256 pinned** — a device under test fetched
+over a plain CDN URL with no digest check is whatever the network handed back —
+LTSC so the guest's behaviour does not move under the criterion. `install.wim`
+is applied straight into a Generation 2 VHDX with DISM and `bcdboot`, skipping
+Windows Setup; `unattend.xml` goes into `\Windows\Panther\` and does three
+things — one local administrator, skip OOBE, skip the network-location prompt —
+all PowerShell Direct requires. **The licence question is flagged, not
+answered:** Microsoft's Evaluation Center gates these images behind a
+registration form and the direct CDN URLs bypass it, and whether that is within
+the licence in automation is a legal question this document does not close. The
+term itself is not the issue — the media expires in 180 days and wants
+activation within 10, and a guest destroyed within the hour reaches neither.
 
-It is never written to — the guest runs on a differencing disk over it — so it
-does not need restoring between runs and there is no snapshot discipline to get
-wrong. That is the main practical difference from the old Hyper-V rig, whose
-`--reset` refused to start on a machine the previous run had dirtied.
+`twinvpnsvc.exe`, `twinvpnctl.exe` and the `wfp_preconditions` test binary are
+built on the runner, which already carries Rust and MSVC, and copied in with
+PortableGit and the Python embeddable zip, since `leak-probe.sh` calls `python3`
+in three places. **The digest is taken on the host at build time and re-taken
+inside the guest after the copy, and a mismatch is refused** — stronger than the
+in-guest digest it replaces, which could only attest to what the guest already
+had. Evidence returns over `Copy-Item -FromSession` on a `New-PSSession -VMName`
+session, a VMBus channel that survives the guest cutting its own network
+(`Copy-VMFile` is host-to-guest only). `guest_kind` stays `nested-hyperv-guest`
+and `guest_disposable` true, so `report.py` needs no edit; the guest is
+destroyed in a `finally` on every path.
 
-### 2.4 Repository configuration
-
-| Name | Kind | Value |
-|---|---|---|
-| `TWINVPN_AZURE_L1_REGISTERED` | variable | `true` once the runner is up |
-| `TWINVPN_GOLDEN_VHD` | variable | e.g. `C:\Hyper-V\golden\twinvpn-guest.vhdx` |
-
-Leave `TWINVPN_AZURE_L1_REGISTERED` unset and the job **skips** rather than
-queueing for twenty-four hours. The row then reads `NOT-EXECUTED`, which counts
-against Phase 5 eligibility exactly as a failure does — promptly, and by name.
+**The lane runs to the `net up` refusal and stops there.** See §6.
 
 ---
 
 ## 3. `ANDROID-16K-PAGE-SIZE` — an ordinary hosted runner
 
-**No machine at all.** Google ships an official 16 KB page-size Android Emulator
-image, so this row no longer needs a Pixel with an OEM-unlocked bootloader and a
-wiped data partition — which is what closed every device farm to it.
-
-`build/ci/ci-android.sh --pagesize16k`:
-
-* **discovers** the image rather than hard-coding a package id. The tag has
-  moved once already (it was `google_apis_ps16k_experimental` while the feature
-  was pre-release), and a hard-coded id turns a rename into "package not found",
-  after which somebody eventually deletes the assertion to make CI green. The
-  script asks `sdkmanager --list` and fails naming every `ps16k` package it did
-  find;
-* **refuses to continue** unless `adb shell getconf PAGE_SIZE` returns exactly
-  `16384`, before the APK is pushed. A 4096-byte-page emulator cannot produce
-  PASS evidence for this criterion;
-* runs `zipalign -c -P 16 -v 4` on the **release** APK — the SDK's own checker,
-  answering for all four ABIs including the ones the emulator will never load;
-* installs the **production** APK. The debug build is a different artifact —
-  unminified, not shrunk, packaged differently — and C-12's claim is about the
-  `.so` inside the shipped one.
-
-### 3.1 Repository configuration
-
-Installing the production APK means signing it, and `app/build.gradle.kts` gives
-the release signing config **no silent fallback to the debug keystore** — a
-fallback would make the evidence say `release` while the disk said otherwise.
-
-| Name | Kind |
-|---|---|
-| `TWINVPN_RELEASE_KEYSTORE_B64` | secret (base64 of the JKS/PKCS12) |
-| `TWINVPN_RELEASE_STORE_PASSWORD` | secret |
-| `TWINVPN_RELEASE_KEY_ALIAS` | secret |
-| `TWINVPN_RELEASE_KEY_PASSWORD` | secret |
+**No machine at all**, and this row PASSES (`ownership.md` §12.5).
+`build/ci/ci-android.sh --pagesize16k` **discovers** Google's official 16 KB
+page-size emulator image rather than hard-coding a package id, **refuses to
+continue** unless `adb shell getconf PAGE_SIZE` returns exactly `16384` before
+the APK is pushed, runs `zipalign -c -P 16 -v 4` on the **release** APK, and
+installs the **production** APK, because C-12's claim is about the `.so` inside
+the shipped one. Signing needs the four `TWINVPN_RELEASE_*` secrets, and the
+release config has **no silent fallback to the debug keystore** — that would
+make the evidence say `release` while the disk said otherwise.
 
 ---
 
-## 4. `MACOS-SYSEXT-LIFECYCLE` and `MACOS-PRODUCTION-SIGNATURE` — EC2 Mac
+## 4. The macOS rows — hosted `macos-26`, and one premise that was wrong
 
-**Runner label:** `[self-hosted, macOS, twinvpn-ec2-mac]`.
-**Gate variable:** `TWINVPN_EC2_MAC_REGISTERED=true`.
+**Runner:** `macos-26`, GitHub-hosted. No `twinvpn-ec2-mac` label, no
+`TWINVPN_EC2_MAC_REGISTERED`. `MACOS-SYSEXT-LIFECYCLE` runs in developer mode,
+which accepts an extension a customer's Mac would refuse — an ad-hoc signature,
+an expired certificate, a missing notarization ticket, an unstapled bundle — so
+it stays a separate criterion, script, evidence file and row from
+`MACOS-PRODUCTION-SIGNATURE`: while they shared one file, **a green
+developer-mode lifecycle read as "the signed, notarized product works"**.
 
-### 4.1 Why these are two criteria
+### 4.1 The SIP premise was wrong
 
-`MACOS-SYSEXT-LIFECYCLE` runs in **developer mode**
-(`systemextensionsctl developer on`), which is the only way a non-App-Store
-extension activates on a machine CI can drive — and which accepts an extension a
-customer's Mac would refuse: an ad-hoc signature, an expired certificate, a
-missing notarization ticket, an unstapled bundle.
+`ci-macos-sysext.sh` and the workflow both said hosted runners cannot carry this
+row because developer mode needs SIP configured and no hosted Mac reaches
+Recovery. **Hosted macOS images ship with SIP already disabled.** Public run
+33476534302, job 99756861345, **2026-09-01**, image `macos-26-arm64`
+20260728.0273.1, macOS 26.5.2 build 25F84: `csrutil status` prints "System
+Integrity Protection status: disabled", so that pre-flight would pass there
+today. **SIP was never the blocker**, and the EC2 Mac's SIP-configuration API —
+the entire reason the row had a cloud path — bought nothing hosted lacks.
 
-While both claims shared one macOS evidence file, **a green developer-mode
-lifecycle read as "the signed, notarized product works"**. They are now separate
-criteria, separate scripts, separate evidence files and separate rows, so
-`macos-signature` can be red while `macos-sysext` is green — which is the true
-state of affairs more often than not.
+What SIP and developer mode buy is also narrower than assumed: Apple documents
+developer mode as skipping the **location** check ("the system doesn't check the
+location of your system extension prior to loading it") and version checks, and
+SIP-disabled as bypassing **notarization** checks. Neither is documented as
+bypassing user approval, so **whether SIP-disabled also bypasses the
+system-extension approval is unverified in either direction.** SIP state is also
+not job-controllable and has drifted before (`runner-images` #9091), so no
+lane's green may depend on it.
 
-`ci-macos-signature.sh` activates nothing and installs nothing to
-`/Applications`; it inspects a built artifact, so neither job's state can reach
-the other's evidence.
+### 4.2 What actually blocks `MACOS-SYSEXT-LIFECYCLE`
 
-### 4.2 Why EC2 Mac specifically
+Three things, none of which a machine purchase fixes. **Two GUI approvals only
+MDM can bypass:** the system-extension toggle in System Settings under Login
+Items and Extensions, whose only supported non-interactive route is a
+`com.apple.system-extension-policy` payload from a user-approved MDM server; and
+the separate VPN-configuration consent dialog `saveToPreferences` raises, for
+which Apple DTS (Developer Forums thread 823741, April 2026) named no
+suppressing API, entitlement or MDM key. **The entitlement has never been
+granted:**
+`shells/macos/packaging/TwinVPNTunnel.entitlements` requests
+`packet-tunnel-provider-systemextension`, and its own header says Apple has not
+granted it — "Until they do, this file describes a build that cannot be signed."
+**And there is no non-NetworkExtension tunnel path:**
+`core/crates/twinvpn-platform-macos/src/utun.rs:436` returns `ENOSYS` for a
+self-created utun, with `tests/darwin.rs` asserting that refusal by name. Nested
+virtualization would not help either: it is unavailable on Apple-silicon hosted
+runners, and `runner-images` #13505 was opened and closed **not planned on
+2026-01-08** — "unavailable due to reasons beyond our control".
 
-The blocker everywhere else is SIP: developer mode needs it configured, and no
-Mac host lets a customer reach Recovery mode. **AWS exposes SIP configuration
-through an API** —
-`aws ec2 create-mac-system-integrity-protection-modification-task`, polled with
-`describe-mac-modification-tasks`. That is the entire reason this row has a
-cloud path.
+**The row therefore has no executor and stays `required=True`.** Two options are
+open and this document records both rather than choosing: **(a)** keep it
+required, where it reads NOT-EXECUTED and blocks Phase 5, the truthful state; or
+**(b)** mark it `required=False` in the shape of `IOS-SUPERVISED-ALWAYS-ON`,
+because it tests a capability Apple has not granted this team. **That is a
+policy decision for the wave owner**, and either way it belongs in the register
+as a deliberate scope reduction rather than slipped in.
 
-Two consequences that decide the provisioning:
+Two defects in that lane were fixed while reading it, both of which would have
+mattered on any host. It checked enforcement by grepping `pfctl -s Anchors` for
+`twinvpn`, which an anchor loaded but never referenced from the main ruleset
+passes — so it could report installed enforcement over a host with pf switched
+off. And `systemextensionsctl_state`, `developer_mode` and `runner_kind` were
+literals rather than the values that were read.
 
-* **SIP state is volume-scoped**, not instance- or host-scoped. A stop/start
-  re-enables it, a replaced root volume does not inherit it, and it does not
-  travel in an AMI or a snapshot. So treat the runner as a long-lived instance
-  that is never stopped — and `ci-macos-sysext.sh` asserts `csrutil status` as a
-  pre-flight anyway, because a silently re-enabled SIP fails deep inside
-  activation with a message about the extension rather than about SIP.
-* **FileVault must stay off**, exactly one bootable volume, and `ec2-user` needs
-  a secure token (`dscl . -passwd`, then `sysadminctl`, verified with
-  `sysadminctl -secureTokenStatus`; passwords 4–16 characters or the API rejects
-  them). AWS warns the host otherwise fails to boot. The instance goes
-  unreachable for 60–90 minutes across the modification task's reboots.
+### 4.3 `MACOS-PRODUCTION-SIGNATURE` moves to `macos-26` with no honesty loss
 
-**Xcode is not preinstalled on any EC2 Mac AMI** — they carry Command Line Tools
-only — so the pinned version is a manual install to
-`/Applications/Xcode_<version>.app`, the path `ci-common-apple.sh` resolves.
-Launch a Tahoe AMI: the AMI page's prose is stale, and its changelog on the same
-page is authoritative.
-
-**Cost, stated plainly.** Billing is per Dedicated Host with a **24-hour minimum
-allocation** — Apple's licence term, not an AWS choice, so no provider beats it.
-A nightly job cannot allocate for less than 24 h, so allocate-daily and
-run-continuously cost the same. us-east-1 On-Demand, 2026-08-30:
-`mac2-m2.metal` $0.878/h → ~$641/month; `mac-m4.metal` $1.23/h → ~$898/month.
-No Spot, no Reserved; Savings Plans apply. EBS is extra at the 10,000 IOPS /
-400 MiB/s AWS recommends. A Mac mini on a desk is ~$600–800 **once** — but a
-desk is exactly what this gate may no longer depend on.
-
-### 4.3 Repository configuration
+It is pure artifact inspection. `codesign`, `spctl`, `stapler` and
+`codesign --check-notarization` all work on the hosted image, Gatekeeper
+assessments are enabled there ("assessments enabled", same 2026-09-01 log), and
+none of the criterion's `environment` keys describes the machine — an ephemeral
+runner is in fact a **better** host for it than a long-lived EC2 Mac sharing a
+disk with the job that activates a developer-mode extension. `sip_config` and
+`gatekeeper_assessments` are recorded as facts about the host, not
+prerequisites: the subject is the artifact. The one row with external inputs,
+and they are Apple Developer Program facts:
 
 | Name | Kind | Value |
 |---|---|---|
-| `TWINVPN_EC2_MAC_REGISTERED` | variable | `true` once the runner is up |
 | `TWINVPN_TEAM_ID` | variable | the Apple Developer Team ID |
-| `TWINVPN_EXTENSION_BUNDLE_ID` | variable | default `com.twinvpn.app.sysext`, the target `shells/macos/project.yml` builds |
 | `TWINVPN_NOTARIZED_APP_URL` | variable | where the release pipeline publishes the signed, notarized, stapled `TwinVPN.zip` |
+| `TWINVPN_NOTARIZED_APP_SHA256` | variable | the pinned digest, verified after download, no fallback |
 | `TWINVPN_NOTARIZED_APP_TOKEN` | secret | optional bearer for that URL |
 
-`macos-signature` fetches the **notarized product**, never a CI build: a build
-produced on the runner would be signed by whatever identity that machine holds
-and notarized by nobody, and checking its signature would tell us about the
+**The job skips by name when `TWINVPN_NOTARIZED_APP_URL` is unset**, and the row
+then reads NOT-EXECUTED. It fetches the notarized product and never a CI build:
+one produced on the runner would be signed by whatever identity that machine
+holds and notarized by nobody, so checking its signature would tell us about the
 runner rather than about the product.
 
+### 4.4 `MACOS-PF-BOOT-ANCHOR` — new, required, hosted, root
+
+The part of the old macOS row a hosted runner can honestly carry, and it closes
+`shells/macos/README.md` §7 gap 2: **Apple's own pf has never parsed the anchor
+this adapter renders.** Root pf on a hosted runner is proven by third-party CI
+(`mullvad/pfctl-rs`, run 18098602553, 2025-09-29). On `macos-26` with
+passwordless sudo, no oracle, no sentinel, no Team ID and no Apple entitlement,
+the lane runs `shells/macos/packaging/install.sh` — the only thing that
+validates the rendered anchor with `pfctl -n -f`, splices `/etc/pf.conf` and
+runs `pfctl -E` — then `ksd --apply-boot-anchor` and `ksd --status`, and proves:
+pf is **enabled**; the `anchor "twinvpn/*"` reference is present **in the main
+ruleset**, the check the sysext lane got wrong; the anchor's rules and its
+posture, generation and per-family scope tables are non-empty; a connect into a
+covered prefix is **refused** while a control connect **succeeds**. It also runs
+the existing `TwinVPNBridgeTests` target as root, driving `tvb_ext_start`
+through `privilege_posture`, `capability_probe` and `enforcement_reclaim` — the
+first native root execution of that start sequence and its first W-24 read-back
+from the kernel. Evidence file `macos-pf-anchor.json`, digest key `twinvpn-ksd`.
+
+**It is deliberately not in `ORACLE_REQUIRED`:** its claim is about a ruleset the
+machine loaded, not a packet that left, and the boot anchor denies only
+`100.64.0.0/10` and `fd7c:9e5d:2a10::/48` — space no oracle ever sees — so
+adding it there would silently require path-identity keys it cannot honestly
+produce. **It also stops at the anchor read-back and never reaches `net.up`:**
+`enforcement_reclaim` is the session-independent boot-time reclaim, while arming
+over a real contract is `net.up`, which refuses for the reasons in §6. Do not
+let anyone describe this row as the second thing.
+
 ---
 
-## 5. `IOS-NE-FAIL-CLOSED` and `IOS-PROFILE-REMOVAL-HONESTY` — Corellium
+## 5. The iOS rows — hosted simulator, and one device-only residual
 
-**No runner.** A cloud virtual iPhone driven entirely over Corellium's REST API,
-so the job runs on an ordinary hosted Linux runner with `curl` and `python3`.
+**No Corellium instance, no device farm, no runner label.** Two rows run in the
+iOS Simulator on `macos-26`; the residual device row has no executor.
 
-### 5.1 Why Corellium and not a device farm
+### 5.1 What the simulator can and cannot do, and why the split is honest
 
-AWS Device Farm, BrowserStack, Sauce Labs and Firebase Test Lab all **re-sign
-the uploaded IPA**, which strips entitlements — `packet-tunnel-provider` is gone
-before the tunnel can start. Corellium runs the IPA as given, signature and
-entitlements intact, and that single capability is what makes the lane possible.
-`ci-ios-corellium.sh` reads the entitlement out of the archive before uploading
-anything, so a wrong artifact fails in one line rather than as a provider that
-mysteriously never starts.
+**A packet-tunnel provider cannot run in the simulator.** Apple DTS (Developer
+Forums thread 101663, August 2022): the simulator "uses the macOS kernel for its
+networking, which makes it infeasible to run iOS network extension providers …
+Unless this architecture changes, you will not be able to test iOS NE providers
+in the simulator." Rechecked against Xcode 26 through 26.6; nothing revises it.
+But `NetworkExtension.framework` is in the simulator SDK, so every
+`NETunnelProviderProtocol`, `NETunnelProviderManager` and
+`NEOnDemandRuleConnect` is a plain object that can be built and read with no
+daemon involved. **Only activation is impossible.**
 
-**The primary path is a NON-JAILBROKEN device**, deliberately. A jailbroken
-instance would allow more — arbitrary shell, direct provider manipulation — and
-every one of those affordances moves the run further from what a user's iPhone
-does.
+Apple documents the enforcement itself, in "Route additional traffic through a
+personal VPN or packet tunnel provider": "**When the VPN transitions away from
+the connected state, the system drops network traffic.**" That promise is scoped
+to a configuration that exists and is enabled, which `includeAllNetworks`
+selects. So fail-closed after the provider dies is **Apple's** obligation, and
+installing the configuration that earns it is **TwinVPN's** — the half a
+simulator discharges completely.
 
-### 5.2 The security invariant, and the one place it does not apply
+### 5.2 `IOS-FAILCLOSED-CONFIGURATION` — new, required, simulator
 
-The invariant is **not** "Jetsam kills the provider". Jetsam is one cause of
-provider disappearance and neither the only nor the interesting one. A crash, a
-network transition, and the user disabling the VPN all produce the same
-security-relevant condition: **the provider is gone and TwinVPN's authority is
-not.** So the job injects five disappearances by five mechanisms and requires
-the same external result from each — zero unauthorized IPv4, IPv6 or DNS egress,
-observed by the oracle.
+A simulator XCTest asserting the exact `NETunnelProviderProtocol` and on-demand
+rules field by field against the decoded enforcement programme:
+`providerBundleIdentifier`, `includeAllNetworks`, `excludeLocalNetworks`,
+`isOnDemandEnabled`, `isEnabled`, and every on-demand rule being an
+`NEOnDemandRuleConnect`. **The app half (`VPNPermission.install`) and the
+extension half (`BridgeHost.applyEnforcement`) must agree on all of it** — drift
+between them is the defect `EnforcementProgramme`'s single-declaration argument
+exists to prevent, and nothing tested it. Evidence
+`ios-failclosed-configuration.json`, digest key `TwinVPN.app/TwinVPN`.
 
-**Configuration removal is not one of them, and must not be.** On consumer iOS,
-removing the VPN configuration *revokes* TwinVPN's authority to intercept
-traffic: the extension is torn down by the system and no API at any entitlement
-level available outside MDM continues filtering. A product claiming to block
-after removal would be claiming a capability the OS does not grant, and the only
-way to pass a test of it would be to make the test lie.
+### 5.3 `IOS-PROFILE-REMOVAL-HONESTY` — redefined as simulator logic
 
-So the corrected consumer criterion is `IOS-PROFILE-REMOVAL-HONESTY`, and it
-asserts what the app **says**, not what leaves the device:
+The five honesty conditions — TwinVPN reports NOT PROTECTED, a green shield is
+**impossible**, the connected state is cleared, the user receives an actionable
+protection-lost state, and TwinVPN makes **no continued kill-switch claim**
+(`blocked` is as wrong as `protected`, both asserting TwinVPN still decides what
+leaves) — are app-side logic, now driven from an **injected "no configuration"
+observation** rather than from a real removal.
 
-1. TwinVPN reports NOT PROTECTED;
-2. a green shield is **impossible**;
-3. the connected state is cleared;
-4. the user receives an actionable protection-lost state;
-5. TwinVPN makes **no continued kill-switch claim** — `blocked` is as wrong as
-   `protected` here, because both assert TwinVPN is still deciding what leaves.
+**The repository's premise that no API removes the app's own profile was
+wrong.** `NEVPNManager.removeFromPreferences(completionHandler:)` has existed
+since iOS 8 and `NETunnelProviderManager` inherits it, so the removal *event* is
+reproducible in code on any provisioned device. The residual device-only claim
+is the user's Settings journey, which no assertion here depends on. The row
+carries no leak-oracle session and needs none: removing the configuration
+*revokes* TwinVPN's authority to intercept traffic, so egress afterwards is
+expected, and a silence phase over that window would test a promise the product
+does not make.
 
-It carries **no leak-oracle session**, and `report.py` requires none: egress
-after removal is expected and correct, and a silence phase over that window
-would test a promise the product does not make.
+### 5.4 `IOS-NE-FAIL-CLOSED` — the device-only residual, no executor
 
-`shells/ios/TwinVPNTests/ProfileRemovalAcceptanceTests.swift` is the
-specification, one test per condition.
+What is left after the split is the real Network Extension being invoked, the
+tunnel coming up through `NEPacketTunnelFlow`, five provider disappearances
+injected by five mechanisms, and an oracle observing zero egress after each. The
+invariant is **not** "Jetsam kills the provider": a crash, a network transition
+and the user disabling the VPN produce the same security-relevant condition —
+the provider is gone and TwinVPN's authority is not.
 
-### 5.3 The supervised/managed criterion is separate and stronger
+Corellium cannot discharge it, and that is a finding rather than a delay: **it
+cannot perform three of the five injections** — `app/crash`, `network/disable`
+and `vpn/disable` appear in no Corellium surface, its only crash API being a
+listener that waits for a report the OS produces on its own — and **whether a
+`NEPacketTunnelProvider` runs on a Corellium virtual iPhone at all was never
+verified.** The row stays `required=True` with no executor and carries §4.2's
+policy question. **Recorded, not chosen.**
 
-A supervised device under MDM can carry an Always-On VPN payload the user cannot
-remove, and there "zero egress outside the tunnel, ever" is both true and
-testable. That is `IOS-SUPERVISED-ALWAYS-ON`. It is `required=False` in the
-report — a criterion for an unbuilt product mode should not hold the wave — and
-it reads its own evidence file with `product_mode: supervised`, while the
-consumer file is pinned to `product_mode: consumer`. The two cannot be swapped,
-and a consumer-mode pass can never be recorded as the supervised one.
+### 5.5 A simulator row can never satisfy a device row
 
-### 5.4 Repository configuration
+`PREREQUISITES` pins the two simulator rows to `execution: "simulator"`,
+`real_network_extension_invoked: false`, `os_enforcement_exercised: false`,
+`device_kind: "ios-simulator"` and `test_count` greater than zero, while the
+device row pins `real_network_extension_invoked` to `true`. The two files are
+mechanically unusable as each other's evidence, the protection `product_mode`
+already gives the consumer and supervised rows. A simulator row discharges
+neither iPhone nor iPad device coverage (ADR-0018 §11.9). `test_count > 0` is
+not decoration: a filter that matches nothing exits zero, so the count is read
+from the `.xcresult` bundle rather than inferred.
 
-| Name | Kind | Value |
+**Two local blockers were fixed to make any of this compile:** six harness types
+the device suite names (`DeviceCapabilities`, `ProviderHarness`,
+`DiagnosticsHarness`, `CaptureHarness`, `NetworkHarness`, `TrafficGenerator`)
+existed nowhere in the tree in any language, and `VPNPermission` had no seam —
+it built the configuration and handed it to the OS in one unbroken private
+sequence, so no test could observe what it built. `IOS-SUPERVISED-ALWAYS-ON` is
+otherwise untouched: `required=False`, its evidence pinned to
+`product_mode: supervised` against the consumer file's `product_mode: consumer`.
+
+---
+
+## 6. What blocks the egress rows now
+
+**The three egress rows cannot PASS on any infrastructure today, and the blocker
+is inside the product rather than in CI.** `twinvpnctl net up` refuses at
+`core/crates/twinvpn-core/src/enforce.rs:185` with `AUTH.IDENTITY_MISSING` and
+calls `block()` on the way out, so the host ends up blocked **before any tunnel
+exists** and, under `set -euo pipefail`, a lane dies at the `net up` line before
+its TUNNELLED phase is declared. The failure is in the safe direction — BLOCKED,
+not open — but it is a failure, and no runner topology changes it. Four product
+walls, each load-bearing; removing any one alone changes nothing:
+
+| # | Wall | Where |
 |---|---|---|
-| `TWINVPN_CORELLIUM_ENABLED` | variable | `true` |
-| `CORELLIUM_PROJECT_ID` | variable | the Corellium project |
-| `CORELLIUM_API_TOKEN` | secret | |
-| `TWINVPN_SIGNED_IPA_URL` | variable | where the release pipeline publishes the **real signed** IPA |
-| `TWINVPN_SIGNED_IPA_TOKEN` | secret | optional bearer for that URL |
-| `TWINVPN_TEAM_ID` | variable | shared with the macOS rows |
+| 1 | **No overlay allocation.** `enforce::arm` refuses unless `DataPlaneView::local_overlay()` returns a value. The only writer, `ControlPlanePort::put_local_overlay`, has **no production caller** — the sole callers are tests. | `enforce.rs:185`, `planes.rs:474`, `tests/data_plane_composed.rs:87` |
+| 2 | **No verified peer.** `AUTH.PEER_UNTRUSTED` unless some peer carries `tunnel_key_binding_verified`. The one production writer is the control-plane client, and **no shell binds the control transport**. The pairing route is closed too: `pair.confirm` is NotWired because ADR-0007 leaves `transcript_hash` with no defined preimage — a specification defect, not missing wiring. | `enforce.rs:197`, `cp_binding/store.rs:198`, `dispatch.rs:194`, `pairing/mod.rs:137-165` |
+| 3 | **No default route.** `RoutingMode::TwinnetOnly` is hard-coded with `selected_exit_node: None` and no exit grant, and that mode adds no candidates beyond the TwinNet host routes, so a beacon aimed at the oracle never enters the tunnel whatever peer exists. `exitnode.select` is refused, so no operator can change it over the shipped interface. | `enforce.rs:236-254`, `twinvpn-route/src/program.rs:263`, `dispatch.rs:226` |
+| 4 | **No protected resolver.** DNS is programmed **OFF** with no upstream servers, `block_fallback` set in both families, and empty stub addresses. `twinvpn-dns` opens no socket and binds no listener, and nothing in `core/` or `shells/` listens on port 53 — the four Windows stub addresses are handed to the adapter for a stub that does not exist. | `enforce.rs:263`, `:525-548`, `:279`, `twinvpn-dns/src/lib.rs:27-32` |
+
+And one wall outside the device: **no forwarding gateway exists anywhere.**
+`twinsim peer` is a relay peer that "runs no L-DATA tunnel, holds no device
+identity, completes no pairing ceremony and speaks to no control plane"; a relay
+forwards between two peers on a `pair_tag` and is not an internet egress; and
+`twinvpn-gateway` decides admission, policy and quota and **never forwards**.
+
+So the hosted Windows lane **runs to the `net up` refusal and records it as an
+executed FAIL with `blocked_on` naming the wall**, in the style the iOS lane
+already uses for injections it cannot perform — worth more than a NOT-EXECUTED,
+because it is a measurement of a named thing. **Do not close these rows by
+weakening the oracle:** `path_identity_problems` compares two strings for
+inequality and cannot tell a measurement from a pair of differing literals, so
+constants, relaxed checks or a beacon on an address the device owns would each
+turn a real blocker into a green row that measures nothing.
 
 ---
 
-## 6. Common to every runner
+## 7. Common to every lane
 
-* Registered against this repository only, in a runner group not shared with any
-  other repository. Each self-hosted job carries the fork guard
-  (`github.event.pull_request.head.repo.full_name == github.repository`) as a
-  second lock.
-* Rust **1.90.0** via rustup (`rust-toolchain.toml`), on the runner service's
-  PATH.
-* **No production credential of any kind.** The signing material the Android job
-  needs is a CI keystore, and the notarized macOS product and signed IPA are
-  *fetched*, never produced here.
-* Every job cleans up on `if: always()`. The Windows guest is destroyed in a
-  `finally`; the Mac's extension is deactivated (developer mode is what makes
-  `systemextensionsctl uninstall` available, and this criterion runs in it); the
-  Corellium instance is stopped and deleted in a shell `trap`, because a leaked
-  instance bills by the hour.
+**No self-hosted runner and no runner group** — every lane runs on a hosted,
+ephemeral runner, so the fork guard on a registered machine goes with it; Rust
+**1.90.0** via rustup; **no production credential of any kind**, the Android
+job's signing material being a CI keystore and the notarized macOS product
+*fetched*, never produced here; and every job cleans up on `if: always()`, with
+the in-box fabric dying with the runner that created it.
 
 ---
 
-## 7. What the 2026-08-30 hardening pass added, and the holes it closed
+## 8. The one rule of the 2026-08-30 pass that is retired
 
-Sections 0–6 describe an arrangement that was already evidence-based. This
-section describes what was wrong with it anyway. Every item below is a hole that
-produced, or would have produced, a **green row about the wrong thing** — the
-same defect the environment attestation exists to catch, found five more times in
-the machinery built to catch it.
+That pass added the sentinel-continuity arithmetic, the self-reported attempt
+floor, resolver-derived DNS identity, path-identity distinctness, run-and-digest
+binding, and the two-mechanism final gate in which **a lane unable to execute is
+RED, not green-by-absence**. All still hold; the narrative is in `ownership.md`
+§12.4 and the operative statements in `lab/twinoracle/README.md`.
 
-### 7.1 The sentinel — SILENCE was vacuous, and the fix was vacuous too
-
-A `SILENCE` phase with zero arrivals was a `PASS` even if the oracle's listeners
-had been dead for the whole window. A device in a drawer, an oracle that had
-crashed, and a working kill switch were the same observation.
-
-So an **independent sentinel** now proves, continuously and throughout every
-SILENCE phase, that each of the three data-plane listeners was still capable of
-observing an arrival. Continuity for family F over `[t0,t1]` holds only if every
-gap in `{t0} ∪ beats(F) ∪ {t1}` is at most `--sentinel-max-gap-ms`. **A family
-with zero beats is not continuous**, and missing sentinel evidence never defaults
-to true — the absent case and the false case both fail, because absence is what a
-deployment that forgot produces.
-
-**The first fix was itself a hole.** `sentinel_token` was returned in the
-open-session response, which put it in the hands of the device under test. A DUT
-beating that token from its own address during the armed window emits *precisely
-the packet the kill switch is supposed to stop*, and the oracle would have filed
-it as proof the oracle was alive — a vacuous SILENCE laundered through the
-mechanism built to detect vacuous SILENCE. The token moved to
-`POST /v1/sessions/{id}/sentinel`, **and** independence is now checked rather
-than assumed: an IPv4/IPv6 beat from an address the device was also observed
-egressing from is excluded from continuity, so dense forged beats cannot paper
-over a real gap. That exclusion yields `INCONCLUSIVE`, not `FAIL` — a sentinel
-behind the same NAT as the device presents the device's public address, and
-accusing the product of a leak on the strength of a network layout is a lie in
-the other direction. Since `INCONCLUSIVE` blocks eligibility exactly as `FAIL`
-does, nothing ships on the back of it either way.
-
-**Consequence, and it is not a small one: no lane can host its own sentinel.**
-Not one of the three. The EC2 Mac *is* the DUT for `MACOS-SYSEXT-LIFECYCLE`; the
-ubuntu controller runs the probe for `IOS-NE-FAIL-CLOSED` and so shares its
-source address; and the Windows L1 host only *looks* independent, because the L2
-guest's Hyper-V switch ordinarily NATs through L1's own address. All three lanes
-had been planned that way. The sentinel is therefore a standing process on a
-**separate machine** (§8), holding a beacon token and no control-plane
-credential, so that host cannot open, close or read a session.
-
-### 7.2 Attempts — silence from a device that stopped trying
-
-Zero arrivals is also what a device that stopped probing produces. The probe now
-self-reports per-family attempt counts, and a family below its configured minimum
-(60, roughly a minute at ~1 Hz) is `INCONCLUSIVE`. Self-reporting is weak
-evidence and is used accordingly: it can only make a session stricter, never
-green. Over-reporting cannot manufacture a pass, and a failed attempts POST is
-dropped rather than retried, because under-reporting is the safe direction.
-
-### 7.3 DNS and path identity
-
-DNS adjudication no longer depends on the authoritative server seeing an original
-client IP. The probe carries its *intent* in the query name —
-`<seq>.<probe_token>.<path_tag>.<zone>`, where `path_tag` is `p` or `u` — and the
-oracle independently derives `resolver_id` from the **arriving resolver's**
-address through `--resolver <ip>=<id>:<p|u>`. Intent and observation are then
-compared: a disagreement during SILENCE is a `FAIL`, and an arrival from an
-unmapped resolver sets `dns_resolver_identity_ambiguous` and is `INCONCLUSIVE`.
-
-Two operational traps, both of which read as product failures to anyone who did
-not configure the deployment:
-
-* **With no `--resolver` flags at all, every DNS arrival is unattributable, so
-  every session is `INCONCLUSIVE`.** This is deliberate and it is not a bug.
-* An unconsumed tag letter becomes the token, the beacon matches no session and
-  is dropped, and **the family reports zero arrivals — indistinguishable from a
-  working kill switch.** The oracle therefore consumes `p`, `u`, `n` and `s`, and
-  refuses an unrecognised value rather than defaulting to no-claim.
-
-Distinct protected and unprotected identities are required for IPv4, IPv6 and
-DNS. `*_identity_distinct` is nullable, but `null` is accepted *only* where the
-adjudicator's table says that family is out of play, and `true` is refused there
-too — `true` is the value someone writes to green a row about a leg that was
-never exercised. **No lane is currently declared IPv6-less**, so an egress lane
-whose network carries no IPv6 to the oracle goes red rather than passing over an
-untested IPv6 kill switch. If a lane genuinely cannot carry IPv6 the fix is a
-one-line table edit carrying its reason in the diff, not an inference from a
-missing value.
-
-### 7.4 Artifact and run binding
-
-Evidence is bound to repository, `GITHUB_SHA`, `GITHUB_RUN_ID`,
-`GITHUB_RUN_ATTEMPT`, criterion, and artifact name plus SHA-256. **Same SHA,
-different run or attempt, is a rumour from another run** and is refused. Digests
-are produced by the job that built the artifact, and the two artifacts that
-genuinely cross a boundary — the signed IPA and the notarized app — are verified
-after download against an operator-pinned repository variable with no fallback.
-A same-job digest proves integrity, not provenance; the requirement stays anyway,
-so the field is already checked the day a build moves into its own job.
-
-`MACOS-SYSEXT-LIFECYCLE` requires two digests, the app executable and the
-`.systemextension`'s own executable, because an app can activate an extension
-built from a different tree and a digest of the app alone leaves the lifecycle
-belonging to a pairing nobody assembled. `MACOS-PRODUCTION-SIGNATURE` likewise
-requires the pinned `TwinVPN.app.zip` — the one artifact in the whole table with
-a chain of custody back to the release pipeline rather than to a runner.
-
-### 7.5 The final gate
-
-`first-wave-acceptance` keeps `if: always()` so the report is always produced,
-and redness comes from two independent mechanisms. `build/ci/require-job-results.py`
-runs last, reads `toJSON(needs)`, and passes on `success` and nothing else —
-`failure`, `cancelled`, `skipped`, an unrecognised conclusion, a job absent from
-`needs`, and a missing acceptance report each exit 1 with a message naming the
-responsible variable or runner label. `report.py` separately grades the evidence,
-where `NOT-EXECUTED` and `INCONCLUSIVE` fail eligibility. **A specialized runner
-being unavailable is RED, not green-by-absence**, and there is no fallback on any
-criterion.
-
-Two `continue-on-error: true` remain, both on `actions/download-artifact`
-collection steps, because that action errors when its pattern matches nothing and
-that is the normal case on an unprovisioned run — and killing the job destroys
-the only artifact saying which rows are red. Neither can turn a red green: a
-failed download leaves the evidence directory empty, absent files read as
-`NOT-EXECUTED`, and the results gate fires on the job outcomes regardless.
-
-### 7.6 Android
-
-`getconf PAGE_SIZE` is compared for exact string equality with `16384` **before
-anything is installed**, so a 4096-page boot produces no install and no
-downstream result. A missing `zipalign` is now a hard error in this lane rather
-than a warning, because an absent SDK component must not be indistinguishable
-from a measured negative. The system-image sweep takes the highest **stable
-integer** API at or below a pinned ceiling and excludes previews in the regex
-itself: under the previous parse, `36.1`, `37.0`, `37.1` and `37.2` all reduced
-to bare `36`/`37`, so `36.1` tied with real `android-36` and won or lost by
-listing order. `system_image_revision` is read from the installed package's
-`source.properties`, because the package path carries no version and two runs a
-month apart can name the same path and boot different bits.
-
-Every shipped ABI is checked for 16-KiB-safe ELF load alignment by
-`build/ci/elf-align.py`, which parses the program header table directly and takes
-the **minimum** `p_align` across all `PT_LOAD` segments of each `.so` — one
-under-aligned segment is enough for the kernel to refuse the mapping. An ABI
-present but unmeasurable is a failure, never a skip, and an APK with no
-`lib/*/*.so` is refused as not the artifact under test. The `readelf`-scraping
-version this replaced was silently wrong: GNU `readelf` wraps each LOAD across
-two lines with `Align` on the continuation, so against real libraries the scraper
-found **zero LOAD rows, which reads identically to "no libraries."** The
-adjudicator grades the raw per-ABI map rather than a flattened boolean, and
-requires `arm64-v8a` in it by name — a map of `{"x86_64": {"aligned": true}}`
-passes a naive "every value true" check while being a green row about the one ABI
-nobody ships to phones.
+**Retired: "no lane can host its own sentinel, so the sentinel must be a
+standing process on a separate machine", and the standing host with it.** It
+rested on the premise that a lane's own host NATs through the device's address —
+true of a default Hyper-V switch, false of §1.2's routed second segment. The
+rule is now §1.2 and §1.4's in-box rule.
 
 ---
 
-## 8. What does not exist yet
+## 9. What is left
 
-Every criterion except `ANDROID-16K-PAGE-SIZE` is blocked on infrastructure
-rather than on code. The runner labels, repository variables, secrets, oracle
-process flags and the standing sentinel host are enumerated, per criterion, in
-`remote-acceptance-provisioning.md`. That file is the checklist; this one is the
-reasoning behind it.
-
+No infrastructure. The gate needs a hosted runner and nothing else, plus the
+four Apple facts in §4.3 for the one row that skips by name without them. What
+remains is **product work and one policy decision**: the four walls in §6, and
+whether `MACOS-SYSEXT-LIFECYCLE` and `IOS-NE-FAIL-CLOSED` stay required and
+NOT-EXECUTED or are deferred (§4.2, §5.4). The per-row checklist is
+`remote-acceptance-provisioning.md`.
