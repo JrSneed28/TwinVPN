@@ -23,10 +23,20 @@ name: First Implementation Wave — acceptance gate
 #   linux-link-run         Linux, already PASSing, re-run only as regression
 #
 #   windows-killswitch     WINDOWS-WFP-KILLSWITCH, in a disposable nested guest
+#                          on the hosted windows-2025 runner, oracle in-box
 #   android-16k            ANDROID-16K-PAGE-SIZE, on Google's 16 KB emulator
-#   ios-corellium          IOS-NE-FAIL-CLOSED + IOS-PROFILE-REMOVAL-HONESTY
-#   macos-sysext           MACOS-SYSEXT-LIFECYCLE, on an EC2 Mac
+#   ios-acceptance         IOS-FAILCLOSED-CONFIGURATION +
+#                          IOS-PROFILE-REMOVAL-HONESTY, hosted simulator
+#   macos-pf-anchor        MACOS-PF-BOOT-ANCHOR, hosted macos-26 as root
 #   macos-signature        MACOS-PRODUCTION-SIGNATURE -- a DIFFERENT claim
+#
+#   Two criteria have NO EXECUTOR and no job: IOS-NE-FAIL-CLOSED (a packet
+#   tunnel provider cannot run in the simulator; every device farm strips the
+#   entitlement) and MACOS-SYSEXT-LIFECYCLE (activation needs Apple's
+#   packet-tunnel-provider-systemextension grant and an approval a CI job
+#   cannot give). Their rows read NOT-EXECUTED with that reason and count
+#   against eligibility; see docs/implementation/remote-acceptance-
+#   infrastructure.md.
 #
 #   first-wave-acceptance  the conjunction, computed from evidence
 #
@@ -61,10 +71,13 @@ name: First Implementation Wave — acceptance gate
 #     because the mechanism could not guarantee whose evidence it had. It is
 #     gone: every criterion runs here, and `actions/download-artifact` reads
 #     this run and only this run.
-#   * local or user-owned hardware is no longer an acceptable dependency. Each
-#     criterion is now a remotely executable, ENVIRONMENT-ATTESTED probe --
-#     Azure with a nested guest, Google's 16 KB emulator image, an EC2 Mac,
-#     a Corellium virtual iPhone -- and each carries an `environment` map that
+#   * local or user-owned hardware is no longer an acceptable dependency, and
+#     since 2026-09-02 neither is any self-hosted runner, cloud Mac, virtual
+#     iPhone service, public oracle host or standing sentinel host. Every
+#     criterion with an executor is a GitHub-hosted, ENVIRONMENT-ATTESTED probe
+#     -- a nested Hyper-V guest on windows-2025 with the leak oracle and its
+#     sentinel in-box, Google's 16 KB emulator image, the iOS simulator, a
+#     root macos-26 runner -- and each carries an `environment` map that
 #     `build/acceptance/report.py` checks BEFORE it reads any test result.
 #
 # AND THE EGRESS CLAIMS ARE ADJUDICATED OFF-DEVICE. A kill-switch criterion
@@ -955,218 +968,99 @@ jobs:
         if: always()
         run: build/ci/ci-android.sh --cleanup
 
-  ios-corellium:
-    name: ios-corellium
-    # HOSTED, and that surprises people: the device is a CLOUD VIRTUAL iPhONE
-    # driven entirely over Corellium's REST API, so the runner needs curl and
-    # python and nothing else. No Mac, no cable, no provisioning dance on the
-    # runner.
-    #
-    # Corellium rather than a device farm for one reason: AWS Device Farm,
-    # BrowserStack, Sauce Labs and Firebase Test Lab all RE-SIGN the uploaded
-    # IPA, which strips `packet-tunnel-provider` -- so the tunnel cannot start
-    # and the criterion is untestable on every one of them.
-    runs-on: ubuntu-24.04
+  # =========================================================================
+  # IOS-FAILCLOSED-CONFIGURATION + IOS-PROFILE-REMOVAL-HONESTY -- hosted
+  # SIMULATOR. Apple's own statement (DTS, forum thread 101663, unchanged
+  # through Xcode 26) is that a packet tunnel provider cannot run in the
+  # simulator, because the simulator uses the macOS kernel for networking. So
+  # this job starts no tunnel, exercises no OS enforcement and claims no
+  # egress. What it proves is the half that is TwinVPN's to prove: that the
+  # app installs exactly the NETunnelProviderProtocol and on-demand rules that
+  # earn the OS's documented drop-when-not-connected behaviour, that the app
+  # half and the extension half agree on it, and that after the observation
+  # the OS delivers on configuration removal (no configuration; NEVPNStatus
+  # .invalid) the app reports NOT PROTECTED and makes no continued kill-switch
+  # claim. Every assertion reads in-process object state, and the evidence
+  # says so: `execution: simulator`, `real_network_extension_invoked: false`,
+  # `os_enforcement_exercised: false`. `build/acceptance/report.py` pins those
+  # values, so a simulator file can never satisfy the device row
+  # IOS-NE-FAIL-CLOSED, which has no executor today and reads NOT-EXECUTED
+  # with that reason.
+  #
+  # The Corellium lane this replaces could not perform three of the five
+  # injections its criterion named, ran its probe on the controller rather
+  # than the device, and never established that a provider runs on a
+  # Corellium instance at all. It was removed on 2026-09-02.
+  # =========================================================================
+  ios-acceptance:
+    name: ios-acceptance
+    # PINNED. Not `macos-latest`, for the reason `ios-link-run` gives.
+    runs-on: macos-26
     timeout-minutes: 90
     permissions:
       contents: read
-    if: ${{ vars.TWINVPN_CORELLIUM_ENABLED == 'true' }}
-    env:
-      CORELLIUM_API_TOKEN: ${{ secrets.CORELLIUM_API_TOKEN }}
-      CORELLIUM_PROJECT_ID: ${{ vars.CORELLIUM_PROJECT_ID }}
-      TWINVPN_TEAM_ID: ${{ vars.TWINVPN_TEAM_ID }}
-      TWINVPN_ORACLE_URL: ${{ vars.TWINVPN_ORACLE_URL }}
-      TWINVPN_ORACLE_TOKEN: ${{ secrets.TWINVPN_ORACLE_TOKEN }}
-      # The standing heartbeat, declared rather than started -- this runner runs
-      # the probe, so a sentinel started here would share its source address and
-      # every beat would be discarded as device-sourced. See
-      # `build/ci/leak-probe.sh`'s header.
-      TWINVPN_SENTINEL_HOST: ${{ vars.TWINVPN_SENTINEL_HOST }}
     steps:
       - uses: actions/checkout@v4
 
-      # THE SIGNED IPA IS AN INPUT, NOT A PRODUCT OF THIS JOB.
-      #
-      # Building it needs a Mac with the provisioning profile; re-signing it
-      # here would strip the entitlement and reproduce the exact defect that
-      # rules every commercial farm out. So the release pipeline publishes it
-      # and this job consumes it -- and `ci-ios-corellium.sh` reads the
-      # entitlement out of the archive before uploading anything, so a wrong
-      # artifact fails in one line rather than as a provider that never starts.
-      - name: fetch the signed IPA and verify it against its pinned digest
-        env:
-          IPA_URL: ${{ vars.TWINVPN_SIGNED_IPA_URL }}
-          IPA_TOKEN: ${{ secrets.TWINVPN_SIGNED_IPA_TOKEN }}
-          IPA_SHA256: ${{ vars.TWINVPN_SIGNED_IPA_SHA256 }}
+      - name: select the pinned Xcode and print every toolchain version
         run: |
-          if [ -z "$IPA_URL" ]; then
-            echo "::error::TWINVPN_SIGNED_IPA_URL is not configured; this criterion needs the REAL signed build with its NetworkExtension entitlement intact"
-            exit 1
-          fi
-          # THE PIN, AND WHY IT IS NOT OPTIONAL.
-          #
-          # This is the one artifact in the whole gate that crosses a workflow
-          # boundary: the release pipeline builds and signs it, this job consumes
-          # it over HTTPS. So "IOS-NE-FAIL-CLOSED passed" is a claim about
-          # WHICHEVER build that URL happened to serve at the moment of the
-          # fetch. A URL that was rebuilt between the review and the run produces
-          # a perfectly green row about a build nobody can point at, and a
-          # transfer truncated by a proxy produces a red row for a reason that
-          # has nothing to do with the product.
-          #
-          # There is deliberately NO fallback. "No digest was configured, so we
-          # skipped the check" is the failure this exists to remove.
-          if [ -z "$IPA_SHA256" ]; then
-            echo "::error::TWINVPN_SIGNED_IPA_SHA256 is not configured. The IPA is fetched from outside this run, so without a pinned SHA-256 the evidence cannot name which build it is about, and this criterion must not be graded on bytes nobody pinned."
-            exit 1
-          fi
-          curl -sSL --fail-with-body \
-            ${IPA_TOKEN:+-H "Authorization: Bearer $IPA_TOKEN"} \
-            -o "$RUNNER_TEMP/TwinVPN.ipa" "$IPA_URL"
-          . build/ci/digest.sh
-          twinvpn_verify_digest "$RUNNER_TEMP/TwinVPN.ipa" "$IPA_SHA256" TwinVPN.ipa
-          echo "TWINVPN_IPA=$RUNNER_TEMP/TwinVPN.ipa" >> "$GITHUB_ENV"
-
-      - name: NetworkExtension failure injection on a virtual iPhone
-        run: build/ci/ci-ios-corellium.sh
-
-      # THE SCRIPT ALREADY DOES THIS IN A TRAP, AND THAT IS NOT SUFFICIENT.
-      #
-      # `ci-ios-corellium.sh` traps EXIT, TERM and INT, which covers a failure
-      # and covers the runner asking it to stop. It does not cover the script
-      # being killed outright, which leaves a session open at the oracle: one
-      # whose phases never ended and whose report the aggregator can still
-      # fetch. Cheap to close twice, expensive to leave open.
-      - name: close the oracle session
-        if: always()
-        run: build/ci/leak-probe.sh close || true
-
-      # THE VIRTUAL DEVICE IS DESTROYED FROM OUTSIDE THE SCRIPT.
-      #
-      # The script's own trap deletes the instance on a failure and on a
-      # requested stop. It cannot cover being KILLED -- a `timeout-minutes`
-      # expiry gives seconds of grace and then the process is gone mid-`curl` --
-      # and what survives that is a Corellium instance BILLING BY THE HOUR until
-      # a human notices. That is why the instance's name is derived from the run
-      # id and attempt rather than random: this step can reconstruct it from the
-      # environment alone and delete whatever is still wearing it.
-      #
-      # Idempotent, and never fatal: it runs after the verdict is decided, and a
-      # teardown that fails the job hides the failure it was cleaning up after.
-      - name: destroy the virtual device
-        if: always()
-        run: build/ci/ci-ios-corellium.sh --reap
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: evidence-ios-corellium
-          path: |
-            build/ci/evidence/ios-corellium.json
-            build/ci/evidence/ios-profile-removal.json
-          # `warn`, not `ignore`: a criterion job that finished without writing
-          # its evidence file did not reach its own write, and that is worth
-          # seeing. Non-fatal, because the row already reads NOT-EXECUTED and a
-          # second red would bury the first.
-          if-no-files-found: warn
-
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          # NEVER the IPA, never the provisioning profile, never the Corellium
-          # token. The console log is the device's own and carries our reason
-          # codes; the oracle report carries our own beacons' source addresses.
-          name: diagnostics-ios-corellium
-          path: |
-            build/ci/logs/ios/oracle-report.json
-            build/ci/logs/ios/profile-removal.log
-            build/ci/logs/ios/app-install.json
-          if-no-files-found: ignore
-
-  macos-sysext:
-    name: macos-sysext
-    # AN AWS EC2 MAC SELF-HOSTED RUNNER. GitHub's hosted macOS runners cannot do
-    # this: `systemextensionsctl developer on` needs SIP configured, and no
-    # hosted Mac lets a job reach Recovery mode. EC2 Mac exposes SIP
-    # configuration through an API instead
-    # (`create-mac-system-integrity-protection-modification-task`), which is the
-    # only reason this row has a cloud path at all.
-    #
-    # SIP state is VOLUME-scoped, so the instance is long-lived and never
-    # stopped, and `ci-macos-sysext.sh` asserts `csrutil status` as a pre-flight
-    # rather than trusting the provisioning.
-    runs-on: [self-hosted, macOS, twinvpn-ec2-mac]
-    timeout-minutes: 90
-    permissions:
-      contents: read
-    if: ${{ vars.TWINVPN_EC2_MAC_REGISTERED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    # One authority per host (ADR-0016 PS-1), and the signature job below shares
-    # the machine. They are serialised rather than merged because they are
-    # different claims and must be able to go red independently.
-    concurrency:
-      group: twinvpn-ec2-mac
-      cancel-in-progress: false
-    env:
-      TWINVPN_TEAM_ID: ${{ vars.TWINVPN_TEAM_ID }}
-      TWINVPN_EXTENSION_BUNDLE_ID: ${{ vars.TWINVPN_EXTENSION_BUNDLE_ID }}
-      TWINVPN_ORACLE_URL: ${{ vars.TWINVPN_ORACLE_URL }}
-      TWINVPN_ORACLE_TOKEN: ${{ secrets.TWINVPN_ORACLE_TOKEN }}
-      # The standing heartbeat, declared rather than started -- and this is the
-      # lane where that is most obviously forced: the EC2 Mac IS the device
-      # under test, so any beat it sent would travel the stack the criterion
-      # says cannot emit a packet. `ci-macos-sysext.sh` refuses to run without
-      # it. The real enforcement is the oracle's: no beats is no continuity,
-      # which is INCONCLUSIVE and never a quiet pass.
-      TWINVPN_SENTINEL_HOST: ${{ vars.TWINVPN_SENTINEL_HOST }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          clean: true
-
-      - name: select the pinned Xcode
-        run: |
-          XCODE_DEV_DIR="$(build/ci/ci-macos.sh --print-xcode-path)"
+          XCODE_DEV_DIR="$(build/ci/ci-ios.sh --print-xcode-path)"
           sudo xcode-select -s "$XCODE_DEV_DIR"
           xcodebuild -version
+          swift --version
+          xcrun --sdk iphonesimulator --show-sdk-version
+          xcrun simctl list runtimes
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
           sw_vers
-          csrutil status || true
-          systemextensionsctl list || true
 
-      - name: reset to a known-clean state
-        run: build/ci/ci-macos-sysext.sh --cleanup
+      - name: install xcodegen
+        run: brew install --quiet xcodegen
 
-      - name: system-extension lifecycle with external leak observation
-        run: build/ci/ci-macos-sysext.sh
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
 
-      # EVERY exit path. Unlike the old rig, this one CAN deactivate: developer
-      # mode is what makes `systemextensionsctl uninstall` available, and this
-      # criterion runs in it. A Mac left holding an activated extension and a pf
-      # anchor is a Mac whose next job inherits our firewall.
-      - name: deactivate the extension and return the Mac
+      # Two xcodebuild invocations, one per row, so neither row carries the
+      # other's test count or transitions. A zero test count is refused by the
+      # lane itself before the adjudicator ever sees it.
+      - name: the two simulator acceptance suites
+        run: build/ci/ci-ios.sh --acceptance
+
+      - name: collect simulator crash reports
+        if: failure()
+        run: |
+          mkdir -p build/ci/logs/ios/crashes
+          find ~/Library/Logs/DiagnosticReports \
+               ~/Library/Developer/CoreSimulator/Devices/*/data/Library/Logs/DiagnosticReports \
+               -name '*TwinVPN*' -type f -exec cp {} build/ci/logs/ios/crashes/ \; 2>/dev/null \
+            || echo "no crash reports"
+
+      - name: shut the simulator down
         if: always()
-        run: build/ci/ci-macos-sysext.sh --cleanup
+        run: build/ci/ci-ios.sh --cleanup
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: evidence-macos-sysext
-          path: build/ci/evidence/macos-sysext.json
-          # `warn`, not `ignore`: a criterion job that finished without
-          # writing its evidence file did not reach its own write, and
-          # that is worth seeing. Non-fatal, because the row already
-          # reads NOT-EXECUTED and a second red would bury the first.
+          name: evidence-ios-acceptance
+          path: |
+            build/ci/evidence/ios-failclosed-configuration.json
+            build/ci/evidence/ios-profile-removal.json
           if-no-files-found: warn
+          retention-days: 14
 
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: diagnostics-macos-sysext
+          name: diagnostics-ios-acceptance
           path: |
-            build/ci/logs/macos/sysext-list.txt
-            build/ci/logs/macos/pf-anchors.txt
-            build/ci/logs/macos/oracle-report.json
-            build/ci/logs/macos/sysext-build.log
+            build/ci/logs/ios/**
           if-no-files-found: ignore
+          retention-days: 14
 
   macos-signature:
     name: macos-signature
@@ -1303,8 +1197,8 @@ jobs:
       # THIS run rather than being imported from another one.
       - windows-killswitch
       - android-16k
-      - ios-corellium
-      - macos-sysext
+      - ios-acceptance
+      - macos-pf-anchor
       - macos-signature
     # `always()`, so the report is PRINTED rather than skipped.
     #
