@@ -79,6 +79,14 @@ jobs:
         with:
           python-version: '3.12'
 
+      # `make lint` ends in `redaction-check`, which is
+      # build/verify/check-otel-redaction.py and needs only PyYAML. The
+      # interpreter setup-python provides does not carry it, and `make
+      # bootstrap` verifies python3 exists without installing modules. The
+      # same pin the other T1 workflows install.
+      - name: install PyYAML
+        run: python3 -m pip install --quiet 'pyyaml==6.0.2'
+
       # --- 1. pinned toolchains ------------------------------------------------
       - name: bootstrap
         run: make bootstrap
