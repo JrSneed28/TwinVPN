@@ -213,6 +213,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `swift:6.1.2` is a Swift toolchain on Ubuntu, not a build image, and it
+      # ships no make -- `make swift-parse` exited 127 with "make: not found".
+      # The claim above is that `make swift-parse` passes, and that target is
+      # the one definition of it, so the container gets make rather than this
+      # job growing a second copy of the recipe to drift from it.
+      - name: make
+        run: apt-get update && apt-get install -y --no-install-recommends make
+
       - name: parse the Swift shells
         id: parse
         run: make swift-parse
