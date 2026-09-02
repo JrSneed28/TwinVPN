@@ -21,14 +21,32 @@
 # ===========================================================================
 # WHAT CHANGES, AND WHY EACH CHANGE IS NECESSARY
 # ===========================================================================
-# 1. The network's IPAM carries a v6 prefix ONLY. Compose replaces sequences
-#    rather than merging them, so `ipam.config` here replaces the dual-stack
-#    pair in docker-compose.yml wholesale.
-# 2. Every host port publication is re-declared on [::1]. A v4 publication
-#    would ask docker-proxy to forward to a container v4 address that does not
-#    exist; leaving them in place would fail the run for a reason that has
-#    nothing to do with the service under test.
-# 3. TWINVPN_ADDRESS_FAMILIES=ipv6 tells each service which families it may
+# 1. The network's IPAM carries a v6 prefix ONLY. `ipam.config` is one of the
+#    sequences Compose replaces wholesale, so this displaces the dual-stack
+#    pair in docker-compose.yml rather than adding to it.
+# 2. `enable_ipv4: false`. A v6-only IPAM config is NOT on its own enough: a
+#    user-defined bridge still takes an IPv4 subnet from the daemon's default
+#    pool unless IPv4 assignment is explicitly disabled, and the first CI run
+#    of this override proved it — every container held an address out of
+#    172.18.0.0/16 next to its fd00:7717:6:: one, which is precisely the
+#    fallback this file exists to remove. Docker Engine 28.0.0 added
+#    `docker network create --ipv4=false` for exactly this, and the Compose
+#    Specification exposes it as the network-level `enable_ipv4` key, wired
+#    through to the network-create request in Compose v2.33.1 (docker/compose
+#    PR #12570, "add support for gw_priority, enable_ipv4 (requires docker
+#    v28.0)"). ubuntu-24.04 carries Engine 28.0.4 and Compose 2.38.2, so both
+#    halves of the mechanism are present. Engine 28 also requires a bridge to
+#    keep at least one family, which the `enable_ipv6: true` below supplies.
+# 3. Every host port publication is re-declared on [::1]. `ports` is NOT one
+#    of the replaced sequences — Compose merges it on {host ip, target,
+#    published, protocol}, so the base file's 127.0.0.1 entries survive this
+#    override rather than being displaced by it. They publish nothing: with
+#    IPv4 off, libnetwork drops a v4 host binding whose endpoint has no v4
+#    address (moby v28.0.4, libnetwork/drivers/bridge/port_mapping_linux.go —
+#    `configurePortBindingIPv4` returns early on an empty container IPv4, and
+#    `bindHostPorts` returns nothing for the resulting empty set). The [::1]
+#    entries here are therefore the only ones that reach the host.
+# 4. TWINVPN_ADDRESS_FAMILIES=ipv6 tells each service which families it may
 #    consider, so "no v4 candidate was gathered" is a configured fact rather
 #    than an inferred one.
 #
@@ -46,6 +64,8 @@ networks:
     name: twinvpn
     driver: bridge
     enable_ipv6: true
+    # The line that makes the name true — see WHAT CHANGES item 2 above.
+    enable_ipv4: false
     driver_opts:
       com.docker.network.bridge.name: br-twinvpn6
     ipam:

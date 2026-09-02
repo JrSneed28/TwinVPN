@@ -56,10 +56,14 @@ What it enforces, and why each one is here:
      ADR-0006 §11.1 rule 3; architecture.md §2.12 calls a set of size 1 a
      design error.
 
-  9. THE IPv6-ONLY OVERRIDE COVERS EVERY SERVICE THE BASE FILE PUBLISHES.
+  9. THE IPv6-ONLY OVERRIDE IS ACTUALLY IPv6-ONLY, AND COVERS EVERY SERVICE
+     THE BASE FILE PUBLISHES.
      A service left with a v4-only publication in the v6-only topology fails
      for a reason that has nothing to do with the code under test, which is
-     how a v6 lane quietly stops being run.
+     how a v6 lane quietly stops being run. The network must also disable IPv4
+     outright: a v6-only `ipam.config` leaves Docker free to attach an IPv4
+     subnet from its default pool, and a v6 lane whose containers still hold a
+     v4 address proves nothing at all.
 
  10. EVERY `TWINVPN_*` VARIABLE COMPOSE SETS IS ACTUALLY READ BY THAT SERVICE.
      This check exists because the mismatch shipped: compose set
@@ -773,6 +777,16 @@ def check_ipv6_override(base: dict, override: dict) -> None:
             fail(f"ipv6-only.yml carries a non-v6 subnet {entry.get('subnet')!r}")
     if not net.get("enable_ipv6"):
         fail("ipv6-only.yml does not set enable_ipv6: true")
+    # A v6-only IPAM config does not produce a v6-only network. Docker gives a
+    # user-defined bridge an IPv4 subnet out of the daemon's default pool
+    # unless IPv4 assignment is turned off, and the containers then hold a v4
+    # address the override was written to remove.
+    if net.get("enable_ipv4") is not False:
+        fail("ipv6-only.yml does not set enable_ipv4: false, so the network "
+             "still takes an IPv4 subnet from the daemon's default pool and "
+             "every container keeps a v4 address to fall back on. "
+             "docs/testing-strategy.md V4: absence of a signal is not evidence "
+             "unless the signal was provably possible.")
 
     base_publishers = {
         n for n, s in base.get("services", {}).items() if s.get("ports")
