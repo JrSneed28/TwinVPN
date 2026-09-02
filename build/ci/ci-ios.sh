@@ -65,10 +65,29 @@ case "${1:-}" in
   --print-xcode-path) MODE="print-xcode-path" ;;
   --reset)            MODE="reset" ;;
   --device)           MODE="device" ;;
+  --acceptance)       MODE="acceptance" ;;
   --cleanup)          MODE="cleanup" ;;
   "")                 MODE="link-run" ;;
   *) echo "ci-ios.sh: unknown argument '$1'" >&2; exit 2 ;;
 esac
+
+# --------------------------------------------------------------------------
+# --acceptance: the HOSTED-SIMULATOR acceptance rows,
+# `IOS-FAILCLOSED-CONFIGURATION` and `IOS-PROFILE-REMOVAL-HONESTY`.
+#
+# A SEPARATE SCRIPT, dispatched here so there is one entry point per platform
+# and `make ci-ios` stays the door everything goes through. It is separate
+# because it is a different claim with different evidence — two version-2 files
+# with an environment attestation, against this file's one version-1 link/run
+# row — and because folding it in would put this file well past the 500-line
+# limit `CLAUDE.md` sets.
+#
+# `exec`, so the acceptance lane's exit status is this script's with nothing in
+# between to swallow it.
+# --------------------------------------------------------------------------
+if [ "$MODE" = "acceptance" ]; then
+  exec "$REPO/build/ci/ci-ios-acceptance.sh"
+fi
 
 # shellcheck disable=SC1091
 source "$REPO/build/toolchain/env.sh"
@@ -101,6 +120,11 @@ if [ "$MODE" = "cleanup" ]; then
       # them. `simctl shutdown all` is idempotent and succeeds with none booted.
       xcrun simctl shutdown all 2>&1 || echo "(nothing to shut down)"
       xcrun simctl uninstall booted net.twinvpn.client 2>&1 || echo "(no app on a booted simulator)"
+      # And the acceptance lane's own bundle, which `--acceptance` installs
+      # alongside the app. Listed explicitly rather than left to the app
+      # uninstall: it is a separate bundle identifier and a separate install.
+      xcrun simctl uninstall booted net.twinvpn.client.acceptancetests 2>&1 \
+        || echo "(no acceptance bundle on a booted simulator)"
     fi
 
     # A physical device, when one is attached. `devicectl` is Xcode 15+'s
@@ -127,7 +151,9 @@ if [ "$MODE" = "reset" ]; then
   rm -rf "$SHELL_DIR/TwinVPN.xcodeproj" "$SHELL_DIR/Frameworks"
   rm -f "$SHELL_DIR/Sources/TwinVPNBridge/include/twinvpn.h"
   rm -rf "$LOGDIR"
-  rm -f "$REPO/build/ci/evidence/ios.json" "$REPO/build/ci/evidence/ios-device.json"
+  rm -f "$REPO/build/ci/evidence/ios.json" "$REPO/build/ci/evidence/ios-device.json" \
+        "$REPO/build/ci/evidence/ios-failclosed-configuration.json" \
+        "$REPO/build/ci/evidence/ios-profile-removal.json"
   "$0" --cleanup
   echo "=== reset done ==="
   exit 0
@@ -318,42 +344,10 @@ if [ "$linked" = true ]; then
     RESULT_BUNDLE="$LOGDIR/TwinVPNIntegrationTests.xcresult"
 
     echo "::group::boot a simulator"
-    # Any available iPhone runtime. The DEVICE MODEL is not pinned: ADR-0018
-    # §11.9 rows 1 and 2 make iPadOS a distinct FARM entry, not a distinct
-    # binary, and a simulator model cannot discharge either row — so pinning one
-    # here would imply a coverage claim the simulator cannot support.
-    #
-    # The iOS VERSION floor is asserted, because that IS a product constraint:
-    # row 1 fixes the minimum at iOS 15, and a runtime below it would be testing
-    # a configuration the product does not support.
-    xcrun simctl list devices available | tee "$LOGDIR/simulators.log"
-    SIM_UDID="$(xcrun simctl list devices available --json \
-      | python3 -c '
-import json, sys
-data = json.load(sys.stdin)["devices"]
-best = None
-for runtime, devices in data.items():
-    if "iOS" not in runtime:
-        continue
-    # com.apple.CoreSimulator.SimRuntime.iOS-18-2 -> (18, 2)
-    tail = runtime.rsplit(".", 1)[-1].removeprefix("iOS-")
-    try:
-        version = tuple(int(part) for part in tail.split("-"))
-    except ValueError:
-        continue
-    if version < (15,):
-        continue          # ADR-0018 §11.9 row 1: iOS 15 is the floor
-    for device in devices:
-        if device.get("isAvailable") and "iPhone" in device.get("name", ""):
-            if best is None or version > best[0]:
-                best = (version, device["udid"])
-if best is None:
-    sys.exit("no available iPhone simulator at iOS 15 or newer")
-print(best[1])
-')"
-    echo "simulator: $SIM_UDID"
-    xcrun simctl boot "$SIM_UDID"
-    xcrun simctl bootstatus "$SIM_UDID" -b
+    # The selection rule and the iOS 15 floor live in `ci-common-apple.sh`, so
+    # that this lane and `ci-ios-acceptance.sh` cannot disagree about which
+    # runtime is acceptable.
+    SIM_UDID="$(apple_boot_ios_simulator "$LOGDIR/simulators.log")"
     echo "::endgroup::"
 
     TEST_CMD="xcodebuild test -scheme TwinVPNIntegration -destination id=$SIM_UDID"

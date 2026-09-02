@@ -174,6 +174,68 @@ targets:
       - target: TwinVPN
 
   # -------------------------------------------------------------------------
+  # The HOSTED-SIMULATOR acceptance suite. Two rows, two evidence files:
+  # `IOS-FAILCLOSED-CONFIGURATION` and `IOS-PROFILE-REMOVAL-HONESTY`.
+  #
+  # STANDALONE, for the same reason `TwinVPNIntegrationTests` is — and it
+  # compiles the app sources it needs rather than hosting the app, because the
+  # types it asserts about (`VPNPermission`, `StatusRecord`,
+  # `EnforcementProgramme`) and the extension's enforcement half
+  # (`EnforcementInstaller`) have to be visible in ONE module for the two halves
+  # to be compared. It links `core-lite`, the same profile the app does, because
+  # `ManagementClient` reaches `CoreLite` and `CoreLite` crosses `twinvpn.h`.
+  #
+  # WHAT IT DOES NOT COMPILE: `TwinVPNApp.swift` (its `@main` belongs to an
+  # application, not a bundle), `Views/` (SwiftUI presentation, which no
+  # assertion here reaches) and `Resources/` (the app's string catalogue, which
+  # the app target ships with an explicit build phase).
+  #
+  # IT IS NOT A DEVICE ROW AND CANNOT BECOME ONE. No NetworkExtension provider
+  # runs in the simulator — it uses the macOS kernel for networking — so nothing
+  # here activates a tunnel, observes egress, or exercises OS enforcement. The
+  # evidence it writes says so in `environment`, and `report.py`'s prerequisites
+  # are what make a simulator file unusable as device evidence.
+  # -------------------------------------------------------------------------
+  TwinVPNAcceptanceTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: TwinVPNAcceptanceTests
+      - path: Sources/TwinVPNApp
+        excludes:
+          - "TwinVPNApp.swift"
+          - "Views"
+          - "Resources"
+      - path: Sources/TwinVPNBridge
+      - path: Sources/TwinVPNShared
+      # The extension's half of the enforcement write, and ONLY that file. The
+      # rest of `Sources/TwinVPNProvider` needs a live `NEPacketTunnelProvider`
+      # and the FULL core, which is why the half that needs neither was split
+      # out of `BridgeHost` in the first place.
+      - path: Sources/TwinVPNProvider/EnforcementInstaller.swift
+      # The one predicate that separates the two lanes, shared with
+      # `TwinVPNTests` so a simulator row and a device row cannot disagree about
+      # which machine they ran on.
+      - path: TwinVPNTests/DeviceCapabilities.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.twinvpn.client.acceptancetests
+        LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/Frameworks/$(PLATFORM_NAME)
+        OTHER_LDFLAGS: $(inherited) -ltwinvpn_core_lite
+        SWIFT_INCLUDE_PATHS: $(inherited) $(SRCROOT)/Sources/TwinVPNBridge/include
+        # NO `CODE_SIGNING_ALLOWED: NO` here, unlike `TwinVPNIntegrationTests`,
+        # and the difference is deliberate. Entitlements are applied at the
+        # CODE-SIGN step, so a build with signing off resolves no App Group
+        # container — and `StatusRecord.read()` would then return nil
+        # unconditionally, turning every "the shield is not green" assertion
+        # into a pass about an input that was never there. `ci-ios.sh
+        # --acceptance` ad-hoc signs (`CODE_SIGN_IDENTITY=-`,
+        # `CODE_SIGNING_REQUIRED=YES`, `CODE_SIGNING_ALLOWED=YES`) rather than
+        # switching signing off. The suite ALSO injects its own byte source, so
+        # the vacuous pass is closed twice over; this setting is the half that
+        # does not depend on undocumented simulator container behaviour.
+
+  # -------------------------------------------------------------------------
   # The SIMULATOR-runnable integration suite. This is the one that produces the
   # `build/ci/evidence/ios.json` link/run evidence.
   #
@@ -229,3 +291,19 @@ schemes:
     test:
       targets:
         - TwinVPNIntegrationTests
+
+  # The acceptance scheme `build/ci/ci-ios.sh --acceptance` drives.
+  #
+  # It BUILDS the production targets as well as the suite, for two reasons: the
+  # simulator app is what `artifact_digests` names, and building it is what
+  # makes the digest a binding to bytes produced from the sources the suite
+  # compiled rather than to a name in a JSON file.
+  TwinVPNAcceptance:
+    build:
+      targets:
+        TwinVPN: all
+        TwinVPNProvider: all
+        TwinVPNAcceptanceTests: [test]
+    test:
+      targets:
+        - TwinVPNAcceptanceTests

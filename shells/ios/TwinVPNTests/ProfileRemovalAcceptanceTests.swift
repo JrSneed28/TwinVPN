@@ -75,12 +75,19 @@ final class ProfileRemovalAcceptanceTests: XCTestCase {
         // remove, so a pass there would be a pass about nothing.
         try XCTSkipUnless(DeviceCapabilities.isPhysicalDevice,
                           "profile removal is a device-only condition")
-        permission = VPNPermission()
+        // `VPNPermission` is `@MainActor`, and this method is not. Every touch
+        // of it below is therefore an `await`, and every one is HOISTED out of
+        // the assertion rather than written inside it: `XCTAssert*` takes an
+        // `@autoclosure () throws -> Bool`, which is not async, so an `await`
+        // inside the parentheses does not compile. That mismatch is why this
+        // file never built.
+        permission = await VPNPermission()
         try await startTunnelAndWaitForProtection()
-        // The removal itself. No API removes our own profile — that is the
-        // point of the criterion — so this is a human on a hand-held device or
-        // an MDM command on a supervised one. `ProviderHarness` is what the
-        // Corellium lane drives.
+        // The removal itself. `NEVPNManager.removeFromPreferences` (iOS 8+)
+        // can remove the app's own configuration, so the END STATE is
+        // reproducible in code; what this device suite exercises is the user's
+        // own Settings journey, which no API performs. The simulator suite
+        // (`TwinVPNAcceptanceTests`) drives the same observation by injection.
         try await ProviderHarness.awaitManualProfileRemoval(timeout: 300)
         await permission.reload()
     }
@@ -92,10 +99,25 @@ final class ProfileRemovalAcceptanceTests: XCTestCase {
     /// a status our own extension reported would be a status from a process the
     /// system has already torn down.
     func testTheAppReportsNotProtected() async throws {
-        XCTAssertEqual(permission.state, .absent,
+        let state = await permission.state
+        let reasonCode = await permission.reasonCode
+        XCTAssertEqual(state, .absent,
                        "the configuration is gone; any other ProfileState is the app believing a stale fact")
-        XCTAssertEqual(permission.reasonCode, ReasonCode.vpnPermissionDenied,
-                       "the condition must be NAMED with a registered reason code, not merely rendered")
+        // NIL, and this assertion used to demand `PLATFORM.VPN_PERMISSION_DENIED`
+        // against an implementation that has always set nil on this branch
+        // (`VPNPermission.reload`'s empty-managers case). The test was the wrong
+        // half of the contradiction.
+        //
+        // `contracts/registry/reason_codes.json` settles it:
+        // `PLATFORM.VPN_PERMISSION_DENIED` has `remediation_class:
+        // PERMISSION_GRANT` and the condition "The OS denied the VPN permission
+        // or entitlement". An ABSENT configuration is not a denial — nothing was
+        // refused, there is simply nothing installed — and reporting a denial
+        // would send the user to grant a permission that was never withheld.
+        // The refusal code belongs to the disabled and error branches, which do
+        // carry it. `contracts/` is frozen and correct here; the assertion moved.
+        XCTAssertNil(reasonCode,
+                     "an absent configuration is a STATE, not a refusal: `.absent` is what names it, and PLATFORM.VPN_PERMISSION_DENIED would misreport a removal as a denied grant")
     }
 
     /// 2. A GREEN SHIELD IS IMPOSSIBLE.
@@ -122,9 +144,17 @@ final class ProfileRemovalAcceptanceTests: XCTestCase {
     /// defect as a green shield wearing different clothes.
     func testTheConnectedStateIsCleared() async throws {
         let status = await ProviderHarness.currentVPNStatus()
+        // Apple defines `.invalid` as "The associated VPN configuration does not
+        // exist OR IS NOT ENABLED", so `.invalid` alone does not distinguish a
+        // removed configuration from a present-but-disabled one — a
+        // present-but-disabled profile reads `.invalid` too. `.disconnected`
+        // means a configuration exists AND is enabled, which is the case this
+        // rules out. The distinction between removed and disabled is drawn
+        // below, off `permission.state`, which is where it can be drawn.
         XCTAssertEqual(status, .invalid,
-                       "NEVPNStatus must be .invalid once the configuration is gone; .disconnected would mean a configuration still exists")
-        XCTAssertFalse(permission.state == .installed || permission.state == .disabled,
+                       "NEVPNStatus must be .invalid once the configuration is gone; .disconnected would mean an enabled configuration still exists")
+        let state = await permission.state
+        XCTAssertFalse(state == .installed || state == .disabled,
                        "a removed profile is neither installed nor disabled")
     }
 
@@ -135,7 +165,11 @@ final class ProfileRemovalAcceptanceTests: XCTestCase {
     /// permits — reinstalling the configuration. A dead end with a red shield
     /// is a report, not an actionable state.
     func testTheUserGetsAnActionableProtectionLostState() async throws {
-        XCTAssertEqual(permission.reasonCode, ReasonCode.vpnPermissionDenied)
+        // The condition is NAMED by the state. See
+        // `testTheAppReportsNotProtected` for why the name is `.absent` and not
+        // a refusal code: nothing was refused.
+        let state = await permission.state
+        XCTAssertEqual(state, .absent)
         // The rest of the app keeps working — ADR-0019 §11.10 (a): "no tunnel
         // is possible; the rest of the app remains usable".
         XCTAssertNoThrow(try DiagnosticsHarness.assembleBundle())
@@ -143,7 +177,8 @@ final class ProfileRemovalAcceptanceTests: XCTestCase {
         // distinction is the whole of "actionable": `VPNPermission.install` has
         // always existed, and a user who is never shown a way to reach it is in
         // the same position as one for whom it did not.
-        XCTAssertTrue(await ProviderHarness.recoveryAffordanceOffered(),
+        let offered = await ProviderHarness.recoveryAffordanceOffered()
+        XCTAssertTrue(offered,
                       "the only recovery iOS permits is reinstalling the configuration; an app that does not OFFER it has left the user with a red shield and nothing to do")
     }
 

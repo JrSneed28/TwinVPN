@@ -185,8 +185,10 @@ class EvidenceWriters(unittest.TestCase):
         # If the heredoc form ever changes, every case below would silently
         # grade an empty list. A FLOOR rather than an equality: the lane set
         # grows as criteria are reconciled, and a count that has to be bumped by
-        # whoever adds a lane fails for the wrong reason. Nine is what the wave
-        # shipped with, and a discovery that finds fewer has broken.
+        # whoever adds a lane fails for the wrong reason. Nine is the set after
+        # the 2026-09-02 reconciliation (the Corellium lane gone, the hosted
+        # simulator lane `ci-ios-acceptance.sh` added), and a discovery that
+        # finds fewer has broken.
         found = writers()
         self.assertGreaterEqual(len(found), 9, [str(p) for p, _, _ in found])
 

@@ -66,6 +66,37 @@ final class VPNPermission: ObservableObject {
 
     private var manager: NETunnelProviderManager?
 
+    /// How this object asks the OS what configuration exists.
+    ///
+    /// ===================================================================
+    /// WHY THIS IS INJECTED
+    /// ===================================================================
+    ///
+    /// `loadAllFromPreferences` is one of the four calls on this type that
+    /// cross into the Network Extension daemons, and those daemons do not run
+    /// in the iOS Simulator at all — it is a group of processes running
+    /// natively on macOS, using the macOS kernel for networking. So the
+    /// observation the OS delivers AFTER a user removes the configuration —
+    /// an empty result — is not reproducible there by asking the OS.
+    ///
+    /// It is perfectly reproducible by SUPPLYING it, which is what the
+    /// acceptance suite does. Everything downstream of the load is ordinary
+    /// app logic and is exactly what `IOS-PROFILE-REMOVAL-HONESTY` is about:
+    /// whether the app reports the absence honestly. Apple's own guidance for
+    /// this shape is to keep the interesting logic in types that can be tested
+    /// without the OS, and this is that seam on the app side.
+    ///
+    /// The default is the real call, so no production path changes.
+    typealias PreferencesLoader = () async throws -> [NETunnelProviderManager]
+
+    private let loadPreferences: PreferencesLoader
+
+    init(loadPreferences: @escaping PreferencesLoader = {
+        try await NETunnelProviderManager.loadAllFromPreferences()
+    }) {
+        self.loadPreferences = loadPreferences
+    }
+
     /// Loads whatever profile exists.
     ///
     /// Called at launch and after every return from Settings, because
@@ -75,7 +106,7 @@ final class VPNPermission: ObservableObject {
     /// looking, so it looks every time it can.
     func reload() async {
         do {
-            let managers = try await NETunnelProviderManager.loadAllFromPreferences()
+            let managers = try await loadPreferences()
             guard let manager = managers.first else {
                 self.manager = nil
                 state = .absent
@@ -101,19 +132,7 @@ final class VPNPermission: ObservableObject {
     /// the app.
     func install(enforcement: EnforcementProgramme) async {
         let manager = self.manager ?? NETunnelProviderManager()
-        let proto = NETunnelProviderProtocol()
-        proto.providerBundleIdentifier = "net.twinvpn.client.provider"
-        // The settings object carries the real remote address once the tunnel is
-        // up; this is the placeholder NE requires at install time and is never a
-        // routing decision.
-        proto.serverAddress = "TwinVPN"
-        proto.includeAllNetworks = enforcement.includeAllNetworks
-        proto.excludeLocalNetworks = enforcement.excludeLocalNetworks
-        manager.protocolConfiguration = proto
-        manager.localizedDescription = "TwinVPN"
-        manager.onDemandRules = enforcement.makeOnDemandRules()
-        manager.isOnDemandEnabled = true
-        manager.isEnabled = true
+        configure(manager, with: enforcement)
 
         do {
             try await manager.saveToPreferences()
@@ -137,6 +156,55 @@ final class VPNPermission: ObservableObject {
             state = .denied
             reasonCode = ReasonCode.vpnPermissionDenied
         }
+    }
+
+    /// The protocol object this app installs, built and nothing else.
+    ///
+    /// ===================================================================
+    /// WHY CONSTRUCTION IS SEPARATE FROM THE SAVE
+    /// ===================================================================
+    ///
+    /// This is the configuration that earns iOS's documented fail-closed
+    /// behaviour: "when the VPN transitions away from the connected state, the
+    /// system drops network traffic". The promise is scoped to a configuration
+    /// that EXISTS and IS ENABLED and carries `includeAllNetworks`, so which
+    /// fields this object ends up with is the entire part of the guarantee
+    /// TwinVPN controls — and until this function existed it could not be read
+    /// by anything, because construction and `saveToPreferences` were one
+    /// unbroken sequence and `manager` is private.
+    ///
+    /// Building is not installing. Nothing here touches the OS, publishes a
+    /// state, or changes `reasonCode`: `install` composes this with the save.
+    ///
+    /// `enforceRoutes` is deliberately NOT set. Apple scopes it to the case
+    /// where `includeAllNetworks` is false, and
+    /// `twinvpn_platform_ios::enforce` ties `include_all_networks` to
+    /// `full_protection_required` for both rulesets, so a full-tunnel posture
+    /// never reaches the case it governs. Setting it "for completeness" would
+    /// be a field this app cannot explain.
+    func makeProtocolConfiguration(enforcement: EnforcementProgramme) -> NETunnelProviderProtocol {
+        let proto = NETunnelProviderProtocol()
+        proto.providerBundleIdentifier = "net.twinvpn.client.provider"
+        // The settings object carries the real remote address once the tunnel is
+        // up; this is the placeholder NE requires at install time and is never a
+        // routing decision.
+        proto.serverAddress = "TwinVPN"
+        proto.includeAllNetworks = enforcement.includeAllNetworks
+        proto.excludeLocalNetworks = enforcement.excludeLocalNetworks
+        return proto
+    }
+
+    /// Copies one decoded programme into one manager, field by field.
+    ///
+    /// The other half of the seam above, and the same rule applies: it builds a
+    /// manager and does not save one. `install` is what presents the consent
+    /// sheet.
+    func configure(_ manager: NETunnelProviderManager, with enforcement: EnforcementProgramme) {
+        manager.protocolConfiguration = makeProtocolConfiguration(enforcement: enforcement)
+        manager.localizedDescription = "TwinVPN"
+        manager.onDemandRules = enforcement.makeOnDemandRules()
+        manager.isOnDemandEnabled = true
+        manager.isEnabled = true
     }
 
     /// Starts the tunnel, if a profile exists and is enabled.

@@ -52,6 +52,11 @@ final class LifecycleTests: XCTestCase {
         try await super.setUp()
         try XCTSkipUnless(DeviceCapabilities.isPhysicalDevice,
                           "every assertion in this suite is vacuous on the simulator")
+        // Both are `@MainActor` and this method is not, so every touch of
+        // either is an `await` -- and every one is HOISTED out of the assertion
+        // that reads it. `XCTAssert*` takes an `@autoclosure () throws -> Bool`,
+        // which is not async, so an `await` inside the parentheses does not
+        // compile. That mismatch is one of the two reasons this file never built.
         permission = await VPNPermission()
         management = await ManagementClient.shared
         await permission.reload()
@@ -81,7 +86,8 @@ final class LifecycleTests: XCTestCase {
         // UNKNOWN until a snapshot or a fresh ProtectionAssertion, NEVER the
         // last value it happened to hold.
         await management.beginPolling()
-        XCTAssertFalse(management.isLive,
+        let isLive = await management.isLive
+        XCTAssertFalse(isLive,
                        "a dead provider must not leave the app rendering a stale live value")
 
         // The on-demand rules re-arm on the next network event, and the
@@ -135,8 +141,18 @@ final class LifecycleTests: XCTestCase {
         try await ProviderHarness.awaitManualProfileRemoval(timeout: 300)
 
         await permission.reload()
-        XCTAssertEqual(permission.state, .absent)
-        XCTAssertEqual(permission.reasonCode, "PLATFORM.VPN_PERMISSION_DENIED")
+        let state = await permission.state
+        let reasonCode = await permission.reasonCode
+        XCTAssertEqual(state, .absent)
+        // NIL. `VPNPermission.reload`'s empty-managers branch has always set nil
+        // here, and `contracts/registry/reason_codes.json` says it is right to:
+        // `PLATFORM.VPN_PERMISSION_DENIED` carries `remediation_class:
+        // PERMISSION_GRANT` and means "the OS denied the VPN permission or
+        // entitlement". A configuration the user REMOVED was not denied, and
+        // naming it a denial would send the user to grant a permission nobody
+        // withheld. `.absent` is the name. See the same correction in
+        // `ProfileRemovalAcceptanceTests.testTheAppReportsNotProtected`.
+        XCTAssertNil(reasonCode)
 
         // ADR-0019 §11.10 (a): "no tunnel is possible; the rest of the app
         // remains usable". Pairing, the device list, settings and diagnostics
@@ -162,7 +178,8 @@ final class LifecycleTests: XCTestCase {
         // infer status from whether its own IPC replied."
         let status = try await ProviderHarness.osReportedStatus()
         XCTAssertEqual(status, .connected)
-        XCTAssertGreaterThan(try await TrafficGenerator.roundTripCount(), 0)
+        let roundTrips = try await TrafficGenerator.roundTripCount()
+        XCTAssertGreaterThan(roundTrips, 0)
     }
 
     /// ADR-0022 LC-24 and §11.6: `NEProvider.sleep`/`wake`, and
@@ -189,9 +206,10 @@ final class LifecycleTests: XCTestCase {
     // MARK: - helpers
 
     private func startTunnelAndWaitForProtection() async throws {
-        try XCTSkipUnless(permission.state == .installed,
+        let state = await permission.state
+        try XCTSkipUnless(state == .installed,
                           "install the VPN profile before running this suite")
-        try permission.startTunnel()
+        try await permission.startTunnel()
         try await ProviderHarness.waitForProtection(timeout: 30)
     }
 

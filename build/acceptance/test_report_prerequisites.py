@@ -42,6 +42,12 @@ from test_environment_attestation import *  # noqa: E402,F401,F403
 # which is exactly why a writer that stopped emitting a required key went
 # unnoticed. `test_evidence_writers` renders the real writers and grades those.
 from test_evidence_writers import *  # noqa: E402,F401,F403
+# And the half that decides what two of those writers WRITE. The iOS acceptance
+# lane derives its test count and its five honesty booleans from an `.xcresult`,
+# so a bug in that parser is a bug in what `IOS-PROFILE-REMOVAL-HONESTY` means --
+# and `xcodebuild test` exits 0 for a bundle in which nothing ran, which is the
+# vacuous pass the count exists to refuse.
+from test_xcresult_summary import *  # noqa: E402,F401,F403
 
 
 class PositiveControls(GateCase):

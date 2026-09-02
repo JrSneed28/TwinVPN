@@ -99,14 +99,39 @@ enum StatusRecord {
     private static let filename = "status.json"
 
     /// Reads the record. **There is deliberately no `write`.**
-    static func read() -> StatusSnapshot? {
+    ///
+    /// ===================================================================
+    /// WHY THE BYTE SOURCE IS A PARAMETER
+    /// ===================================================================
+    ///
+    /// `appGroupBytes` resolves an App Group container, and a container URL is
+    /// nil without the App Group entitlement — which is applied at the
+    /// CODE-SIGN step. So on any build where signing is off, this returns nil
+    /// unconditionally, and every `XCTAssertNotEqual(snapshot?.protection?.state,
+    /// .protected)` in the acceptance suite passes without ever seeing a
+    /// snapshot. That is a vacuous pass: an assertion that cannot fail because
+    /// its input is always absent, which is a shape this repository has already
+    /// shipped once.
+    ///
+    /// Passing the source in removes the dependency rather than hoping around
+    /// it: a test supplies the exact bytes it wants judged — including the
+    /// dangerous ones, a stale record still claiming `protected` — and the
+    /// assertion is then about the app's handling and not about whether a
+    /// container happened to resolve.
+    ///
+    /// The default is the real container, so no production path changes.
+    static func read(from source: () -> Data? = StatusRecord.appGroupBytes) -> StatusSnapshot? {
+        guard let data = source() else { return nil }
+        return try? JSONDecoder().decode(StatusSnapshot.self, from: data)
+    }
+
+    /// The App Group file the provider writes, as bytes.
+    static func appGroupBytes() -> Data? {
         guard let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: "group.net.twinvpn.client") else {
             return nil
         }
-        let url = container.appendingPathComponent(filename)
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(StatusSnapshot.self, from: data)
+        return try? Data(contentsOf: container.appendingPathComponent(filename))
     }
 }
 
