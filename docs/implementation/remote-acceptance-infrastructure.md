@@ -239,7 +239,7 @@ desk is exactly what this gate may no longer depend on.
 |---|---|---|
 | `TWINVPN_EC2_MAC_REGISTERED` | variable | `true` once the runner is up |
 | `TWINVPN_TEAM_ID` | variable | the Apple Developer Team ID |
-| `TWINVPN_EXTENSION_BUNDLE_ID` | variable | default `net.twinvpn.client.tunnel` |
+| `TWINVPN_EXTENSION_BUNDLE_ID` | variable | default `com.twinvpn.app.sysext`, the target `shells/macos/project.yml` builds |
 | `TWINVPN_NOTARIZED_APP_URL` | variable | where the release pipeline publishes the signed, notarized, stapled `TwinVPN.zip` |
 | `TWINVPN_NOTARIZED_APP_TOKEN` | secret | optional bearer for that URL |
 

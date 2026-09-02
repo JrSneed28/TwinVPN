@@ -132,7 +132,7 @@ class ArtifactDigests(GateCase):
     def test_a_missing_required_digest_is_refused(self):
         # An app can activate an extension built from a different tree.
         ev = fx.macos_sysext()
-        del ev["artifact_digests"]["net.twinvpn.client.tunnel.systemextension"]
+        del ev["artifact_digests"]["com.twinvpn.app.sysext.systemextension"]
         self.assertRefused("macos-sysext", "MACOS-SYSEXT-LIFECYCLE", ev,
                            fx.oracle("sess-mac", "MACOS-SYSEXT-LIFECYCLE"))
         # No pinned `TwinVPN.app.zip`: not the shipped product.

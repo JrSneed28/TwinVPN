@@ -26,8 +26,8 @@ EVERYTHING its criterion requires? That question is the one the drift survived.
 ===========================================================================
 HOW IT IS ANSWERED, AND WHAT IS AND IS NOT REAL ABOUT IT
 ===========================================================================
-Nothing here greps a shell script for a word, and nothing here hand-copies a key
-name. The `environment` object is obtained by RENDERING the writer's own heredoc
+No environment key here is found by grepping a shell script for a word, and
+nothing here hand-copies a key name. The `environment` object is obtained by RENDERING the writer's own heredoc
 with bash -- `test_evidence_writers.writers()` and `.render()`, reused rather
 than reimplemented -- and the required keys come from the real `PREREQUISITES`,
 after `report.py` has merged `PATH_IDENTITY_PREREQUISITES` into every
@@ -80,7 +80,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from adjudication import PATH_IDENTITY_PREREQUISITES  # noqa: E402
+from adjudication import ARTIFACT_DIGEST_REQUIRED, PATH_IDENTITY_PREREQUISITES  # noqa: E402
 from report import ORACLE_REQUIRED, PREREQUISITES  # noqa: E402
 from test_evidence_writers import render, writers  # noqa: E402
 
@@ -291,6 +291,32 @@ class ProducerKeyCoverage(unittest.TestCase):
             with self.subTest(criterion=criterion):
                 self.assertLessEqual(set(PATH_IDENTITY_PREREQUISITES),
                                      set(PREREQUISITES[criterion]))
+
+    def test_the_extension_digest_key_names_the_extension_project_yml_builds(self):
+        # THE DRIFT `render()` CANNOT SEE. It stubs `ARTIFACT_DIGESTS` from the
+        # adjudicator's own key names, so a producer that spells a key
+        # differently renders as if it agreed. 54d1977 moved the sysext lane's
+        # default bundle id to the target `shells/macos/project.yml` builds and
+        # left `ARTIFACT_DIGEST_REQUIRED` naming the iOS provider id it
+        # replaced: the lane wrote `com.twinvpn.app.sysext.systemextension`,
+        # the adjudicator demanded `net.twinvpn.client.tunnel.systemextension`,
+        # and the row would have failed its run-binding check on a fully
+        # provisioned Mac. The lane builds the key from its own default, so the
+        # default is read as TEXT here -- the one place this file does that,
+        # and it does it because the alternative is evaluating bash.
+        project = (REPO / "shells" / "macos" / "project.yml").read_text()
+        self.assertEqual(project.count("type: system-extension"), 1,
+                         "one system-extension target is what the key names")
+        built = re.search(r"type: system-extension.*?PRODUCT_BUNDLE_IDENTIFIER:\s*(\S+)",
+                          project, re.S).group(1)
+        self.assertIn(f"{built}.systemextension",
+                      ARTIFACT_DIGEST_REQUIRED["MACOS-SYSEXT-LIFECYCLE"],
+                      "the adjudicator names an extension nobody builds")
+        lane = (CI / "ci-macos-sysext.sh").read_text()
+        self.assertIn(f"${{TWINVPN_EXTENSION_BUNDLE_ID:-{built}}}", lane,
+                      "the lane's default is not the extension project.yml builds")
+        self.assertIn('"$ext_bundle_id.systemextension"', lane,
+                      "the lane no longer keys the digest by that default")
 
 
 if __name__ == "__main__":

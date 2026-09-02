@@ -119,8 +119,12 @@ ARTIFACT_DIGEST_REQUIRED = {
     # covers `Contents/MacOS/TwinVPN` and not the Info.plist or the nested
     # extension. A key called `TwinVPN.app` would imply it covered both, which
     # is the implication that lets one digest stand in for two artifacts.
+    # The extension key is the bundle `shells/macos/project.yml` BUILDS, not
+    # the iOS provider's id this table used to carry: the lane derives its key
+    # from the same default, and `test_producer_key_coverage.py` pins all three
+    # spellings to project.yml so a rename cannot land in only one of them.
     "MACOS-SYSEXT-LIFECYCLE": ("TwinVPN.app/Contents/MacOS/TwinVPN",
-                               "net.twinvpn.client.tunnel.systemextension"),
+                               "com.twinvpn.app.sysext.systemextension"),
     "WINDOWS-WFP-KILLSWITCH": ("twinvpnsvc.exe",),
 }
 

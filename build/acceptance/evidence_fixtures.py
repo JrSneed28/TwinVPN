@@ -34,7 +34,7 @@ DIGESTS = {
     "TwinVPN.ipa": "b" * 64,
     "TwinVPN.app.zip": "c" * 64,
     "TwinVPN.app/Contents/MacOS/TwinVPN": "d" * 64,
-    "net.twinvpn.client.tunnel.systemextension": "e" * 64,
+    "com.twinvpn.app.sysext.systemextension": "e" * 64,
     "twinvpnsvc.exe": "f" * 64,
 }
 
@@ -134,13 +134,13 @@ def macos_sysext(**env_over) -> dict:
         "macos_version": "26.0",
         "sip_config": "custom (system extensions allowed)",
         "team_id": "ABCDE12345",
-        "extension_bundle_id": "net.twinvpn.client.tunnel",
+        "extension_bundle_id": "com.twinvpn.app.sysext",
         "systemextensionsctl_state": "activated enabled",
     })
     env.update(env_over)
     return _base("macos", "MACOS-SYSEXT-LIFECYCLE", "macos-sysext",
                  ["TwinVPN.app/Contents/MacOS/TwinVPN",
-                  "net.twinvpn.client.tunnel.systemextension"], environment=env,
+                  "com.twinvpn.app.sysext.systemextension"], environment=env,
                  leak_oracle=_oracle_ref("sess-mac", "MACOS-SYSEXT-LIFECYCLE"))
 
 
