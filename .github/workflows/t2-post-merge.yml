@@ -59,6 +59,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # `make lint` ends in `redaction-check` (build/verify/check-otel-
+      # redaction.py), which needs only PyYAML; setup-python's interpreter
+      # carries no third-party modules. Same pin as `topology-up` below.
+      - name: install PyYAML
+        run: python3 -m pip install --quiet 'pyyaml==6.0.2'
 
       - name: install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
