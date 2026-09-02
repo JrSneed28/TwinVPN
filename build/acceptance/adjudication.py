@@ -68,10 +68,12 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 #   * ANDROID-16K-PAGE-SIZE is a claim about the `.so` inside the SHIPPED APK.
 #     The debug APK is a different artifact -- unminified, not shrunk, packaged
 #     differently -- so `apk-release` is the only one whose digest counts.
-#   * The three iOS criteria run the SIGNED IPA on a Corellium instance, and the
-#     entire reason that lane exists is that the IPA is not re-signed. A digest
-#     is how a reader knows the archive that was uploaded is the archive whose
-#     entitlements were read.
+#   * The DEVICE iOS criteria run the SIGNED IPA on a provisioned iPhone, and
+#     the reason no device farm can host them is that every farm re-signs it. A
+#     digest is how a reader knows the archive uploaded is the archive whose
+#     entitlements were read. The SIMULATOR criteria grade a different artifact,
+#     `TwinVPN.app/TwinVPN`, so a device archive cannot be read as simulator
+#     evidence at the digest layer either.
 #   * MACOS-PRODUCTION-SIGNATURE inspects the NOTARIZED PRODUCT fetched from the
 #     release pipeline, never a build made on the runner. Its digest is what
 #     distinguishes the two, and they are otherwise indistinguishable in the
@@ -98,8 +100,17 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 ARTIFACT_DIGEST_REQUIRED = {
     "ANDROID-16K-PAGE-SIZE": ("app-release.apk",),
     "IOS-NE-FAIL-CLOSED": ("TwinVPN.ipa",),
-    "IOS-PROFILE-REMOVAL-HONESTY": ("TwinVPN.ipa",),
+    # THE TWO SIMULATOR ROWS GRADE THE SIMULATOR BUILD, and the key says so. A
+    # simulator .app is a directory, so the value names the executable inside
+    # it exactly as the macOS keys below do. An IPA digest here would mean a
+    # device archive had been graded by a simulator criterion.
+    "IOS-FAILCLOSED-CONFIGURATION": ("TwinVPN.app/TwinVPN",),
+    "IOS-PROFILE-REMOVAL-HONESTY": ("TwinVPN.app/TwinVPN",),
     "IOS-SUPERVISED-ALWAYS-ON": ("TwinVPN.ipa",),
+    # The kill-switch daemon whose `--apply-boot-anchor` wrote the anchor the
+    # criterion then reads back out of pf. A row about an anchor no named build
+    # produced is a row about a file somebody could have written by hand.
+    "MACOS-PF-BOOT-ANCHOR": ("twinvpn-ksd",),
     # BOTH HALVES OF THE NOTARIZED PRODUCT. `TwinVPN.app.zip` is the operator's
     # PINNED digest, recorded verbatim rather than recomputed -- it is the digest
     # the download was gated on, and it is the only real chain of custody in this
@@ -158,19 +169,32 @@ ARTIFACT_DIGEST_REQUIRED = {
 # been leaking throughout. Every number in the oracle's report is then about the
 # wrong machine while remaining internally consistent -- the sentinel held, the
 # attempt count is high, the identities are distinct, and the row is a
-# measurement of a host nobody is making a claim about. `ci-ios-corellium.sh`
-# does exactly this today, which is why the key exists and why `device` is the
-# only accepted value: it means the DUT, whatever shape it takes -- the
-# disposable Hyper-V guest, the virtual iPhone, the EC2 Mac itself.
+# measurement of a host nobody is making a claim about. `device` is therefore
+# the only accepted value, and it means the DUT whatever shape it takes -- the
+# disposable nested guest, a provisioned iPhone, the Mac itself.
+#
+# AND THE TOPOLOGY, WHICH USED TO BE A DEPLOYMENT ASSUMPTION. The oracle
+# contains no address-class restriction of its own; "the oracle must be
+# off-device" lives in the probe. An oracle on a public cloud instance and an
+# oracle in a namespace on the runner's own fabric produce the same report, so
+# the topology is MEASURED here rather than inferred from the deployment.
+# `in-box` is a legitimate answer -- with no NAT between the DUT and the oracle
+# the source addresses stay distinct by construction, which is stronger than a
+# public host behind a NAT -- and an unlisted value is not, because it is what
+# a lane that never measured it writes. `sentinel_egress_identity` is the other
+# half of the same measurement; see `sentinel_independence_problems`.
 PATH_IDENTITY_PREREQUISITES = {
     "protected_path_established": (True,),
     "unprotected_path_established": (True,),
     "protected_path_identity": REQUIRED,
     "unprotected_path_identity": REQUIRED,
     "probe_host": ("device",),
+    "oracle_topology": ("in-box", "external"),
+    "sentinel_egress_identity": REQUIRED,
 }
 
 DISTINCT_PATH_KEYS = ("protected_path_identity", "unprotected_path_identity")
+SENTINEL_EGRESS_IDENTITY = "sentinel_egress_identity"
 
 
 def path_identity_problems(criterion: str, env: dict, oracle_required) -> list[str]:
@@ -193,6 +217,111 @@ def path_identity_problems(criterion: str, env: dict, oracle_required) -> list[s
                 f"unprotected legs share one source identity: no arrival can be "
                 f"attributed to either, and the session's silence proves nothing"]
     return []
+
+
+def sentinel_independence_problems(criterion: str, env: dict,
+                                   oracle_required) -> list[str]:
+    """The heartbeat was somebody else's, and that is a comparison too.
+
+    THE FAILURE. A SILENCE phase is creditable only when an independent
+    heartbeat proves the oracle was still listening throughout it -- otherwise
+    an oracle that died and a kill switch that worked leave identical evidence.
+    The oracle already discards a beat arriving from an address the device was
+    seen egressing from, and that reaches `report.py` as
+    `*_sentinel_continuous`. What no field carried until now is the sentinel's
+    OWN egress identity, measured on the sentinel.
+
+    `sentinel_host` does not answer this and must not be made to: it is a free
+    string chosen by whoever posted the beat, surfaced for a reader and gated
+    on by nothing, and a test exists to fail if anyone turns it into a gate.
+    This key is a different fact -- a MEASURED source identity in the platform
+    evidence -- graded the only way this file is entitled to grade an opaque
+    identity: two equal strings are not two hosts, exactly as two equal path
+    identities are not two paths.
+    """
+    if criterion not in oracle_required:
+        return []
+    got = env.get(SENTINEL_EGRESS_IDENTITY)
+    if got in (None, "", False):
+        return []          # already reported as unmeasured by check_environment
+    for key in DISTINCT_PATH_KEYS:
+        if key in env and env[key] == got:
+            return [f"`{SENTINEL_EGRESS_IDENTITY}` and `{key}` are both {got!r}, "
+                    f"so the heartbeat that proves the oracle was listening was "
+                    f"emitted from the same place as the traffic being "
+                    f"adjudicated: it shares every fate of the thing it is "
+                    f"supposed to be independent of, and its continuity says "
+                    f"nothing about the oracle"]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# COUNTS THAT MUST BE POSITIVE
+# ===========================================================================
+#
+# A VACUOUS RUN IS NOT A PASS, stated for the rows whose evidence is a count.
+# `xcodebuild` with a test filter that matches nothing exits 0, exactly as
+# `cargo test <filter>` does, and a pf anchor that loaded with zero rules is a
+# loaded anchor that forbids nothing. Both produce a file where every boolean
+# is true and the criterion is undischarged -- the shape `probe_command` in
+# report.py already refuses for the Rust rows.
+#
+# `REQUIRED` nearly covers it, since `0 == False` makes a plain zero "empty".
+# Nearly is not the point: this states the rule that was meant, names the
+# reason in the failure text, and also catches `true`, `-1` and `"12"`.
+POSITIVE_COUNTS = {
+    "IOS-FAILCLOSED-CONFIGURATION": ("test_count",),
+    "IOS-PROFILE-REMOVAL-HONESTY": ("test_count",),
+    "MACOS-PF-BOOT-ANCHOR": ("anchor_rule_count", "bridge_test_count"),
+}
+
+
+def positive_count_problems(criterion: str, env: dict) -> list[str]:
+    """Each key in `POSITIVE_COUNTS` is an int greater than zero, or the row is
+    a claim about a run that measured nothing."""
+    problems = []
+    for key in POSITIVE_COUNTS.get(criterion, ()):
+        if key not in env:
+            continue       # already reported as unmeasured by check_environment
+        got = env[key]
+        if not isinstance(got, int) or isinstance(got, bool) or got <= 0:
+            problems.append(f"`{key}` is {got!r}, not a count above zero: the "
+                            f"run reported no {key.replace('_', ' ')} at all, "
+                            f"and a vacuous run is not a pass")
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# THE iOS SIMULATOR ROWS, PINNED SO NEITHER CAN BE READ AS DEVICE EVIDENCE
+# ===========================================================================
+#
+# Apple's packet tunnel provider does not run in the simulator, so a simulator
+# row can only ever grade the half of a kill-switch claim that belongs to
+# TwinVPN: that the app installs exactly the configuration Apple's documented
+# enforcement is scoped to, and that the app reports honestly when that
+# configuration is gone. The half that belongs to the OS -- traffic actually
+# dropped when the provider dies -- is not exercised here.
+#
+# `real_network_extension_invoked` and `os_enforcement_exercised` are pinned
+# FALSE rather than omitted: omitting them would let a device file discharge a
+# simulator row, and pinning them makes the two unswappable in BOTH directions
+# -- the same protection `product_mode` gives the consumer and supervised rows.
+# `entitlement_packet_tunnel_provider` is false for the same reason, since a
+# simulator build carries no such grant. `assertion_source` states plainly that
+# the row read in-process object state rather than observing the OS, and
+# `test_count` is the vacuous-run guard above.
+IOS_SIMULATOR_PREREQUISITES = {
+    "execution": ("simulator",),
+    "real_network_extension_invoked": (False,),
+    "os_enforcement_exercised": (False,),
+    "device_kind": ("ios-simulator",),
+    "product_mode": ("consumer",),
+    "entitlement_packet_tunnel_provider": (False,),
+    "assertion_source": ("in-process-object-state",),
+    "simulator_runtime": REQUIRED,
+    "xcode_version": REQUIRED,
+    "test_count": REQUIRED,
+}
 
 
 # ---------------------------------------------------------------------------

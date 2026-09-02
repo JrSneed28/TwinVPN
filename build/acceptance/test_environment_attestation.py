@@ -20,6 +20,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import evidence_fixtures as fx  # noqa: E402
 from gate_harness import GateCase  # noqa: E402
 
+# The two rows that run on a SIMULATOR, and the builder for each. They share
+# every simulator pin, so the cases that grade those pins are written once and
+# driven off this table rather than copied per row.
+SIMULATOR_ROWS = (
+    ("ios-failclosed-configuration", "IOS-FAILCLOSED-CONFIGURATION",
+     fx.ios_failclosed_configuration),
+    ("ios-profile-removal", "IOS-PROFILE-REMOVAL-HONESTY",
+     fx.ios_profile_removal),
+)
+
 
 class EnvironmentAttestation(GateCase):
     """Whether the MACHINE was capable of the claim, before any test result."""
@@ -191,15 +201,115 @@ class EnvironmentAttestation(GateCase):
                            fx.macos_signature(),
                            fx.oracle("sess-mac", "MACOS-SYSEXT-LIFECYCLE"))
 
+    def test_macos_pf_anchor_that_is_loaded_but_not_enforcing_is_refused(self):
+        # THE WHOLE POINT OF THE ROW. An anchor can be written, validated and
+        # loaded while pf is off or while the main ruleset no longer references
+        # it, and every one of those leaves a file whose booleans are true and
+        # whose packets are not filtered.
+        for bad in ({"pf_enabled": False},
+                    {"anchor_referenced_in_main_ruleset": False},
+                    {"covered_prefix_connect_refused": False}):
+            with self.subTest(**bad):
+                self.assertRefused("macos-pf-anchor", "MACOS-PF-BOOT-ANCHOR",
+                                   fx.macos_pf_anchor(**bad))
+
+    def test_macos_pf_anchor_without_its_own_control_is_refused(self):
+        # A host with no network refuses the covered prefix too. The control
+        # connect is what separates "the anchor denied it" from "nothing works".
+        self.assertRefused("macos-pf-anchor", "MACOS-PF-BOOT-ANCHOR",
+                           fx.macos_pf_anchor(control_connect_succeeded=False))
+
+    def test_macos_pf_anchor_with_no_rules_is_refused(self):
+        # A loaded anchor with zero rules forbids nothing, and `ksd --status`
+        # exiting non-zero means the daemon never confirmed the read-back.
+        detail = self.assertRefused("macos-pf-anchor", "MACOS-PF-BOOT-ANCHOR",
+                                    fx.macos_pf_anchor(anchor_rule_count=0))
+        self.assertIn("anchor_rule_count", detail)
+        self.assertRefused("macos-pf-anchor", "MACOS-PF-BOOT-ANCHOR",
+                           fx.macos_pf_anchor(ksd_status_exit=1))
+        ev = fx.macos_pf_anchor()
+        del ev["environment"]["read_back_tables"]
+        self.assertRefused("macos-pf-anchor", "MACOS-PF-BOOT-ANCHOR", ev)
+
+    def test_macos_pf_anchor_bridge_tests_that_ran_nothing_are_refused(self):
+        # `TwinVPNBridgeTests` as root is what makes Apple's pf parse the
+        # rendered anchor rather than this lane asserting that it would. A
+        # filter that matched nothing exits 0, so the count is the evidence,
+        # and an unprivileged run exercised neither `tvb_ext_start` nor
+        # `enforcement_reclaim`.
+        detail = self.assertRefused("macos-pf-anchor", "MACOS-PF-BOOT-ANCHOR",
+                                    fx.macos_pf_anchor(bridge_test_count=0))
+        self.assertIn("bridge_test_count", detail)
+        self.assertRefused("macos-pf-anchor", "MACOS-PF-BOOT-ANCHOR",
+                           fx.macos_pf_anchor(bridge_tests_as_root=False))
+
+    def test_a_simulator_file_cannot_discharge_the_device_criterion(self):
+        # THE SUBSTITUTION THE SIMULATOR ROWS EXIST TO MAKE IMPOSSIBLE. Apple's
+        # packet tunnel provider does not run in the simulator, so a simulator
+        # file describes a run in which the OS enforced nothing -- and the
+        # device row's claim is entirely about what the OS did.
+        self.assertRefused("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED",
+                           fx.ios_failclosed_configuration(),
+                           fx.oracle("sess-ios", "IOS-NE-FAIL-CLOSED"))
+        self.assertRefused("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED",
+                           fx.ios_ne(real_network_extension_invoked=False,
+                                     entitlement_packet_tunnel_provider=False),
+                           fx.oracle("sess-ios", "IOS-NE-FAIL-CLOSED"))
+
+    def test_a_device_file_cannot_discharge_the_simulator_criteria(self):
+        # And the other direction, which is the one that would quietly turn a
+        # blocked device row into a green simulator row.
+        for stem, criterion, build in SIMULATOR_ROWS:
+            with self.subTest(criterion=criterion):
+                self.assertRefused(stem, criterion, fx.ios_ne())
+                detail = self.assertRefused(
+                    stem, criterion,
+                    build(execution="device", device_kind="provisioned-iphone",
+                          real_network_extension_invoked=True))
+                self.assertIn("execution", detail)
+
+    def test_a_simulator_row_that_ran_no_tests_is_refused(self):
+        # A VACUOUS RUN IS NOT A PASS: `xcodebuild` with a filter that matches
+        # nothing exits 0, so the count out of the .xcresult bundle is what
+        # says any assertion was made at all. `true` and `"17"` are refused for
+        # the same reason -- neither is a number of tests that ran.
+        for stem, criterion, build in SIMULATOR_ROWS:
+            for bad in (0, True, "17", -1):
+                with self.subTest(criterion=criterion, test_count=bad):
+                    detail = self.assertRefused(stem, criterion,
+                                                build(test_count=bad))
+                    self.assertIn("test_count", detail)
+
+    def test_a_simulator_row_that_observed_the_os_is_refused(self):
+        # `os_enforcement_exercised: true` on a simulator is a claim the
+        # platform cannot support, and `assertion_source` is what stops the row
+        # being read as an observation of the OS rather than of object state.
+        self.assertRefused("ios-failclosed-configuration",
+                           "IOS-FAILCLOSED-CONFIGURATION",
+                           fx.ios_failclosed_configuration(
+                               os_enforcement_exercised=True))
+        detail = self.assertRefused(
+            "ios-failclosed-configuration", "IOS-FAILCLOSED-CONFIGURATION",
+            fx.ios_failclosed_configuration(assertion_source="os-observation"))
+        self.assertIn("assertion_source", detail)
+
+    def test_a_simulator_row_without_its_toolchain_is_refused(self):
+        for key in ("simulator_runtime", "xcode_version"):
+            ev = fx.ios_failclosed_configuration()
+            del ev["environment"][key]
+            with self.subTest(key=key):
+                self.assertRefused("ios-failclosed-configuration",
+                                   "IOS-FAILCLOSED-CONFIGURATION", ev)
+
     def test_ios_without_the_packet_tunnel_entitlement_is_refused(self):
         # Every device farm but one re-signs the IPA and strips this. An IPA
         # without it cannot start a tunnel, so nothing that follows is a test.
-        self.assertRefused("ios-corellium", "IOS-NE-FAIL-CLOSED",
+        self.assertRefused("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED",
                            fx.ios_ne(entitlement_packet_tunnel_provider=False),
                            fx.oracle("sess-ios", "IOS-NE-FAIL-CLOSED"))
 
     def test_ios_without_a_real_network_extension_is_refused(self):
-        self.assertRefused("ios-corellium", "IOS-NE-FAIL-CLOSED",
+        self.assertRefused("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED",
                            fx.ios_ne(real_network_extension_invoked=False),
                            fx.oracle("sess-ios", "IOS-NE-FAIL-CLOSED"))
 

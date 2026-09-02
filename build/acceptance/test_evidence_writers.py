@@ -21,9 +21,10 @@ without anyone having remembered to mirror the change into a fixture.
 ===========================================================================
 HOW THE HEREDOC IS RENDERED, AND WHAT IS AND IS NOT REAL ABOUT IT
 ===========================================================================
-The writers are the last hundred lines of scripts that need an emulator, an EC2
-Mac or a Corellium instance to reach, so the script cannot be run. What CAN be
-run is the heredoc itself: it is extracted verbatim, `cat > "$FILE"` is turned
+The writers are the last hundred lines of scripts that need an emulator, a
+simulator, a nested guest or a provisioned device to reach, so the script cannot
+be run. What CAN be run is the heredoc itself: it is extracted verbatim,
+`cat > "$FILE"` is turned
 into `cat`, and it is evaluated with `digest.sh` sourced -- so
 `twinvpn_repository_json` and `twinvpn_run_attempt_json` are the real ones and
 `GITHUB_*` come from the environment exactly as they do in Actions.
@@ -182,9 +183,12 @@ class EvidenceWriters(unittest.TestCase):
 
     def test_every_writer_is_discovered(self):
         # If the heredoc form ever changes, every case below would silently
-        # grade an empty list. Nine writers, in nine scripts that ship one each.
+        # grade an empty list. A FLOOR rather than an equality: the lane set
+        # grows as criteria are reconciled, and a count that has to be bumped by
+        # whoever adds a lane fails for the wrong reason. Nine is what the wave
+        # shipped with, and a discovery that finds fewer has broken.
         found = writers()
-        self.assertEqual(len(found), 9, [str(p) for p, _, _ in found])
+        self.assertGreaterEqual(len(found), 9, [str(p) for p, _, _ in found])
 
     def test_rendered_evidence_is_valid_json(self):
         for script, body, criteria in writers():

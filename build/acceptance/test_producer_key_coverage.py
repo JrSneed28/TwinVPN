@@ -52,6 +52,16 @@ produces no evidence and lands NOT-EXECUTED, which is `job_results.py`'s
 problem.
 
 ===========================================================================
+THE PRODUCER THAT DOES NOT EXIST YET
+===========================================================================
+Derivation cannot see a lane nobody has written. `UNPRODUCED` says a criterion
+has no writer; `PRODUCER_PINS` says WHICH FILE is supposed to become one, and
+fails once, by path, until it does. It is also the only place a digest key is
+checked as text, because `test_evidence_writers.render()` builds the digest map
+out of the adjudicator's own names and therefore cannot see a lane that spells
+one differently.
+
+===========================================================================
 THE INDIRECT PRODUCER
 ===========================================================================
 `ci-windows-killswitch.sh` does not write its own environment inline: it
@@ -108,6 +118,60 @@ UNPRODUCED: dict[str, str] = {
     "IOS-SUPERVISED-ALWAYS-ON":
         "supervised/managed Always-On has no lane script; nothing writes "
         "build/ci/evidence/ios-supervised.json. Closed when that lane lands.",
+    "IOS-FAILCLOSED-CONFIGURATION":
+        "the hosted simulator lane is build/ci/ci-ios.sh and is being written "
+        "in parallel with this table; nothing writes "
+        "build/ci/evidence/ios-failclosed-configuration.json yet. PRODUCER_PINS "
+        "names the file, so this entry is a statement of the gap and not a "
+        "substitute for it. Closed when that branch lands.",
+    "MACOS-PF-BOOT-ANCHOR":
+        "the hosted pf lane is build/ci/ci-macos-pf-anchor.sh and does not "
+        "exist yet; nothing writes build/ci/evidence/macos-pf-anchor.json. "
+        "PRODUCER_PINS names the file. Closed when that lane lands.",
+}
+
+# THE LANE SCRIPTS THE RECONCILED CRITERIA ARE BEING WRITTEN TO, PINNED BY NAME.
+#
+# Everything else in this file is DERIVED -- keys off the real tables, emitted
+# keys off a real render -- and derivation cannot see a producer that does not
+# exist yet. `UNPRODUCED` above states that a criterion has no writer; it does
+# not say WHICH file is supposed to become one, so an entry could sit there
+# indefinitely while the row read NOT-EXECUTED and nobody could tell whether the
+# lane was late or abandoned.
+#
+# These entries name the file and the strings it must carry, which also covers
+# the blind spot at test_evidence_writers.py:150: `render()` stubs
+# `ARTIFACT_DIGESTS` from the ADJUDICATOR'S OWN key names, so a lane that spells
+# a digest key differently renders as if it agreed. Each digest key below is
+# therefore pinned as TEXT against the script that must write it -- the same
+# thing the macOS system-extension case at the bottom of this file does for
+# `com.twinvpn.app.sysext.systemextension`.
+#
+# A missing file fails ONCE, naming the path and everything it owes. That is
+# deliberate: thirty subtest failures for one absent script tell a reader less
+# than one failure that names the script.
+PRODUCER_PINS: dict[str, tuple[str, ...]] = {
+    # Both simulator rows come out of the existing iOS lane, which today is the
+    # version-1 link/run writer only.
+    "build/ci/ci-ios.sh": (
+        "IOS-FAILCLOSED-CONFIGURATION", "IOS-PROFILE-REMOVAL-HONESTY",
+        "TwinVPN.app/TwinVPN", "execution", "assertion_source",
+        "simulator_runtime", "xcode_version", "test_count",
+        "os_enforcement_exercised",
+    ),
+    "build/ci/ci-macos-pf-anchor.sh": (
+        "MACOS-PF-BOOT-ANCHOR", "twinvpn-ksd", "pf_enabled",
+        "anchor_referenced_in_main_ruleset", "anchor_rule_count",
+        "read_back_tables", "covered_prefix_connect_refused",
+        "control_connect_succeeded", "ksd_status_exit",
+        "bridge_tests_as_root", "bridge_test_count",
+    ),
+    # The two keys the in-box topology added to every egress criterion. The
+    # kill-switch lane is the one that can measure them: it builds the oracle
+    # and the sentinel it is attesting.
+    "build/ci/ci-windows-killswitch.sh": (
+        "oracle_topology", "sentinel_egress_identity",
+    ),
 }
 
 # THE GAPS THAT ARE OPEN RIGHT NOW, each with what closes it.
@@ -119,14 +183,48 @@ UNPRODUCED: dict[str, str] = {
 # into a standing exemption.
 KNOWN_GAPS: dict[str, tuple[str, tuple[str, ...]]] = {
     "IOS-NE-FAIL-CLOSED": (
-        "the leak probe runs on the ubuntu controller, not on the virtual "
-        "iPhone, so ci-ios-corellium.sh has no honest value to write for "
-        "either leg's identity -- it would be attesting the CONTROLLER's "
-        "paths, which is the exact substitution `probe_host` exists to catch. "
-        "Closed by moving the probe onto the DUT. NOT closed by writing the "
-        "keys, and this entry is here rather than the keys for that reason.",
+        "the leak probe runs on the ubuntu controller, not on the device, so "
+        "the existing lane has no honest value to write for either leg's "
+        "identity -- it would be attesting the CONTROLLER's paths, which is "
+        "the exact substitution `probe_host` exists to catch. The topology and "
+        "the sentinel's egress identity are unmeasurable for the same reason, "
+        "and this criterion additionally has NO EXECUTOR at all: it needs a "
+        "provisioned iPhone whose IPA keeps the packet-tunnel-provider "
+        "entitlement. Closed by moving the probe onto a DUT that exists. NOT "
+        "closed by writing the keys, and this entry is here rather than the "
+        "keys for that reason.",
         ("protected_path_established", "unprotected_path_established",
-         "protected_path_identity", "unprotected_path_identity"),
+         "protected_path_identity", "unprotected_path_identity",
+         "oracle_topology", "sentinel_egress_identity"),
+    ),
+    "MACOS-SYSEXT-LIFECYCLE": (
+        "the two topology keys arrived with the in-box fabric, and this "
+        "criterion has NO EXECUTOR to measure them on: activation needs "
+        "Apple's packet-tunnel-provider-systemextension grant and then an "
+        "approval a CI job cannot give, so ci-macos-sysext.sh cannot run at "
+        "all. Writing the keys would be attesting a topology nothing stood up. "
+        "Closed when an executor exists, not before.",
+        ("oracle_topology", "sentinel_egress_identity"),
+    ),
+    "WINDOWS-WFP-KILLSWITCH": (
+        "the two topology keys arrived with the in-box fabric and the lane is "
+        "being rewritten to build that fabric in the same change. It is the "
+        "one criterion that CAN measure them -- it stands up the oracle and "
+        "the sentinel it attests -- so this entry is short-lived by "
+        "construction and PRODUCER_PINS names the file that closes it: "
+        "build/ci/ci-windows-killswitch.sh.",
+        ("oracle_topology", "sentinel_egress_identity"),
+    ),
+    "IOS-PROFILE-REMOVAL-HONESTY": (
+        "the criterion was redefined as SIMULATOR logic, so its producer is "
+        "build/ci/ci-ios.sh rather than the device lane that names it today. "
+        "The device lane correctly emits none of the simulator attestation: it "
+        "does not run on a simulator, and a device lane writing "
+        "`execution: simulator` would be the exact conflation the pins exist "
+        "to prevent. Closed when ci-ios.sh writes "
+        "build/ci/evidence/ios-profile-removal.json -- PRODUCER_PINS names it.",
+        ("execution", "os_enforcement_exercised", "assertion_source",
+         "simulator_runtime", "xcode_version", "test_count"),
     ),
 }
 
@@ -291,6 +389,40 @@ class ProducerKeyCoverage(unittest.TestCase):
             with self.subTest(criterion=criterion):
                 self.assertLessEqual(set(PATH_IDENTITY_PREREQUISITES),
                                      set(PREREQUISITES[criterion]))
+
+    def test_the_named_lane_scripts_exist_and_carry_what_they_owe(self):
+        # THE PIN THAT DERIVATION CANNOT PROVIDE. Everything above is computed
+        # from the tables and from a render, so a producer that does not exist
+        # yet is invisible to all of it -- `UNPRODUCED` records that a criterion
+        # has no writer, and nothing records WHICH file was supposed to be one.
+        #
+        # It is also the only check that can see a misspelled digest key:
+        # `render()` builds the digest map from `ARTIFACT_DIGEST_REQUIRED`
+        # itself, so a lane writing `TwinVPN.app/TwinVPNApp` would render as if
+        # it agreed with the adjudicator. Text, therefore, and one failure per
+        # file naming everything that file owes.
+        self.assertTrue(PRODUCER_PINS, "the pin table is empty; nothing graded")
+        for rel, needles in sorted(PRODUCER_PINS.items()):
+            path = REPO / rel
+            with self.subTest(script=rel):
+                self.assertTrue(
+                    path.is_file(),
+                    f"{rel} does not exist. It is the producer for: "
+                    f"{', '.join(needles)}. Until it lands, every criterion "
+                    f"and key in that list is unproduced and its row reads "
+                    f"NOT-EXECUTED.")
+                text = path.read_text()
+                absent = [n for n in needles if n not in text]
+                self.assertEqual(
+                    absent, [],
+                    f"{rel} exists but never mentions {', '.join(absent)}. A "
+                    f"criterion name that is absent means the lane writes no "
+                    f"evidence for it; a KEY that is absent means the row fails "
+                    f"its environment check before its verdict is read; a "
+                    f"DIGEST name that is absent means the run binding fails, "
+                    f"and it is the one kind of drift the rendered writers "
+                    f"cannot see, because they stub the digest map from the "
+                    f"adjudicator's own names.")
 
     def test_the_extension_digest_key_names_the_extension_project_yml_builds(self):
         # THE DRIFT `render()` CANNOT SEE. It stubs `ARTIFACT_DIGESTS` from the

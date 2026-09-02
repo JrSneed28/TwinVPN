@@ -7,9 +7,9 @@ THE HOLE THIS CLOSES
 `first-wave-acceptance` runs under `if: always()`, which is what makes it print
 a report on the path where a platform job went red. `always()` also means every
 one of its `needs:` is satisfied by a job that FAILED, was CANCELLED, or was
-SKIPPED -- and a skip is the normal outcome here, because the three self-hosted
-jobs are gated on a repository variable so that an unregistered runner skips
-instead of queueing for twenty-four hours.
+SKIPPED -- and a skip stays possible even now that every required job runs on a
+GitHub-hosted runner, because a job can still be skipped by a fork guard, by a
+`vars.*` condition, or by an edit to the `needs:` list nobody mirrored here.
 
 So the gate's redness rests entirely on `build/acceptance/report.py`. That is a
 good mechanism and it is not a complete one: report.py grades EVIDENCE FILES,
@@ -20,10 +20,19 @@ and it cannot see the difference between "this criterion is unprovisioned" and
 "this criterion's runner died". Job results are the only place that information
 exists, and this script is the only thing in the run that reads them.
 
-The specific failure it prevents: GREEN BY ABSENCE. An unregistered self-hosted
-label, a `TWINVPN_*_ENABLED` variable left false, a cancelled job -- each one
-removes a criterion from the run rather than failing it, and every mechanism
-downstream of the removal then has nothing to complain about.
+The specific failure it prevents: GREEN BY ABSENCE. A gating variable left
+false, a renamed job, a cancelled job -- each one removes a criterion from the
+run rather than failing it, and every mechanism downstream of the removal then
+has nothing to complain about.
+
+TWO CRITERIA HAVE NO JOB AT ALL, deliberately: `MACOS-SYSEXT-LIFECYCLE` and
+`IOS-NE-FAIL-CLOSED` need a capability nobody can currently execute (an Apple
+entitlement grant plus a human or MDM approval; a provisioned iPhone whose IPA
+keeps the packet-tunnel-provider entitlement). They are ABSENT from `REQUIRED`
+below rather than listed and expected to skip, because a job that does not exist
+cannot report a result -- and `report.py` still prints both rows as NOT-EXECUTED
+with the missing capability named, which is what keeps them counting against
+Phase 5 eligibility.
 
 ===========================================================================
 WHAT COUNTS AS A PASS
@@ -53,9 +62,17 @@ REPORT = REPO / "build/acceptance/first-wave-acceptance.json"
 
 # Every job that must have SUCCEEDED, and -- for the ones that can vanish rather
 # than fail -- exactly what makes them vanish. The second half is the whole
-# point: "windows-killswitch was skipped" is not actionable, and
-# "vars.TWINVPN_AZURE_L1_REGISTERED is not 'true', or no runner carries the
-# label twinvpn-azure-l1" is.
+# point: "macos-signature was skipped" is not actionable, and
+# "vars.TWINVPN_NOTARIZED_APP_URL is unset, so there is no published product to
+# fetch" is.
+#
+# EVERY JOB HERE NOW RUNS ON A GITHUB-HOSTED RUNNER. No entry may name
+# TWINVPN_AZURE_L1_REGISTERED, TWINVPN_EC2_MAC_REGISTERED,
+# TWINVPN_CORELLIUM_ENABLED or TWINVPN_SENTINEL_HOST: none of those four gates
+# exists any more, the kill-switch lane builds its own guest, its own oracle and
+# its own sentinel in-box, and a remedy naming a variable nobody can set is
+# worse than no remedy -- it sends a reader to provision a machine that is not
+# the reason the row is red. `self_check` asserts all four names are gone.
 #
 # `mutation-proof` is DELIBERATELY ABSENT. It is not in `needs:` either: B-1 is
 # deferred past Wave 1 by the integration lead (2026-08-30) and report.py marks
@@ -70,12 +87,14 @@ REQUIRED = {
     "ios-link-run": None,
     "android-link-run": None,
     "windows-killswitch":
-        "set the repository variable TWINVPN_AZURE_L1_REGISTERED to 'true' AND "
-        "register a self-hosted runner carrying the labels "
-        "[self-hosted, Windows, twinvpn-azure-l1]. It also needs "
-        "vars.TWINVPN_GOLDEN_VHD, vars.TWINVPN_ORACLE_URL, "
-        "vars.TWINVPN_SENTINEL_HOST (the standing heartbeat, which no job in "
-        "this workflow can start for itself) and secrets.TWINVPN_ORACLE_TOKEN",
+        "this job is HOSTED on windows-2025 and builds its own nested Hyper-V "
+        "guest, its own in-box oracle and its own sentinel, so it can neither "
+        "skip for want of a runner nor wait on a standing host: a non-success "
+        "here is a real failure of the criterion. Look first at whether the "
+        "guest reached Running, whether both internal switches carried their "
+        "addresses with no NAT between guest and oracle, and whether the oracle "
+        "saw all three families before the guest armed -- "
+        "build/ci/logs/windows/ has all three",
     "android-16k":
         "this job is HOSTED and its four release-signing secrets are "
         "configured, so it can neither skip for want of a runner nor fail for "
@@ -84,24 +103,31 @@ REQUIRED = {
         "found (the sweep refuses previews and CANARY), whether the booted "
         "device reported a 16384-byte page, and whether any shipped ABI is "
         "under-aligned -- build/ci/logs/android/ has all three",
-    "ios-corellium":
-        "set the repository variable TWINVPN_CORELLIUM_ENABLED to 'true'. It "
-        "also needs vars.CORELLIUM_PROJECT_ID, vars.TWINVPN_SIGNED_IPA_URL, "
-        "vars.TWINVPN_SIGNED_IPA_SHA256, vars.TWINVPN_TEAM_ID, "
-        "vars.TWINVPN_ORACLE_URL, vars.TWINVPN_SENTINEL_HOST and "
-        "secrets.CORELLIUM_API_TOKEN + secrets.TWINVPN_ORACLE_TOKEN",
-    "macos-sysext":
-        "set the repository variable TWINVPN_EC2_MAC_REGISTERED to 'true' AND "
-        "register a self-hosted runner carrying the labels "
-        "[self-hosted, macOS, twinvpn-ec2-mac]. It also needs "
-        "vars.TWINVPN_TEAM_ID, vars.TWINVPN_ORACLE_URL, "
-        "vars.TWINVPN_SENTINEL_HOST and secrets.TWINVPN_ORACLE_TOKEN",
+    "ios-acceptance":
+        "this job is HOSTED on macos-26 and runs the two iOS SIMULATOR rows, "
+        "which need no device, no farm and no signing identity: a non-success "
+        "here is a real failure of the criteria. It writes BOTH "
+        "build/ci/evidence/ios-failclosed-configuration.json and "
+        "build/ci/evidence/ios-profile-removal.json, so a run that dies between "
+        "them leaves one row NOT-EXECUTED. Look first at whether a simulator "
+        "booted and at the test count read out of the .xcresult bundle -- a "
+        "filter that matched nothing exits 0 and proves nothing",
+    "macos-pf-anchor":
+        "this job is HOSTED on macos-26 and needs no Team ID, no oracle and no "
+        "sentinel, only passwordless root: a non-success here is a real failure "
+        "of the criterion. Look first at whether "
+        "shells/macos/packaging/install.sh validated the rendered anchor with "
+        "`pfctl -n -f` and spliced /etc/pf.conf, whether `pfctl -s rules` still "
+        "carries the anchor \"twinvpn/*\" reference, and whether the connect "
+        "into the covered prefix was refused while the control connect "
+        "succeeded -- build/ci/logs/macos/ has all three",
     "macos-signature":
-        "set the repository variable TWINVPN_EC2_MAC_REGISTERED to 'true' AND "
-        "register a self-hosted runner carrying the labels "
-        "[self-hosted, macOS, twinvpn-ec2-mac]. It also needs "
-        "vars.TWINVPN_NOTARIZED_APP_URL and "
-        "vars.TWINVPN_NOTARIZED_APP_SHA256",
+        "set vars.TWINVPN_NOTARIZED_APP_URL and vars.TWINVPN_NOTARIZED_APP_SHA256. "
+        "The job itself is HOSTED on macos-26 and needs no registered runner, "
+        "but this criterion inspects a product the RELEASE pipeline published "
+        "rather than anything the gate built, so without the pinned URL and its "
+        "digest there is nothing to fetch and nothing to assess. It also needs "
+        "vars.TWINVPN_TEAM_ID",
 }
 
 # What each non-success means, said in the terms a reader of the checks list
@@ -198,10 +224,22 @@ def self_check() -> int:
         assert len(got) == 1 and got[0].startswith("windows-killswitch"), (bad, got)
     # The remedy text is what makes a skip actionable; losing it is a silent
     # regression that still exits 1 and still says nothing useful.
-    skipped = dict(all_green, **{"macos-sysext": {"result": "skipped"}})
-    assert "TWINVPN_EC2_MAC_REGISTERED" in check(skipped, True)[0]
+    skipped = dict(all_green, **{"macos-signature": {"result": "skipped"}})
+    assert "TWINVPN_NOTARIZED_APP_URL" in check(skipped, True)[0]
 
-    missing = {j: v for j, v in all_green.items() if j != "ios-corellium"}
+    # AND NO REMEDY MAY SEND A READER AFTER INFRASTRUCTURE THAT NO LONGER
+    # GATES ANYTHING. Each of these four named a machine or a variable the
+    # reconciled workflow does not use; a remedy that keeps naming one is a
+    # provisioning instruction for a rig that is not the reason the row is red.
+    for retired in ("TWINVPN_AZURE_L1_REGISTERED", "TWINVPN_EC2_MAC_REGISTERED",
+                    "TWINVPN_CORELLIUM_ENABLED", "TWINVPN_SENTINEL_HOST"):
+        assert not any(retired in (r or "") for r in REQUIRED.values()), retired
+    # The two criteria with no executor have no job, so they cannot be required
+    # to report a result. report.py prints them NOT-EXECUTED with the reason.
+    for absent in ("ios-corellium", "macos-sysext", "ios-ne-failclosed"):
+        assert absent not in REQUIRED, absent
+
+    missing = {j: v for j, v in all_green.items() if j != "ios-acceptance"}
     assert len(check(missing, True)) == 1
     assert "not in this job's `needs:`" in check(missing, True)[0]
 

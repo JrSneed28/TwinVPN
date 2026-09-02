@@ -62,9 +62,18 @@ class PositiveControls(GateCase):
         self.assertGreen("macos-signature", "MACOS-PRODUCTION-SIGNATURE",
                          fx.macos_signature())
 
+    def test_macos_pf_boot_anchor_passes(self):
+        self.assertGreen("macos-pf-anchor", "MACOS-PF-BOOT-ANCHOR",
+                         fx.macos_pf_anchor())
+
     def test_ios_fail_closed_passes(self):
-        self.assertGreen("ios-corellium", "IOS-NE-FAIL-CLOSED", fx.ios_ne(),
+        self.assertGreen("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED", fx.ios_ne(),
                          fx.oracle("sess-ios", "IOS-NE-FAIL-CLOSED"))
+
+    def test_ios_failclosed_configuration_passes(self):
+        self.assertGreen("ios-failclosed-configuration",
+                         "IOS-FAILCLOSED-CONFIGURATION",
+                         fx.ios_failclosed_configuration())
 
     def test_ios_profile_removal_passes(self):
         self.assertGreen("ios-profile-removal", "IOS-PROFILE-REMOVAL-HONESTY",
@@ -181,7 +190,7 @@ class PathIdentity(GateCase):
         # virtual iPhone. Every oracle number is then about the controller's
         # egress while staying internally consistent -- sentinel held, attempts
         # high, identities distinct -- and the device may have leaked.
-        detail = self.assertRefused("ios-corellium", "IOS-NE-FAIL-CLOSED",
+        detail = self.assertRefused("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED",
                                     fx.ios_ne(probe_host="controller"),
                                     fx.oracle("sess-ios", "IOS-NE-FAIL-CLOSED"))
         self.assertIn("probe_host", detail)
@@ -189,8 +198,68 @@ class PathIdentity(GateCase):
     def test_an_unmeasured_path_identity_is_refused(self):
         ev = fx.ios_ne()
         del ev["environment"]["protected_path_identity"]
-        self.assertRefused("ios-corellium", "IOS-NE-FAIL-CLOSED", ev,
+        self.assertRefused("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED", ev,
                            fx.oracle("sess-ios", "IOS-NE-FAIL-CLOSED"))
+
+
+class SentinelIndependence(GateCase):
+    """The heartbeat came from somewhere the device is not.
+
+    A SILENCE phase is creditable only when an independent observer proves the
+    oracle was still listening. `sentinel_host` cannot carry that -- it is a
+    free string, surfaced and gated on by nothing, and the case below keeps it
+    that way. `sentinel_egress_identity` is the measured version, and two equal
+    strings are not two hosts.
+    """
+
+    def test_a_sentinel_egressing_as_either_path_is_refused(self):
+        for key in ("protected_path_identity", "unprotected_path_identity"):
+            with self.subTest(shared_with=key):
+                shared = fx.windows()["environment"][key]
+                detail = self.assertRefused(
+                    "windows-killswitch", "WINDOWS-WFP-KILLSWITCH",
+                    fx.windows(sentinel_egress_identity=shared), fx.oracle())
+                self.assertIn("sentinel_egress_identity", detail)
+
+    def test_an_unmeasured_sentinel_identity_is_refused(self):
+        # Absence is what a lane that never measured it produces, and it must
+        # be as red as a sentinel sharing the device's address.
+        ev = fx.windows()
+        del ev["environment"]["sentinel_egress_identity"]
+        detail = self.assertRefused("windows-killswitch",
+                                    "WINDOWS-WFP-KILLSWITCH", ev, fx.oracle())
+        self.assertIn("sentinel_egress_identity", detail)
+        self.assertRefused("windows-killswitch", "WINDOWS-WFP-KILLSWITCH",
+                           fx.windows(sentinel_egress_identity=""), fx.oracle())
+
+    def test_a_distinct_sentinel_identity_is_green_in_both_topologies(self):
+        # The positive control, and the proof that the rule is a COMPARISON
+        # rather than a preference for one deployment: an in-box fabric and an
+        # external host are both green while the three addresses are three.
+        for topology in ("in-box", "external"):
+            with self.subTest(oracle_topology=topology):
+                self.assertGreen("windows-killswitch", "WINDOWS-WFP-KILLSWITCH",
+                                 fx.windows(oracle_topology=topology),
+                                 fx.oracle())
+
+    def test_an_unlisted_oracle_topology_is_refused(self):
+        # `in-box` and `external` are the two things a lane can measure. A
+        # third value is what a lane that guessed writes.
+        detail = self.assertRefused(
+            "windows-killswitch", "WINDOWS-WFP-KILLSWITCH",
+            fx.windows(oracle_topology="cloud"), fx.oracle())
+        self.assertIn("oracle_topology", detail)
+
+    def test_the_rule_reaches_every_egress_criterion(self):
+        # Driven off the `PATH_IDENTITY_PREREQUISITES` merge rather than the
+        # Windows row alone: a criterion added to `ORACLE_REQUIRED` inherits
+        # this without anyone remembering to write a case for it.
+        self.assertGreater(len(report.ORACLE_REQUIRED), 0)
+        for criterion in sorted(report.ORACLE_REQUIRED):
+            with self.subTest(criterion=criterion):
+                self.assertIn("sentinel_egress_identity",
+                              report.PREREQUISITES[criterion])
+                self.assertIn("oracle_topology", report.PREREQUISITES[criterion])
 
 
 class OracleAdjudication(GateCase):
@@ -342,8 +411,8 @@ class JobOutcome(GateCase):
         self.assertIn("CANCELLED", detail)
 
     def test_a_failed_job_is_red_and_says_so(self):
-        _, detail, _ = self.probe("ios-corellium", "IOS-NE-FAIL-CLOSED", None,
-                                  None, {"ios-corellium": "failure"})
+        _, detail, _ = self.probe("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED", None,
+                                  None, {"ios-ne-failclosed": "failure"})
         self.assertIn("FAILED", detail)
 
     def test_a_job_absent_from_the_run_is_red_and_says_so(self):
