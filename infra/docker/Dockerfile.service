@@ -46,11 +46,21 @@ ARG BUSYBOX_IMAGE=docker.io/library/busybox:1.37.0-musl
 # that, and nothing else in the image can be used to fetch, resolve or execute
 # anything the service did not.
 # ---------------------------------------------------------------------------
+# DL3006 wants an explicit tag and there is one: `${BUSYBOX_IMAGE}`
+# defaults to a fully tagged reference in the ARG block above. hadolint does
+# not substitute an ARG into a FROM before applying the rule, so it reports
+# every parameterised base as untagged. The pin is real; the finding is not.
+# hadolint ignore=DL3006
 FROM ${BUSYBOX_IMAGE} AS busybox
 
 # ---------------------------------------------------------------------------
 # Stage 2 — dependency fetch, cached separately from the source build.
 # ---------------------------------------------------------------------------
+# DL3006 wants an explicit tag and there is one: `${RUST_IMAGE}`
+# defaults to a fully tagged reference in the ARG block above. hadolint does
+# not substitute an ARG into a FROM before applying the rule, so it reports
+# every parameterised base as untagged. The pin is real; the finding is not.
+# hadolint ignore=DL3006
 FROM ${RUST_IMAGE} AS fetch
 WORKDIR /src
 # The services workspace has exactly one permitted edge into /core
@@ -96,6 +106,11 @@ RUN cargo build --locked --offline --profile "${CARGO_PROFILE}" -p "twinvpn-${SE
 # manager and no setuid binary. There is no USER downgrade to forget, because
 # there is no root user to start from.
 # ---------------------------------------------------------------------------
+# DL3006 wants an explicit tag and there is one: `${RUNTIME_IMAGE}`
+# defaults to a fully tagged reference in the ARG block above. hadolint does
+# not substitute an ARG into a FROM before applying the rule, so it reports
+# every parameterised base as untagged. The pin is real; the finding is not.
+# hadolint ignore=DL3006
 FROM ${RUNTIME_IMAGE} AS runtime
 
 ARG SERVICE
