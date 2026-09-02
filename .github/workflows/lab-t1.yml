@@ -85,7 +85,13 @@ jobs:
         run: |
           cd lab
           set -o pipefail
-          out=$(cargo run --quiet -p twinlab-scenarios -- list --family NAT | head -1 | awk '{print $1}')
+          # `awk 'NR==1'` and not `head -1`: head closes the pipe after the
+          # line it wants, and the writer here is a Rust binary. Rust's runtime
+          # ignores SIGPIPE, so the catalogue does not die quietly at the first
+          # unwritable line -- it gets EPIPE and panics, "failed printing to
+          # stdout: Broken pipe (os error 32)", exit 101. awk reads the stream
+          # to the end and then prints the field, so nothing is left unread.
+          out=$(cargo run --quiet -p twinlab-scenarios -- list --family NAT | awk 'NR == 1 { print $1 }')
           [ -n "$out" ] || { echo "::error::no NAT scenarios in the catalogue"; exit 1; }
           cargo run --quiet -p twinlab-scenarios -- plan "$out" | tee plan.txt
           grep -qE 'verdict: (runnable|Unavailable|Void)' plan.txt \
@@ -153,8 +159,13 @@ jobs:
           # A bound flow means the pair_tag rendezvous completed: the SECOND
           # BIND on a tag is what binds it (ADR-0005 §11.1(3)), so this is the
           # only assertion that proves two peers actually met.
+          # `grep -v ... >/dev/null` rather than `grep -qv`, for the reason the
+          # catalogue step above gives: -q stops at the first selected line and
+          # closes the pipe under a producer that is still writing. Here that
+          # would SIGPIPE curl and, under `pipefail`, report "no flow was ever
+          # bound" for a stack in which one had been.
           curl -fsS http://127.0.0.1:19190/metrics http://127.0.0.1:19191/metrics \
-            | grep -E 'twinsim_binds_total\{outcome="bound"' | grep -qv ' 0$' \
+            | grep -E 'twinsim_binds_total\{outcome="bound"' | grep -v ' 0$' >/dev/null \
             || { echo "::error title=No flow was ever bound::both peers bound, but neither reached BOUND - the pair_tag rendezvous did not complete"; exit 1; }
           make plane-down
 
