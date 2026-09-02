@@ -118,10 +118,6 @@ UNPRODUCED: dict[str, str] = {
     "IOS-SUPERVISED-ALWAYS-ON":
         "supervised/managed Always-On has no lane script; nothing writes "
         "build/ci/evidence/ios-supervised.json. Closed when that lane lands.",
-    "MACOS-PF-BOOT-ANCHOR":
-        "the hosted pf lane is build/ci/ci-macos-pf-anchor.sh and does not "
-        "exist yet; nothing writes build/ci/evidence/macos-pf-anchor.json. "
-        "PRODUCER_PINS names the file. Closed when that lane lands.",
     "IOS-NE-FAIL-CLOSED":
         "no executor exists: the packet tunnel provider does not run in the "
         "simulator, Corellium could not perform three of the five injections, "
@@ -182,15 +178,6 @@ PRODUCER_PINS: dict[str, tuple[str, ...]] = {
 # instruction to delete the entry. The list can only shrink, and it cannot rot
 # into a standing exemption.
 KNOWN_GAPS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "MACOS-SYSEXT-LIFECYCLE": (
-        "the two topology keys arrived with the in-box fabric, and this "
-        "criterion has NO EXECUTOR to measure them on: activation needs "
-        "Apple's packet-tunnel-provider-systemextension grant and then an "
-        "approval a CI job cannot give, so ci-macos-sysext.sh cannot run at "
-        "all. Writing the keys would be attesting a topology nothing stood up. "
-        "Closed when an executor exists, not before.",
-        ("oracle_topology", "sentinel_egress_identity"),
-    ),
     "WINDOWS-WFP-KILLSWITCH": (
         "the two topology keys arrived with the in-box fabric and the lane is "
         "being rewritten to build that fabric in the same change. It is the "

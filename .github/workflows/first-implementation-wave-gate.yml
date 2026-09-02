@@ -1062,34 +1062,166 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  macos-signature:
-    name: macos-signature
-    # SEPARATE FROM `macos-sysext`, AND THAT SEPARATION IS THE POINT.
-    #
-    # `macos-sysext` runs in DEVELOPER MODE, which accepts an extension a
-    # customer's Mac would refuse -- an ad-hoc signature, an expired
-    # certificate, a missing notarization ticket, an unstapled bundle. While
-    # both claims shared one evidence file, a green developer-mode lifecycle
-    # read as "the signed, notarized product works". Now this job can be red
-    # while that one is green, which is the true state of affairs more often
-    # than not.
-    #
-    # It activates nothing and installs nothing to /Applications: it inspects a
-    # built artifact, so the two jobs cannot contaminate each other's evidence.
-    runs-on: [self-hosted, macOS, twinvpn-ec2-mac]
-    timeout-minutes: 30
+  # =========================================================================
+  # MACOS-PF-BOOT-ANCHOR -- hosted macos-26, as root. The KS-19 boot anchor
+  # installed by the package and EVALUATED by pf, plus the bridge tests run as
+  # root so Apple's pf parses the rendered anchor. Needs nothing an operator
+  # configures. See build/ci/jobs/macos-pf-anchor.yml.
+  # =========================================================================
+  macos-pf-anchor:
+    name: macos-pf-anchor
+    # PINNED, not `macos-latest`. Same image as `macos-link-run`, so the Xcode
+    # 26.6 pin in build/ci/ci-common-apple.sh is known to resolve on it.
+    runs-on: macos-26
+    # A universal-2 core build with `ring` compiled from C, an xcodegen run and
+    # an xcodebuild test, plus the install and the pf work. Rule C-1: a budget
+    # is raised by a reviewed change, not silently.
+    timeout-minutes: 75
     permissions:
       contents: read
-    if: ${{ vars.TWINVPN_EC2_MAC_REGISTERED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    concurrency:
-      group: twinvpn-ec2-mac
-      cancel-in-progress: false
-    env:
-      TWINVPN_TEAM_ID: ${{ vars.TWINVPN_TEAM_ID }}
+    # The fork guard only. There is no variable to gate on, which is the point:
+    # nothing an operator has to configure stands between this row and a
+    # verdict. A fork's pull request is still excluded, because it runs on a
+    # runner this repository does not control the provisioning of.
+    if: >-
+      ${{ github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@v4
         with:
           clean: true
+
+      # The pin lives in build/ci/ci-common-apple.sh and nowhere else. Resolved
+      # into a variable first so a missing Xcode fails with the resolver's own
+      # message rather than with `invalid developer directory ''`.
+      #
+      # `sudo xcode-select -s` is SYSTEM-WIDE, which is what lets the lane run
+      # `sudo xcodebuild` later without carrying `DEVELOPER_DIR` across the
+      # privilege boundary.
+      - name: select the pinned Xcode and print every toolchain version
+        run: |
+          XCODE_DEV_DIR="$(build/ci/ci-macos.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
+          xcodebuild -version
+          swift --version
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          sw_vers
+          csrutil status || true
+
+      - name: install xcodegen
+        # Both Apple shells keep an XcodeGen spec rather than a committed
+        # .xcodeproj, so the generator is a prerequisite and not a convenience.
+        run: brew install --quiet xcodegen
+
+      # The same cache key as `macos-link-run`: the two jobs build the same
+      # crates for the same targets on the same image, so a shared key is a hit
+      # rather than two copies of one download.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      # A KNOWN-CLEAN START. The image should carry no TwinVPN enforcement, and
+      # if it somehow does, the run must not inherit it and then report on it.
+      # Non-fatal here: a host with nothing to remove is the expected case.
+      - name: reset to a known-clean state
+        run: build/ci/ci-macos-pf-anchor.sh --cleanup || true
+
+      - name: install the boot anchor and prove pf evaluates it
+        run: build/ci/ci-macos-pf-anchor.sh
+
+      # EVERY EXIT PATH, including a cancellation and a timeout. This one is
+      # NOT `|| true`: it reads the kernel back and fails the job when TwinVPN
+      # enforcement is still installed, which on a self-hosted Mac is the
+      # difference between a clean host and one that inherits our firewall.
+      - name: remove the boot anchor and return the runner's pf
+        if: always()
+        run: build/ci/ci-macos-pf-anchor.sh --cleanup
+
+      # The gate's input. `warn`, not `error`: the row already reads
+      # NOT-EXECUTED when the file is absent, and a second red would bury the
+      # first — the failure mode `macos-link-run`'s header records from run
+      # 33283744937.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-macos-pf-anchor
+          path: build/ci/evidence/macos-pf-anchor.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      # The measurements themselves, always — not only on failure. This lane's
+      # whole subject is what pf said, and a GREEN row whose pfctl output nobody
+      # kept is a row that cannot be re-read later. ENUMERATED, never `path: .`.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diagnostics-macos-pf-anchor
+          path: |
+            build/ci/logs/macos/pf-anchor-install.log
+            build/ci/logs/macos/ksd-apply.log
+            build/ci/logs/macos/ksd-status.log
+            build/ci/logs/macos/pf-*.txt
+            build/ci/logs/macos/xctest-root.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # =========================================================================
+  # MACOS-PRODUCTION-SIGNATURE -- hosted. Pure artifact inspection; see
+  # build/ci/jobs/macos-signature-hosted.yml for the reasoning that moved it
+  # off the EC2 Mac and for why it skips by name without a notarized URL.
+  # =========================================================================
+  macos-signature:
+    name: macos-signature
+    # PINNED, not `macos-latest`: R-32's failure mode is "it does not build for
+    # that target any more", arriving one silent runner-image update at a time.
+    # `macos-26` is the image `macos-link-run` and `ios-link-run` already use,
+    # so the Xcode 26.6 pin in build/ci/ci-common-apple.sh is known to resolve.
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    # Two conditions, and they are different refusals. The first is "this row
+    # has nothing to inspect" — see the header. The second is the fork guard:
+    # a fork's pull request cannot read `vars` or `secrets` at all.
+    if: >-
+      ${{ vars.TWINVPN_NOTARIZED_APP_URL != ''
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository) }}
+    env:
+      TWINVPN_TEAM_ID: ${{ vars.TWINVPN_TEAM_ID }}
+      # MEASURED WHERE IT CAN BE, DECLARED WHERE IT CANNOT. The script reads
+      # `RUNNER_ENVIRONMENT` — GitHub's own answer, whose vocabulary is exactly
+      # the evidence schema's — and this variable exists only to override it on
+      # a host that is neither hosted nor self-hosted. It is deliberately unset
+      # here so the runner speaks for itself.
+      TWINVPN_RUNNER_KIND: ${{ vars.TWINVPN_RUNNER_KIND }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      # The pin lives in build/ci/ci-common-apple.sh and nowhere else.
+      # RESOLVED FIRST, into a variable: inlining the substitution into
+      # `xcode-select -s "$(...)"` discards the resolver's exit status and hands
+      # `xcode-select` an empty string, so the job dies with "invalid developer
+      # directory ''" instead of with the resolver's own message.
+      #
+      # `stapler` ships with Xcode, so this step is what pins the tool this
+      # criterion's stapling check actually runs.
+      - name: select the pinned Xcode
+        run: |
+          XCODE_DEV_DIR="$(build/ci/ci-macos.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
+          xcodebuild -version
+          sw_vers
+          # RECORDED, not gated. The evidence carries both; the criterion's
+          # subject is the artifact, not the host.
+          csrutil status || true
+          spctl --status || true
 
       # The SIGNED, NOTARIZED product, published by the release pipeline. NOT a
       # CI build: a build produced here would be signed by whatever identity the
@@ -1105,8 +1237,7 @@ jobs:
             echo "::error::TWINVPN_NOTARIZED_APP_URL is not configured; MACOS-PRODUCTION-SIGNATURE is about the artifact users download and must not be handed a CI build"
             exit 1
           fi
-          # The same pin as the IPA above, for the same reason and with more
-          # force: this criterion's entire subject is "the bytes a user would
+          # This criterion's entire subject is "the bytes a user would
           # download", so a run that cannot name those bytes has not made the
           # claim. A truncated transfer also fails `codesign --verify` for a
           # reason that has nothing to do with signing, which is the confusing
@@ -1130,15 +1261,11 @@ jobs:
       - name: signature, notarization and stapling
         run: build/ci/ci-macos-signature.sh "$RUNNER_TEMP/product/TwinVPN.app"
 
-      # THIS MAC IS LONG-LIVED AND SHARED WITH `macos-sysext`.
-      #
-      # It is never stopped -- SIP state is volume-scoped, so a stop/start would
-      # undo the one thing that makes this runner usable -- which means anything
-      # this job leaves on disk is inherited by the next job and by the next
-      # run. What it leaves is the SIGNED, NOTARIZED PRODUCT: not a secret, but a
-      # release artifact on a machine that also activates system extensions, and
-      # a stale copy is exactly the sort of thing a later run picks up by
-      # accident when a download half-fails. Removed on every path.
+      # A hosted runner is destroyed after the job, so this is no longer the
+      # load-bearing step it was on a long-lived shared Mac. It stays because it
+      # is also what a developer reproducing this on their own machine should
+      # do, and because "the runner is ephemeral" is a property of the fleet
+      # rather than of this job.
       - name: remove the downloaded product
         if: always()
         run: rm -rf "$RUNNER_TEMP/product"
@@ -1148,18 +1275,22 @@ jobs:
         with:
           name: evidence-macos-signature
           path: build/ci/evidence/macos-signature.json
-          # `warn`, not `ignore`: a criterion job that finished without
-          # writing its evidence file did not reach its own write, and
-          # that is worth seeing. Non-fatal, because the row already
-          # reads NOT-EXECUTED and a second red would bury the first.
+          # `warn`, not `ignore`: a criterion job that finished without writing
+          # its evidence file did not reach its own write, and that is worth
+          # seeing. Non-fatal, because the row already reads NOT-EXECUTED and a
+          # second red would bury the first.
           if-no-files-found: warn
+          retention-days: 14
 
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: diagnostics-macos-signature
+          # ENUMERATED, never `path: .`. NEVER ~/Library/Keychains and never
+          # ~/Library/MobileDevice.
           path: build/ci/logs/macos/sig-*.log
           if-no-files-found: ignore
+          retention-days: 14
 
   first-wave-acceptance:
     name: first-wave-acceptance
