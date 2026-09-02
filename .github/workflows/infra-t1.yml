@@ -25,7 +25,10 @@ name: T1 — infrastructure
 
 on:
   push:
-    branches: [main, master]
+    # The repository's DEFAULT branch is fix/wave1-final-review-register and
+    # there are no pull requests, so a filter naming only main and master
+    # meant this workflow had never run: GitHub had not even registered it.
+    branches: [main, master, fix/wave1-final-review-register]
   pull_request:
   workflow_dispatch:
 
