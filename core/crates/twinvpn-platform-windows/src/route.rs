@@ -58,6 +58,64 @@ use twinvpn_types::{AddressFamily, InterfaceAddress, IpAddr, IpPrefix, PerFamily
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InterfaceLuid(pub u64);
 
+/// The overlay adapter's LUID, shared between the two halves of the adapter that
+/// have to agree about it.
+///
+/// # The gap this closes
+///
+/// [`crate::wfp::EnforcementConfig::overlay_luid`] is injected at construction
+/// (CD-2), and at construction **the overlay adapter does not exist yet** — a
+/// shell has nothing truthful to put there but `0`. Every consumer then keyed on
+/// `0`: the Tier-2 permit matched no interface, so a `Protected` posture was
+/// indistinguishable from `Blocked`; the DNS containment filters' complement
+/// condition `NotLocalInterface(0)` was true everywhere, including on the
+/// overlay; and the route and resolver reads went to interface `0`.
+///
+/// The LUID is not knowable before [`crate::wintun::WindowsTunnelDevice`]
+/// creates the adapter and is knowable exactly then, so it is **published by the
+/// side that learns it** rather than re-injected by a shell that would have to
+/// discover it by name. Discovery by name is what ADR-0016 O1 warns about: a
+/// user can rename a Wintun adapter in Network Connections.
+///
+/// The injected value stays the initial one, and [`Self::clear`] puts it back
+/// when the adapter is destroyed — so a torn-down overlay leaves the enforcement
+/// layer keyed on the shell's pre-arming value and never on a stale LUID some
+/// other adapter may since have been given.
+#[derive(Debug, Clone)]
+pub struct OverlayLuid {
+    initial: u64,
+    live: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl OverlayLuid {
+    /// Starts at the injected value.
+    #[must_use]
+    pub fn new(initial: InterfaceLuid) -> Self {
+        Self {
+            initial: initial.0,
+            live: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(initial.0)),
+        }
+    }
+
+    /// What the overlay's LUID is right now.
+    #[must_use]
+    pub fn get(&self) -> InterfaceLuid {
+        InterfaceLuid(self.live.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// Publishes the LUID of an adapter that has just been created.
+    pub fn set(&self, luid: InterfaceLuid) {
+        self.live
+            .store(luid.0, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Back to the injected value: the adapter is gone.
+    pub fn clear(&self) {
+        self.live
+            .store(self.initial, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// The origin `MIB_IPFORWARD_ROW2.Protocol` carries.
 ///
 /// `NetMgmt` is `MIB_IPPROTO_NETMGMT` — "a route added by a network-management

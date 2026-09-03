@@ -54,7 +54,7 @@ use twinvpn_platform::{
 use twinvpn_types::{AddressFamily, PerFamily};
 
 use crate::dns::{self, InterfaceDns, NrptRule, RestorePoint, StubAddresses};
-use crate::route::{self, InstalledRoutes, InterfaceLuid};
+use crate::route::{self, InstalledRoutes, InterfaceLuid, OverlayLuid};
 use crate::shutdown::ShutdownLatch;
 use crate::sys::SystemOps;
 use crate::wfp::canary::{CanaryVerdict, CounterSnapshot};
@@ -187,6 +187,9 @@ pub struct NetworkConfigParts {
 pub struct WindowsNetworkConfig {
     system: Arc<dyn SystemOps>,
     enforcement: EnforcementConfig,
+    /// The overlay's LUID, which [`EnforcementConfig::overlay_luid`] can only
+    /// state as `0` because the adapter does not exist at construction.
+    overlay: OverlayLuid,
     stub: StubAddresses,
     restore_point_path: std::path::PathBuf,
     shutdown: ShutdownLatch,
@@ -204,6 +207,7 @@ impl WindowsNetworkConfig {
     #[must_use]
     pub fn new(parts: NetworkConfigParts) -> Self {
         Self {
+            overlay: OverlayLuid::new(InterfaceLuid(parts.enforcement.overlay_luid)),
             system: parts.system,
             enforcement: parts.enforcement,
             stub: parts.stub,
@@ -215,8 +219,19 @@ impl WindowsNetworkConfig {
 
     /// The overlay this configuration programs.
     #[must_use]
-    pub const fn overlay(&self) -> InterfaceLuid {
-        InterfaceLuid(self.enforcement.overlay_luid)
+    pub fn overlay(&self) -> InterfaceLuid {
+        self.overlay.get()
+    }
+
+    /// The writable handle on that LUID, for the tunnel device that creates the
+    /// adapter.
+    ///
+    /// Handed out at assembly time rather than injected, so there is exactly one
+    /// cell and the two halves cannot be wired to two: `WindowsPlatformAdapter`
+    /// builds this object first and gives the device the handle it returns.
+    #[must_use]
+    pub fn overlay_luid(&self) -> OverlayLuid {
+        self.overlay.clone()
     }
 
     fn ledger(&self) -> std::sync::MutexGuard<'_, Ledger> {
@@ -347,8 +362,23 @@ impl WindowsNetworkConfig {
         self.system.filters().purge()
     }
 
-    fn render(&self, contract: &NetworkContract, ruleset: Ruleset) -> FilterSet {
-        wfp::filters::render(contract, ruleset, &self.enforcement)
+    /// Renders the set at the **live** overlay LUID.
+    ///
+    /// `EnforcementConfig` is injected before the adapter exists, so its
+    /// `overlay_luid` is the shell's pre-arming value and is `0` on Windows. It
+    /// is substituted here rather than at each of the six call sites in
+    /// [`wfp::filters::render`], because one of those is the Tier-2 permit that
+    /// is the *only* difference between `Protected` and `Blocked` and five are
+    /// `NotLocalInterface` complements — so a render that used the stale value
+    /// in one place and the live one in another would be a posture nobody
+    /// intended.
+    ///
+    /// `pub(crate)` for the propagation test in [`crate::wintun`], which asserts
+    /// this substitution against a device that has actually created an adapter.
+    pub(crate) fn render(&self, contract: &NetworkContract, ruleset: Ruleset) -> FilterSet {
+        let mut enforcement = self.enforcement.clone();
+        enforcement.overlay_luid = self.overlay().0;
+        wfp::filters::render(contract, ruleset, &enforcement)
     }
 
     fn commit(&self, set: &FilterSet) -> Result<(), PlatformError> {
