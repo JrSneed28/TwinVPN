@@ -842,12 +842,30 @@ jobs:
         run: cargo build --locked --release -p twinoracle
         working-directory: lab
 
+      # THE OTHER END OF THE TUNNEL, and it is never shipped. `enforce::arm`
+      # needs one peer with a verified tunnel-key binding before the guest can
+      # reach the Protected posture, and the guest has to hand a real
+      # Noise_IKpsk2 handshake to something. `twinpeer` is that something: it
+      # generates the run's seed, holds the peer's overlay addresses on a Wintun
+      # adapter on this host, and answers the guest's initiation. It lives under
+      # /lab, which ADR-0018 §11.12 defines as never shipped.
+      - name: build the lab tunnel peer
+        run: cargo build --locked --release -p twinpeer
+        working-directory: lab
+
       # The bytes under test and the precondition probe, built here while the
       # ISO downloads. `ci-windows-killswitch.sh` runs the same two commands
       # again and finds them up to date; it still names the binaries it copies
       # from cargo's own message stream, so nothing stale can be picked up.
+      # `--features lab-seed`, AND `ci-windows-killswitch.sh` RUNS THE IDENTICAL
+      # COMMAND. The feature is off in `default` and inert without
+      # TWINVPN_LAB_SEED_FILE, but it changes the bytes: two different commands
+      # would build two different twinvpnsvc.exe and `artifact_digests` would
+      # name a binary the guest never ran. It is what supplies the overlay
+      # allocation and the verified peer binding that `enforce::arm` requires
+      # and that no production writer produces yet.
       - name: build the shipped binaries
-        run: cargo build --locked --release -p twinvpnctl -p twinvpnsvc
+        run: cargo build --locked --release -p twinvpnctl -p twinvpnsvc --features lab-seed
         working-directory: shells/windows
 
       - name: build the precondition test
@@ -860,6 +878,15 @@ jobs:
       # pass, and the ISO is deleted once the image exists.
       - name: build the disposable guest image
         run: scripts\twinvpn-l1.ps1 -Action build-image
+
+      # BEFORE `-Action run`, because that action starts the lab peer -- and its
+      # Wintun adapter -- in `Start-Observers`, well before
+      # `ci-windows-killswitch.sh` reaches its own staging step. Same script,
+      # same pinned URL and SHA-256, idempotent: the lane's later call
+      # re-verifies this download instead of repeating it.
+      - name: stage the pinned tunnel driver
+        shell: bash
+        run: build/ci/fetch-wintun.sh
 
       - name: kill-switch sequence in a disposable nested guest
         run: |

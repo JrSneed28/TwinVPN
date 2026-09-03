@@ -38,7 +38,8 @@
 param(
     [Parameter(Mandatory)]
     [ValidateSet('stage', 'unpack-shell', 'prepare', 'preconditions', 'service-up',
-                 'route-identity', 'net-up', 'beacon', 'armed-check', 'kill', 'restore')]
+                 'route-identity', 'net-up', 'dns-protected', 'dns-unprotected',
+                 'beacon', 'armed-check', 'kill', 'restore')]
     [string] $Step,
     [string] $Arg1 = '',
     [string] $Arg2 = ''
@@ -59,6 +60,13 @@ $Counts  = Join-Path $Root 'counts.env'
 # start failed is unobservable and only an exit code survives. The service
 # reads TWINVPN_LOG_FILE from its `Environment` registry value (below).
 $SvcLog  = Join-Path $Root 'twinvpnsvc.log'
+# THE LAB SEED, read by a `lab-seed` build of the service and by nothing else.
+# `enforce::arm` needs a local overlay allocation and one peer with a verified
+# tunnel-key binding, both of which live only in memory and have no production
+# writer yet, so without this `net up` refuses AUTH.IDENTITY_MISSING and every
+# phase after BASELINE is silent. `ci-windows-killswitch.sh` pushes the file the
+# lab peer generated on L1; the service's `Environment` value below names it.
+$SeedFile = Join-Path $Root 'lab-seed.json'
 # ADR-0020 §11.9's Windows row and TwinVPN.wxs's `StoreDirectory`: the
 # installer creates the store root with its ACL; the service creates `tier1`
 # beneath it on first use and refuses to start if the root is absent
@@ -68,20 +76,48 @@ $SvcLog  = Join-Path $Root 'twinvpnsvc.log'
 $StoreRoot = 'C:\ProgramData\TwinVPN\store'
 
 # THE GUEST'S HALF OF THE ADDRESS PLAN. Switch A is the guest's own link;
-# switch B carries the oracle and is reachable only through the default route.
-# Four ranges are excluded by construction and the exclusion is the design:
+# everything else is reachable only through the default route. Two ranges are
+# excluded by construction and the exclusion is the design:
 #   * 169.254.0.0/16 and fe80::/10 -- class 9 PERMITS link-local;
 #   * anything on-link with this guest -- class 4 PERMITS local network access,
-#     which is ALLOW in every routing mode (wfp/mod.rs:576);
-#   * 100.64.0.0/10 and fd7c:9e5d:2a10::/48 -- the Tier-1 baseline deny floor,
-#     blocked in BOTH postures, so a TUNNELLED leg there could never arrive.
+#     which is ALLOW in every routing mode (wfp/mod.rs:576).
+#
+# 100.64.0.0/10 AND fd7c:9e5d:2a10::/48 USED TO BE EXCLUDED TOO, on the ground
+# that they are the Tier-1 baseline deny floor and a leg addressed there could
+# never arrive. That reasoning has INVERTED and the beacon target is now
+# deliberately inside it:
+#
+#   * In RoutingMode::TwinnetOnly the Tier-1 PROTECTED scope is that floor plus
+#     the authorized peers' /32 and /128 host routes and nothing else. A target
+#     outside it -- 10.78.0.1, say -- is not governed at all, so an ARMED host
+#     permits the beacon and the SILENCE phase fails BY DESIGN.
+#   * The two postures differ by exactly the Tier-2 overlay permit, which is
+#     INTERFACE-scoped, so the same destination is permitted through the tunnel
+#     and denied off it. That is what makes TUNNELLED arrive and ARMED silent.
+#   * BASELINE still reaches it because BASELINE runs before the service exists
+#     and this lane registers the service with `sc.exe create`, never the MSI,
+#     so the KS-19 boot-time filter set is never installed. Assert-Reachable
+#     below MEASURES that rather than assuming it.
+#
+# One destination, two paths, disjoint sources. See scripts/twinvpn-l1.ps1's
+# header and lab/twinoracle/README.md section 3.1.
 $GuestV4   = '10.77.0.10'; $GuestV4Len = 24; $GatewayV4 = '10.77.0.1'
 $GuestV6   = 'fd77:7717:d0c::10'; $GuestV6Len = 64; $GatewayV6 = 'fd77:7717:d0c::1'
-$OracleV4  = '10.78.0.1'
+# The PEER's overlay addresses: the oracle's HTTP listener and the protected
+# DNS relay both live there, on L1's `twinpeer` adapter.
+$OracleV4  = '100.64.1.2'
 $OraclePort = 8080   # twinvpn-l1.ps1 binds and advertises 8080; port 80 belongs to HTTP.sys on L1
-$OracleV6  = 'fd78:7717:d0c::1'
+$OracleV6  = 'fd7c:9e5d:2a10:1::2'
+# The UNPROTECTED resolver, on switch B. BASELINE only.
 $ResolverV4 = '10.78.0.53'
 $ResolverV6 = 'fd78:7717:d0c::53'
+# The PROTECTED resolver: the same overlay addresses, reachable only through
+# the tunnel. `dns-protected` SWITCHES the stub to these rather than adding
+# them -- Windows would otherwise query both, a `p`-tagged phase would collect
+# an arrival the oracle maps `u`, and that disagreement is an inconclusive
+# reason (twinoracle evidence.rs:448-465).
+$ProtResolverV4 = $OracleV4
+$ProtResolverV6 = $OracleV6
 
 function Say([string] $Text) { Write-Output $Text }
 
@@ -142,7 +178,8 @@ function Register-TwinVpnService {
     # REG_MULTI_SZ `Environment` under the service key. `sc.exe delete` removes
     # the key, so this is re-applied on every registration.
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\TwinVPNService' `
-        -Name Environment -Type MultiString -Value @("TWINVPN_LOG_FILE=$SvcLog")
+        -Name Environment -Type MultiString `
+        -Value @("TWINVPN_LOG_FILE=$SvcLog", "TWINVPN_LAB_SEED_FILE=$SeedFile")
 }
 
 # Polls the management endpoint for up to $Seconds, and stops early once the
@@ -188,6 +225,26 @@ function Get-GuestAdapter {
     $a = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | Sort-Object ifIndex | Select-Object -First 1
     if (-not $a) { throw 'the guest has no network adapter in the Up state' }
     return $a
+}
+
+# THE UNDERLAY NIC, FOUND BY THE ADDRESS `prepare` PUT ON IT.
+#
+# Get-GuestAdapter picks the lowest-ifIndex adapter in the Up state, which is
+# exactly right before the tunnel exists and a coin flip afterwards -- the DNS
+# steps below run AFTER `net up`, when the overlay adapter is Up too. Putting
+# the stub resolver on the OVERLAY interface would put it precisely where the
+# product's own DNS programme rewrites it (dns.rs:295-306 sets the overlay
+# interface's servers and its NRPT rules and nothing else), so the guest would
+# silently keep querying the unprotected resolver and the TUNNELLED window would
+# collect a DNS arrival the oracle maps `u` inside a `p`-tagged phase.
+function Get-UnderlayInterfaceIndex {
+    $a = Get-NetIPAddress -IPAddress $GuestV4 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $a) {
+        throw ("the guest holds no $GuestV4, so its underlay NIC cannot be " +
+               "identified. The prepare step assigns it; either that step did " +
+               "not run or something removed the address.")
+    }
+    return $a.InterfaceIndex
 }
 
 function Assert-OffLink([string] $Address, [string] $Gateway) {
@@ -288,9 +345,12 @@ switch ($Step) {
             -PrefixLength $GuestV4Len -DefaultGateway $GatewayV4 | Out-Null
         New-NetIPAddress -InterfaceIndex $nic.ifIndex -IPAddress $GuestV6 `
             -PrefixLength $GuestV6Len -DefaultGateway $GatewayV6 | Out-Null
-        # The UNPROTECTED resolver, off-link like the oracle. The protected one
-        # does not exist yet: nothing in the product binds a DNS listener, so
-        # there is no `--resolver <addr>=twinvpn-dns:p` address to hand out.
+        # The UNPROTECTED resolver, off-link like the oracle. BASELINE runs
+        # against this one; `dns-protected` switches to the overlay relay once
+        # the tunnel is up. Nothing in the PRODUCT binds a DNS listener
+        # (enforce.rs:265-289 assembles denied_dns_policy() with empty stub
+        # addresses), so the protected relay is the lab's, and the evidence's
+        # `dns_protected_resolver` says exactly that.
         Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex `
             -ServerAddresses @($ResolverV4, $ResolverV6) | Out-Null
         Say ((Get-NetIPAddress -InterfaceIndex $nic.ifIndex |
@@ -342,13 +402,59 @@ switch ($Step) {
         # MEASURED, never declared. `PATH_IDENTITY_PREREQUISITES` refuses a row
         # whose two path identities are equal, and a pair of differing constants
         # would satisfy that check while describing nothing.
-        $r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-             Sort-Object -Property RouteMetric | Select-Object -First 1
-        if ($null -eq $r) { return }   # unreadable == not established
-        $nic = Get-NetAdapter -InterfaceIndex $r.ifIndex -ErrorAction SilentlyContinue
-        $ip  = Get-NetIPAddress -InterfaceIndex $r.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-               Select-Object -First 1
-        Say ("if{0}:{1}:{2}" -f $r.ifIndex, $nic.Name, $ip.IPAddress)
+        #
+        # TOWARD THE BEACON, NOT ALONG THE DEFAULT ROUTE, and that is a fix
+        # rather than a refinement. `RoutingMode::TwinnetOnly` installs NO
+        # default route -- the match arm in twinvpn-route/src/program.rs is
+        # empty, and enforce.rs confirms that no exit node means no default
+        # route in either family -- so after `net up` the default route is still
+        # the underlay one. Reading it returned the SAME string in both phases,
+        # `protected_path_identity` equalled `unprotected_path_identity`, and
+        # build/acceptance/adjudication.py failed the row.
+        #
+        # `Find-NetRoute` answers the question that actually matters -- which
+        # interface and which SOURCE address this guest would use to reach the
+        # oracle right now -- and its two objects are the same pair
+        # `Assert-OffLink` above unpacks: a NetIPAddress and a NetRoute. The
+        # source it reports is exactly what the oracle records as the arrival
+        # source, so the two halves of the evidence are the same measurement.
+        $sel   = Find-NetRoute -RemoteIPAddress $OracleV4 -ErrorAction SilentlyContinue
+        $route = $sel | Where-Object { $_.PSObject.Properties['DestinationPrefix'] } | Select-Object -First 1
+        $src   = $sel | Where-Object { $_.PSObject.Properties['IPAddress'] } | Select-Object -First 1
+        if ($null -eq $route) { return }   # unreadable == not established
+        $nic = Get-NetAdapter -InterfaceIndex $route.ifIndex -ErrorAction SilentlyContinue
+        Say ("if{0}:{1}:{2}" -f $route.ifIndex, $nic.Name, $src.IPAddress)
+    }
+
+    # THE STUB RESOLVER, SWITCHED RATHER THAN EXTENDED. The product programs no
+    # resolver of its own -- the Windows DNS programme only ever sets the
+    # OVERLAY interface's servers and NRPT rules, and `assemble` hands it an
+    # empty stub list -- so pointing the guest at the protected relay is a LAB
+    # action standing in for something TwinVPN does not do. It is still honest
+    # evidence for THIS criterion, whose claim is that an armed host BLOCKS the
+    # resolver, not that it configures one; `dns_protected_resolver` in the
+    # evidence names the relay so no reader infers otherwise.
+    #
+    # Both families in one call, because Set-DnsClientServerAddress REPLACES the
+    # list. Adding the protected pair beside the unprotected one would let
+    # Windows query both, a `p`-tagged phase would collect an arrival the oracle
+    # maps `u`, and that disagreement is an inconclusive reason.
+    'dns-protected' {
+        $idx = Get-UnderlayInterfaceIndex
+        Set-DnsClientServerAddress -InterfaceIndex $idx `
+            -ServerAddresses @($ProtResolverV4, $ProtResolverV6) | Out-Null
+        Say "dns servers on if${idx}: $ProtResolverV4, $ProtResolverV6 (protected; reachable only through the tunnel)"
+    }
+
+    # The BASELINE configuration, restorable for a diagnosis. It is deliberately
+    # NOT used before the ARMED window: that window has to test the TUNNELLED
+    # configuration with the tunnel dead, and pointing the stub back at a
+    # reachable resolver would measure something else entirely.
+    'dns-unprotected' {
+        $idx = Get-UnderlayInterfaceIndex
+        Set-DnsClientServerAddress -InterfaceIndex $idx `
+            -ServerAddresses @($ResolverV4, $ResolverV6) | Out-Null
+        Say "dns servers on if${idx}: $ResolverV4, $ResolverV6 (unprotected)"
     }
 
     'net-up' {

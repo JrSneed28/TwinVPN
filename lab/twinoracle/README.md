@@ -99,6 +99,31 @@ with the device**, **`100.64.0.0/10`** and **`fd7c:9e5d:2a10::/48`** — the las
 two being the Tier-1 baseline deny floor, blocked in both postures, so a beacon
 there could never arrive even through a working tunnel.
 
+> **The Windows kill-switch lane departs from the last two, deliberately.**
+> `build/ci/ci-windows-killswitch.sh` puts the oracle's HTTP listener and its
+> protected DNS relay on the lab peer's OVERLAY addresses (`100.64.1.2`,
+> `fd7c:9e5d:2a10:1::2`), which this section otherwise forbids. Two facts make
+> that correct there and nowhere else:
+>
+> * In `RoutingMode::TwinnetOnly` the Tier-1 **protected scope** is the baseline
+>   floor plus the authorized peers' `/32` and `/128` host routes and nothing
+>   else. A beacon aimed OUTSIDE that scope is not governed at all, so an armed
+>   host permits it and the SILENCE phase fails by design rather than by defect.
+>   The postures differ by exactly the Tier-2 overlay permit, which is
+>   interface-scoped — so the same destination is reachable through the tunnel
+>   and denied off it, which is precisely the discrimination the criterion needs.
+> * The BASELINE phase still reaches it, because that lane registers the service
+>   with `sc.exe create` rather than with the MSI. The KS-19 boot-time filter set
+>   is the installer's, nothing in production calls `wfp::boot::boot_set()`, and
+>   BASELINE runs before the service starts — so no TwinVPN filter exists at that
+>   moment and the beacon leaves on the guest's default route.
+>
+> **Re-examine this the moment that lane installs the MSI.** With the boot
+> artifact live during BASELINE the second fact reverses, the positive control
+> is never established, and the beacon must move back off the overlay — which in
+> turn requires the routing mode to become an input to `enforce::arm` rather than
+> the literal it is today. The rule above stands for every other deployment.
+
 The session's evidence records which shape produced it. `oracle_topology` is
 `in-box` or `external`, and `sentinel_egress_identity` is the measured identity
 the sentinel presented, which the acceptance adjudicator requires to differ from
