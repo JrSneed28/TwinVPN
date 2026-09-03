@@ -124,7 +124,16 @@ function Assert-Reachable([string] $Address) {
     # BEFORE any phase, and fatal. Zero arrivals because the kill switch worked
     # and zero arrivals because the oracle was never reachable are the same
     # bytes; this is what keeps them apart on the guest's side.
-    $ok = Test-NetConnection -ComputerName $Address -Port $OraclePort -InformationLevel Quiet -WarningAction SilentlyContinue
+    # RETRIED, and read from TcpTestSucceeded rather than the Quiet boolean: run
+    # 10's one-shot quiet probe said no while the detailed probe a second later
+    # connected, so the first SYN through a freshly configured adapter, a fresh
+    # neighbour entry and a fresh firewall rule is not the measurement.
+    $ok = $false
+    foreach ($attempt in 1..10) {
+        $r = Test-NetConnection -ComputerName $Address -Port $OraclePort -WarningAction SilentlyContinue
+        if ($r.TcpTestSucceeded) { $ok = $true; break }
+        Start-Sleep -Seconds 2
+    }
     if (-not $ok) {
         # Which hop failed, before throwing: the guest's own gateway on the
         # link (L1), then the routed oracle address. Run 7 probed port 80 after
