@@ -52,6 +52,7 @@ $Bash    = Join-Path $Root 'git\bin\bash.exe'
 $Ctl     = Join-Path $Bin 'twinvpnctl.exe'
 $Svc     = Join-Path $Bin 'twinvpnsvc.exe'
 $Precond = Join-Path $Bin 'wfp_preconditions.exe'
+$Wintun  = Join-Path $Bin 'wintun.dll'
 $Counts  = Join-Path $Root 'counts.env'
 
 # THE GUEST'S HALF OF THE ADDRESS PLAN. Switch A is the guest's own link;
@@ -218,7 +219,7 @@ switch ($Step) {
         # THE PAYLOAD, RE-DIGESTED WHERE IT WILL RUN. L1 digested the same files
         # before the copy; the lane refuses a mismatch. A digest taken only on
         # the build host says nothing about what arrived over VMBus.
-        foreach ($f in @($Ctl, $Svc, $Precond)) {
+        foreach ($f in @($Ctl, $Svc, $Precond, $Wintun)) {
             if (-not (Test-Path $f)) { throw "the payload is missing $f" }
             $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash.ToLower()
             Say "TWINVPN_GUEST_DIGEST $([IO.Path]::GetFileName($f))=$h"

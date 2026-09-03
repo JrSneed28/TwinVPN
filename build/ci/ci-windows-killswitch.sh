@@ -190,13 +190,36 @@ PRECOND_EXE="$(cygpath -u "$PRECOND_EXE")"
 echo "precondition test binary: $PRECOND_EXE"
 echo "::endgroup::"
 
+# THE TUNNEL DRIVER, PINNED. ADR-0021 §11: the upstream Microsoft-signed Wintun
+# binaries ship app-locally beside the service, and `build_adapter` refuses to
+# start without `wintun.dll` beside it (PS-18). The MSI stages it from
+# `$(var.WinTunDir)`; this lane stages it the same way, from the release
+# wintun.net publishes together with its SHA-256. The zip carries every
+# architecture; only the amd64 DLL goes in.
+WINTUN_URL='https://www.wintun.net/builds/wintun-0.14.1.zip'
+WINTUN_SHA256='07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51'
+CACHE="$REPO/build/ci/.cache"
+mkdir -p "$CACHE"
+echo "::group::the tunnel driver"
+[ -f "$CACHE/wintun.zip" ] || \
+  curl -sS --fail --location --retry 3 -o "$CACHE/wintun.zip" "$WINTUN_URL"
+twinvpn_verify_digest "$CACHE/wintun.zip" "$WINTUN_SHA256" "Wintun 0.14.1"
+twinvpn_python - "$CACHE/wintun.zip" "$CACHE/wintun.dll" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z, open(sys.argv[2], "wb") as out:
+    out.write(z.read("wintun/bin/amd64/wintun.dll"))
+PY
+WINTUN_DLL="$CACHE/wintun.dll"
+echo "::endgroup::"
+
 # THE BYTES UNDER TEST, NAMED ON THIS SIDE OF THE COPY. The guest re-digests
 # them afterwards and the two must agree: a digest taken only where the bytes
 # were built says nothing about what arrived over VMBus.
 ARTIFACT_DIGESTS="$(twinvpn_digest_json \
   twinvpnsvc.exe "$SVC" \
   twinvpnctl.exe "$TWINVPN" \
-  wfp_preconditions.exe "$PRECOND_EXE")"
+  wfp_preconditions.exe "$PRECOND_EXE" \
+  wintun.dll "$WINTUN_DLL")"
 echo "artifact digests: $ARTIFACT_DIGESTS"
 
 # THE GUEST'S SHELL, PINNED. `leak-probe.sh` is bash and a stock Windows image
@@ -212,8 +235,6 @@ echo "artifact digests: $ARTIFACT_DIGESTS"
 # anything under test.
 GIT_URL='https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/Git-2.55.0.5-64-bit.tar.bz2'
 GIT_SHA256='58fdf5679db11901697d2257cd076c8cdc49d64fe641b3e64ad158f1c5bf9b8d'
-CACHE="$REPO/build/ci/.cache"
-mkdir -p "$CACHE"
 echo "::group::the guest's shell"
 [ -f "$CACHE/git.tar.bz2" ] || \
   curl -sS --fail --location --retry 3 -o "$CACHE/git.tar.bz2" "$GIT_URL"
@@ -234,6 +255,7 @@ echo "::group::copy the payload into the guest"
 guest stage
 for pair in "$CACHE/git.tar:git.tar" "$SVC:bin\\twinvpnsvc.exe" "$TWINVPN:bin\\twinvpnctl.exe" \
             "$PRECOND_EXE:bin\\wfp_preconditions.exe" \
+            "$WINTUN_DLL:bin\\wintun.dll" \
             "$REPO/build/ci/leak-probe.sh:build\\ci\\leak-probe.sh" \
             "$REPO/build/ci/leak-probe-rules.sh:build\\ci\\leak-probe-rules.sh" \
             "$REPO/build/ci/leak-probe-sentinel.sh:build\\ci\\leak-probe-sentinel.sh" \
@@ -250,7 +272,7 @@ echo "::endgroup::"
 
 # The digests, compared across the copy. A mismatch means the guest is about to
 # test bytes this job did not build.
-for name in twinvpnsvc.exe twinvpnctl.exe wfp_preconditions.exe; do
+for name in twinvpnsvc.exe twinvpnctl.exe wfp_preconditions.exe wintun.dll; do
   here="$(twinvpn_python -c '
 import json, sys
 print(json.loads(sys.argv[1]).get(sys.argv[2], ""))' "$ARTIFACT_DIGESTS" "$name")"
