@@ -393,6 +393,9 @@ impl TrafficClass {
 pub struct FilterFlags {
     /// `FWPM_FILTER_FLAG_PERSISTENT` — reinstated by the Base Filtering Engine
     /// across a reboot, with no process of ours running.
+    ///
+    /// **Cannot be set together with `boot_time`**; the engine refuses the pair
+    /// with `FWP_E_INVALID_FLAGS`, and [`FilterSet::validate`] refuses it first.
     pub persistent: bool,
     /// `FWPM_FILTER_FLAG_BOOTTIME` — applied by BFE before any service starts.
     ///
@@ -478,6 +481,12 @@ impl FilterSet {
             return Err(SetDefect::FamilyAsymmetry { v4, v6 });
         }
         for filter in &self.filters {
+            // FWPM_FILTER0: the persistent flag "cannot be set together with
+            // FWPM_FILTER_FLAG_BOOTTIME". The engine answers FWP_E_INVALID_FLAGS;
+            // the boot set installs each rule twice instead (see `boot`).
+            if filter.flags.boot_time && filter.flags.persistent {
+                return Err(SetDefect::BootTimeFilterIsPersistent(filter.name));
+            }
             // ADR-0012 §11.6: a BOOTTIME filter cannot carry an ALE condition.
             // Asserting it here rather than discovering it at
             // `FwpmFilterAdd0` is what keeps the boot set installable by an
@@ -537,6 +546,10 @@ pub enum SetDefect {
     /// A boot-time filter names an ALE principal, which BFE cannot evaluate.
     #[error("the boot-time filter `{0}` names a principal, which BFE cannot evaluate")]
     BootTimeFilterNamesAPrincipal(&'static str),
+    /// A filter carries both `FWPM_FILTER_FLAG_BOOTTIME` and
+    /// `FWPM_FILTER_FLAG_PERSISTENT`, which the engine refuses.
+    #[error("the filter `{0}` is both boot-time and persistent; the engine refuses that pair")]
+    BootTimeFilterIsPersistent(&'static str),
     /// A Tier-2 object references a destination.
     #[error("the Tier-2 filter `{0}` references a destination prefix")]
     Tier2NamesADestination(&'static str),
