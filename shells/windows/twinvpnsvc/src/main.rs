@@ -435,24 +435,32 @@ fn run(
 
 /// Steps 7 and 8: bind the pipe with its DACL, then accept.
 ///
-/// # The gap, named
+/// The whole of it is `twinvpnsvc::win32::listener::serve`, because every line of
+/// it names Windows and this crate confines that to one module. What is left here
+/// is the platform dispatch [`acquire_instance_lock`] and [`build_adapter`]
+/// already use.
 ///
-/// MI-A3 requires **the agent** to create the endpoint and write its DACL at
-/// every start, and [`twinvpnsvc::mi::dacl::pipe_sddl`] renders the descriptor.
-/// What is missing is the two calls between them:
-/// `ConvertStringSecurityDescriptorToSecurityDescriptorW`, and a
-/// `tokio::net::windows::named_pipe::ServerOptions` accept loop with
-/// `.first_pipe_instance(true)`, `.reject_remote_clients(true)` and
-/// `.pipe_mode(PipeMode::Message)`.
-///
-/// The server itself is written and tested —
-/// [`twinvpnsvc::service::server::serve`] is generic over the transport and its
-/// tests drive a real client against it through `tokio::io::duplex`. What has
-/// not been written is the listener that supplies a real pipe.
-///
-/// PS-18's shape applies: a service that reached `SERVICE_RUNNING` with no
-/// management endpoint would be reporting itself as running while being
-/// unmanageable, so this refuses by name.
+/// `stop` flips at most once, when the SCM asks this service to stop; in
+/// foreground mode it never flips. `on_ready` is called exactly once, after the
+/// first instance is bound with its DACL and before the first accept, and never
+/// if the bind failed (PS-18). `lock` is released on return (LC-5).
+#[cfg(windows)]
+fn serve(
+    env: &twinvpn_env::Env,
+    runtime: &Arc<twinvpn_env::binding::tokio_rt::TokioRuntime>,
+    adapter: &Arc<twinvpn_platform_windows::WindowsPlatformAdapter>,
+    core: &Arc<twinvpn_core::Core>,
+    lock: InstanceLock,
+    stop: tokio::sync::watch::Receiver<bool>,
+    on_ready: &mut dyn FnMut(),
+) -> Result<(), StartupRefusal> {
+    twinvpnsvc::win32::listener::serve(env, runtime, adapter, core, lock, stop, on_ready)
+}
+
+/// The non-Windows answer. **Never reached**: [`acquire_instance_lock`] refuses
+/// off Windows and `run` stops at step 1. Present for the same reason
+/// [`build_adapter`]'s twin is.
+#[cfg(not(windows))]
 fn serve(
     _env: &twinvpn_env::Env,
     _runtime: &Arc<twinvpn_env::binding::tokio_rt::TokioRuntime>,
@@ -463,11 +471,10 @@ fn serve(
     _on_ready: &mut dyn FnMut(),
 ) -> Result<(), StartupRefusal> {
     Err(StartupRefusal::platform(
-        "MGMT.UNAVAILABLE",
-        "MGMT.UNAVAILABLE",
-        "the named-pipe listener is not implemented: the DACL is rendered and the server \
-         is written, and nothing binds \\\\.\\pipe\\TwinVPN\\mgmt. Refusing rather than \
-         reporting a running service with no management endpoint (PS-18)."
+        "PLATFORM.OS_UNSUPPORTED",
+        "PLATFORM.OS_UNSUPPORTED",
+        "there is no named-pipe namespace here; ADR-0017 §11.2's Windows row is the only \
+         transport this binary serves"
             .to_owned(),
     ))
 }

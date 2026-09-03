@@ -148,6 +148,142 @@ pub fn grants_to(sddl: &str, trustee: &str) -> bool {
         .any(|ace| ace.split(')').next().is_some_and(|a| a.ends_with(trustee)))
 }
 
+/// Whether a rendered descriptor is still the one PS-12a describes.
+///
+/// **PS-17's discipline, applied to a descriptor we wrote ourselves.** A
+/// descriptor is the sort of thing that is right until somebody edits it, and
+/// the two properties PS-12a actually states are cheap to check at the moment of
+/// use: the built-in groups are never the principals, and the two the package
+/// creates always are. The service calls this before installing the descriptor
+/// and refuses on `false` — installing one that does not match the model would
+/// make every later authorization decision rest on an ACL nobody had checked.
+#[must_use]
+pub fn matches_ps12a(sddl: &str, sids: &PrincipalSids) -> bool {
+    !grants_to(sddl, EVERYONE)
+        && !grants_to(sddl, BUILTIN_USERS)
+        && grants_to(sddl, &sids.observe)
+        && grants_to(sddl, &sids.operate)
+}
+
+/// The registered code every bind failure carries.
+///
+/// ADR-0017's own sentence for it is the one an operator needs: *"TwinVPN is
+/// protecting this device but cannot be managed."* → *"Reinstall TwinVPN, or
+/// check permissions on the service directory."* Protection is unaffected
+/// (MI-I5-4), which is why this is not a `PLATFORM.*` code.
+pub const LISTEN_FAILED: &str = "MGMT.LISTEN_FAILED";
+
+/// `ERROR_ACCESS_DENIED`.
+///
+/// A literal rather than a `windows-sys` import, and the reason is the same one
+/// `twinvpn_platform_windows::oserr` states about itself: *"the layer that
+/// decides what an error means has no reason to need the OS that produced it"*.
+/// That module's constants are not reachable from here either — `mi` is compiled
+/// into `twinvpnctl` with `default-features = false`, which excludes the whole
+/// `service` feature and with it the adapter — so the mapping below is target-
+/// free by necessity as well as by taste, and its tests run on a Linux host.
+pub const ERROR_ACCESS_DENIED: u32 = 5;
+
+/// `ERROR_PIPE_BUSY` — every instance of the pipe is already in use.
+pub const ERROR_PIPE_BUSY: u32 = 231;
+
+/// `ERROR_INVALID_OWNER` — the descriptor names an owner this token may not
+/// assign.
+///
+/// The owner must be the token's user, or a group in it carrying
+/// `SE_GROUP_OWNER`. ADR-0016 §11.2 requires `SERVICE_SID_TYPE_UNRESTRICTED`,
+/// which is what puts `NT SERVICE\TwinVPNService` in the service's token with
+/// exactly that attribute — so this status means the service SID type is wrong,
+/// not that the descriptor is.
+pub const ERROR_INVALID_OWNER: u32 = 1307;
+
+/// `ERROR_NONE_MAPPED` — no account of that name exists on this host.
+pub const ERROR_NONE_MAPPED: u32 = 1332;
+
+/// Why the management endpoint could not be created.
+///
+/// # One code, four sentences
+///
+/// All four map to [`LISTEN_FAILED`], because the registry carries exactly one
+/// condition for "the agent could not create or verify its endpoint" and
+/// inventing a second spelling here would be the substitution `ownership.md` §8
+/// W-18 exists to stop. What differs is the **sentence**, and that difference is
+/// the whole value: "another process owns the pipe name", "the group the
+/// installer creates is missing" and "this token may not own the object" send an
+/// operator to three different places.
+///
+/// The same discipline as [`crate::service::StartSequence::first_incomplete`] —
+/// named rather than counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindRefusal {
+    /// `ERROR_ACCESS_DENIED` on the **first** instance: something else already
+    /// holds `\\.\pipe\TwinVPN\mgmt`.
+    ///
+    /// This is what `FILE_FLAG_FIRST_PIPE_INSTANCE` is for (ADR-0017 §11.2's
+    /// Windows row). Without it the service would quietly become the *second*
+    /// server on somebody else's pipe, and every client that reached the
+    /// squatter first would be talking to it instead.
+    Squatted,
+    /// `ERROR_INVALID_OWNER`; see [`ERROR_INVALID_OWNER`].
+    OwnerUnassignable,
+    /// `ERROR_PIPE_BUSY` — `nMaxInstances` is reached.
+    Saturated,
+    /// `ERROR_NONE_MAPPED` — one of PS-12a's principals does not exist. The MSI
+    /// creates `TwinVPN Users` and `TwinVPN Operators`; the service never does.
+    PrincipalUnknown,
+    /// Anything else Windows reported.
+    Refused,
+}
+
+impl BindRefusal {
+    /// Classifies the status `CreateNamedPipeW` or the SID lookup reported.
+    ///
+    /// `first_instance` matters: `ERROR_ACCESS_DENIED` with
+    /// `FILE_FLAG_FIRST_PIPE_INSTANCE` set is a squatter, and the same status on
+    /// a later instance is an ordinary access failure against a descriptor this
+    /// process itself wrote.
+    #[must_use]
+    pub const fn classify(status: u32, first_instance: bool) -> Self {
+        if first_instance && status == ERROR_ACCESS_DENIED {
+            return Self::Squatted;
+        }
+        match status {
+            ERROR_INVALID_OWNER => Self::OwnerUnassignable,
+            ERROR_PIPE_BUSY => Self::Saturated,
+            ERROR_NONE_MAPPED => Self::PrincipalUnknown,
+            _ => Self::Refused,
+        }
+    }
+
+    /// The registered `reason_code`.
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        LISTEN_FAILED
+    }
+
+    /// What to tell a human reading the Event Log.
+    #[must_use]
+    pub const fn detail(self) -> &'static str {
+        match self {
+            Self::Squatted => {
+                "another process already holds the management pipe name; this service refuses \
+                 to become the second server on it (FILE_FLAG_FIRST_PIPE_INSTANCE)"
+            }
+            Self::OwnerUnassignable => {
+                "the service token may not own the endpoint: ADR-0016 §11.2's \
+                 SERVICE_SID_TYPE_UNRESTRICTED is what puts NT SERVICE\\TwinVPNService in the \
+                 token as an owner-eligible group, and it is not in force"
+            }
+            Self::Saturated => "every instance of the management pipe is in use",
+            Self::PrincipalUnknown => {
+                "one of ADR-0016 PS-12a's principals does not exist on this host; the package \
+                 creates TwinVPN Users and TwinVPN Operators and the service never does"
+            }
+            Self::Refused => "the management endpoint could not be created",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +372,88 @@ mod tests {
         ] {
             let suffix = format!(";;;{trustee})");
             assert_eq!(sddl.matches(&suffix).count(), 1, "{trustee} in {sddl}");
+        }
+    }
+
+    #[test]
+    fn the_startup_self_check_accepts_what_this_module_renders_and_rejects_a_widened_edit() {
+        // The check the service runs before it installs the descriptor. It has
+        // to accept the real one — a self-check that refused the production
+        // value would be a service that never starts — and it has to catch the
+        // one edit PS-12a names: a built-in group as a principal.
+        let sids = sids();
+        assert!(matches_ps12a(&pipe_sddl(&sids), &sids));
+
+        let widened = format!("{}{}", pipe_sddl(&sids), ace("A", EVERYONE, CLIENT_ACCESS));
+        assert!(!matches_ps12a(&widened, &sids), "{widened}");
+        let builtin = format!(
+            "{}{}",
+            pipe_sddl(&sids),
+            ace("A", BUILTIN_USERS, CLIENT_ACCESS)
+        );
+        assert!(!matches_ps12a(&builtin, &sids), "{builtin}");
+
+        // And a descriptor that dropped a principal is refused too: an endpoint
+        // nobody can reach is not the fail-closed direction, it is an outage
+        // that looks like a start.
+        let narrowed = pipe_sddl(&PrincipalSids {
+            operate: "S-1-5-21-9-9-9-9999".to_owned(),
+            ..sids.clone()
+        });
+        assert!(!matches_ps12a(&narrowed, &sids), "{narrowed}");
+    }
+
+    #[test]
+    fn every_bind_refusal_names_a_registered_code() {
+        // The whole point of the type: a bind failure is reported by NAME. A
+        // spelling the frozen registry does not carry would be `ownership.md`
+        // §8 W-18's silent substitution, and this is the tripwire for it.
+        for refusal in [
+            BindRefusal::Squatted,
+            BindRefusal::OwnerUnassignable,
+            BindRefusal::Saturated,
+            BindRefusal::PrincipalUnknown,
+            BindRefusal::Refused,
+        ] {
+            assert!(
+                twinvpn_types::ReasonCode::lookup(refusal.reason_code()).is_some(),
+                "{refusal:?} emits {}, which is not registered",
+                refusal.reason_code()
+            );
+            assert!(!refusal.detail().is_empty(), "{refusal:?} has no sentence");
+        }
+    }
+
+    #[test]
+    fn a_squatter_is_told_apart_from_an_ordinary_access_failure() {
+        // `ERROR_ACCESS_DENIED` means two different things either side of
+        // `FILE_FLAG_FIRST_PIPE_INSTANCE`, and collapsing them would send an
+        // operator hunting for a permissions problem that is really another
+        // process holding the name.
+        assert_eq!(
+            BindRefusal::classify(ERROR_ACCESS_DENIED, true),
+            BindRefusal::Squatted
+        );
+        assert_eq!(
+            BindRefusal::classify(ERROR_ACCESS_DENIED, false),
+            BindRefusal::Refused
+        );
+    }
+
+    #[test]
+    fn each_named_status_classifies_to_its_own_variant() {
+        for (status, expected) in [
+            (ERROR_INVALID_OWNER, BindRefusal::OwnerUnassignable),
+            (ERROR_PIPE_BUSY, BindRefusal::Saturated),
+            (ERROR_NONE_MAPPED, BindRefusal::PrincipalUnknown),
+            (0x8000_0042, BindRefusal::Refused),
+        ] {
+            assert_eq!(BindRefusal::classify(status, true), expected, "{status:#x}");
+            assert_eq!(
+                BindRefusal::classify(status, false),
+                expected,
+                "{status:#x}"
+            );
         }
     }
 
