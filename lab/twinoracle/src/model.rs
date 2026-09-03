@@ -116,7 +116,7 @@ pub enum Verdict {
 /// `"p"` and `"u"`. Rejecting `"n"` would 400 the whole phase call, and a phase
 /// that never opened is a phase whose observations land in the previous one —
 /// which is how a leak ends up attributed to the wrong window.
-fn deserialize_path<'de, D>(d: D) -> Result<Option<PathKind>, D::Error>
+pub fn deserialize_path<'de, D>(d: D) -> Result<Option<PathKind>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

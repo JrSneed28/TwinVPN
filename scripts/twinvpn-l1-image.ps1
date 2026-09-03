@@ -36,7 +36,12 @@ param(
     [Parameter(Mandatory)] [string] $WorkDir,
     [string] $SystemLetter  = 'S',
     [string] $WindowsLetter = 'W',
-    [int]    $SizeGB        = 40
+    [int]    $SizeGB        = 40,
+    # Start the ISO download in the background and return. The job builds its
+    # Rust binaries while the 4.8 GB transfer runs (run 11 measured 7m38s for
+    # it, serial, before any build could start); the normal invocation then
+    # waits for that download instead of starting its own.
+    [switch] $Prefetch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,9 +69,33 @@ function Assert-Space([string] $Drive, [int] $NeedGB) {
     }
 }
 
+$IsoPart = $null   # set below, once $WorkDir is known
+$IsoPid  = $null
+
+function Start-IsoPrefetch([string] $Path) {
+    if (Test-Path $Path) { Write-Host "the ISO is already at $Path; nothing to prefetch"; return }
+    if (Test-Path $IsoPid) { Write-Host "a prefetch is already running (pid $(Get-Content $IsoPid))"; return }
+    Remove-Item -LiteralPath $IsoPart -Force -ErrorAction SilentlyContinue
+    Write-Host "prefetching the evaluation ISO ($([math]::Round($IsoBytes / 1GB, 1)) GB) in the background"
+    $p = Start-Process -FilePath 'curl.exe' -PassThru -WindowStyle Hidden `
+         -ArgumentList @('-sS', '--fail', '--location', '--retry', '3', '--retry-delay', '10', '-o', $IsoPart, $IsoUrl)
+    $p.Id | Set-Content -LiteralPath $IsoPid -NoNewline
+}
+
 function Get-PinnedIso([string] $Path) {
     if (Test-Path $Path) {
         Write-Host "reusing the ISO already at $Path"
+    } elseif (Test-Path $IsoPid) {
+        $id = [int](Get-Content -LiteralPath $IsoPid)
+        Write-Host "waiting for the prefetched ISO download (pid $id)"
+        $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
+        if ($proc) { $proc.WaitForExit() }
+        Remove-Item -LiteralPath $IsoPid -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path $IsoPart) -or (Get-Item $IsoPart).Length -ne $IsoBytes) {
+            throw ("the prefetched ISO download did not complete: expected $IsoBytes bytes at $IsoPart, " +
+                   "found $(if (Test-Path $IsoPart) { (Get-Item $IsoPart).Length } else { 'no file' })")
+        }
+        Move-Item -LiteralPath $IsoPart -Destination $Path -Force
     } else {
         Write-Host "downloading the evaluation ISO ($([math]::Round($IsoBytes / 1GB, 1)) GB)"
         # `curl.exe` is in-box since Windows 10 1803 and streams to disk;
@@ -92,6 +121,13 @@ function Get-PinnedIso([string] $Path) {
 }
 
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+$IsoPart = Join-Path $WorkDir 'win11-ltsc-eval.iso.part'
+$IsoPid  = Join-Path $WorkDir 'iso-download.pid'
+if ($Prefetch) {
+    Assert-Space ((Split-Path -Qualifier $WorkDir).TrimEnd(':')) 25
+    Start-IsoPrefetch (Join-Path $WorkDir 'win11-ltsc-eval.iso')
+    return
+}
 # MEASURED, not the disk's nominal size: run 4 applied the image at 18.3 GB
 # beside the 4.8 GB ISO, and the ISO is removed once applied, so the peak is
 # about 23 GB plus the guest's differencing disk. The dynamic VHDX's 40 GB

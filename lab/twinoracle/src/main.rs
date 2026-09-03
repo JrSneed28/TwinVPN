@@ -424,6 +424,10 @@ async fn dns_loop(sock: UdpSocket, state: Shared, cfg: Arc<Serve>) {
             continue;
         };
         let Some((token, seq, path_tag)) = dns::beacon_labels(&q.name, &cfg.zone) else {
+            // REFUSED, at once, and nothing recorded. A dropped query is not
+            // free: the querier waits out its timeout and retries, and the
+            // lab's relay waits on the unanswered upstream. See `build_refusal`.
+            let _ = sock.send_to(&dns::build_refusal(packet, &q), peer).await;
             continue;
         };
         let source = normalise(peer.ip());

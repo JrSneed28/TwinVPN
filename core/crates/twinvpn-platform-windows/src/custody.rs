@@ -736,9 +736,15 @@ impl SecureStore for WindowsSecureStore {
 /// Used by the shell's start sequence to say "the installer did not create the
 /// store" as its own condition rather than discovering it as a write failure
 /// three steps later.
+///
+/// The ROOT, not the Tier-1 directory beneath it: ADR-0020 §11.9 puts the root
+/// and its ACL with the installer (`TwinVPN.wxs`'s `StoreDirectory` creates
+/// exactly that), and [`WindowsSecureStore::prepare`] creates `tier1` on the
+/// service's own first use. Checking for `tier1` here refused every fresh
+/// install before the service had a chance to create it.
 #[must_use]
 pub fn store_root_prepared(root: &Path) -> bool {
-    root.join(WindowsSecureStore::TIER1_DIR).is_dir()
+    root.is_dir()
 }
 
 // ---------------------------------------------------------------------------

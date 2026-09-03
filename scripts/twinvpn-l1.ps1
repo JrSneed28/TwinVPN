@@ -64,14 +64,16 @@
   runs the data plane. See `build/ci/ci-windows-killswitch.sh`.
 
 .EXAMPLE
-  .\twinvpn-l1.ps1 -Action preflight; .\twinvpn-l1.ps1 -Action build-image
+  .\twinvpn-l1.ps1 -Action preflight; .\twinvpn-l1.ps1 -Action prefetch-iso
+  # ... build the binaries while it downloads ...
+  .\twinvpn-l1.ps1 -Action build-image
   .\twinvpn-l1.ps1 -Action run -RepoPath $env:GITHUB_WORKSPACE -EvidenceOut ...
   .\twinvpn-l1.ps1 -Action destroy    # always, including after a cancellation
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('preflight', 'build-image', 'run', 'destroy', 'guest-exec', 'push', 'fetch')]
+    [ValidateSet('preflight', 'prefetch-iso', 'build-image', 'run', 'destroy', 'guest-exec', 'push', 'fetch')]
     [string] $Action,
 
     [string] $RepoPath,
@@ -487,6 +489,12 @@ switch ($Action) {
             if (-not (Get-Command $c -ErrorAction SilentlyContinue)) { throw "$c is not on PATH." }
         }
         Write-Host 'preflight: hypervisor, disk, bash, cargo, python and curl are all present'
+    }
+
+    # The 4.8 GB ISO download, started in the background so the cargo builds
+    # run beside it; `build-image` waits for it. See twinvpn-l1-image.ps1.
+    'prefetch-iso' {
+        & (Join-Path $Here 'twinvpn-l1-image.ps1') -VhdPath $BaseVhd -WorkDir $VmRoot -Prefetch
     }
 
     'build-image' {

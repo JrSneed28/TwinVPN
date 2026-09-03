@@ -777,8 +777,9 @@ jobs:
     # move that dropped the Hyper-V role would change what this job is about
     # with no diff to point at.
     runs-on: windows-2025
-    # A cold cargo build of the shell plus the core test binary is the long
-    # pole; the ISO download and the DISM apply add ten to twenty minutes.
+    # The ISO download (about 8 minutes, run beside the cargo builds), the
+    # DISM apply (about 3) and the guest's first boot (about 3) are the long
+    # poles; a cold cargo build of three workspaces hides under the download.
     timeout-minutes: 90
     permissions:
       contents: read
@@ -804,7 +805,15 @@ jobs:
       # a different toolchain or lockfile, and a wrong hit is a green build of
       # the wrong thing. `lab/target` is here too -- the leak oracle now builds
       # in this job rather than living on a machine somebody provisioned.
-      - uses: actions/cache@v4
+      #
+      # RESTORE AND SAVE SPLIT, because `actions/cache`'s post step saves only
+      # when the job SUCCEEDS. This job fails by design while the product is
+      # walled, so eleven runs never saved a cache and every one of them paid
+      # for a cold crate download and a cold build of three workspaces
+      # (run 11: 1m13s + 2m53s + the test binary). The save below runs on
+      # failure too, and skips when the key was already present.
+      - uses: actions/cache/restore@v4
+        id: cargo-cache
         with:
           path: |
             ~/.cargo/registry/index
@@ -820,11 +829,30 @@ jobs:
       - name: preflight
         run: scripts\twinvpn-l1.ps1 -Action preflight
 
+      # THE ISO DOWNLOAD STARTS NOW AND RUNS BESIDE THE BUILDS. It is the
+      # single longest thing in the job (run 11: 7m38s for 4.8 GB) and nothing
+      # about it depends on the builds, which used to wait for it in series.
+      # `build-image` waits for this download instead of starting its own.
+      - name: prefetch the guest ISO in the background
+        run: scripts\twinvpn-l1.ps1 -Action prefetch-iso
+
       # The observer. It runs on this host, beside the guest, on a segment the
       # guest reaches only through its default route.
       - name: build the leak oracle
         run: cargo build --locked --release -p twinoracle
         working-directory: lab
+
+      # The bytes under test and the precondition probe, built here while the
+      # ISO downloads. `ci-windows-killswitch.sh` runs the same two commands
+      # again and finds them up to date; it still names the binaries it copies
+      # from cargo's own message stream, so nothing stale can be picked up.
+      - name: build the shipped binaries
+        run: cargo build --locked --release -p twinvpnctl -p twinvpnsvc
+        working-directory: shells/windows
+
+      - name: build the precondition test
+        run: cargo test --locked --no-run -p twinvpn-platform-windows --test wfp_preconditions
+        working-directory: core
 
       # Windows 11 Enterprise LTSC 2024 Evaluation, SHA-256 pinned in
       # `scripts/twinvpn-l1-image.ps1`, applied to a VHDX with
@@ -856,6 +884,20 @@ jobs:
       - name: destroy the disposable guest and the lab fabric
         if: always()
         run: scripts\twinvpn-l1.ps1 -Action destroy
+
+      # The other half of the restore above: saved on every outcome, once per
+      # key. The three workspaces' targets are what make the next run warm.
+      - uses: actions/cache/save@v4
+        if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            core/target
+            shells/windows/target
+            lab/target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
       # THE EVIDENCE, AND THE ORACLE'S OWN REPORT BESIDE IT.
       #

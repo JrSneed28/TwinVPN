@@ -458,10 +458,17 @@ environment="$(scrape_env "$PRECOND_LOG" "$ARMED_LOG")"
 # reaching SERVICE_RUNNING, and the story would have said otherwise.
 net_up_reason="$(sed -n '/^TWINVPN_NET_UP_OUTPUT_BEGIN/,/^TWINVPN_NET_UP_OUTPUT_END/p' "$GUESTLOG" \
   | grep -oE '"reason_code":"[^"]+"' | head -1 | cut -d'"' -f4)"
+# What the SCM reported and what the service itself wrote, both scraped from
+# the guest's own lines. No fixed story: this note used to assert a 1053 start
+# timeout for any non-zero exit, and run 11's service had passed the SCM
+# handshake and refused three steps later.
+service_state="$(grep -E '^TWINVPN_SERVICE_STATE ' "$GUESTLOG" | head -1 | sed 's/^TWINVPN_SERVICE_STATE //')"
+service_said="$(sed -n '/^TWINVPN_SERVICE_LOG_BEGIN$/,/^TWINVPN_SERVICE_LOG_END$/p' "$GUESTLOG" \
+  | grep -E '"level":"(ERROR|WARN)"|the service cannot start' | head -1 | tr -d '"' | cut -c1-400)"
 if [ "$SERVICE_UP_EXIT" = "0" ]; then
-  service_note="TwinVPNService started and bound its management endpoint"
+  service_note="TwinVPNService started and bound its management endpoint (${service_state:-state unrecorded})"
 else
-  service_note="TwinVPNService did not start: the guest's service-up step exited $SERVICE_UP_EXIT; guest.log carries sc.exe's error (1053 is the SCM's start timeout, which a process that never calls StartServiceCtrlDispatcherW always earns)"
+  service_note="TwinVPNService did not reach its management endpoint: the guest's service-up step exited $SERVICE_UP_EXIT; sc.exe query reported ${service_state:-nothing (the state line is missing from guest.log)}; the service's own log said: ${service_said:-nothing (no error line was captured)}"
 fi
 notes="the L1 controller holds the oracle control token and the guest holds none, so the ARMED window's attempt counts survive a working kill switch. EXECUTED: guest built and booted, binaries copied and digest-verified on both sides, WFP preconditions measured in the guest, oracle and sentinel up in-box with a measured sentinel egress identity, BASELINE OBSERVE seen by the oracle, service-up and net up attempted. MEASURED: $service_note; net up exited $NET_UP_EXIT with reason_code ${net_up_reason:-<none>}; the armed read-back exited $ARMED_EXIT. NOT YET REACHED, known from source review: once the service runs, enforce::arm refuses AUTH.IDENTITY_MISSING without an overlay allocation (enforce.rs:185), and four product walls stand behind it: no production writer for put_local_overlay, no peer with a verified tunnel key binding, RoutingMode::TwinnetOnly installing no default route, and no protected resolver bound anywhere. The remaining phases still ran and their results are measured, not assumed. graceful_shutdown is FALSE and that is the point: step 5 kills the service rather than asking it to stop."
 

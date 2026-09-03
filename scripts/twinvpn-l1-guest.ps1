@@ -54,6 +54,18 @@ $Svc     = Join-Path $Bin 'twinvpnsvc.exe'
 $Precond = Join-Path $Bin 'wfp_preconditions.exe'
 $Wintun  = Join-Path $Bin 'wintun.dll'
 $Counts  = Join-Path $Root 'counts.env'
+# Where the service writes its own log. Under the SCM a service has no console
+# and its stdout is discarded, so without this the refusal that names WHY a
+# start failed is unobservable and only an exit code survives. The service
+# reads TWINVPN_LOG_FILE from its `Environment` registry value (below).
+$SvcLog  = Join-Path $Root 'twinvpnsvc.log'
+# ADR-0020 §11.9's Windows row and TwinVPN.wxs's `StoreDirectory`: the
+# installer creates the store root with its ACL; the service creates `tier1`
+# beneath it on first use and refuses to start if the root is absent
+# (AUTH.KEY_STORE_UNAVAILABLE). Run 11 measured exactly that refusal: the
+# service started, exited 71 before binding its pipe, and nothing here had
+# created the directory.
+$StoreRoot = 'C:\ProgramData\TwinVPN\store'
 
 # THE GUEST'S HALF OF THE ADDRESS PLAN. Switch A is the guest's own link;
 # switch B carries the oracle and is reachable only through the default route.
@@ -120,6 +132,52 @@ function Register-TwinVpnService {
             Add-LocalGroupMember -Group $g -Member $env:USERNAME
         }
     }
+    # The store root, with the MSI's ACL (TwinVPN.wxs `StoreDirectory`): SYSTEM
+    # and Administrators full, Users denied, nothing inheritable. The root only;
+    # `tier1` is the service's to create.
+    if (-not (Test-Path $StoreRoot)) { New-Item -ItemType Directory -Path $StoreRoot -Force | Out-Null }
+    Invoke-Native { & icacls.exe $StoreRoot /inheritance:r /grant:r 'SYSTEM:(F)' 'Administrators:(F)' /deny 'Users:(F)' } | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls exited $LASTEXITCODE setting the store root's ACL" }
+    # The service's process environment, the way the SCM reads it: a
+    # REG_MULTI_SZ `Environment` under the service key. `sc.exe delete` removes
+    # the key, so this is re-applied on every registration.
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\TwinVPNService' `
+        -Name Environment -Type MultiString -Value @("TWINVPN_LOG_FILE=$SvcLog")
+}
+
+# Polls the management endpoint for up to $Seconds, and stops early once the
+# SCM says the service is STOPPED: a refused start used to be waited out for
+# the full window, and then reported as a bind timeout it never was.
+function Wait-ManagementEndpoint([int] $Seconds = 30) {
+    foreach ($i in 1..$Seconds) {
+        Invoke-Native { & $Ctl status get } | Out-Null
+        if ($LASTEXITCODE -eq 0) { return $true }
+        $q = Invoke-Native { & sc.exe query TwinVPNService }
+        if ($q -match 'STATE\s*:\s*\d+\s+STOPPED') { return $false }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+# What the SCM and the service itself have to say, as lines the lane scrapes.
+# Printed on every path so a success also records the state it reached.
+function Report-ServiceState {
+    $q = Invoke-Native { & sc.exe query TwinVPNService }
+    $state = if ($q -match 'STATE\s*:\s*\d+\s+([A-Z_]+)') { $Matches[1] } else { 'UNQUERYABLE' }
+    $w32   = if ($q -match 'WIN32_EXIT_CODE\s*:\s*(\d+)') { $Matches[1] } else { '?' }
+    $spec  = if ($q -match 'SERVICE_EXIT_CODE\s*:\s*(\d+)') { $Matches[1] } else { '?' }
+    $alive = [bool](Get-Process -Name twinvpnsvc -ErrorAction SilentlyContinue)
+    Say "TWINVPN_SERVICE_STATE state=$state win32_exit=$w32 service_exit=$spec process_alive=$alive"
+    Say 'TWINVPN_SERVICE_LOG_BEGIN'
+    if (Test-Path $SvcLog) { Get-Content -LiteralPath $SvcLog -Tail 60 | ForEach-Object { Say $_ } }
+    else { Say "(no service log at $SvcLog: the service never reached its logger, or the SCM did not pass TWINVPN_LOG_FILE)" }
+    Say 'TWINVPN_SERVICE_LOG_END'
+    Say 'TWINVPN_SCM_EVENTS_BEGIN'
+    Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager' } `
+                 -MaxEvents 200 -ErrorAction SilentlyContinue |
+        Where-Object { $_.Message -match 'TwinVPN' } | Select-Object -First 10 |
+        ForEach-Object { Say ("{0:o} id={1} {2}" -f $_.TimeCreated, $_.Id, ($_.Message -replace '\s+', ' ')) }
+    Say 'TWINVPN_SCM_EVENTS_END'
 }
 
 function Transition([string] $From, [string] $To) {
@@ -270,16 +328,12 @@ switch ($Step) {
     'service-up' {
         # The SHIPPED service, registered the way the MSI registers it.
         Register-TwinVpnService
-        Invoke-Native { & sc.exe start TwinVPNService } | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "sc.exe start TwinVPNService exited $LASTEXITCODE" }
+        $start = Invoke-Native { & sc.exe start TwinVPNService }
+        if ($LASTEXITCODE -ne 0) { Say $start.Trim(); Report-ServiceState; throw "sc.exe start TwinVPNService exited $LASTEXITCODE" }
         Transition 'SERVICE_ABSENT' 'SERVICE_RUNNING'
-        $ready = $false
-        foreach ($i in 1..30) {
-            Invoke-Native { & $Ctl status get } | Out-Null
-            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
-            Start-Sleep -Seconds 1
-        }
-        if (-not $ready) { throw 'TwinVPNService started but never bound its management endpoint' }
+        $ready = Wait-ManagementEndpoint 30
+        Report-ServiceState
+        if (-not $ready) { throw 'TwinVPNService started but never bound its management endpoint; TWINVPN_SERVICE_STATE above says what the SCM saw and TWINVPN_SERVICE_LOG what the service said' }
         Transition 'SERVICE_RUNNING' 'MANAGEMENT_READY'
         Say (Invoke-Native { & $Ctl --output json status get }).Trim()
     }
@@ -298,12 +352,11 @@ switch ($Step) {
     }
 
     'net-up' {
-        # NOT FATAL HERE. `net.up` refuses today -- the device has no overlay
-        # allocation, so `enforce::arm` returns AUTH.IDENTITY_MISSING and blocks
-        # the host on the way out. Aborting on that would destroy the evidence
-        # that says WHY the row is red, which is the only useful thing this run
-        # can currently produce. The exit code and the refusal are printed and
-        # the lane records them verbatim.
+        # NOT FATAL HERE. A refusal is a measured fact about the product on
+        # this host, and aborting on it would destroy the evidence that says
+        # WHY the row is red. The exit code and the refusal are printed and the
+        # lane records them verbatim; which reason code comes back is read from
+        # the output, never predicted here.
         $out = Invoke-Native { & $Ctl --output json net up }
         $code = $LASTEXITCODE
         Say "TWINVPN_NET_UP_EXIT $code"
@@ -371,11 +424,8 @@ switch ($Step) {
         Register-TwinVpnService
         Invoke-Native { & sc.exe start TwinVPNService } | Out-Null
         Transition 'SERVICE_KILLED' 'SERVICE_RUNNING'
-        foreach ($i in 1..30) {
-            Invoke-Native { & $Ctl status get } | Out-Null
-            if ($LASTEXITCODE -eq 0) { Transition 'SERVICE_RUNNING' 'MANAGEMENT_READY'; break }
-            Start-Sleep -Seconds 1
-        }
+        if (Wait-ManagementEndpoint 30) { Transition 'SERVICE_RUNNING' 'MANAGEMENT_READY' }
+        Report-ServiceState
         $out = Invoke-Native { & $Ctl --output json net up }
         Say "TWINVPN_RESTORE_NET_UP_EXIT $LASTEXITCODE"
         Say $out.Trim()

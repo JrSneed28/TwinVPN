@@ -83,14 +83,7 @@ def relay(listen: str, upstream: str, source: str, once: bool = False,
     down.bind((lhost, lport))
     if ready is not None:
         ready.set()
-    while True:
-        try:
-            query, client = down.recvfrom(4096)
-        except ConnectionResetError:
-            # Windows only: the device closed the port a previous answer went
-            # to, and its ICMP port-unreachable surfaces here as WSAECONNRESET
-            # on the next receive. Nothing arrived; the socket is still usable.
-            continue
+    def forward_one(query: bytes, client: tuple) -> None:
         # A NEW upstream socket per query, bound to the source address the
         # oracle is configured to recognise. Per query rather than once,
         # because a long-lived socket is state, and state is what a relay in a
@@ -106,12 +99,27 @@ def relay(listen: str, upstream: str, source: str, once: bool = False,
                 # NOT retried. A lost answer is a lost answer; inventing a
                 # second query would put an arrival at the oracle that the
                 # device never asked for.
-                continue
+                return
             down.sendto(answer, client)
         finally:
             up.close()
+
+    while True:
+        try:
+            query, client = down.recvfrom(4096)
+        except ConnectionResetError:
+            # Windows only: the device closed the port a previous answer went
+            # to, and its ICMP port-unreachable surfaces here as WSAECONNRESET
+            # on the next receive. Nothing arrived; the socket is still usable.
+            continue
+        # ONE THREAD PER QUERY, so a query the oracle never answers costs only
+        # its own three seconds. Serialised, one unanswered query held every
+        # query behind it: the sentinel's two-second cadence alone put the relay
+        # permanently behind, and the device's beacons never got through.
         if once:
+            forward_one(query, client)
             return
+        threading.Thread(target=forward_one, args=(query, client), daemon=True).start()
 
 
 def self_check() -> int:
