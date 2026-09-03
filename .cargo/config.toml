@@ -1,0 +1,14 @@
+# Windows binaries link the C runtime statically.
+#
+# A default MSVC build imports vcruntime140.dll, which is the Visual C++
+# Redistributable and not part of Windows. The kill-switch guest is a bare
+# LTSC image by design, so its loader refused the WFP precondition probe with
+# STATUS_DLL_NOT_FOUND (0xC0000135) before a single test ran; a user's machine
+# without the redistributable would refuse twinvpnsvc.exe the same way. The
+# UCRT the static runtime still calls into ships with Windows 10 and later.
+#
+# This file sits at the repository root so it governs every workspace that
+# builds for Windows (core, shells/windows, lab's oracle). The Windows CI
+# cache keys hash it: a flag change alters the artifacts.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -340,7 +340,7 @@ jobs:
             ~/.cargo/git/db
             core/target
             shells/windows/target
-          key: fwg-windows-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'core/Cargo.lock', 'shells/windows/Cargo.lock', 'build/ci/ci-windows.sh') }}
+          key: fwg-windows-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'core/Cargo.lock', 'shells/windows/Cargo.lock', 'build/ci/ci-windows.sh') }}
 
       - name: make ci-windows
         run: make ci-windows
@@ -813,7 +813,7 @@ jobs:
             core/target
             shells/windows/target
             lab/target
-          key: fwg-killswitch-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'core/Cargo.lock', 'shells/windows/Cargo.lock', 'lab/Cargo.lock', 'build/ci/ci-windows-killswitch.sh') }}
+          key: fwg-killswitch-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'core/Cargo.lock', 'shells/windows/Cargo.lock', 'lab/Cargo.lock', 'build/ci/ci-windows-killswitch.sh') }}
 
       # BEFORE the guest image is built, so a runner that cannot host one says
       # so in two minutes rather than after a 5 GB download.

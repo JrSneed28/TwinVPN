@@ -429,7 +429,7 @@ jobs:
             shells/android/jni/target
           key: >-
             twinvpn-cargo-${{ runner.os }}-${{ runner.arch }}-crosscheck-${{
-            hashFiles('rust-toolchain.toml') }}-${{
+            hashFiles('rust-toolchain.toml', '.cargo/config.toml') }}-${{
             hashFiles('core/Cargo.lock', 'shells/windows/Cargo.lock',
             'shells/macos/Cargo.lock', 'shells/android/jni/Cargo.lock') }}-${{
             hashFiles('core/Cargo.toml', 'shells/windows/Cargo.toml',

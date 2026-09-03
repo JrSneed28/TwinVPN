@@ -84,7 +84,13 @@ def relay(listen: str, upstream: str, source: str, once: bool = False,
     if ready is not None:
         ready.set()
     while True:
-        query, client = down.recvfrom(4096)
+        try:
+            query, client = down.recvfrom(4096)
+        except ConnectionResetError:
+            # Windows only: the device closed the port a previous answer went
+            # to, and its ICMP port-unreachable surfaces here as WSAECONNRESET
+            # on the next receive. Nothing arrived; the socket is still usable.
+            continue
         # A NEW upstream socket per query, bound to the source address the
         # oracle is configured to recognise. Per query rather than once,
         # because a long-lived socket is state, and state is what a relay in a
@@ -96,7 +102,7 @@ def relay(listen: str, upstream: str, source: str, once: bool = False,
             up.sendto(query, (uhost, uport))
             try:
                 answer, _ = up.recvfrom(4096)
-            except socket.timeout:
+            except (socket.timeout, ConnectionResetError):
                 # NOT retried. A lost answer is a lost answer; inventing a
                 # second query would put an arrival at the oracle that the
                 # device never asked for.
