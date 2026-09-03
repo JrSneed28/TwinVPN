@@ -423,6 +423,12 @@ fn run(
     // through `Core::create`; there is no separate durable-store open here.
     sequence.state_rehydrated = true;
 
+    // The lab guest's stand-in for the control plane and the pairing ceremony.
+    // Absent from `default`, and a no-op even here unless `TWINVPN_LAB_SEED_FILE`
+    // names a file. See `twinvpnsvc::lab_seed`.
+    #[cfg(feature = "lab-seed")]
+    twinvpnsvc::lab_seed::seed_from_env(&core)?;
+
     if !sequence.ready() {
         return Err(StartupRefusal::internal(format!(
             "the §11.6 start sequence did not complete: {:?} outstanding",

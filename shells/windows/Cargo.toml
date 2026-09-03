@@ -35,6 +35,11 @@ twinvpn-platform-windows = { version = "0.1.0", path = "../../core/crates/twinvp
 twinvpn-enforce          = { version = "0.1.0", path = "../../core/crates/twinvpn-enforce" }
 twinvpn-mgmt             = { version = "0.1.0", path = "../../core/crates/twinvpn-mgmt" }
 twinvpn-diag             = { version = "0.1.0", path = "../../core/crates/twinvpn-diag" }
+# **The `lab-seed` feature's dependency, and nothing else's.** CD-I2 is satisfied
+# by construction: this names `twinvpn-crypto`, which is the exempt crate, and no
+# cryptographic implementation — the same argument `shells/linux/twinvpnd` makes
+# for its own dev-dependency on it.
+twinvpn-crypto           = { version = "0.1.0", path = "../../core/crates/twinvpn-crypto" }
 
 thiserror = "2.0"
 anyhow    = "1.0"
