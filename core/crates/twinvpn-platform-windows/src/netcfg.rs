@@ -605,6 +605,11 @@ const fn compensation_of(ok: bool) -> Compensation {
 ///
 /// What step 5 of the service's start sequence renders, and what a caller
 /// probing the engine with the runtime set should render too.
+///
+/// # Panics
+///
+/// Never: the four covers are constants (`0.0.0.0/1`, `128.0.0.0/1`, `::/1`,
+/// `8000::/1`) that `IpPrefix::new` accepts, and the unit tests build them.
 #[must_use]
 pub fn prearming_contract() -> NetworkContract {
     use twinvpn_platform::{InterfaceIndex, RouteEntry};
