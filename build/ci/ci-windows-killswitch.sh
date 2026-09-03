@@ -426,7 +426,19 @@ transitions="$(grep -oE '^TWINVPN_LIFECYCLE_TRANSITION [A-Z_]+->[A-Z_]+$' "$GUES
 environment="$(scrape_env "$PRECOND_LOG" "$ARMED_LOG")"
 [ -n "$environment" ] || environment='"wfp_preconditions_measured": false'
 
-notes="the L1 controller holds the oracle control token and the guest holds none, so the ARMED window's attempt counts survive a working kill switch. EXECUTED: guest built and booted, binaries copied and digest-verified on both sides, WFP preconditions measured in the guest, oracle and sentinel up in-box with a measured sentinel egress identity, BASELINE OBSERVE seen by the oracle, net up executed. BLOCKED ON: net up exited $NET_UP_EXIT and cannot arm -- the device has no overlay allocation, so enforce::arm refuses with AUTH.IDENTITY_MISSING (enforce.rs:185) and blocks the host. Four product walls stand behind it: no production writer for put_local_overlay, no peer with a verified tunnel key binding, RoutingMode::TwinnetOnly installing no default route, and no protected resolver bound anywhere. The remaining phases still ran and their results are measured, not assumed. graceful_shutdown is FALSE and that is the point: step 5 kills the service rather than asking it to stop."
+# THE NOTES ARE READ OUT OF WHAT THE GUEST MEASURED, NOT WRITTEN HERE. This
+# lane used to interpolate a fixed story that ended at `net up` refusing
+# AUTH.IDENTITY_MISSING, which was a source-review prediction and not a
+# measurement: the first guest run that got this far found the service never
+# reaching SERVICE_RUNNING, and the story would have said otherwise.
+net_up_reason="$(sed -n '/^TWINVPN_NET_UP_OUTPUT_BEGIN/,/^TWINVPN_NET_UP_OUTPUT_END/p' "$GUESTLOG" \
+  | grep -oE '"reason_code":"[^"]+"' | head -1 | cut -d'"' -f4)"
+if [ "$SERVICE_UP_EXIT" = "0" ]; then
+  service_note="TwinVPNService started and bound its management endpoint"
+else
+  service_note="TwinVPNService did not start: the guest's service-up step exited $SERVICE_UP_EXIT; guest.log carries sc.exe's error (1053 is the SCM's start timeout, which a process that never calls StartServiceCtrlDispatcherW always earns)"
+fi
+notes="the L1 controller holds the oracle control token and the guest holds none, so the ARMED window's attempt counts survive a working kill switch. EXECUTED: guest built and booted, binaries copied and digest-verified on both sides, WFP preconditions measured in the guest, oracle and sentinel up in-box with a measured sentinel egress identity, BASELINE OBSERVE seen by the oracle, service-up and net up attempted. MEASURED: $service_note; net up exited $NET_UP_EXIT with reason_code ${net_up_reason:-<none>}; the armed read-back exited $ARMED_EXIT. NOT YET REACHED, known from source review: once the service runs, enforce::arm refuses AUTH.IDENTITY_MISSING without an overlay allocation (enforce.rs:185), and four product walls stand behind it: no production writer for put_local_overlay, no peer with a verified tunnel key binding, RoutingMode::TwinnetOnly installing no default route, and no protected resolver bound anywhere. The remaining phases still ran and their results are measured, not assumed. graceful_shutdown is FALSE and that is the point: step 5 kills the service rather than asking it to stop."
 
 verdict=FAIL
 if [ "$oracle_verdict" = "PASS" ] && [ "$SERVICE_UP_EXIT" = "0" ] \
