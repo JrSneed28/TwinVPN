@@ -54,6 +54,16 @@ core-lite = []
 # CI runner". Never shipped.
 test-support = ["twinvpn-platform/mock", "twinvpn-env/test-support"]
 
+# `lab/twinpeer`'s surface. Turns on `pub mod lab`, which re-exports the
+# establishment chain's entry points so a TwinLab peer can speak L-DATA to a
+# real device instead of the lane having to fake a tunnel.
+#
+# It implies `full` because the handshake and the pump live behind that feature,
+# and it is deliberately absent from BOTH `default` and `full`: a shipped build
+# has no reason to publish `execute::handshake`, and a feature that `full` turned
+# on would be published by every shell in the workspace. Never shipped.
+lab-peer = ["full"]
+
 [dependencies]
 # -- always present: the core-lite set (§11.12) -----------------------------
 twinvpn-types         = { workspace = true }
