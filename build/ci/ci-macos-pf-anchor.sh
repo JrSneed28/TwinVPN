@@ -44,7 +44,7 @@
 # the anchor's own label counters, evaluations AND packets, rising (G-35).
 #
 
-# shellcheck disable=SC2024  # sudo output is redirected by the unprivileged shell on purpose: the upload step must read the log
+# shellcheck disable=SC2024  # sudo output redirected by the unprivileged shell on purpose
 
 set -euo pipefail
 
@@ -278,9 +278,8 @@ if [ -n "$probe_v6_iface" ]; then
     sleep 0.5
   done
   ifconfig "$probe_v6_iface" inet6 >> "$LOGDIR/pf-probe-route.txt" 2>&1 || true
-  # VIA A STATIC NEIGHBOUR: an on-link route left the SYN on neighbour
-  # discovery and connect() failed before pf ran; a link-local gateway with a
-  # static ndp entry needs no resolution, so the packet reaches pf's output.
+  # VIA A STATIC NEIGHBOUR: a link-local gateway with a static ndp entry needs
+  # no neighbour discovery, so the SYN reaches pf's output hook.
   PROBE_V6_GW="fe80::dead:beef:1%$probe_v6_iface"
   if sudo -n ndp -s "$PROBE_V6_GW" 02:00:00:00:be:ef >> "$LOGDIR/pf-probe-route.txt" 2>&1 \
      && sudo -n route -n add -inet6 "${PROBE_V6%::1}::/48" "$PROBE_V6_GW" \
@@ -360,6 +359,7 @@ source "$REPO/build/ci/ci-common-apple.sh"
 # nobody reviewed — which is the whole reason this assertion exists.
 apple_require_pinned_swift
 apple_require_xcodegen
+rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null  # universal 2; run 10 lost them to a cache miss
 "$SHELL_DIR/Scripts/build-bridge.sh" --profile release 2>&1 \
   | tee "$LOGDIR/pf-anchor-build-core.log"
 compiled=true
