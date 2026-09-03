@@ -296,7 +296,7 @@ impl WindowsNetworkConfig {
         contract: Option<&NetworkContract>,
     ) -> Result<ProtectionAssertion, PlatformError> {
         self.shutdown.check()?;
-        let blocked = self.render(contract.unwrap_or(&blank_contract()), Ruleset::Blocked);
+        let blocked = self.render(contract.unwrap_or(&prearming_contract()), Ruleset::Blocked);
         let observed = self.assert_protection(Some(&blocked))?;
         // Reclaimed, not recreated (KS-20, PS-8): if the engine already holds a
         // fail-closed **runtime** set, leave it exactly where it is. KS-23
@@ -585,15 +585,56 @@ const fn compensation_of(ok: bool) -> Compensation {
 /// still produces a set that denies the overlay space in both families, because
 /// [`wfp::baseline_protected`] is a floor beneath every render — which is
 /// `desktop-linux`'s R-6 finding, and the reason a blank contract is safe here.
-/// The contract in force before any session exists: no addresses, no routes,
-/// no resolvers, `Blocked`. What step 5 of the service's start sequence renders
-/// and what a caller probing the engine with the runtime set should render too.
+/// The contract in force before any session exists: no addresses, no
+/// resolvers, `Blocked` — and a Tier-1 scope that is EVERYTHING.
+///
+/// The routes are the two `/1` covers per family that `twinvpn-route` uses for
+/// a full tunnel, so [`wfp::filters::scope_mode`] reads `Complement` and the
+/// scope deny covers every destination rather than only the overlay space.
+/// Without them the pre-contract `Blocked` posture was `Bounded`: DNS and the
+/// overlay space denied, everything else permitted — which the hosted
+/// kill-switch lane measured (run 33721689011: DNS 0 of 6 arrived while
+/// armed, HTTP 6 of 6). A host that reports `Blocked` before it has a contract
+/// must be closed, not closed-for-the-overlay-only; ADR-0012 §8 and PS-18 say
+/// so, and the KS-19 boot artifact that the package installs says the same
+/// thing about the interval before the service.
+///
+/// The routes are rendered into filters only. Nothing programs them: this
+/// contract is what `reclaim` and a posture swap with no superseded contract
+/// render, never what `apply` installs.
+///
+/// What step 5 of the service's start sequence renders, and what a caller
+/// probing the engine with the runtime set should render too.
 #[must_use]
-pub fn blank_contract() -> NetworkContract {
+pub fn prearming_contract() -> NetworkContract {
+    use twinvpn_platform::{InterfaceIndex, RouteEntry};
+    use twinvpn_types::{IpAddr, IpPrefix, V4Addr, V6Addr};
+    let v4 = |first: u8| {
+        IpPrefix::new(IpAddr::V4(V4Addr::from_octets([first, 0, 0, 0])), 1)
+            .expect("a /1 with no host bits is well formed")
+    };
+    let v6 = |first: u8| {
+        let mut octets = [0u8; 16];
+        octets[0] = first;
+        IpPrefix::new(
+            IpAddr::V6(V6Addr::prefix_base(octets).expect("a zoneless prefix base")),
+            1,
+        )
+        .expect("a /1 with no host bits is well formed")
+    };
+    let cover = |destination: IpPrefix| RouteEntry {
+        destination,
+        via: None,
+        interface: InterfaceIndex(0),
+        metric: None,
+    };
     NetworkContract {
         generation: ContractGeneration(0),
         addresses: PerFamily::new(Vec::new(), Vec::new()),
-        routes: PerFamily::new(Vec::new(), Vec::new()),
+        routes: PerFamily::new(
+            vec![cover(v4(0)), cover(v4(128))],
+            vec![cover(v6(0)), cover(v6(0x80))],
+        ),
         dns: twinvpn_platform::DnsConfig {
             resolvers: PerFamily::new(Vec::new(), Vec::new()),
             search_domains: Vec::new(),
@@ -655,7 +696,7 @@ impl NetworkConfig for WindowsNetworkConfig {
                     .find(|(g, _)| *g == generation)
                     .map(|(_, s)| s.contract.clone())
             };
-            let contract = contract.unwrap_or_else(blank_contract);
+            let contract = contract.unwrap_or_else(prearming_contract);
             self.commit(&self.render(&contract, ruleset))
         })
     }

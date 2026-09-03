@@ -214,7 +214,7 @@ fn the_runtime_ruleset_is_accepted_by_the_engine_without_being_committed() {
         doh_endpoints: Vec::new(),
     };
     let set = wfp::filters::render(
-        &twinvpn_platform_windows::netcfg::blank_contract(),
+        &twinvpn_platform_windows::netcfg::prearming_contract(),
         wfp::Ruleset::Blocked,
         &config,
     );
