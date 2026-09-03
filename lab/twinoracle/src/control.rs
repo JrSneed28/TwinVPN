@@ -362,7 +362,8 @@ mod tests {
         ];
         for (field, want) in cases {
             let body = format!(r#"{{"phase":"BASELINE","expectation":"OBSERVE",{field}}}"#);
-            let req: PhaseRequest = serde_json::from_str(&body).unwrap_or_else(|e| panic!("{body}: {e}"));
+            let req: PhaseRequest =
+                serde_json::from_str(&body).unwrap_or_else(|e| panic!("{body}: {e}"));
             assert_eq!(req.path, want, "{body}");
         }
     }

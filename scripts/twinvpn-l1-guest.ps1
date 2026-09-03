@@ -170,7 +170,7 @@ function Report-ServiceState {
     Say "TWINVPN_SERVICE_STATE state=$state win32_exit=$w32 service_exit=$spec process_alive=$alive"
     Say 'TWINVPN_SERVICE_LOG_BEGIN'
     if (Test-Path $SvcLog) { Get-Content -LiteralPath $SvcLog -Tail 60 | ForEach-Object { Say $_ } }
-    else { Say "(no service log at $SvcLog: the service never reached its logger, or the SCM did not pass TWINVPN_LOG_FILE)" }
+    else { Say "(no service log at ${SvcLog}: the service never reached its logger, or the SCM did not pass TWINVPN_LOG_FILE)" }
     Say 'TWINVPN_SERVICE_LOG_END'
     Say 'TWINVPN_SCM_EVENTS_BEGIN'
     Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager' } `

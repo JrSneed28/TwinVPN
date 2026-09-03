@@ -220,7 +220,11 @@ mod tests {
         assert_eq!(reply[2] & 0x04, 0, "AA must be clear: this is not our zone");
         assert_eq!(reply[3] & 0x0f, 5, "RCODE must be REFUSED");
         assert_eq!(u16::from_be_bytes([reply[6], reply[7]]), 0, "ANCOUNT");
-        assert_eq!(&reply[12..], &q[12..12 + parsed.question_len], "the question is echoed");
+        assert_eq!(
+            &reply[12..],
+            &q[12..12 + parsed.question_len],
+            "the question is echoed"
+        );
     }
 
     #[test]
