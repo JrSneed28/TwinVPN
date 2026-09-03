@@ -89,25 +89,25 @@ function Get-PinnedIso([string] $Path) {
         $id = [int](Get-Content -LiteralPath $IsoPid)
         Write-Host "waiting for the prefetched ISO download (pid $id)"
         $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
-        if ($proc) { $proc.WaitForExit() }
-        Remove-Item -LiteralPath $IsoPid -Force -ErrorAction SilentlyContinue
-        if (-not (Test-Path $IsoPart) -or (Get-Item $IsoPart).Length -ne $IsoBytes) {
-            throw ("the prefetched ISO download did not complete: expected $IsoBytes bytes at $IsoPart, " +
-                   "found $(if (Test-Path $IsoPart) { (Get-Item $IsoPart).Length } else { 'no file' })")
+        # BOUNDED. Run 33733330258 sat in this wait for the whole job: the
+        # background curl neither finished nor died, and an unbounded
+        # WaitForExit turned a slow CDN into a 90-minute timeout with no
+        # evidence. A prefetch that has not finished in 25 minutes is killed
+        # and the foreground download below takes over from what it left.
+        if ($proc -and -not $proc.WaitForExit(25 * 60 * 1000)) {
+            Write-Warning "the prefetch (pid $id) did not finish within 25 minutes; killing it and downloading in the foreground"
+            try { $proc.Kill() } catch { }
         }
-        Move-Item -LiteralPath $IsoPart -Destination $Path -Force
+        Remove-Item -LiteralPath $IsoPid -Force -ErrorAction SilentlyContinue
+        if ((Test-Path $IsoPart) -and (Get-Item $IsoPart).Length -eq $IsoBytes) {
+            Move-Item -LiteralPath $IsoPart -Destination $Path -Force
+        } else {
+            $have = if (Test-Path $IsoPart) { (Get-Item $IsoPart).Length } else { 0 }
+            Write-Warning "the prefetched ISO is incomplete ($have of $IsoBytes bytes); resuming the download in the foreground"
+            Get-PinnedIsoForeground $Path
+        }
     } else {
-        Write-Host "downloading the evaluation ISO ($([math]::Round($IsoBytes / 1GB, 1)) GB)"
-        # `curl.exe` is in-box since Windows 10 1803 and streams to disk;
-        # Invoke-WebRequest buffers and is unusable at this size. Its stderr is
-        # not an exception -- the exit code is what says whether it worked, and
-        # under `Stop` a progress or diagnostic line would terminate the step
-        # before the check below could name the failure.
-        $previous = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try { & curl.exe -sS --fail --location --retry 3 --retry-delay 10 -o $Path $IsoUrl 2>&1 | Write-Host }
-        finally { $ErrorActionPreference = $previous }
-        if ($LASTEXITCODE -ne 0) { throw "the ISO download failed (curl exit $LASTEXITCODE)" }
+        Get-PinnedIsoForeground $Path
     }
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLower()
     if ($actual -ne $IsoSha256) {
@@ -119,6 +119,23 @@ function Get-PinnedIso([string] $Path) {
     }
     Write-Host "ISO verified against its pinned SHA-256 ($actual)"
 }
+
+# The foreground download, resuming a partial `.part` when one exists.
+function Get-PinnedIsoForeground([string] $Path) {
+    Write-Host "downloading the evaluation ISO ($([math]::Round($IsoBytes / 1GB, 1)) GB)"
+    # `curl.exe` is in-box since Windows 10 1803 and streams to disk;
+    # Invoke-WebRequest buffers and is unusable at this size. Its stderr is
+    # not an exception -- the exit code is what says whether it worked, and
+    # under `Stop` a progress or diagnostic line would terminate the step
+    # before the check below could name the failure.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & curl.exe -sS --fail --location --retry 3 --retry-delay 10 --continue-at - -o $IsoPart $IsoUrl 2>&1 | Write-Host }
+    finally { $ErrorActionPreference = $previous }
+    if ($LASTEXITCODE -ne 0) { throw "the ISO download failed (curl exit $LASTEXITCODE)" }
+    Move-Item -LiteralPath $IsoPart -Destination $Path -Force
+}
+
 
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
 $IsoPart = Join-Path $WorkDir 'win11-ltsc-eval.iso.part'
