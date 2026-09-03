@@ -39,10 +39,9 @@ use windows_sys::Win32::Security::Cryptography::{
     NCryptFreeObject, NCryptOpenKey, NCryptOpenStorageProvider, NCryptProtectSecret,
     NCryptSetProperty, NCryptSignHash, NCryptUnprotectSecret, BCRYPT_ALG_HANDLE,
     BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDSA_P256_ALGORITHM, BCRYPT_ECDSA_PUBLIC_P256_MAGIC,
-    BCRYPT_SHA256_ALGORITHM, MS_KEY_STORAGE_PROVIDER, MS_PLATFORM_KEY_STORAGE_PROVIDER,
-    NCRYPT_ALLOW_SIGNING_FLAG, NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_KEY_HANDLE,
-    NCRYPT_KEY_USAGE_PROPERTY, NCRYPT_MACHINE_KEY_FLAG, NCRYPT_PERSIST_FLAG, NCRYPT_PROV_HANDLE,
-    NCRYPT_SILENT_FLAG,
+    MS_KEY_STORAGE_PROVIDER, MS_PLATFORM_KEY_STORAGE_PROVIDER, NCRYPT_ALLOW_SIGNING_FLAG,
+    NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_KEY_HANDLE, NCRYPT_KEY_USAGE_PROPERTY,
+    NCRYPT_MACHINE_KEY_FLAG, NCRYPT_PERSIST_FLAG, NCRYPT_PROV_HANDLE, NCRYPT_SILENT_FLAG,
 };
 use windows_sys::Win32::Security::NCRYPT_DESCRIPTOR_HANDLE;
 
@@ -293,6 +292,26 @@ fn create_identity_key(provider: &Provider, container: &str) -> Result<Key, Plat
     Ok(key)
 }
 
+/// `BCRYPT_SHA256_ALG_HANDLE`, the one-shot pseudo-handle `BCryptHash` takes.
+///
+/// **Recorded here because `windows-sys` 0.61.2 does not export it.** The value
+/// is `bcrypt.h`'s, Windows SDK 10.0.26100.0 line 1022:
+/// `#define BCRYPT_SHA256_ALG_HANDLE ((BCRYPT_ALG_HANDLE) 0x00000041)`. It is
+/// a sentinel the OS recognises and never a pointer to anything, which is what
+/// [`core::ptr::without_provenance_mut`] says in the type system.
+///
+/// This replaces a cast of `BCRYPT_SHA256_ALGORITHM` — the algorithm *string* —
+/// to a handle, which is not the pseudo-handle form and which the first real
+/// execution of this module refused with `STATUS_INVALID_HANDLE` (0xC0000008).
+/// That is exactly the class of defect the module header warns about: "`make
+/// cross-check` type-checks it against the real `windows-sys` and proves
+/// nothing about its behaviour". A wrong value here cannot be silent — the
+/// width is checked by the call, and `provisioning_creates_a_signing_key_…`
+/// exercises it on a Windows host.
+fn sha256_pseudo_handle() -> BCRYPT_ALG_HANDLE {
+    core::ptr::without_provenance_mut::<core::ffi::c_void>(0x0000_0041)
+}
+
 /// SHA-256, through the platform's own hash rather than a crate.
 ///
 /// See the module documentation for why this reading of CD-I2 is a judgement:
@@ -301,9 +320,7 @@ fn create_identity_key(provider: &Provider, container: &str) -> Result<Key, Plat
 /// designate for platform primitives.
 fn sha256(input: &[u8]) -> Result<[u8; 32], PlatformError> {
     let mut out = [0u8; 32];
-    let algorithm: BCRYPT_ALG_HANDLE = BCRYPT_SHA256_ALGORITHM
-        .cast::<core::ffi::c_void>()
-        .cast_mut();
+    let algorithm: BCRYPT_ALG_HANDLE = sha256_pseudo_handle();
     // SAFETY: `input` and `out` are live slices whose true byte lengths are
     // passed; `BCryptHash` with a pseudo-handle algorithm identifier writes at
     // most `out.len()` bytes and retains no pointer. The pseudo-handle form is
