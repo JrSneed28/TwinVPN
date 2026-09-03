@@ -40,11 +40,11 @@
 # counter moved — the counter being the load-bearing half, because a failed
 # connect alone is equally well explained by a host with no route.
 #
-# THE CONTROL IS LOOPBACK AND ONLY A SANITY CHECK: 127.0.0.1 is in neither
-# table, so it survives whether or not the anchor is evaluated. What PROVES
-# evaluation is the anchor's own label counters: evaluations AND packets on
-# `twinvpn.deny.v4`/`.v6` must both rise across the covered connect (G-35).
+# THE CONTROL IS LOOPBACK AND ONLY A SANITY CHECK; what PROVES evaluation is
+# the anchor's own label counters, evaluations AND packets, rising (G-35).
 #
+
+# shellcheck disable=SC2024  # sudo output is redirected by the unprivileged shell on purpose: the upload step must read the log
 
 set -euo pipefail
 

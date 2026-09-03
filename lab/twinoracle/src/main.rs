@@ -232,7 +232,9 @@ async fn main() -> std::io::Result<()> {
 
     {
         let (state, cfg, token) = (state.clone(), cfg.clone(), token.clone());
-        let listener = TcpListener::bind(cfg.control).await.map_err(|e| std::io::Error::new(e.kind(), format!("bind {}: {e}", cfg.control)))?;
+        let listener = TcpListener::bind(cfg.control)
+            .await
+            .map_err(|e| std::io::Error::new(e.kind(), format!("bind {}: {e}", cfg.control)))?;
         tracing::info!(addr = %cfg.control, "control plane listening");
         tasks.push(tokio::spawn(async move {
             loop {
@@ -254,7 +256,9 @@ async fn main() -> std::io::Result<()> {
         // guess. `TcpListener::bind` on a `[::]` address under tokio inherits
         // the OS default, so the deployment MUST set `net.ipv6.bindv6only=1`;
         // the mapped-address check below is the belt to that braces.
-        let listener = TcpListener::bind(addr).await.map_err(|e| std::io::Error::new(e.kind(), format!("bind {}: {e}", addr)))?;
+        let listener = TcpListener::bind(addr)
+            .await
+            .map_err(|e| std::io::Error::new(e.kind(), format!("bind {}: {e}", addr)))?;
         tracing::info!(%addr, family = family.as_str(), "beacon listening");
         tasks.push(tokio::spawn(async move {
             loop {
@@ -271,7 +275,9 @@ async fn main() -> std::io::Result<()> {
         let Some(addr) = addr else { continue };
         let state = state.clone();
         let cfg = cfg.clone();
-        let sock = UdpSocket::bind(addr).await.map_err(|e| std::io::Error::new(e.kind(), format!("bind {}: {e}", addr)))?;
+        let sock = UdpSocket::bind(addr)
+            .await
+            .map_err(|e| std::io::Error::new(e.kind(), format!("bind {}: {e}", addr)))?;
         tracing::info!(%addr, "dns listening");
         tasks.push(tokio::spawn(
             async move { dns_loop(sock, state, cfg).await },
