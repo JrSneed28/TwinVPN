@@ -724,9 +724,14 @@ pub fn app_id_for(path: &std::path::Path) -> Result<String, PlatformError> {
     // SAFETY: the blob is a UTF-16 string of `size` bytes (NUL included) that
     // the engine allocated; it is read once and freed exactly once.
     let app_id = unsafe {
-        let units =
-            core::slice::from_raw_parts((*blob).data.cast::<u16>(), (*blob).size as usize / 2);
-        let text = super::wide_from_utf16(units);
+        // Byte-wise, then paired: the engine's buffer carries no alignment
+        // promise a `*const u16` could rely on.
+        let bytes = core::slice::from_raw_parts((*blob).data, (*blob).size as usize);
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let text = super::wide_from_utf16(&units);
         FwpmFreeMemory0((&raw mut blob).cast::<*mut core::ffi::c_void>());
         text
     };
@@ -1431,7 +1436,12 @@ mod tests {
         let app_id = app_id_for(&exe).expect("the engine resolves an existing file");
         assert!(app_id.starts_with("\\device\\"), "{app_id}");
         assert_eq!(app_id, app_id.to_lowercase(), "{app_id}");
-        assert!(app_id.ends_with(".exe"), "{app_id}");
+        assert!(
+            std::path::Path::new(&app_id)
+                .extension()
+                .is_some_and(|e| e == "exe"),
+            "{app_id}"
+        );
         assert!(app_id_for(std::path::Path::new(r"C:\no\such\file.exe")).is_err());
     }
 }
