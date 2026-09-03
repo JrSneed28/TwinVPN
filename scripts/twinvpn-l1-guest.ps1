@@ -93,6 +93,21 @@ function Invoke-Native([scriptblock] $Command) {
 # One marker per transition the guest ACTUALLY observed. The lane greps these
 # out and puts them in `lifecycle_transitions`, exactly as `ci-linux.sh` does --
 # a hard-coded list reports the same thing whether or not anything happened.
+function Register-TwinVpnService {
+    # THE WAY THE MSI REGISTERS IT (shells/windows/packaging/TwinVPN.wxs):
+    # LocalSystem, the unrestricted service SID, and RequiredPrivileges trimmed
+    # to ADR-0016 §11.9's three. The trim is load-bearing: the service verifies
+    # its own posture at startup and refuses a token holding SeDebugPrivilege or
+    # SeTcbPrivilege, which a LocalSystem service registered by a bare
+    # `sc.exe create` always does.
+    Invoke-Native { & sc.exe create TwinVPNService binPath= "$Svc" start= demand } | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "sc.exe create TwinVPNService exited $LASTEXITCODE" }
+    Invoke-Native { & sc.exe sidtype TwinVPNService unrestricted } | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "sc.exe sidtype TwinVPNService exited $LASTEXITCODE" }
+    Invoke-Native { & sc.exe privs TwinVPNService SeChangeNotifyPrivilege/SeImpersonatePrivilege/SeLoadDriverPrivilege } | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "sc.exe privs TwinVPNService exited $LASTEXITCODE" }
+}
+
 function Transition([string] $From, [string] $To) {
     Write-Output "TWINVPN_LIFECYCLE_TRANSITION $From->$To"
 }
@@ -240,7 +255,7 @@ switch ($Step) {
 
     'service-up' {
         # The SHIPPED service, registered the way the MSI registers it.
-        Invoke-Native { & sc.exe create TwinVPNService binPath= "$Svc" start= demand } | Out-Null
+        Register-TwinVpnService
         Invoke-Native { & sc.exe start TwinVPNService } | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "sc.exe start TwinVPNService exited $LASTEXITCODE" }
         Transition 'SERVICE_ABSENT' 'SERVICE_RUNNING'
@@ -339,7 +354,7 @@ switch ($Step) {
 
     'restore' {
         Invoke-Native { & sc.exe delete TwinVPNService } | Out-Null
-        Invoke-Native { & sc.exe create TwinVPNService binPath= "$Svc" start= demand } | Out-Null
+        Register-TwinVpnService
         Invoke-Native { & sc.exe start TwinVPNService } | Out-Null
         Transition 'SERVICE_KILLED' 'SERVICE_RUNNING'
         foreach ($i in 1..30) {
