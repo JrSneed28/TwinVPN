@@ -304,8 +304,11 @@ fi
 # both logs in one pass, so "no facts at all" is an empty string rather than a
 # pipeline failure or a stray comma.
 scrape_env() {
-  awk '/^TWINVPN_PRECONDITION [A-Za-z0-9_]+=/ {
-         sub(/\r$/, ""); sub(/^TWINVPN_PRECONDITION /, "");
+  # NOT anchored at the line start: under `--nocapture` the harness prints
+  # `test <name> ... ` without a newline, so a test's first fact shares that
+  # line, and an anchored match dropped three of the four facts.
+  awk '/TWINVPN_PRECONDITION [A-Za-z0-9_]+=/ {
+         sub(/\r$/, ""); sub(/^.*TWINVPN_PRECONDITION /, "");
          i = index($0, "="); k = substr($0, 1, i-1); v = substr($0, i+1);
          if (v == "true" || v == "false" || v ~ /^-?[0-9]+$/) printf "%s\"%s\": %s", sep, k, v;
          else { gsub(/"/, "", v); printf "%s\"%s\": \"%s\"", sep, k, v; }
