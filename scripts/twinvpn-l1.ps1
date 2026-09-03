@@ -241,6 +241,15 @@ function New-Fabric {
     New-NetFirewallRule -DisplayName $FwRule -Direction Inbound -Action Allow `
         -Protocol ICMPv6 -IcmpType 128 `
         -LocalAddress @($L1GuestV6, $OracleV6, $SentinelV6, $ResolverV6) | Out-Null
+    # AND an allow scoped to the two lab vNICs themselves. Run 9 had ICMP
+    # answered on both hops and tcp/8080 still refused with the port rule in
+    # place; the guest is the only peer on these switches, so an
+    # interface-scoped allow is as narrow as the port rule in practice and
+    # removes the whole class. Blocked packets are logged so the next refusal
+    # names its rule instead of being inferred.
+    New-NetFirewallRule -DisplayName $FwRule -Direction Inbound -Action Allow `
+        -InterfaceAlias @($NicGuest, $NicOracle) | Out-Null
+    Set-NetFirewallProfile -All -LogBlocked True -LogFileName "$env:SystemRoot\System32\LogFiles\Firewall\pfirewall.log" -ErrorAction SilentlyContinue
     Write-Host "fabric up: $SwGuest ($L1GuestV4, $L1GuestV6) and $SwOracle ($OracleV4, $OracleV6)"
 }
 
@@ -538,6 +547,15 @@ switch ($Action) {
                 Copy-Item -Path (Join-Path $RunDir '*.out'), (Join-Path $RunDir '*.err'), `
                                 (Join-Path $RunDir '*.log') `
                           -Destination $logsOut -Force -ErrorAction SilentlyContinue
+                # What L1's firewall held and dropped, for the reachability diagnosis.
+                Get-NetFirewallRule -DisplayName $FwRule -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_ | Get-NetFirewallPortFilter; $_ | Get-NetFirewallAddressFilter; $_ | Get-NetFirewallInterfaceFilter } |
+                    Out-String | Set-Content -LiteralPath (Join-Path $logsOut 'l1-firewall-rules.txt')
+                Copy-Item -Path "$env:SystemRoot\System32\LogFiles\Firewall\pfirewall.log" `
+                          -Destination (Join-Path $logsOut 'l1-pfirewall.log') -Force -ErrorAction SilentlyContinue
+                Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LocalPort -in $OraclePort, 8443 } | Out-String |
+                    Set-Content -LiteralPath (Join-Path $logsOut 'l1-listeners.txt')
             } catch { Write-Host "could not copy the run directory's logs: $_" }
             # On every path including a throw and a cancellation. A guest left
             # running holds a differencing disk and, having installed persistent
