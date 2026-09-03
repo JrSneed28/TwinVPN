@@ -212,10 +212,14 @@ extern "system" fn service_main(_argc: u32, _argv: *mut twinvpnsvc::win32::scm::
 /// Never a bare message: the registered code is the contract, and the sentence
 /// is for a human reading the Event Log.
 fn report_refusal(refusal: &StartupRefusal) {
+    // `detail` is on the log line as well as on stderr: under the SCM there
+    // is no stderr, and the hosted kill-switch lane measured a refusal whose
+    // code (POLICY.KILLSWITCH.ARM_FAILED) survived and whose reason did not.
     tracing::error!(
         target: "twinvpn.service",
         reason_code = refusal.code,
         specified_code = refusal.specified,
+        detail = %refusal.detail,
         "the service cannot start"
     );
     eprintln!("twinvpnsvc: {}: {}", refusal.code, refusal.detail);

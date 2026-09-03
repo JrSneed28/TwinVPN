@@ -464,7 +464,9 @@ net_up_reason="$(sed -n '/^TWINVPN_NET_UP_OUTPUT_BEGIN/,/^TWINVPN_NET_UP_OUTPUT_
 # handshake and refused three steps later.
 service_state="$(grep -E '^TWINVPN_SERVICE_STATE ' "$GUESTLOG" | head -1 | sed 's/^TWINVPN_SERVICE_STATE //')"
 service_said="$(sed -n '/^TWINVPN_SERVICE_LOG_BEGIN$/,/^TWINVPN_SERVICE_LOG_END$/p' "$GUESTLOG" \
-  | grep -E '"level":"(ERROR|WARN)"|the service cannot start' | head -1 | tr -d '"' | cut -c1-400)"
+  | grep -E 'the service cannot start' | head -1 | tr -d '"' | cut -c1-600)"
+[ -n "$service_said" ] || service_said="$(sed -n '/^TWINVPN_SERVICE_LOG_BEGIN$/,/^TWINVPN_SERVICE_LOG_END$/p' "$GUESTLOG" \
+  | grep -E '"level":"(ERROR|WARN)"' | head -1 | tr -d '"' | cut -c1-400)"
 if [ "$SERVICE_UP_EXIT" = "0" ]; then
   service_note="TwinVPNService started and bound its management endpoint (${service_state:-state unrecorded})"
 else
