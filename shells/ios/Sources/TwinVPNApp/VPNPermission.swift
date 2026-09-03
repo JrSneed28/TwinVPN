@@ -64,7 +64,16 @@ final class VPNPermission: ObservableObject {
     /// `tw_render_diagnostic` with an explicit `platform_ctx`.
     @Published private(set) var reasonCode: String?
 
-    private var manager: NETunnelProviderManager?
+    /// The profile the OS currently has, or `nil`.
+    ///
+    /// Readable so `ManagementClient.attach(to:)` binds its session to the SAME
+    /// object this type loaded. The alternative — the channel calling
+    /// `loadAllFromPreferences` itself — would give the app two manager objects
+    /// for one profile and two answers to "is it enabled", which is the shape
+    /// PS-24 condition 2 exists to prevent.
+    ///
+    /// `private(set)`: this type is the one writer.
+    private(set) var manager: NETunnelProviderManager?
 
     /// How this object asks the OS what configuration exists.
     ///
@@ -127,34 +136,62 @@ final class VPNPermission: ObservableObject {
     /// ADR-0019 §11.10 (a): `NEVPNManager.saveToPreferences` → system prompt plus
     /// passcode or biometric.
     ///
-    /// On refusal this sets `.denied` and a registered code, and **returns**. It
-    /// does not retry, does not escalate, and does not disable anything else in
-    /// the app.
+    /// On refusal this sets a registered code and **returns**. It does not
+    /// escalate and does not disable anything else in the app. The one retry it
+    /// performs is `saveWithOneStaleRetry`'s, which is mechanical and is not a
+    /// policy.
     func install(enforcement: EnforcementProgramme) async {
         let manager = self.manager ?? NETunnelProviderManager()
         configure(manager, with: enforcement)
 
         do {
-            try await manager.saveToPreferences()
-            // `NEVPNErrorConfigurationStale` is the one condition worth retrying
-            // ONCE: the profile in preferences moved under us between the load
-            // and the save. Rust classes it Transient; the retry is mechanical
-            // and is not a policy.
+            try await saveWithOneStaleRetry(manager, enforcement: enforcement)
             try await manager.loadFromPreferences()
             self.manager = manager
             state = .installed
             reasonCode = nil
         } catch let error as NSError where error.domain == NEVPNErrorDomain {
-            // Declining the sheet arrives as `configurationReadWriteFailed`, and
-            // switching the profile off later arrives as `configurationDisabled`.
-            // Both are the GRANT, which is why
-            // `twinvpn_platform_ios::oserr::from_ne_vpn_error` maps both to
-            // `PLATFORM.VPN_PERMISSION_DENIED` rather than to an adapter fault.
-            state = .denied
-            reasonCode = ReasonCode.vpnPermissionDenied
+            let code = Self.reasonCode(forNEVPNError: error.code)
+            // ONLY the grant produces `.denied`. An adapter fault is not the user
+            // refusing anything, and reporting it as one would send them to
+            // Settings to re-approve a profile they never declined.
+            state = code == ReasonCode.vpnPermissionDenied ? .denied : state
+            reasonCode = code
         } catch {
-            state = .denied
-            reasonCode = ReasonCode.vpnPermissionDenied
+            // Not `NEVPNErrorDomain` at all — a mechanism refused and there is no
+            // NE number. `twinvpn_platform_ios::oserr::unavailable` is the same
+            // shape on the Rust side.
+            reasonCode = ReasonCode.adapterUnavailable
+        }
+    }
+
+    /// `saveToPreferences`, with the ONE retry `NEVPNErrorConfigurationStale`
+    /// earns.
+    ///
+    /// Stale means the profile in preferences moved under us between the load and
+    /// the save. `twinvpn_platform_ios::oserr::from_ne_vpn_error` is the
+    /// authority and classes it `PlatformError::Transient` — the only NE code it
+    /// does not class as a permanent condition — so a reload-and-save is the
+    /// mechanical response and not a policy.
+    ///
+    /// It retries **once**. A second stale is a different fact from the first and
+    /// is reported rather than looped on; the shell has no registered code for
+    /// "transient", so turning one into a nameable outcome is the whole job here.
+    /// The enforcement is a parameter because `loadFromPreferences` OVERWRITES
+    /// the manager's fields with whatever is on disk. Retrying the save without
+    /// re-applying the programme would install the posture that was already
+    /// there — the one the stale error says moved under us — under the name of
+    /// the one the core asked for.
+    private func saveWithOneStaleRetry(_ manager: NETunnelProviderManager,
+                                       enforcement: EnforcementProgramme) async throws {
+        do {
+            try await manager.saveToPreferences()
+        } catch let error as NSError
+            where error.domain == NEVPNErrorDomain
+            && error.code == NEVPNErrorCode.configurationStale {
+            try await manager.loadFromPreferences()
+            configure(manager, with: enforcement)
+            try await manager.saveToPreferences()
         }
     }
 
@@ -219,6 +256,125 @@ final class VPNPermission: ObservableObject {
         }
         try session.startVPNTunnel()
     }
+
+    // MARK: - the focal disc's action
+
+    /// Bring the tunnel up from whatever state the profile is in.
+    ///
+    /// DESIGN.md D4 makes the focal disc the control and §10 left the wiring as a
+    /// functionality decision; this is that decision, made. It is the ONLY entry
+    /// point the view calls, because the sequence — install if there is no
+    /// profile, then start — is a state machine and a state machine in a `body`
+    /// is a state machine nothing can test.
+    ///
+    /// # It connects. It does not disconnect.
+    ///
+    /// `configure` sets `isOnDemandEnabled = true`, and the programme Rust
+    /// renders carries `disconnect_on_demand_enabled: false`. Under those two,
+    /// `stopVPNTunnel()` is not a disconnect — the on-demand rules bring the
+    /// tunnel straight back, and making it stick would mean the shell writing
+    /// `isOnDemandEnabled = false`, which is the enforcement posture the core
+    /// rendered. ADR-0012's iOS row and KS-4 put that decision in
+    /// `twinvpn_platform_ios::enforce`, not here. A disconnect affordance is a
+    /// core-side posture change first and a button second.
+    ///
+    /// # `.denied` and `.disabled` are not actionable from here
+    ///
+    /// ADR-0012 §11.10: "on iOS/iPadOS the **only** unblock mechanism is removing
+    /// the VPN profile in Settings — this is not 'ours', not a command". So this
+    /// returns without touching anything, and the diagnostic panel already
+    /// carries the next action — LT-3's `App-prefs:General&path=VPN` variant,
+    /// chosen by the core. The view disables the disc in those states so the user
+    /// is not offered a control that cannot work.
+    func connect() async {
+        switch state {
+        case .denied, .disabled:
+            return
+
+        case .absent:
+            do {
+                // The posture is the CORE's. See
+                // `CoreLite.makeEnforcementProgramme` for why this refuses on
+                // this build and what closing it takes — one FFI export.
+                let programme = try CoreLite.shared.makeEnforcementProgramme()
+                await install(enforcement: programme)
+            } catch let refusal as CoreLiteRefusal {
+                reasonCode = refusal.reasonCode
+                return
+            } catch {
+                reasonCode = ReasonCode.adapterUnavailable
+                return
+            }
+            // `install` publishes the outcome. Anything but `.installed` means it
+            // already set the code that says why, and starting a tunnel on a
+            // profile that was not installed would be a second failure reported
+            // over the first.
+            guard state == .installed else { return }
+
+        case .installed:
+            break
+        }
+
+        do {
+            try startTunnel()
+            reasonCode = nil
+        } catch let error as NSError where error.domain == NEVPNErrorDomain {
+            reasonCode = Self.reasonCode(forNEVPNError: error.code)
+        } catch {
+            // `ManagementChannelError.notConnected` — the profile exists but its
+            // `connection` is not an `NETunnelProviderSession`, so there is no
+            // provider to start. That is an adapter fact, not a grant fact.
+            reasonCode = ReasonCode.adapterUnavailable
+        }
+    }
+
+    // MARK: - NEVPNError, mapped where Rust maps it
+
+    /// The registered code for one `NEVPNError`.
+    ///
+    /// This is `twinvpn_platform_ios::oserr::from_ne_vpn_error` in Swift, and it
+    /// agrees with it case for case. It used to be absent: every error in
+    /// `NEVPNErrorDomain` was reported as `PLATFORM.VPN_PERMISSION_DENIED`, so a
+    /// `connectionFailed` — which Rust classes `AdapterUnavailable` — told the
+    /// user they had declined a consent sheet they had actually approved, and
+    /// sent them to Settings to fix a grant that was never the problem. It did
+    /// not matter while `install` had no caller; the focal disc is that caller.
+    ///
+    /// `configurationStale` is deliberately absent from this table.
+    /// `from_ne_vpn_error` classes it `PlatformError::Transient`, the shell has
+    /// no registered code for a transient, and `saveWithOneStaleRetry` is what
+    /// turns it into either a success or one of the codes below.
+    static func reasonCode(forNEVPNError code: Int) -> String {
+        switch code {
+        // The user declined the consent sheet, or later switched the profile off
+        // in Settings, or deleted it. All three are the GRANT, not a fault, and
+        // all three are recoverable by the user approving it again.
+        case NEVPNErrorCode.configurationDisabled,
+             NEVPNErrorCode.configurationReadWriteFailed:
+            return ReasonCode.vpnPermissionDenied
+        // `connectionFailed`, `configurationInvalid`, `configurationUnknown`, and
+        // Rust's `_` arm.
+        default:
+            return ReasonCode.adapterUnavailable
+        }
+    }
+}
+
+/// `NEVPNError`'s numbers, transcribed.
+///
+/// Transcribed rather than spelled `NEVPNError.configurationStale.rawValue` for
+/// the reason `twinvpn_platform_ios::oserr` gives for doing the same on its
+/// side: these are "stable public ABI" from `NEVPNConnection.h`, and naming the
+/// integer lets a reviewer check this file against the header instead of against
+/// a bridged enum's spelling. The values are the same six `oserr.rs` declares, in
+/// the same order.
+private enum NEVPNErrorCode {
+    static let configurationInvalid = 1
+    static let configurationDisabled = 2
+    static let connectionFailed = 3
+    static let configurationStale = 4
+    static let configurationReadWriteFailed = 5
+    static let configurationUnknown = 6
 }
 
 /// The registered codes this file may name.

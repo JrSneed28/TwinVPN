@@ -217,6 +217,14 @@ targets:
       # `TwinVPNTests` so a simulator row and a device row cannot disagree about
       # which machine they ran on.
       - path: TwinVPNTests/DeviceCapabilities.swift
+      # ONE file out of the excluded `Views/`, for the same reason
+      # `EnforcementInstaller.swift` is named above: `StateVisual.resolve` is not
+      # presentation. DESIGN.md D2 makes it the palette expression of O-18 — "an
+      # unrenewed assertion rounds to `UNKNOWN`, never `PROTECTED`" — so it is a
+      # product-honesty rule that happens to live in the visual layer, and
+      # `StateVisualHonestyTests` is the assertion that reaches it. Nothing else
+      # in `Views/` is compiled here and nothing here renders.
+      - path: Sources/TwinVPNApp/Views/DesignSystem.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.twinvpn.client.acceptancetests

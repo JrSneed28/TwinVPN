@@ -76,12 +76,33 @@ final class ManagementClient: ObservableObject {
 
     // MARK: - lifecycle
 
-    func attach(to manager: NETunnelProviderManager) {
-        session = manager.connection as? NETunnelProviderSession
+    /// Binds this client to whatever profile the OS currently has — **or to the
+    /// absence of one**.
+    ///
+    /// # The parameter is optional, and that is the whole point
+    ///
+    /// ADR-0012 §11.10: "on iOS/iPadOS the **only** unblock mechanism is removing
+    /// the VPN profile in Settings — this is not 'ours', not a command". So the
+    /// profile can vanish while this object holds a session for it, and the
+    /// session object outlives the configuration it came from. Passing `nil`
+    /// drops it, which is what makes `refresh` fall to the not-live branch
+    /// instead of renewing an assertion about a tunnel whose profile is gone
+    /// (O-18).
+    ///
+    /// Call it after every `VPNPermission.reload()`, which is every launch and
+    /// every return from Settings.
+    func attach(to manager: NETunnelProviderManager?) {
+        session = manager?.connection as? NETunnelProviderSession
         // §11.2.1's second emulation: a Darwin notification carrying NO payload,
         // which triggers a declarative re-read. "A hint that triggers a
         // declarative re-read, never a state delta" — a delta would make the app
         // a second holder of state the provider owns (I8).
+        //
+        // Armed ONCE. The notification is about the App Group record, not about
+        // a particular session, so re-arming it on every attach would churn a
+        // process-wide CFNotificationCenter registration for no change in what it
+        // observes.
+        guard darwinObserver == nil else { return }
         darwinObserver = DarwinNotificationObserver(name: StatusRecord.changeNotification) {
             [weak self] in
             Task { @MainActor in await self?.refresh() }
@@ -137,8 +158,16 @@ final class ManagementClient: ObservableObject {
     }
 
     private func refresh() async {
-        guard let session else { return }
-        guard session.status == .connected else {
+        // NO SESSION AND A DISCONNECTED SESSION ARE THE SAME ANSWER, and merging
+        // them is a fix, not a tidy-up. These used to be two guards, and the
+        // first one was `guard let session else { return }` — a bare return that
+        // left `snapshot` and `isLive` exactly as the last successful poll had
+        // set them. So the sequence "tunnel connects, poll succeeds, user removes
+        // the profile in Settings" ended with `isLive == true` and a snapshot
+        // still claiming `protected`, renewed by nothing. That is precisely the
+        // reading O-18 forbids: "an unrenewed assertion → the indicator becomes
+        // UNKNOWN, never PROTECTED."
+        guard let session, session.status == .connected else {
             // §11.2.1's third emulation: render from the App Group status record
             // and mark it NOT LIVE. O-18: an assertion that cannot be renewed
             // becomes `UNKNOWN`, never `PROTECTED`.

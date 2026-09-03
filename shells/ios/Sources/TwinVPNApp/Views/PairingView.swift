@@ -50,47 +50,86 @@ import CoreImage.CIFilterBuiltins
 import SwiftUI
 
 struct PairingView: View {
+    /// The room's light, resolved at the root. DESIGN.md D1 keeps the panels
+    /// achromatic; this is the 0.05/0.06 `glassStateTint` and nothing more.
+    let tone: StateTone
+
     @StateObject private var model = PairingModel()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         // `NavigationView` + `.stack`, not `NavigationStack`. See `StatusView`
         // for why: `NavigationStack` is iOS 16.0+ and §11.9 row 1 fixes the floor
         // at 15.0.
+        //
+        // A `ScrollView`, not a `List`, for the reason DESIGN.md's Floor
+        // paragraph gives: `.scrollContentBackground(.hidden)` is iOS 16.0, so a
+        // `List` would paint an opaque slab over §3's backdrop.
         NavigationView {
-            VStack(spacing: 24) {
-                if let offer = model.renderedOffer {
-                    // The C-B ceremony where a camera and a screen exist
-                    // (ADR-0007 §7.4). The bytes came from the core; this draws
-                    // them.
-                    QRCodeImage(payload: offer)
-                        .frame(maxWidth: 320, maxHeight: 320)
-                        .accessibilityLabel(String(localized: "pairing_qr_description"))
-                } else {
-                    CameraScanner { payload in
-                        // The bytes go straight to the core. This closure does
-                        // not look at them.
-                        model.submitScannedPayload(payload)
+            ScrollView {
+                VStack(spacing: Space.betweenPanels) {
+                    if let offer = model.renderedOffer {
+                        // The C-B ceremony where a camera and a screen exist
+                        // (ADR-0007 §7.4). The bytes came from the core; this
+                        // draws them.
+                        //
+                        // §4.1's "pairing frame" is a panel, radius 28. The code
+                        // inside keeps its own black-on-white plate: a QR code is
+                        // read by a camera, and tinting it with `glassStateTint`
+                        // to match the room would be a design choice that costs
+                        // the ceremony its scan margin.
+                        QRCodeImage(payload: offer)
+                            .frame(maxWidth: 320, maxHeight: 320)
+                            .accessibilityLabel(String(localized: "pairing_qr_description"))
+                            .glassPanel(tone: tone)
+                            .panelTransition(reduceMotion: reduceMotion)
+                    } else {
+                        CameraScanner { payload in
+                            // The bytes go straight to the core. This closure
+                            // does not look at them.
+                            model.submitScannedPayload(payload)
+                        }
+                        .frame(height: 320)
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: Radius.panel, style: .continuous))
+                        .glass(
+                            RoundedRectangle(cornerRadius: Radius.panel, style: .continuous),
+                            tone: tone)
+                    }
+
+                    if let fingerprint = model.confirmationFingerprint {
+                        // ADR-0007 §7.4's third concern: "post-hoc display of the
+                        // peer's label and 20-char fingerprint on both ends".
+                        // DISPLAY ONLY — the comparison is the user's, and the
+                        // acceptance is the core's.
+                        //
+                        // §5's monospaced role, with its +0.5 tracking, exists
+                        // for exactly this string: A11Y-9, "a 20-character
+                        // fingerprint is compared by eye, character by character,
+                        // and tight tracking is what makes `8`/`B` and `0`/`O` a
+                        // coin flip."
+                        StyledText(fingerprint, .mono)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .glassCard(tone: tone)
+                            .panelTransition(reduceMotion: reduceMotion)
+                    }
+
+                    if let code = model.reasonCode {
+                        DiagnosticView(reasonCode: code, evidence: model.evidence)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .glassPanel(tone: tone)
+                            .panelTransition(reduceMotion: reduceMotion)
                     }
                 }
-
-                if let fingerprint = model.confirmationFingerprint {
-                    // ADR-0007 §7.4's third concern: "post-hoc display of the
-                    // peer's label and 20-char fingerprint on both ends".
-                    // DISPLAY ONLY — the comparison is the user's, and the
-                    // acceptance is the core's.
-                    Text(fingerprint)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-
-                if let code = model.reasonCode {
-                    DiagnosticView(reasonCode: code, evidence: model.evidence)
-                }
+                .padding(.horizontal, Space.screenMargin)
+                .padding(.vertical, Space.xl)
             }
-            .padding()
             .navigationTitle(String(localized: "pairing_title"))
             .task { await model.begin() }
             .onDisappear { model.end() }
+            .animation(Motion.panelAppear, value: model.confirmationFingerprint)
+            .animation(Motion.panelAppear, value: model.reasonCode)
         }
         .navigationViewStyle(.stack)
     }

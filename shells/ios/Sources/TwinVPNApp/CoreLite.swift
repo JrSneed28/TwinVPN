@@ -212,6 +212,58 @@ final class CoreLite {
         return try? JSONDecoder().decode(StatusSnapshot.self, from: envelope.result)
     }
 
+    // MARK: - the enforcement programme
+
+    /// The posture `VPNPermission.install` needs, rendered by the core.
+    ///
+    /// **It refuses, and the refusal is the honest answer for this build.**
+    ///
+    /// # Where a programme comes from, and why none of the three routes is open
+    ///
+    /// `EnforcementProgramme` mirrors `twinvpn_platform_ios::enforce::
+    /// EnforcementProgramme` field for field, and Rust renders one with
+    /// `EnforcementPosture::programme(generation, ruleset)`. There is a
+    /// fail-closed `Default` for the posture — `full_protection_required: true`,
+    /// `local_network_access: false`, restart on any interface — whose own
+    /// comment says "a `Default` that armed nothing would make 'we never
+    /// configured this' and 'policy says protect nothing' the same value". So the
+    /// value exists. What does not exist is a way for THIS process to obtain it:
+    ///
+    ///   1. **Not from `core-lite`.** `Core::submit_response` refuses every
+    ///      command under `#[cfg(not(feature = "full"))]` with
+    ///      `PLATFORM.ADAPTER_UNAVAILABLE` — "core-lite carries no data-plane
+    ///      crate, so it performs NO command". That is the same wall
+    ///      `assembleBundle` reports below, reached before dispatch rather than
+    ///      inside it.
+    ///   2. **Not from the extension.** ADR-0017 §11.2.1's channel works "only
+    ///      while the session is connected", and there is no session until a
+    ///      profile is installed. Asking the provider for the programme needed to
+    ///      install the profile is circular.
+    ///   3. **Not from here.** `EnforcementProgramme.swift`'s header names this
+    ///      exact temptation and refuses it: "A SECOND COPY IN THE APP WOULD BE
+    ///      THE WRONG FIX… two declarations of them is two things that can drift,
+    ///      and the drift would show up as an enforcement posture the app
+    ///      installed and the extension cannot find." A hard-coded posture would
+    ///      also be this shell deciding `include_all_networks`, which is KS-4's
+    ///      inversion and CB-2's line — `enforce.rs` keeps the mapping in Rust
+    ///      precisely "so the mapping … is one function with tests rather than a
+    ///      Swift file".
+    ///
+    /// Closing it is ONE core change: an FFI export of the rendered default
+    /// programme, alongside `tw_render_diagnostic` — pure, instance-free, and
+    /// callable before any core exists, which is exactly the shape F-10 already
+    /// establishes for a call the shell needs before it can bring anything up.
+    /// This function is then a decode of what that returns, and every caller
+    /// above it is already written.
+    ///
+    /// It FAILS CLOSED: the caller installs nothing and renders the registered
+    /// code. The alternative — installing a posture this process invented —
+    /// would put a profile on the device whose `includeAllNetworks` no part of
+    /// the core ever asked for.
+    func makeEnforcementProgramme() throws -> EnforcementProgramme {
+        throw CoreLiteRefusal(reasonCode: ReasonCode.adapterUnavailable)
+    }
+
     // MARK: - the Tier-1 bundle
 
     /// Assembles the eight-part Tier-1 bundle ADR-0015 §11.8 requires.
