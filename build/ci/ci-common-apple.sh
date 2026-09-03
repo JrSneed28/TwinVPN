@@ -163,6 +163,21 @@ apple_toolchain_banner() {
 }
 
 # ---------------------------------------------------------------------------
+# One-line tool versions, for the evidence JSON and the Swift pin check.
+#
+# NOT `xcodebuild -version | head -1`. head exits as soon as it has its line;
+# xcodebuild ignores SIGPIPE, and when its second line ("Build version ...")
+# then hits the closed pipe NSFileHandle raises NSFileHandleOperationException
+# ("Broken pipe"), which aborts the process: exit 134, and under
+# `set -euo pipefail` the job with it. It is a race, so most runs are fine
+# (ios-acceptance died this way on run 33750757726 after two green ones).
+# swift has the same shape with a plain SIGPIPE, exit 141. sed reads to EOF,
+# so the writer always finishes.
+# ---------------------------------------------------------------------------
+apple_xcodebuild_version() { xcodebuild -version 2>/dev/null | sed -n 1p; }
+apple_swift_version()      { swift --version 2>&1 | sed -n 1p; }
+
+# ---------------------------------------------------------------------------
 # ADR-0018 §11.3, mechanically: the compiler in the selected Xcode must be the
 # one this repository's Xcode pin ships.
 #
@@ -193,7 +208,7 @@ apple_require_pinned_swift() {
   # sometimes prefixed by "swift-driver version: 1.x ". The number is EXTRACTED
   # and compared for equality rather than substring-matched, so "6.3" cannot
   # satisfy an assertion that wants "6.3.3".
-  reported="$(swift --version 2>&1 | head -1)"
+  reported="$(apple_swift_version)"
   detected="$(printf '%s' "$reported" | sed -n 's/.*Swift version \([0-9][0-9.]*\).*/\1/p')"
 
   if [ "$detected" = "$want" ]; then

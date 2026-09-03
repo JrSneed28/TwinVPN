@@ -441,8 +441,8 @@ cat > "$EVIDENCE" <<JSON
   "toolchain": {
     "macos": "$macos_version",
     "macos_build": "$(sw_vers -buildVersion)",
-    "xcodebuild": "$(xcodebuild -version 2>/dev/null | head -1)",
-    "swift": "$(swift --version 2>&1 | head -1)",
+    "xcodebuild": "$(apple_xcodebuild_version)",
+    "swift": "$(apple_swift_version)",
     "rustc": "$(rustc --version)"
   },
   "environment": {

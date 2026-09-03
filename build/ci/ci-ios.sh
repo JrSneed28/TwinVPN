@@ -417,8 +417,8 @@ cat > "$EVIDENCE" <<JSON
   "github_run_url": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/$GITHUB_RUN_ID\"" || echo null),
   "commit": "$(cd "$REPO" && git rev-parse HEAD)",
   "toolchain": {
-    "xcodebuild": "$(xcodebuild -version | head -1)",
-    "swift": "$(swift --version 2>&1 | head -1)",
+    "xcodebuild": "$(apple_xcodebuild_version)",
+    "swift": "$(apple_swift_version)",
     "rustc": "$(rustc --version)",
     "sdk_device": "iphoneos $(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo unknown)",
     "sdk_simulator": "iphonesimulator $(xcrun --sdk iphonesimulator --show-sdk-version 2>/dev/null || echo unknown)",

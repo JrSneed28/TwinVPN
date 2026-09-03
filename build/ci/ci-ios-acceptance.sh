@@ -111,7 +111,7 @@ apple_toolchain_banner iphonesimulator
 apple_require_pinned_swift
 apple_require_xcodegen
 
-XCODE_VERSION="$(xcodebuild -version | head -1 | sed -n 's/^Xcode //p')"
+XCODE_VERSION="$(apple_xcodebuild_version | sed -n 's/^Xcode //p')"
 [ -n "$XCODE_VERSION" ] || XCODE_VERSION="unknown"
 
 # --------------------------------------------------------------------------
@@ -346,8 +346,8 @@ write_evidence() {
   "github_run_url": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/$GITHUB_RUN_ID\"" || echo null),
   "commit": "$(cd "$REPO" && git rev-parse HEAD)",
   "toolchain": {
-    "xcodebuild": "$(xcodebuild -version | head -1)",
-    "swift": "$(swift --version 2>&1 | head -1)",
+    "xcodebuild": "$(apple_xcodebuild_version)",
+    "swift": "$(apple_swift_version)",
     "rustc": "$(rustc --version)",
     "sdk_simulator": "iphonesimulator $(xcrun --sdk iphonesimulator --show-sdk-version 2>/dev/null || echo unknown)",
     "macos": "$(sw_vers -productVersion 2>/dev/null || echo unknown)"
