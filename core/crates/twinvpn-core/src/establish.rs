@@ -368,7 +368,11 @@ pub async fn probe(
 ///
 /// Fixed, bounded, and carrying **no identifier**: it is not an authenticator
 /// and must not be mistaken for one.
-const PROBE: &[u8] = b"TwinVPN/probe/v1";
+///
+/// `pub` so a lab peer can recognise and discard one rather than restating the
+/// octets in a second crate, where the two copies would drift silently. Nothing
+/// answers a probe -- see this module's documentation.
+pub const PROBE: &[u8] = b"TwinVPN/probe/v1";
 
 const fn socket_family_matches(socket: SocketFamily, candidate: AddressFamily) -> bool {
     matches!(

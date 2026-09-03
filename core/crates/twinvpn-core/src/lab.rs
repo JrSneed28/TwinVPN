@@ -41,8 +41,11 @@ pub use crate::datapath::{
     Raced, ReceiverIndex, Refused, Reject, Report, Step, Stop, DATAGRAM_CEILING, HEADER_BYTES,
     OVERHEAD_BYTES, OVERLAY_MTU_FLOOR, TAG_BYTES, TYPE_TRANSPORT_DATA,
 };
+pub use crate::enforce::MTU as OVERLAY_MTU;
+pub use crate::establish::PROBE;
 pub use crate::execute::handshake::{
-    drive, encode_initiation, encode_response, ordered, role_for, Attempt, Handshaken, Refusal,
+    deadline_from, drive, encode_initiation, encode_response, ordered, role_for, Attempt,
+    Handshaken, Refusal,
     INITIATION_PREFIX_BYTES, MAX_HANDSHAKE_DATAGRAM_BYTES, RESPONSE_PREFIX_BYTES,
     TYPE_HANDSHAKE_INITIATION, TYPE_HANDSHAKE_RESPONSE,
 };
