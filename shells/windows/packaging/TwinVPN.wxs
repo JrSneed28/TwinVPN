@@ -150,9 +150,18 @@
     -->
     <Component Id="StoreDirectory" Directory="TWINVPNSTORE" Guid="7477696E-7670-6E00-5354-4F5245000001">
       <CreateFolder>
-        <util:PermissionEx User="SYSTEM" GenericAll="yes" Inheritable="no" />
-        <util:PermissionEx User="Administrators" GenericAll="yes" Inheritable="no" />
-        <util:PermissionEx User="Users" GenericAll="yes" Denied="yes" Inheritable="no" />
+        <!--
+          NO DENY ACE FOR `Users`. Measured on Windows 11 (2026-09-03): the
+          LocalSystem token carries BUILTIN\Users, so a deny ACE for `Users`
+          denied the service's own file creates in this directory ("Access to
+          the path ... is denied") while still allowing directory creation.
+          With `PermissionEx` replacing the inherited set, an absent ACE is
+          already no access for everyone not named here; the deny bought
+          nothing and broke the service. The grants are inheritable so the
+          items the service creates inside carry the same two principals.
+        -->
+        <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+        <util:PermissionEx User="Administrators" GenericAll="yes" />
       </CreateFolder>
     </Component>
 

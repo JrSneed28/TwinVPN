@@ -172,7 +172,15 @@ function Register-TwinVpnService {
     # and Administrators full, Users denied, nothing inheritable. The root only;
     # `tier1` is the service's to create.
     if (-not (Test-Path $StoreRoot)) { New-Item -ItemType Directory -Path $StoreRoot -Force | Out-Null }
-    Invoke-Native { & icacls.exe $StoreRoot /inheritance:r /grant:r 'SYSTEM:(F)' 'Administrators:(F)' /deny 'Users:(F)' } | Out-Null
+    # NO DENY ACE FOR USERS, AND INHERITABLE GRANTS. Measured on 2026-09-03 as
+    # NT AUTHORITY\SYSTEM: its token carries BUILTIN\Users, so `/deny Users:(F)`
+    # denied the service's own file creates ("Access to the path ... is
+    # denied") while still allowing directory creation -- which is why the
+    # store's tier1 directory appeared and `net up` then failed writing
+    # resolver.restore as AUTH.KEY_STORE_UNAVAILABLE. With inheritance removed,
+    # an absent ACE already denies everyone else; (OI)(CI) makes the grants
+    # reach the files the service creates inside.
+    Invoke-Native { & icacls.exe $StoreRoot /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' } | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls exited $LASTEXITCODE setting the store root's ACL" }
     # The service's process environment, the way the SCM reads it: a
     # REG_MULTI_SZ `Environment` under the service key. `sc.exe delete` removes

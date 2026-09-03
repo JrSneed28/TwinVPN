@@ -522,6 +522,16 @@ impl WindowsNetworkConfig {
             cause,
             compensation,
         };
+        // On the log as well as in the ledger: the ledger is read by nobody
+        // in the hosted lane, and run 33740622733 reported `net up` as
+        // AUTH.KEY_STORE_UNAVAILABLE with the failing step and its OS error
+        // recorded nowhere a reader could find them.
+        tracing::error!(
+            step = failure.step,
+            cause = %failure.cause,
+            reason_code = failure.cause.reason_code().as_str(),
+            "applying the network contract failed at a step; the compensation below was applied"
+        );
         self.ledger().last_failure = Some(failure.clone());
         failure
     }
