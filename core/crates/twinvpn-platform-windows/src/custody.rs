@@ -99,6 +99,16 @@ pub const DEFAULT_STORE_ROOT: &str = r"C:\ProgramData\TwinVPN\store";
 /// store.
 pub const LOCAL_SYSTEM_SID: &str = "S-1-5-18";
 
+/// The Tier-1 item name of ADR-0020 ST-21's anti-rollback anchor.
+///
+/// **Defined by `twinvpn-store`**, at `core/crates/twinvpn-store/src/anchor.rs`
+/// (`ANCHOR_ITEM`), and repeated here rather than imported: `twinvpn-store`
+/// pulls in `twinvpn-crypto` and with it the whole cryptographic graph, which
+/// this adapter deliberately does not carry (CD-I2's purpose, and the reason
+/// the identity digest here is CNG's own). The string is a *name*, not an
+/// encoding, and [`WindowsIdentityCustody`]'s ST-28 guard is its only reader.
+const STORE_ANCHOR_ITEM: &str = "twinvpn.store.anchor";
+
 // ---------------------------------------------------------------------------
 // The custody class lattice (ADR-0020 §11.4, ST-9a)
 // ---------------------------------------------------------------------------
@@ -279,6 +289,81 @@ pub const fn store_root_attributes() -> StoreRootAttributes {
 // The identity half (CB-5)
 // ---------------------------------------------------------------------------
 
+/// One coordinate of a P-256 point.
+const P256_COORDINATE_BYTES: usize = 32;
+
+/// `BCRYPT_ECCKEY_BLOB`'s fixed header: `dwMagic` then `cbKey`, both `ULONG`.
+const ECC_BLOB_HEADER_BYTES: usize = 8;
+
+/// `BCRYPT_ECDSA_PUBLIC_P256_MAGIC`, `"ECS1"` little-endian.
+///
+/// Repeated from `windows-sys` because this function is target-free and runs
+/// its tests on a Linux host. `custody::platform`'s `const _: () = assert!(..)`
+/// checks the two against each other at compile time on Windows, which is the
+/// same shape `sys::win` uses for the `oserr` literals.
+const ECDSA_PUBLIC_P256_MAGIC: u32 = 0x3153_4345;
+
+/// The constant 26-byte X.509 `SubjectPublicKeyInfo` header of a P-256 key.
+///
+/// `SEQUENCE { SEQUENCE { OID id-ecPublicKey, OID prime256v1 }, BIT STRING }`,
+/// with the bit string's length and its zero unused-bit count. Everything after
+/// it is `0x04 || X || Y` — the uncompressed point — so the whole encoding is
+/// this prefix plus 65 bytes and there is no length to compute.
+///
+/// **Byte assembly, not cryptography.** CD-I2 restricts a *cryptographic
+/// implementation* to `twinvpn-crypto`; a fixed DER prefix is neither, and
+/// ADR-0007 N-2's derivation — which is a real one — is deliberately still not
+/// done here (see [`SigningElement::public_identity`]).
+const P256_SPKI_PREFIX: [u8; 26] = [
+    0x30, 0x59, // SEQUENCE, 89 bytes
+    0x30, 0x13, // SEQUENCE, 19 bytes: the algorithm identifier
+    0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, // OID 1.2.840.10045.2.1
+    0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, // OID 1.2.840.10045.3.1.7
+    0x03, 0x42, 0x00, // BIT STRING, 66 bytes, 0 unused bits
+];
+
+/// Re-encodes a CNG `BCRYPT_ECCPUBLIC_BLOB` as X.509 `SubjectPublicKeyInfo`.
+///
+/// # Why the element vends SPKI rather than the blob
+///
+/// `IdentityPublic::public_key` is documented as "the element's own encoding",
+/// and `twinvpn_core::pairing::enrol::ik_pub_cose_for` can only *prove* an
+/// encoding it recognises: a dCBOR `COSE_Key`, or an SPKI it hands to
+/// `twinvpn_crypto::cose::es256_cose_key_from_spki`. A raw CNG blob is neither,
+/// so a perfectly good TPM key could not be enrolled. Android's element already
+/// vends SPKI (`TwinKeystore.identityPublic`), so this is the encoding the
+/// corpus already has two readers for rather than a third one.
+///
+/// # Errors
+///
+/// [`PlatformError::AdapterUnavailable`] where the blob is not a P-256 public
+/// key of exactly the declared shape. A provider that returned something else
+/// under `BCRYPT_ECCPUBLIC_BLOB` is malfunctioning, and guessing at a partial
+/// point would publish an identity nobody can verify.
+///
+/// Public for the same reason [`protection_descriptor`] is: it is the
+/// target-free half of a Windows-only operation, so it is reviewable and
+/// testable on a host that has no CNG.
+pub fn spki_from_ecc_public_blob(blob: &[u8]) -> Result<Vec<u8>, PlatformError> {
+    let point = blob
+        .get(ECC_BLOB_HEADER_BYTES..)
+        .filter(|point| point.len() == 2 * P256_COORDINATE_BYTES)
+        .ok_or_else(|| oserr::unavailable("NCryptExportKey.blob_length"))?;
+    // Both `ULONG`, little-endian, and both checked: the magic says the curve
+    // and the direction (public, P-256), `cbKey` says the coordinate width. A
+    // blob whose header disagrees with its length is not a point to publish.
+    let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
+    let coordinate = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
+    if magic != ECDSA_PUBLIC_P256_MAGIC || coordinate as usize != P256_COORDINATE_BYTES {
+        return Err(oserr::unavailable("NCryptExportKey.blob_magic"));
+    }
+    let mut spki = Vec::with_capacity(P256_SPKI_PREFIX.len() + 1 + point.len());
+    spki.extend_from_slice(&P256_SPKI_PREFIX);
+    spki.push(0x04); // uncompressed
+    spki.extend_from_slice(point);
+    Ok(spki)
+}
+
 /// An element that performs identity operations **inside itself**.
 ///
 /// Every method names *which* key and returns a *result*. No method takes key
@@ -299,6 +384,28 @@ pub trait SigningElement: Send + Sync + std::fmt::Debug {
     ///
     /// [`PlatformError::IdentityKeyUnavailable`] where there is no element.
     fn public_identity(&self) -> Result<IdentityPublic, PlatformError>;
+
+    /// Creates the identity key inside the element, if it is not already there.
+    ///
+    /// **Idempotent, and it is not the decision.** The element performs the
+    /// syscalls; whether provisioning may happen at all is ADR-0020 ST-28's
+    /// question, and [`WindowsIdentityCustody`] answers it from the Tier-1
+    /// anchor before ever calling this. An element must therefore never call
+    /// this from its own [`Self::public_identity`] or [`Self::sign`] — that is
+    /// exactly the "path from a read to a generation" ST-28 says does not
+    /// exist.
+    ///
+    /// An implementation MUST NOT overwrite an existing container, and MUST NOT
+    /// create one on any status other than "no container of that name": every
+    /// other failure can mean the identity is still there and merely
+    /// unreachable, and replacing one of those is ADR-0007 §7.3's
+    /// compromise-indistinguishable case.
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError::IdentityKeyUnavailable`] where there is no element, or
+    /// where the element refused to create.
+    fn provision(&self) -> Result<(), PlatformError>;
 
     /// Signs inside the element.
     fn sign(&self, key: IdentityKeyRef, message: &[u8]) -> Result<Signature, PlatformError>;
@@ -342,6 +449,12 @@ impl SigningElement for AbsentElement {
         Err(no_element("NCryptOpenStorageProvider"))
     }
 
+    fn provision(&self) -> Result<(), PlatformError> {
+        // §11.16 (l) again: a host with no element gets a refusal, never a key
+        // this process would then have to hold itself.
+        Err(no_element("NCryptCreatePersistedKey"))
+    }
+
     fn sign(&self, _key: IdentityKeyRef, _message: &[u8]) -> Result<Signature, PlatformError> {
         Err(no_element("NCryptSignHash"))
     }
@@ -369,9 +482,50 @@ fn no_element(call: &'static str) -> PlatformError {
 ///
 /// **Holds no key material.** See the module documentation for the four
 /// structural properties that make that true.
+///
+/// # ST-28, and why the guard lives here rather than in the element
+///
+/// ADR-0020 ST-28: "there is no path from 'open the store' to 'generate a key'
+/// — the store-open code has no key-generation capability in scope", and
+/// §11.19's A-04 records what happens if that structural claim ever weakens:
+/// "MUST NOT silently mint a replacement identity would need an explicit
+/// runtime check plus a proof test of its own". This type carries that check.
+///
+/// A bare create-on-`NTE_BAD_KEYSET` inside the element cannot distinguish a
+/// first run from a re-imaged host — both present as "no container" — so it
+/// would mint a replacement identity for a device that already has one, which
+/// ADR-0007 §7.3 calls indistinguishable from a compromise. §11.7's ST-24
+/// absence table supplies the discriminator, and it is a *store* fact rather
+/// than a key fact:
+///
+/// | Tier-1 anchor | identity key | this type does |
+/// |---|---|---|
+/// | absent | absent | provisions — first run or re-enrolment |
+/// | present | absent | refuses; the identity was destroyed independently |
+/// | either | present | nothing; the open succeeded |
+/// | unreadable | — | refuses; never create on a store you could not read |
+///
+/// So the decision needs the vault root, which is why this type holds one: the
+/// element holds a backend discriminator and stays the syscall marshalling it
+/// was written as, and the rule that governs it is ordinary Rust that runs its
+/// tests on a Linux host.
+///
+/// **The refusal is `AUTH.KEY_UNAVAILABLE`, not `AUTH.IDENTITY_MISSING`.** The
+/// seam has no [`PlatformError`] that maps to the latter — `error.rs`'s table
+/// has no such arm — and inventing one would be a reason code this adapter is
+/// not the owner of. ADR-0007 N-7 names both codes for this condition and the
+/// core is where the choice belongs: `pairing::enrol` already turns an identity
+/// it cannot prove into `AUTH.IDENTITY_MISSING`.
 pub struct WindowsIdentityCustody {
     element: Arc<dyn SigningElement>,
     shutdown: ShutdownLatch,
+    /// The vault root, for the ST-28 anchor read and nothing else.
+    ///
+    /// A path, injected (CB-7 / ST-12e) exactly as [`WindowsSecureStore`]'s is.
+    /// It is the one field this type has ever grown, and it holds no secret —
+    /// `no_type_in_this_module_can_hold_a_private_scalar` is updated for it
+    /// deliberately rather than worked around.
+    store_root: PathBuf,
 }
 
 impl std::fmt::Debug for WindowsIdentityCustody {
@@ -394,8 +548,16 @@ impl WindowsIdentityCustody {
     /// `from_bytes`, `from_pfx` or `from_file`: the type cannot be given a
     /// private key because no function accepts one.
     #[must_use]
-    pub fn new(element: Arc<dyn SigningElement>, shutdown: ShutdownLatch) -> Self {
-        Self { element, shutdown }
+    pub fn new(
+        element: Arc<dyn SigningElement>,
+        shutdown: ShutdownLatch,
+        store_root: PathBuf,
+    ) -> Self {
+        Self {
+            element,
+            shutdown,
+            store_root,
+        }
     }
 
     /// The element's stable name, for `CoreBuildIdentity` (S-46).
@@ -409,13 +571,85 @@ impl WindowsIdentityCustody {
     pub fn custody_class(&self) -> CustodyClass {
         self.element.backend().custody_class()
     }
+
+    /// The ST-28 guard: provisions once, or explains why it must not.
+    ///
+    /// Takes the element's own refusal and returns it unchanged wherever
+    /// creation is not permitted, so a caller that could not be helped is left
+    /// with the OS status it started with rather than a second, vaguer one.
+    /// See the type documentation for the table this implements.
+    fn provision_under_st28(&self, refusal: PlatformError) -> Result<(), PlatformError> {
+        // Only "the element has no key" is a provisioning question at all. A
+        // shutdown, a busy TPM reported as `Transient`, an unsupported host —
+        // none of those says the identity is absent, and creating on one of
+        // them would replace an identity that still exists.
+        if !matches!(refusal, PlatformError::IdentityKeyUnavailable(_)) {
+            return Err(refusal);
+        }
+        // ST-24: `Err` is not `absent`. A store we could not read is the one
+        // case where both branches are wrong, so neither is taken.
+        if anchor_present(&self.store_root)? {
+            return Err(refusal);
+        }
+        self.element.provision()?;
+        // ADR-0015: one INFO line, because a device minting its identity is the
+        // most consequential thing this adapter ever does and a support case
+        // needs to be able to date it. The container and the element name, and
+        // nothing drawn from the key — the public half is not logged either,
+        // since `enrol` is where an identity becomes readable evidence.
+        tracing::info!(
+            target: "twinvpn.platform",
+            container = IDENTITY_KEY_CONTAINER,
+            element = self.element.name(),
+            "the device had no identity key and no Tier-1 anchor, so one was created (ADR-0020 ST-28)"
+        );
+        Ok(())
+    }
+}
+
+/// Whether ADR-0020 ST-21's anti-rollback anchor is on this host.
+///
+/// Deliberately **presence only**. [`WindowsSecureStore::secure_item_read`]'s
+/// semantics are the ones that matter — "'Absent' is a normal first-run state
+/// and not an error … absent enrols and unavailable must not" — and ST-24's
+/// table asks whether the item is *there*, never what is in it. Reading it
+/// properly would mean unsealing through DPAPI-NG, which would make a momentary
+/// protector failure look like an absent anchor unless it were carefully
+/// mapped; asking the filesystem cannot make that mistake.
+///
+/// # Errors
+///
+/// Any error that is not `NotFound`, mapped through the crate's one vocabulary
+/// as a store failure. `AUTH.KEY_STORE_UNAVAILABLE` is TRANSIENT/WARN, which is
+/// the honest class: an unreadable vault is a retry, not a re-enrolment.
+fn anchor_present(root: &Path) -> Result<bool, PlatformError> {
+    let path = root
+        .join(WindowsSecureStore::TIER1_DIR)
+        .join(STORE_ANCHOR_ITEM);
+    match fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(io_error(&e, "GetFileAttributesW(store.anchor)")),
+    }
 }
 
 impl IdentityCustody for WindowsIdentityCustody {
     fn public_identity(&self) -> BoxFuture<'_, Result<IdentityPublic, PlatformError>> {
         Box::pin(async move {
             self.shutdown.check()?;
-            self.element.public_identity()
+            // ADR-0023 EM-22 E4: "at first boot the device generates its
+            // identity". Reached lazily, and never from the ADR-0016 §11.6
+            // start sequence — Microsoft's `NCryptCreatePersistedKey` page:
+            // "A service must not call this function from its StartService
+            // function … a deadlock can occur". This runs on the core's
+            // executor, long after the SCM was told `Running`.
+            match self.element.public_identity() {
+                Ok(identity) => Ok(identity),
+                Err(refusal) => {
+                    self.provision_under_st28(refusal)?;
+                    self.element.public_identity()
+                }
+            }
         })
     }
 
@@ -426,7 +660,17 @@ impl IdentityCustody for WindowsIdentityCustody {
     ) -> BoxFuture<'a, Result<Signature, PlatformError>> {
         Box::pin(async move {
             self.shutdown.check()?;
-            self.element.sign(key, message)
+            // The same guard, because a signature is the other caller that
+            // opens the container. One rule, both doors: a device whose first
+            // operation happens to be a signature must not take a different
+            // path from one whose first operation is a read.
+            match self.element.sign(key, message) {
+                Ok(signature) => Ok(signature),
+                Err(refusal) => {
+                    self.provision_under_st28(refusal)?;
+                    self.element.sign(key, message)
+                }
+            }
         })
     }
 
@@ -785,10 +1029,31 @@ mod platform {
             Self { backend }
         }
 
+        /// TEST ONLY: the same, under a caller-named container.
+        ///
+        /// Present here only so the API does not change shape with the target —
+        /// a call that compiles for Windows must compile here. Off Windows
+        /// there is still no container and every operation still refuses.
+        #[cfg(any(test, feature = "test-support"))]
+        #[must_use]
+        pub const fn new_for_test(backend: Tier1Backend, _container: &'static str) -> Self {
+            Self { backend }
+        }
+
         /// The live probe. Off Windows there is no CNG, so there is no element.
         #[must_use]
         pub const fn probe() -> Tier1Backend {
             Tier1Backend::Absent
+        }
+
+        /// TEST ONLY: deletes the container. There is none here.
+        ///
+        /// # Errors
+        ///
+        /// Always. See [`Self::new_for_test`].
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn delete_identity_key_for_test(&self) -> Result<(), PlatformError> {
+            Err(no_element("NCryptDeleteKey"))
         }
     }
 
@@ -801,6 +1066,9 @@ mod platform {
         }
         fn public_identity(&self) -> Result<IdentityPublic, PlatformError> {
             Err(no_element("NCryptOpenStorageProvider"))
+        }
+        fn provision(&self) -> Result<(), PlatformError> {
+            Err(no_element("NCryptCreatePersistedKey"))
         }
         fn sign(&self, _key: IdentityKeyRef, _message: &[u8]) -> Result<Signature, PlatformError> {
             Err(no_element("NCryptSignHash"))
@@ -1316,18 +1584,27 @@ mod tests {
     #[test]
     fn no_type_in_this_module_can_hold_a_private_scalar() {
         // CD-I4, asserted rather than asserted-in-prose. `WindowsIdentityCustody`
-        // is one `Arc<dyn SigningElement>` plus one `ShutdownLatch` (itself an
-        // `Arc`), and nothing else. Adding a field to hold a key changes this
-        // number and fails here.
+        // is one `Arc<dyn SigningElement>`, one `ShutdownLatch` (itself an
+        // `Arc`) and one `PathBuf`, and nothing else. Adding a field to hold a
+        // key changes this number and fails here.
+        //
+        // **The `PathBuf` was added deliberately and this line with it.** It is
+        // the vault root the ADR-0020 ST-28 guard reads the Tier-1 anchor from
+        // — a path, injected by the shell under CB-7, holding no secret. The
+        // assertion is updated rather than relaxed so that the *next* field
+        // still has to be argued for here.
         assert_eq!(
             std::mem::size_of::<WindowsIdentityCustody>(),
-            std::mem::size_of::<Arc<dyn SigningElement>>() + std::mem::size_of::<ShutdownLatch>()
+            std::mem::size_of::<Arc<dyn SigningElement>>()
+                + std::mem::size_of::<ShutdownLatch>()
+                + std::mem::size_of::<PathBuf>()
         );
     }
 
     #[test]
     fn the_debug_impls_name_the_mechanism_and_nothing_else() {
-        let custody = WindowsIdentityCustody::new(Arc::new(AbsentElement), ShutdownLatch::new());
+        let custody =
+            WindowsIdentityCustody::new(Arc::new(AbsentElement), ShutdownLatch::new(), temp_root());
         let text = format!("{custody:?}");
         assert!(text.contains("absent"));
         assert!(!text.contains("key"), "not even a field name");
@@ -1343,7 +1620,8 @@ mod tests {
         // §11.16 (l): "the core MUST NOT substitute a file-backed signer
         // silently". Refusing is the specified behaviour, and the attestation
         // still answers so S-46 records the truth.
-        let custody = WindowsIdentityCustody::new(Arc::new(AbsentElement), ShutdownLatch::new());
+        let custody =
+            WindowsIdentityCustody::new(Arc::new(AbsentElement), ShutdownLatch::new(), temp_root());
         let attestation = custody.identity_attestation().await.expect("answers");
         assert!(!attestation.hardware_backed);
         assert_eq!(attestation.attestation, None);
@@ -1354,7 +1632,16 @@ mod tests {
             .await
             .expect_err("no element");
         assert_eq!(err.reason_code().as_str(), "AUTH.KEY_UNAVAILABLE");
-        assert_eq!(err.os_detail().map(|d| d.call), Some("NCryptSignHash"));
+        // The ST-28 guard runs on the refusal — the store root above is a fresh
+        // temporary directory, so there is no anchor and provisioning is
+        // permitted — and the element refuses that too. The detail therefore
+        // names the *last* thing that was tried, which is the honest one: on a
+        // host with no element the operator's problem is that nothing can be
+        // created, not that one signature failed.
+        assert_eq!(
+            err.os_detail().map(|d| d.call),
+            Some("NCryptCreatePersistedKey")
+        );
         assert_eq!(custody.element_name(), "absent");
         assert_eq!(custody.custody_class(), CustodyClass::SoftwareLocal);
     }
@@ -1368,6 +1655,7 @@ mod tests {
         let custody = WindowsIdentityCustody::new(
             Arc::new(CngElement::new(Tier1Backend::Absent)),
             ShutdownLatch::new(),
+            temp_root(),
         );
         let err = custody
             .identity_agree(
@@ -1385,12 +1673,228 @@ mod tests {
     #[tokio::test]
     async fn the_identity_refuses_new_work_after_shutdown() {
         let latch = ShutdownLatch::new();
-        let custody = WindowsIdentityCustody::new(Arc::new(AbsentElement), latch.clone());
+        let custody =
+            WindowsIdentityCustody::new(Arc::new(AbsentElement), latch.clone(), temp_root());
         latch.begin();
         match custody.public_identity().await {
             Err(PlatformError::ShuttingDown) => {}
             other => panic!("expected ShuttingDown, got {other:?}"),
         }
+    }
+
+    // -- the export encoding (ADR-0007 N-2's input) --------------------------
+
+    /// The X and Y of one P-256 public key, and the SPKI OpenSSL 3 writes for
+    /// it — `openssl ec -pubout -outform DER`, captured 2026-09-03.
+    ///
+    /// A **known answer from an independent tool**, which is the only kind of
+    /// vector worth having for hand-assembled DER: asserting the prefix against
+    /// itself would pass with every byte of it wrong.
+    const VECTOR_X: [u8; 32] = [
+        0x1c, 0x07, 0x89, 0xdf, 0xf4, 0x85, 0x29, 0x30, 0x16, 0x42, 0xda, 0x61, 0x97, 0xdc, 0x40,
+        0xeb, 0xa4, 0xdf, 0xf0, 0x84, 0xff, 0x86, 0x9c, 0x7f, 0x76, 0xaa, 0x55, 0x84, 0x95, 0x7a,
+        0xd5, 0x23,
+    ];
+    const VECTOR_Y: [u8; 32] = [
+        0xb8, 0x42, 0xc2, 0x86, 0x88, 0xe3, 0x79, 0xc3, 0x58, 0x17, 0x37, 0xd2, 0x38, 0xf0, 0x66,
+        0x61, 0x86, 0x04, 0x87, 0x14, 0x47, 0x95, 0x35, 0xa4, 0x9a, 0xbd, 0x80, 0x38, 0xc9, 0x6c,
+        0xc0, 0xff,
+    ];
+    const VECTOR_SPKI: [u8; 91] = [
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+        0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0x1c, 0x07, 0x89,
+        0xdf, 0xf4, 0x85, 0x29, 0x30, 0x16, 0x42, 0xda, 0x61, 0x97, 0xdc, 0x40, 0xeb, 0xa4, 0xdf,
+        0xf0, 0x84, 0xff, 0x86, 0x9c, 0x7f, 0x76, 0xaa, 0x55, 0x84, 0x95, 0x7a, 0xd5, 0x23, 0xb8,
+        0x42, 0xc2, 0x86, 0x88, 0xe3, 0x79, 0xc3, 0x58, 0x17, 0x37, 0xd2, 0x38, 0xf0, 0x66, 0x61,
+        0x86, 0x04, 0x87, 0x14, 0x47, 0x95, 0x35, 0xa4, 0x9a, 0xbd, 0x80, 0x38, 0xc9, 0x6c, 0xc0,
+        0xff,
+    ];
+
+    fn ecc_public_blob(magic: u32, coordinate: usize) -> Vec<u8> {
+        let mut blob = Vec::with_capacity(8 + 64);
+        blob.extend_from_slice(&magic.to_le_bytes());
+        blob.extend_from_slice(&u32::try_from(coordinate).expect("fits").to_le_bytes());
+        blob.extend_from_slice(&VECTOR_X);
+        blob.extend_from_slice(&VECTOR_Y);
+        blob
+    }
+
+    #[test]
+    fn the_exported_blob_becomes_the_spki_an_independent_tool_writes_for_it() {
+        let spki = spki_from_ecc_public_blob(&ecc_public_blob(
+            ECDSA_PUBLIC_P256_MAGIC,
+            P256_COORDINATE_BYTES,
+        ))
+        .expect("a well-formed P-256 public blob");
+        assert_eq!(spki, VECTOR_SPKI.to_vec());
+        // Stated separately because these are the two properties
+        // `twinvpn_crypto::cose::es256_cose_key_from_spki` depends on and the
+        // ones a wrong constant would break silently.
+        assert_eq!(spki.len(), P256_SPKI_PREFIX.len() + 1 + 64);
+        assert_eq!(spki[P256_SPKI_PREFIX.len()], 0x04, "uncompressed point");
+    }
+
+    #[test]
+    fn a_blob_that_is_not_a_p256_public_point_is_refused_rather_than_published() {
+        // Each of the three ways a provider can disagree with itself. Publishing
+        // a truncated or foreign point would put an identity on the wire that
+        // no peer can verify and that nothing downstream would notice.
+        for blob in [
+            ecc_public_blob(ECDSA_PUBLIC_P256_MAGIC, 48), // P-384's width
+            ecc_public_blob(0x3253_4345, P256_COORDINATE_BYTES), // "ECS2": P-384
+            ecc_public_blob(ECDSA_PUBLIC_P256_MAGIC, P256_COORDINATE_BYTES)[..40].to_vec(),
+            Vec::new(),
+        ] {
+            let err = spki_from_ecc_public_blob(&blob).expect_err("refuses");
+            assert_eq!(err.reason_code().as_str(), "PLATFORM.ADAPTER_UNAVAILABLE");
+        }
+    }
+
+    // -- ST-28: the one guard between a read and a generation ----------------
+
+    /// An element with no key until it is told to make one, and a count of how
+    /// often it was told.
+    ///
+    /// The ST-28 table is a rule about *when* [`SigningElement::provision`] is
+    /// called, so the thing under test is the call itself. A real CNG element
+    /// could not answer that question on this host.
+    #[derive(Debug, Default)]
+    struct CountingElement {
+        provisions: AtomicU32,
+        /// What the element says before it has a key. `None` is "no container
+        /// of that name", which is the only refusal ST-28 lets act.
+        refusal: Option<PlatformError>,
+    }
+
+    impl CountingElement {
+        fn provisioned(&self) -> u32 {
+            self.provisions.load(Ordering::Relaxed)
+        }
+    }
+
+    impl SigningElement for CountingElement {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+        fn backend(&self) -> Tier1Backend {
+            Tier1Backend::SoftwareKsp
+        }
+        fn public_identity(&self) -> Result<IdentityPublic, PlatformError> {
+            if self.provisioned() == 0 {
+                return Err(self
+                    .refusal
+                    .clone()
+                    .unwrap_or_else(|| no_element("NCryptOpenKey")));
+            }
+            Ok(IdentityPublic {
+                device_id: twinvpn_types::DeviceId::from_array([7u8; 32]),
+                identity_id: twinvpn_types::IdentityId::from_array([7u8; 32]),
+                generation: 0,
+                public_key: VECTOR_SPKI.to_vec(),
+            })
+        }
+        fn provision(&self) -> Result<(), PlatformError> {
+            self.provisions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn sign(&self, _key: IdentityKeyRef, _message: &[u8]) -> Result<Signature, PlatformError> {
+            Err(no_element("NCryptSignHash"))
+        }
+        fn agree(
+            &self,
+            _key: IdentityKeyRef,
+            _peer: &PeerPublicKey,
+        ) -> Result<SharedSecret, PlatformError> {
+            Err(no_element("NCryptSecretAgreement"))
+        }
+        fn attestation(&self) -> Option<(Vec<u8>, &'static str)> {
+            None
+        }
+    }
+
+    fn write_anchor(root: &Path) {
+        let tier1 = root.join(WindowsSecureStore::TIER1_DIR);
+        fs::create_dir_all(&tier1).expect("creates the Tier-1 directory");
+        fs::write(tier1.join(STORE_ANCHOR_ITEM), b"sealed").expect("writes the anchor");
+    }
+
+    #[tokio::test]
+    async fn st28_provisions_once_where_the_device_has_no_tier1_state_at_all() {
+        // ADR-0020 §11.7's "ANCH absent and IK absent" row, which §1.2's
+        // reading makes a *first* creation and not a replacement: a device with
+        // no Tier-1 state is by definition entering enrolment (EM-22 E4, "at
+        // first boot the device generates its identity").
+        let element = Arc::new(CountingElement::default());
+        let custody =
+            WindowsIdentityCustody::new(element.clone(), ShutdownLatch::new(), temp_root());
+
+        custody
+            .public_identity()
+            .await
+            .expect("provisions and reads");
+        assert_eq!(element.provisioned(), 1);
+        // And exactly once: the second call finds a key and never reaches the
+        // guard, which is what makes this safe to put on a hot path.
+        custody.public_identity().await.expect("reads");
+        assert_eq!(element.provisioned(), 1);
+    }
+
+    #[tokio::test]
+    async fn st28_refuses_to_mint_a_replacement_where_the_anchor_outlived_the_key() {
+        // §11.7's "ANCH present, IK absent" row: a restored image or a wiped
+        // TPM, which ADR-0007 §7.3 says is indistinguishable from a compromise
+        // if the device answers it by minting a new identity. Re-enrolment is
+        // the answer, and it is the core's to start.
+        let root = temp_root();
+        write_anchor(&root);
+        let element = Arc::new(CountingElement::default());
+        let custody = WindowsIdentityCustody::new(element.clone(), ShutdownLatch::new(), root);
+
+        let err = custody.public_identity().await.expect_err("refuses");
+        assert_eq!(element.provisioned(), 0, "no replacement identity");
+        // The element's own refusal, unchanged, so the OS status survives.
+        assert_eq!(err.reason_code().as_str(), "AUTH.KEY_UNAVAILABLE");
+        assert_eq!(err.os_detail().map(|d| d.call), Some("NCryptOpenKey"));
+    }
+
+    #[tokio::test]
+    async fn st28_never_creates_on_a_store_it_could_not_read() {
+        // The fourth row, and the one an "absent means create" reading gets
+        // wrong: `Err` is not `absent`. A vault we cannot read is a retry —
+        // `AUTH.KEY_STORE_UNAVAILABLE` is TRANSIENT/WARN — and not a licence to
+        // decide the device is new.
+        // A root the OS cannot even look at. An interior NUL is the one
+        // provocation both hosts refuse identically and neither reports as
+        // `NotFound` — a file where `tier1` should be does not work, because
+        // Windows answers that with `ERROR_PATH_NOT_FOUND`, which Rust maps to
+        // `NotFound` and this guard would then read as "no anchor". It stands
+        // in for the real conditions (a denied ACL, a dead volume), which need
+        // host state a unit test cannot make portably.
+        let root = PathBuf::from("this\0is not a path");
+        let element = Arc::new(CountingElement::default());
+        let custody = WindowsIdentityCustody::new(element.clone(), ShutdownLatch::new(), root);
+
+        let err = custody.public_identity().await.expect_err("refuses");
+        assert_eq!(element.provisioned(), 0);
+        assert_eq!(err.reason_code().as_str(), "AUTH.KEY_STORE_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn st28_only_a_missing_key_is_a_provisioning_question() {
+        // The element half of the same rule, and the one `custody::platform`
+        // enforces again on the raw status: a busy TPM, a denied provider or a
+        // shutdown all mean the identity may still exist. Creating on one of
+        // them replaces a live identity.
+        let element = Arc::new(CountingElement {
+            refusal: Some(PlatformError::Transient(None)),
+            ..CountingElement::default()
+        });
+        let custody =
+            WindowsIdentityCustody::new(element.clone(), ShutdownLatch::new(), temp_root());
+
+        let err = custody.public_identity().await.expect_err("refuses");
+        assert_eq!(element.provisioned(), 0);
+        assert_eq!(err.reason_code().as_str(), "PLATFORM.ADAPTER_BUSY");
     }
 
     #[test]

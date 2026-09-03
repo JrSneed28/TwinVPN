@@ -230,9 +230,14 @@ impl WindowsPlatformAdapter {
             ),
             network,
             interfaces: iface::WindowsInterfaceProvider::new(shutdown.clone()),
+            // The vault root reaches identity custody as well as the store: the
+            // ADR-0020 ST-28 guard is a question about Tier 1, not about CNG,
+            // and `WindowsAdapterParts` already carries the one injected path
+            // (CB-7) so no shell learns a second one.
             identity: custody::WindowsIdentityCustody::new(
                 parts.identity_element,
                 shutdown.clone(),
+                store_root.clone(),
             ),
             store: custody::WindowsSecureStore::new(
                 parts.store_root,

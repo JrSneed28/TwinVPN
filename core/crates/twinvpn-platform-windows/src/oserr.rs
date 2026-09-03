@@ -259,6 +259,15 @@ pub const NTE_BAD_KEYSET: u32 = 0x8009_0016;
 pub const NTE_NOT_FOUND: u32 = 0x8009_002A;
 /// `NTE_DEVICE_NOT_READY` — the TPM is present but not usable.
 pub const NTE_DEVICE_NOT_READY: u32 = 0x8009_002D;
+/// `NTE_EXISTS` — a key container of that name is already there.
+///
+/// Only reachable from `NCryptCreatePersistedKey`, and only on a race: the open
+/// that preceded the create reported [`NTE_BAD_KEYSET`], so between the two
+/// calls another thread or another process created the container. The caller
+/// re-opens rather than overwriting — `NCRYPT_OVERWRITE_KEY_FLAG` would destroy
+/// a device identity silently, which ADR-0007 §7.3 makes indistinguishable from
+/// a compromise.
+pub const NTE_EXISTS: u32 = 0x8009_000F;
 
 /// Maps one Windows status onto the seam's failure vocabulary.
 ///
@@ -388,10 +397,20 @@ pub fn from_status(status: Win32Error, call: &'static str, context: Context) -> 
         // identity, which routes ADR-0020's recovery ladder to L4 (re-enrolment)
         // instead of a retry. Two codes, two classes, two remediations: the
         // disambiguator is the one `Context` already carries.
-        NTE_BAD_KEYSET | NTE_NOT_FOUND | NTE_NO_KEY | NTE_DEVICE_NOT_READY => match context {
-            Context::SecureStore => PlatformError::SecureStoreUnavailable(d),
-            _ => PlatformError::IdentityKeyUnavailable(d),
-        },
+        //
+        // `NTE_EXISTS` joins them for the same reason and with the same split.
+        // It is a *provisioning* status — "the container is already there" —
+        // and the seam has no code for that condition: ADR-0015 §11.2's
+        // admission rule refuses a new one where an existing code owns it, and
+        // `AUTH.KEY_UNAVAILABLE` is what the caller sees only if it then fails
+        // to open the container it was just told exists, which is a genuine key
+        // failure. The number rides along in [`OsDetail`] either way.
+        NTE_BAD_KEYSET | NTE_NOT_FOUND | NTE_NO_KEY | NTE_DEVICE_NOT_READY | NTE_EXISTS => {
+            match context {
+                Context::SecureStore => PlatformError::SecureStoreUnavailable(d),
+                _ => PlatformError::IdentityKeyUnavailable(d),
+            }
+        }
 
         // The WFP session went away underneath us. That is **not** "no rules" —
         // once committed, the filters belong to the Base Filtering Engine and
@@ -457,6 +476,31 @@ mod tests {
                 "{status:#x}"
             );
         }
+    }
+
+    #[test]
+    fn a_provisioning_status_is_a_key_condition_and_not_a_store_one() {
+        // `NTE_EXISTS` is only reachable from `NCryptCreatePersistedKey`, which
+        // is an identity operation, so `Context::Identity` must give it the
+        // identity code and its class. The `SecureStore` arm is asserted with
+        // it because the two share the match arm and the whole point of that
+        // arm is that the context — not the number — picks the code: DPAPI-NG
+        // returns the same `NTE_*` values as a key operation, and collapsing
+        // them routes ADR-0020's recovery ladder to re-enrolment instead of a
+        // retry.
+        let key = from_status(
+            Win32Error(NTE_EXISTS),
+            "NCryptCreatePersistedKey",
+            Context::Identity,
+        );
+        assert_eq!(key.reason_code().as_str(), "AUTH.KEY_UNAVAILABLE");
+        assert_eq!(key.os_detail().map(|d| d.code), Some(0x8009_000F));
+        assert_eq!(
+            from_status(Win32Error(NTE_EXISTS), "probe", Context::SecureStore)
+                .reason_code()
+                .as_str(),
+            "AUTH.KEY_STORE_UNAVAILABLE"
+        );
     }
 
     #[test]
