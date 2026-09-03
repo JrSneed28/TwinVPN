@@ -161,7 +161,9 @@ fn build_env() -> Result<(Env, Arc<TokioRuntime>)> {
 }
 
 #[cfg(windows)]
-fn build_adapter(state_dir: &Path) -> Result<Arc<twinvpn_platform_windows::WindowsPlatformAdapter>> {
+fn build_adapter(
+    state_dir: &Path,
+) -> Result<Arc<twinvpn_platform_windows::WindowsPlatformAdapter>> {
     let driver = Arc::new(
         wintun::WintunDriver::load()
             .map_err(|e| anyhow::anyhow!("wintun.dll could not be loaded: {e}"))?,
@@ -335,19 +337,19 @@ async fn supervise(
             keying: Some(&keying),
             trust_epoch: seed.trust_epoch,
         };
-        let handshaken = match drive(env, &replay, attempt, deadline_from(env.now_monotonic())).await
-        {
-            Ok(handshaken) => handshaken,
-            Err(refusal) => {
-                // §7.3.1 P-3 keeps the causes indistinguishable on the wire; the
-                // registered code is what a lane operator reads.
-                tracing::warn!(
-                    code = %code_of(&refusal),
-                    "the handshake was refused; returning to listen"
-                );
-                continue;
-            }
-        };
+        let handshaken =
+            match drive(env, &replay, attempt, deadline_from(env.now_monotonic())).await {
+                Ok(handshaken) => handshaken,
+                Err(refusal) => {
+                    // §7.3.1 P-3 keeps the causes indistinguishable on the wire; the
+                    // registered code is what a lane operator reads.
+                    tracing::warn!(
+                        code = %code_of(&refusal),
+                        "the handshake was refused; returning to listen"
+                    );
+                    continue;
+                }
+            };
         tracing::info!("the handshake completed; the tunnel is carrying");
 
         let cancel = Cancel::new();

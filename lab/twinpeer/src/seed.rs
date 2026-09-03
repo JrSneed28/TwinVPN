@@ -14,7 +14,7 @@ use twinvpn_env::Entropy as _;
 use twinvpn_platform_windows::clock::WindowsEntropy;
 
 use crate::seedfile::{
-    hex, LocalHalf, NegotiationMaterial, PeerHalf, PskMaterial, SeedFile, ResolvedSeed,
+    hex, LocalHalf, NegotiationMaterial, PeerHalf, PskMaterial, ResolvedSeed, SeedFile,
 };
 
 /// The overlay addresses the lane's address plan fixes.
@@ -78,7 +78,8 @@ pub fn run(args: &SeedArgs) -> Result<()> {
     // the two names and both ends compute it from the same rule, so the order is
     // decided here once rather than negotiated later — and the lane's `net up`
     // then sends message 1 without waiting for anything.
-    let (guest_device, peer_device) = ordered_pair(draw("the device ids")?, draw("the device ids")?);
+    let (guest_device, peer_device) =
+        ordered_pair(draw("the device ids")?, draw("the device ids")?);
     let guest_static = draw("the guest's L-DATA static")?;
     let peer_static = draw("the peer's L-DATA static")?;
     let guest_public = public_of(&guest_static)?;

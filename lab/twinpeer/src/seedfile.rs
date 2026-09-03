@@ -312,7 +312,10 @@ fn endpoint(field: &str, text: &str) -> Result<Endpoint> {
         .parse()
         .with_context(|| format!("{field}: `{text}` is not an address:port"))?;
     let port = Port::new(socket.port()).map_err(|e| anyhow::anyhow!("{field}: {e}"))?;
-    Ok(Endpoint::new(address(field, &socket.ip().to_string())?, port))
+    Ok(Endpoint::new(
+        address(field, &socket.ip().to_string())?,
+        port,
+    ))
 }
 
 #[cfg(test)]

@@ -213,7 +213,10 @@ impl UdpSocket for Guard {
                             source = ?arrival.source,
                             "an initiation arrived while pumping; stopping to re-handshake"
                         );
-                        put(&self.captured, (buf[..arrival.len].to_vec(), arrival.source));
+                        put(
+                            &self.captured,
+                            (buf[..arrival.len].to_vec(), arrival.source),
+                        );
                         self.cancel.cancel();
                         // The pump's own receive is raced against this token, so
                         // it stops rather than waiting for this loop to return.

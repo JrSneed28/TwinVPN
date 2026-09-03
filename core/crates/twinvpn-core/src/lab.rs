@@ -45,9 +45,8 @@ pub use crate::enforce::MTU as OVERLAY_MTU;
 pub use crate::establish::PROBE;
 pub use crate::execute::handshake::{
     deadline_from, drive, encode_initiation, encode_response, ordered, role_for, Attempt,
-    Handshaken, Refusal,
-    INITIATION_PREFIX_BYTES, MAX_HANDSHAKE_DATAGRAM_BYTES, RESPONSE_PREFIX_BYTES,
-    TYPE_HANDSHAKE_INITIATION, TYPE_HANDSHAKE_RESPONSE,
+    Handshaken, Refusal, INITIATION_PREFIX_BYTES, MAX_HANDSHAKE_DATAGRAM_BYTES,
+    RESPONSE_PREFIX_BYTES, TYPE_HANDSHAKE_INITIATION, TYPE_HANDSHAKE_RESPONSE,
 };
 pub use crate::session_table::{session_id_for, TunnelKeying, STATIC_KEY_LEN};
 pub use twinvpn_crypto::noise::Role;

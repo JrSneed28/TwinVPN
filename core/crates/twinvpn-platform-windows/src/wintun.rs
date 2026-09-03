@@ -1083,7 +1083,11 @@ mod tests {
     #[tokio::test]
     async fn the_device_refuses_new_work_after_shutdown() {
         let latch = ShutdownLatch::new();
-        let device = WindowsTunnelDevice::new(Arc::new(FakeDriver::default()), latch.clone(), unpublished());
+        let device = WindowsTunnelDevice::new(
+            Arc::new(FakeDriver::default()),
+            latch.clone(),
+            unpublished(),
+        );
         latch.begin();
         match device.create_interface(&name(), 1420).await {
             Err(PlatformError::ShuttingDown) => {}
