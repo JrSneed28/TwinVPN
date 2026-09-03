@@ -666,6 +666,10 @@ impl IdentityCustody for WindowsIdentityCustody {
             // path from one whose first operation is a read.
             match self.element.sign(key, message) {
                 Ok(signature) => Ok(signature),
+                // Only this device's own identity key has a container to
+                // create. The two `Owner` keys are the `Owner`'s device's, and
+                // a refusal for one of them is not a provisioning question.
+                Err(refusal) if !matches!(key, IdentityKeyRef::Identity { .. }) => Err(refusal),
                 Err(refusal) => {
                     self.provision_under_st28(refusal)?;
                     self.element.sign(key, message)
@@ -1895,6 +1899,18 @@ mod tests {
         let err = custody.public_identity().await.expect_err("refuses");
         assert_eq!(element.provisioned(), 0);
         assert_eq!(err.reason_code().as_str(), "PLATFORM.ADAPTER_BUSY");
+
+        // Nor is a signature by a key this device does not own. The two `Owner`
+        // keys live on the `Owner`'s device, so "no such container" is the
+        // truth about them and not something to fix by creating anything.
+        let owner = Arc::new(CountingElement::default());
+        let custody = WindowsIdentityCustody::new(owner.clone(), ShutdownLatch::new(), temp_root());
+        let err = custody
+            .identity_sign(IdentityKeyRef::OwnerRoot, &[0u8; 32])
+            .await
+            .expect_err("refuses");
+        assert_eq!(owner.provisioned(), 0);
+        assert_eq!(err.os_detail().map(|d| d.call), Some("NCryptSignHash"));
     }
 
     #[test]
