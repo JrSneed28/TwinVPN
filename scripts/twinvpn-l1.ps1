@@ -405,6 +405,23 @@ function Start-Observers([string] $Repo) {
     }
     New-NetIPAddress -InterfaceIndex $peerNic.ifIndex -IPAddress $PeerOverlayV4 -PrefixLength 24 | Out-Null
     New-NetIPAddress -InterfaceIndex $peerNic.ifIndex -IPAddress $PeerOverlayV6 -PrefixLength 64 | Out-Null
+    # PREFERRED before anything binds. A freshly assigned address sits in the
+    # Tentative state while duplicate-address detection runs, and a bind on it
+    # during that window fails with WSAEADDRNOTAVAIL (10049): the first run of
+    # this lane lost the oracle to exactly that, `bind 100.64.1.2:8080: The
+    # requested address is not valid in its context`, with the adapter up and
+    # the address visibly assigned.
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        $states = @($PeerOverlayV4, $PeerOverlayV6) | ForEach-Object {
+            (Get-NetIPAddress -InterfaceIndex $peerNic.ifIndex -IPAddress $_ -ErrorAction SilentlyContinue).AddressState
+        }
+        $ready = ($states.Count -eq 2) -and (($states | Where-Object { $_ -ne 'Preferred' }).Count -eq 0)
+        if (-not $ready) { Start-Sleep -Milliseconds 500 }
+    } while (-not $ready -and (Get-Date) -lt $deadline)
+    if (-not $ready) {
+        throw "the peer adapter's overlay addresses never became Preferred within 30 s (states: $($states -join ', ')); nothing can bind them"
+    }
     foreach ($fam in @('IPv4', 'IPv6')) {
         # The same reason New-Fabric gives for the two lab vNICs, and it is the
         # BASELINE leg that needs it: the guest's beacon arrives on switch A
