@@ -58,9 +58,10 @@ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, FWPM_PROVIDER0, FWPM_SUBLAYER0,
     FWPM_SUBLAYER_FLAG_PERSISTENT, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB,
     FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0,
-    FWP_FILTER_ENUM_FULLY_CONTAINED, FWP_IP_VERSION_V4, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ANY_SET,
-    FWP_MATCH_NOT_EQUAL, FWP_UINT16, FWP_UINT32, FWP_UINT64, FWP_UINT8, FWP_V4_ADDR_AND_MASK,
-    FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
+    FWP_FILTER_ENUM_FLAG_INCLUDE_BOOTTIME, FWP_FILTER_ENUM_FULLY_CONTAINED, FWP_IP_VERSION_V4,
+    FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ANY_SET, FWP_MATCH_NOT_EQUAL, FWP_UINT16, FWP_UINT32,
+    FWP_UINT64, FWP_UINT8, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK,
+    FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
 };
 use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 
@@ -829,12 +830,31 @@ impl WfpEngine {
     /// `provider_owned: false`, which is what lets `readback` refuse to count
     /// them and what lets a diagnostic bundle say who else is filtering.
     fn enumerate(&self) -> Result<Vec<InstalledFilter>, PlatformError> {
+        let mut out = Vec::new();
+        for layer in Layer::BOTH {
+            self.enumerate_layer(layer, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    /// One layer's filter rows, appended to `out`.
+    ///
+    /// The template names the layer because the engine requires one: a null
+    /// `layerKey` is `FWP_E_LAYER_NOT_FOUND`, not "every layer". It asks for
+    /// boot-time filters explicitly because the engine omits them by default,
+    /// and the KS-19 boot artifact is exactly what `read` must count and
+    /// `purge` must remove.
+    fn enumerate_layer(
+        &self,
+        layer: Layer,
+        out: &mut Vec<InstalledFilter>,
+    ) -> Result<(), PlatformError> {
         let mut enum_handle: HANDLE = core::ptr::null_mut();
         let template = FWPM_FILTER_ENUM_TEMPLATE0 {
             providerKey: core::ptr::null_mut(),
-            layerKey: GUID::from_u128(0),
+            layerKey: layer_guid(layer),
             enumType: FWP_FILTER_ENUM_FULLY_CONTAINED,
-            flags: 0,
+            flags: FWP_FILTER_ENUM_FLAG_INCLUDE_BOOTTIME,
             providerContextTemplate: core::ptr::null_mut(),
             numFilterConditions: 0,
             filterCondition: core::ptr::null_mut(),
@@ -860,7 +880,6 @@ impl WfpEngine {
         };
 
         let ours = guid(PROVIDER_KEY);
-        let mut out = Vec::new();
         loop {
             let mut entries: *mut *mut FWPM_FILTER0 = core::ptr::null_mut();
             let mut returned: u32 = 0;
@@ -892,16 +911,12 @@ impl WfpEngine {
                 let provider_owned = !filter.providerKey.is_null()
                     // SAFETY: checked non-null immediately above.
                     && guid_eq(unsafe { *filter.providerKey }, ours);
-                let layer = if guid_eq(filter.layerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V4) {
-                    Layer::AleAuthConnectV4
-                } else if guid_eq(filter.layerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V6) {
-                    Layer::AleAuthConnectV6
-                } else {
-                    // A layer this crate does not install into. Skipped rather
-                    // than mapped: reporting somebody else's ALE_BIND filter as
-                    // one of ours would make the read-back lie.
+                // The template already restricts the rows to `layer`; a row
+                // from anywhere else is skipped rather than mapped, because
+                // reporting it as ours would make the read-back lie.
+                if !guid_eq(filter.layerKey, layer_guid(layer)) {
                     continue;
-                };
+                }
                 out.push(InstalledFilter {
                     key: ours_key(filter.filterKey),
                     layer,
@@ -922,7 +937,7 @@ impl WfpEngine {
                 break;
             }
         }
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -978,6 +993,13 @@ impl FilterEngine for WfpEngine {
         // an intermediate state (KS-17) and the swap is a swap rather than a
         // remove-then-add (KS-23).
         for key in self.owned_keys()? {
+            // The trait's one exception: the KS-19 boot artifact survives a
+            // runtime commit. A boot key the incoming set also carries is
+            // replaced inside this transaction instead, because
+            // `FwpmFilterAdd0` refuses a duplicate key rather than overwriting.
+            if crate::wfp::boot::is_boot_filter(key) && !set.filters.iter().any(|f| f.key == key) {
+                continue;
+            }
             let key = guid(key);
             // SAFETY: `key` is live for the call.
             let status = unsafe { FwpmFilterDeleteByKey0(self.handle(), &raw const key) };
