@@ -224,11 +224,23 @@ function New-Fabric {
     # NARROW firewall rules rather than a disabled profile: only the observers'
     # own addresses and ports, removed again by -Action destroy.
     Remove-NetFirewallRule -DisplayName $FwRule -ErrorAction SilentlyContinue
+    # The oracle's port is $OraclePort, not 80 (see Start-Observers). Run 8
+    # measured this rule still on 80: the guest could not open tcp/8080 and
+    # could not even ping its gateway, because the host vNICs sit in the
+    # Public profile where everything inbound is dropped unless a rule allows
+    # it. ICMP echo is allowed on the lab addresses so the guest's own
+    # reachability diagnostics can tell a dead listener from a dead link.
     New-NetFirewallRule -DisplayName $FwRule -Direction Inbound -Action Allow `
-        -Protocol TCP -LocalPort 80 -LocalAddress @($OracleV4, $OracleV6) | Out-Null
+        -Protocol TCP -LocalPort $OraclePort -LocalAddress @($OracleV4, $OracleV6) | Out-Null
     New-NetFirewallRule -DisplayName $FwRule -Direction Inbound -Action Allow `
         -Protocol UDP -LocalPort 53 `
         -LocalAddress @($OracleV4, $OracleV6, $ResolverV4, $ResolverV6) | Out-Null
+    New-NetFirewallRule -DisplayName $FwRule -Direction Inbound -Action Allow `
+        -Protocol ICMPv4 -IcmpType 8 `
+        -LocalAddress @($L1GuestV4, $OracleV4, $SentinelV4, $ResolverV4) | Out-Null
+    New-NetFirewallRule -DisplayName $FwRule -Direction Inbound -Action Allow `
+        -Protocol ICMPv6 -IcmpType 128 `
+        -LocalAddress @($L1GuestV6, $OracleV6, $SentinelV6, $ResolverV6) | Out-Null
     Write-Host "fabric up: $SwGuest ($L1GuestV4, $L1GuestV6) and $SwOracle ($OracleV4, $OracleV6)"
 }
 
