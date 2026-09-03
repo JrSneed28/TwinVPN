@@ -285,6 +285,18 @@ pub enum PlanDefect {
     OverlayAddressIsNotAHost(IpAddr, u32),
 }
 
+/// Whether an address is one the operating system assigns to a link on its
+/// own: IPv6 link-local (`fe80::/10`) or IPv4 APIPA (`169.254.0.0/16`).
+fn is_os_link_local(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V6(a) => a.is_link_local(),
+        IpAddr::V4(a) => {
+            let o = a.octets();
+            o[0] == 169 && o[1] == 254
+        }
+    }
+}
+
 impl RoutePlan {
     /// An empty plan.
     #[must_use]
@@ -476,11 +488,18 @@ pub fn plan(
 
     let desired_addresses = desired_address_rows(contract, overlay);
     let existing_addresses = {
+        // The OS's own link-local addresses are not ours to delete: Windows
+        // auto-configures fe80::/64 on every adapter (and 169.254/16 while
+        // DHCP is unanswered), neighbour discovery runs over it, and the
+        // contract never names it. Left in this set, it became a delete row
+        // with a /64 prefix, which `validate` refused as "not a host address"
+        // and turned every `net up` into ROUTE.PROGRAMMING_DENIED (measured in
+        // the hosted kill-switch lane, run 33737786510).
         let mut a: Vec<AddressRow> = previous
             .addresses
             .iter()
             .copied()
-            .filter(|a| a.luid == overlay)
+            .filter(|a| a.luid == overlay && !is_os_link_local(a.address.address()))
             .collect();
         a.sort_unstable();
         a
@@ -640,7 +659,7 @@ fn same_route(a: &RouteRow, b: &RouteRow) -> bool {
 mod tests {
     use super::*;
     use twinvpn_platform::{ContractGeneration, DnsConfig, InterfaceIndex, RouteEntry};
-    use twinvpn_types::{V4Addr, V6Addr};
+    use twinvpn_types::{V4Addr, V6Addr, ZoneIndex};
 
     const OVERLAY: InterfaceLuid = InterfaceLuid(0x0001_0000_0000_0006);
 
@@ -989,6 +1008,48 @@ mod tests {
             plan.validate(OVERLAY).expect_err("refused"),
             PlanDefect::ForeignRoute(_)
         ));
+    }
+
+    #[test]
+    fn the_adapters_own_link_local_address_is_neither_deleted_nor_a_defect() {
+        // Windows puts fe80::/64 on the overlay adapter the moment it exists.
+        // Run 33737786510 planned its deletion, `validate` refused the /64 as a
+        // non-host address, and `net up` failed ROUTE.PROGRAMMING_DENIED.
+        let mut ll = [0u8; 16];
+        ll[0] = 0xfe;
+        ll[1] = 0x80;
+        ll[15] = 0x2a;
+        let link_local = AddressRow {
+            luid: OVERLAY,
+            address: InterfaceAddress::new(
+                IpAddr::V6(V6Addr::new(ll, ZoneIndex::new(10)).expect("a zoned link-local")),
+                64,
+            )
+            .expect("address"),
+            skip_as_source: false,
+        };
+        let previous = InstalledRoutes {
+            rows: Vec::new(),
+            addresses: vec![link_local],
+            interface_metric: PerFamily::new(None, None),
+        };
+        let contract = contract(
+            PerFamily::new(Vec::new(), Vec::new()),
+            PerFamily::new(vec![host_v4([100, 64, 1, 1])], vec![host_v6(1)]),
+        );
+        let plan = plan(&previous, &contract, OVERLAY);
+        plan.validate(OVERLAY)
+            .expect("the OS's link-local address is not a plan defect");
+        assert!(
+            plan.addresses.deletes.is_empty(),
+            "nothing deletes the OS's link-local address: {:?}",
+            plan.addresses.deletes
+        );
+        assert_eq!(
+            plan.addresses.adds.len(),
+            2,
+            "both overlay host addresses are added"
+        );
     }
 
     #[test]

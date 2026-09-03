@@ -370,6 +370,10 @@ function Start-Observers([string] $Repo) {
         if (-not (Test-Path $f)) { throw "twinpeer seed exited 0 but wrote no $f" }
     }
     $peerOut = Join-Path $RunDir 'twinpeer.out'
+    # Verbose: the peer logs discarded probes and non-initiation datagrams at
+    # debug, and run 33737786510's silence at info could not say whether the
+    # guest had sent anything at all.
+    $env:RUST_LOG = 'twinpeer=debug,info'
     $pids += (Start-Process -FilePath $peer -PassThru -NoNewWindow `
         -ArgumentList @('serve', '--seed', $peerSeed, '--wintun-dll', $wintunDir,
                         '--adapter-name', $PeerAdapter) `

@@ -471,9 +471,23 @@ fn net_up(core: &Core, submission: &Submission) -> Result<Outcome, Box<Diagnosti
         let mut scoped = submission.clone();
         scoped.op = CoreCommand::SessionConnect;
         scoped.params = peer.as_bytes().to_vec();
-        if let Ok(outcome) = connect(core, &scoped) {
-            effects = effects.saturating_add(outcome.effects);
-            connected += 1;
+        match connect(core, &scoped) {
+            Ok(outcome) => {
+                effects = effects.saturating_add(outcome.effects);
+                connected += 1;
+            }
+            Err(diagnostic) => {
+                // Named, not swallowed: `net.up` continues to arm with the host
+                // Blocked, but a session that could not connect is the one
+                // fact a reader of the service log needs, and the refusal
+                // was invisible until run 33737786510 asked why the far peer
+                // never saw an initiation.
+                tracing::warn!(
+                    target: "twinvpn.core.enforce",
+                    reason_code = diagnostic.code().as_str(),
+                    "net.up could not connect a session; arming continues Blocked"
+                );
+            }
         }
     }
 
