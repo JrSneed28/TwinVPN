@@ -200,7 +200,7 @@ transitions='[]'
 notes=""
 exit_code=0
 
-TEST_CMD='cargo test --locked -p twinvpnsvc --test windows_link_run -- --nocapture --test-threads=1'
+TEST_CMD='cargo test --locked -p twinvpnsvc --test windows_link_run --test mgmt_listener -- --nocapture --test-threads=1'
 if [ "$do_privileged" = true ]; then
   export TWINVPN_WINDOWS_TEST=1
   echo "TWINVPN_WINDOWS_TEST=1: the real WFP/Wintun surface will be exercised"

@@ -106,6 +106,20 @@ function Register-TwinVpnService {
     if ($LASTEXITCODE -ne 0) { throw "sc.exe sidtype TwinVPNService exited $LASTEXITCODE" }
     Invoke-Native { & sc.exe privs TwinVPNService SeChangeNotifyPrivilege/SeImpersonatePrivilege/SeLoadDriverPrivilege } | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "sc.exe privs TwinVPNService exited $LASTEXITCODE" }
+    # PS-12a's local groups, which the package creates and the service only
+    # resolves: the listener refuses to bind its pipe without them, and a
+    # client's scopes come from membership. The lane's user drives `net up`,
+    # so it is an operator here the way README §4 step 8 makes a person one.
+    # Idempotent, because step 8 registers the service a second time.
+    foreach ($g in @('TwinVPN Users', 'TwinVPN Operators')) {
+        if (-not (Get-LocalGroup -Name $g -ErrorAction SilentlyContinue)) {
+            New-LocalGroup -Name $g -Description 'TwinVPN PS-12a (lane-created, as the MSI would)' | Out-Null
+        }
+        $members = @(Get-LocalGroupMember -Group $g -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+        if (-not ($members -match "\\$([regex]::Escape($env:USERNAME))$")) {
+            Add-LocalGroupMember -Group $g -Member $env:USERNAME
+        }
+    }
 }
 
 function Transition([string] $From, [string] $To) {
