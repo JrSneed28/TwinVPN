@@ -21,6 +21,14 @@ use crate::service::scm::{wait_hint_ms, ServiceState};
 
 use super::{wide, Failure};
 
+/// The SCM's argument-vector element type.
+///
+/// Re-exported so the binary's entry point can spell its own signature without
+/// naming `windows-sys`: this module is the only one in the crate that does
+/// (see [`crate::win32`]), and an entry point declared over the raw crate would
+/// be a second place to keep in step with it.
+pub use windows_sys::core::PWSTR;
+
 /// Whether the SCM started this process (PS-11).
 ///
 /// An unsupervised authority "MUST NOT claim guarantees it does not have", and
@@ -40,6 +48,24 @@ pub fn started_by_scm() -> bool {
 }
 
 static DISPATCHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Records that the SCM's dispatcher has called this process's entry point.
+///
+/// **[`dispatch`] cannot set this in time, and that is not a detail.**
+/// `StartServiceCtrlDispatcherW` returns only after the service's entry point
+/// has *ended*, so the flag that call stores is `false` for the whole of the
+/// service's life — which is exactly the window in which [`started_by_scm`] is
+/// asked. `service::privilege::Posture::read` reads it at step 2 of §11.6's
+/// sequence, and would have recorded `supervised: false` on a service the SCM
+/// had started.
+///
+/// The entry point running *is* the dispatcher connection having succeeded, so
+/// that is the honest place to record it. Called from `service_main` and
+/// nowhere else; a caller that has not been handed control by the SCM would be
+/// manufacturing PS-11's supervised posture, which is the claim PS-11 forbids.
+pub fn mark_dispatched() {
+    DISPATCHED.store(true, std::sync::atomic::Ordering::Release);
+}
 
 /// The controls this service accepts.
 ///
@@ -81,7 +107,11 @@ pub fn dispatch(service_name: &str, entry: LPSERVICE_MAIN_FUNCTIONW) -> bool {
     // and `name` is declared first.
     let ok = unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) };
     let dispatched = ok != 0;
-    DISPATCHED.store(dispatched, std::sync::atomic::Ordering::Release);
+    // `fetch_or` and not `store`: [`mark_dispatched`] has already run by now on
+    // the path that matters, and a dispatcher that reported a failure *after*
+    // running the entry point would otherwise retract a supervised posture that
+    // was true. The flag is one-way for the same reason `ShutdownLatch` is.
+    DISPATCHED.fetch_or(dispatched, std::sync::atomic::Ordering::Release);
     dispatched
 }
 
@@ -124,11 +154,14 @@ pub unsafe fn register_handler(
 /// `handle` must be the value [`register_handler`] returned for this service,
 /// and must not have been invalidated by the service having stopped.
 pub unsafe fn report(handle: SERVICE_STATUS_HANDLE, state: ServiceState) {
-    let (current, checkpoint, exit_code) = match state {
-        ServiceState::StartPending { checkpoint } => (SERVICE_START_PENDING, checkpoint, 0),
-        ServiceState::Running => (SERVICE_RUNNING, 0, 0),
-        ServiceState::StopPending { checkpoint } => (SERVICE_STOP_PENDING, checkpoint, 0),
-        ServiceState::Stopped { exit_code } => (SERVICE_STOPPED, 0, exit_code),
+    let (current, checkpoint, exit_code, specific) = match state {
+        ServiceState::StartPending { checkpoint } => (SERVICE_START_PENDING, checkpoint, 0, 0),
+        ServiceState::Running => (SERVICE_RUNNING, 0, 0, 0),
+        ServiceState::StopPending { checkpoint } => (SERVICE_STOP_PENDING, checkpoint, 0, 0),
+        ServiceState::Stopped {
+            exit_code,
+            service_specific,
+        } => (SERVICE_STOPPED, 0, exit_code, service_specific),
     };
     let status = SERVICE_STATUS {
         dwServiceType: SERVICE_WIN32_OWN_PROCESS,
@@ -141,7 +174,12 @@ pub unsafe fn report(handle: SERVICE_STATUS_HANDLE, state: ServiceState) {
             0
         },
         dwWin32ExitCode: exit_code,
-        dwServiceSpecificExitCode: 0,
+        // Read by `sc query` only when `dwWin32ExitCode` is
+        // `ERROR_SERVICE_SPECIFIC_ERROR`, and carried rather than zeroed
+        // because the two fields are one contract: 1066 beside a specific code
+        // of zero says "the service failed for its own reason, and the reason
+        // is no error", which is the pair contradicting itself.
+        dwServiceSpecificExitCode: specific,
         dwCheckPoint: checkpoint,
         dwWaitHint: wait_hint_ms(state),
     };

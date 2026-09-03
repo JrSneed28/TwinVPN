@@ -43,9 +43,28 @@ use std::sync::Arc;
 use twinvpnsvc::service::{logging, privilege, runtime, start, StartSequence, StartupRefusal};
 
 fn main() -> std::process::ExitCode {
-    // PS-11: whether the SCM started us decides both the log format and whether
-    // this build may claim a restart guarantee. Read before the subscriber is
-    // installed, because it selects the subscriber.
+    // **The SCM handshake is attempted FIRST, before logging and before
+    // anything else.** ADR-0016 §11.6's supervision row and PS-11: a process the
+    // service control manager started has ~30 s to call
+    // `StartServiceCtrlDispatcherW`, and one that never calls it is killed with
+    // `ERROR_SERVICE_REQUEST_TIMEOUT` (1053) however correct the rest of its
+    // start sequence was. That is exactly what the hosted kill-switch lane
+    // measured, so the connection attempt cannot sit behind any other step.
+    //
+    // On success this blocks for the whole life of the service and returns
+    // after `service_main` has finished; the exit code is the one that recorded.
+    if dispatch_to_scm() {
+        return std::process::ExitCode::from(
+            SERVICE_EXIT.load(std::sync::atomic::Ordering::Acquire),
+        );
+    }
+
+    // ERROR_FAILED_SERVICE_CONTROLLER_CONNECT: run by hand, from a shell, or
+    // under a debugger. PS-11's foreground path, unchanged.
+    //
+    // `started_by_scm` is read rather than hard-coded `false`, and it is now a
+    // genuine read: `dispatch` has run and stored its answer, so the value the
+    // subscriber's JSON-vs-text choice sees is the dispatcher's own.
     let supervised = started_by_scm();
 
     // The shell installs the subscriber, because the core deliberately installs
@@ -66,21 +85,140 @@ fn main() -> std::process::ExitCode {
         );
     }
 
-    match run() {
+    // The sender is bound rather than dropped, and that is the whole of the
+    // foreground stop policy: a dropped sender closes the channel, which
+    // `serve` would see as a stop. Nothing flips it, so `serve` runs until the
+    // process is signalled — which is what running in the foreground means.
+    let (_stop, stop_rx) = tokio::sync::watch::channel(false);
+    let outcome = run(
+        stop_rx,
+        &mut || {
+            tracing::info!(
+                target: "twinvpn.service",
+                "the management endpoint is bound and accepting; §11.6 step 8 is reached. \
+                 There is no SCM to tell, so this is the only place it is said"
+            );
+        },
+        &mut |_adapter| {},
+    );
+
+    match outcome {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(refusal) => {
-            // Never a bare message: the registered code is the contract, and the
-            // sentence is for a human reading the Event Log.
-            tracing::error!(
-                target: "twinvpn.service",
-                reason_code = refusal.code,
-                specified_code = refusal.specified,
-                "the service cannot start"
-            );
-            eprintln!("twinvpnsvc: {}: {}", refusal.code, refusal.detail);
+            report_refusal(&refusal);
             std::process::ExitCode::from(refusal.exit)
         }
     }
+}
+
+/// The exit code `service_main` recorded, for `main` to exit with.
+///
+/// A `static` because the two are separated by `StartServiceCtrlDispatcherW`:
+/// the SCM calls `service_main` on a thread of its own and returns to `main`
+/// only afterwards, so there is no value to return and no channel to return it
+/// through.
+static SERVICE_EXIT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Hands this process to the SCM (ADR-0016 §11.6, PS-11).
+#[cfg(windows)]
+fn dispatch_to_scm() -> bool {
+    twinvpnsvc::win32::scm::dispatch(twinvpnsvc::SERVICE_NAME, Some(service_main))
+}
+
+/// The non-Windows answer: there is no dispatcher to connect to.
+#[cfg(not(windows))]
+fn dispatch_to_scm() -> bool {
+    false
+}
+
+/// The SCM's entry point, run on a thread the dispatcher creates.
+///
+/// Everything the SCM needs to hear happens here and in this order: the handler
+/// is registered before a status is reported, because a service that reported
+/// `START_PENDING` with no handler could not be told to stop; and
+/// `START_PENDING` is reported before §11.6's sequence begins, because the SCM's
+/// 30 s start timeout is already running.
+#[cfg(windows)]
+extern "system" fn service_main(_argc: u32, _argv: *mut twinvpnsvc::win32::scm::PWSTR) {
+    // PS-11, and this is the only honest place to say it: this function runs
+    // *because* the dispatcher connected. `dispatch` cannot record it, because
+    // `StartServiceCtrlDispatcherW` does not return until after this function
+    // has ended — see `win32::scm::mark_dispatched`.
+    twinvpnsvc::win32::scm::mark_dispatched();
+
+    // `supervised = true` as a fact rather than a query, for the same reason.
+    if let Err(reason) = logging::install(true) {
+        eprintln!("twinvpnsvc: {reason}");
+        SERVICE_EXIT.store(70, std::sync::atomic::Ordering::Release);
+        return;
+    }
+
+    let (stop, stop_rx) = tokio::sync::watch::channel(false);
+    let supervisor = match twinvpnsvc::service::supervisor::Supervisor::install(stop) {
+        Ok(supervisor) => supervisor,
+        Err(failure) => {
+            // Fatal, and reported as a start failure rather than a silent exit:
+            // a service with no control handler cannot be stopped and would
+            // hang every shutdown.
+            tracing::error!(
+                target: "twinvpn.service",
+                reason_code = "PLATFORM.ADAPTER_UNAVAILABLE",
+                call = failure.call,
+                status = format_args!("{:#010x}", failure.status.get()),
+                "the SCM refused the control handler registration"
+            );
+            SERVICE_EXIT.store(71, std::sync::atomic::Ordering::Release);
+            return;
+        }
+    };
+
+    // The 30 s start timeout is already counting; `START_WAIT_HINT_MS` is the
+    // budget this service declares against it, and the checkpoint is LC-37's
+    // liveness signal.
+    supervisor.report(twinvpnsvc::service::scm::ServiceState::StartPending {
+        checkpoint: twinvpnsvc::service::supervisor::FIRST_CHECKPOINT,
+    });
+
+    let outcome = run(
+        stop_rx,
+        // PS-18: `SERVICE_RUNNING` is reported from inside `serve`, after the
+        // pipe is bound with its DACL and before the first accept — never
+        // earlier. A service that reported running with no management endpoint
+        // would be reporting itself as running while being unmanageable.
+        &mut || supervisor.report(twinvpnsvc::service::scm::ServiceState::Running),
+        &mut |adapter| {
+            supervisor
+                .attach_adapter(Arc::clone(adapter) as Arc<dyn twinvpn_platform::PlatformAdapter>);
+        },
+    );
+
+    if let Err(refusal) = &outcome {
+        report_refusal(refusal);
+    }
+    supervisor.report(twinvpnsvc::service::scm::ServiceState::StopPending {
+        checkpoint: twinvpnsvc::service::supervisor::FIRST_CHECKPOINT,
+    });
+    supervisor.report(twinvpnsvc::service::supervisor::stopped_for(
+        outcome.as_ref().err(),
+    ));
+    SERVICE_EXIT.store(
+        twinvpnsvc::service::supervisor::process_exit_code(outcome.as_ref().err()),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
+/// A refusal, on both the log and the standard error stream.
+///
+/// Never a bare message: the registered code is the contract, and the sentence
+/// is for a human reading the Event Log.
+fn report_refusal(refusal: &StartupRefusal) {
+    tracing::error!(
+        target: "twinvpn.service",
+        reason_code = refusal.code,
+        specified_code = refusal.specified,
+        "the service cannot start"
+    );
+    eprintln!("twinvpnsvc: {}: {}", refusal.code, refusal.detail);
 }
 
 /// Whether the SCM started this process.
@@ -100,8 +238,25 @@ fn started_by_scm() -> bool {
 }
 
 /// §11.6's sequence.
+///
+/// The three parameters are the supervisor's seam, and none of them is a
+/// decision this function makes:
+///
+/// - `stop` flips to `true` at most once, when the SCM delivers
+///   `SERVICE_CONTROL_STOP` or `SERVICE_CONTROL_PRESHUTDOWN`. `serve` returns
+///   `Ok(())` within `STOP_WAIT_HINT_MS` of that.
+/// - `on_ready` is called by `serve` exactly once, after the pipe is bound with
+///   its DACL and before the first accept, and never if binding failed. PS-18
+///   is what puts it there and not here.
+/// - `on_adapter` hands the adapter to the supervisor as soon as step 4 has
+///   built one, so a stop arriving during steps 4b–8 can latch it. It is a
+///   callback rather than a return value because those steps have not finished.
 #[allow(clippy::too_many_lines)]
-fn run() -> Result<(), StartupRefusal> {
+fn run(
+    stop: tokio::sync::watch::Receiver<bool>,
+    on_ready: &mut dyn FnMut(),
+    on_adapter: &mut dyn FnMut(&Arc<twinvpn_platform_windows::WindowsPlatformAdapter>),
+) -> Result<(), StartupRefusal> {
     let mut sequence = StartSequence::default();
 
     // ---- 1. the single-instance lock (LC-5, PS-1) -------------------------
@@ -145,6 +300,11 @@ fn run() -> Result<(), StartupRefusal> {
 
     // ---- 4. the adapter, and the capability probe -------------------------
     let adapter = Arc::new(build_adapter()?);
+    // Handed over here and not later: from this line on there is enforcement
+    // state and an open WFP engine handle, so a stop delivered during 4b–8 has
+    // something to latch. ADR-0022 §11.4's 2 s budget is only reachable if an
+    // in-flight adapter call can be made to return at once.
+    on_adapter(&adapter);
     let adapter_posture = adapter.posture();
     tracing::info!(
         target: "twinvpn.service",
@@ -270,7 +430,7 @@ fn run() -> Result<(), StartupRefusal> {
     // The guard is passed in rather than dropped early: LC-5's property is that
     // a LIVE authority holds it for as long as it is one, and passing it makes
     // the lifetime a thing the compiler enforces rather than a comment.
-    serve(&env, &tokio_runtime, &adapter, &core, lock)
+    serve(&env, &tokio_runtime, &adapter, &core, lock, stop, on_ready)
 }
 
 /// Steps 7 and 8: bind the pipe with its DACL, then accept.
@@ -299,6 +459,8 @@ fn serve(
     _adapter: &Arc<twinvpn_platform_windows::WindowsPlatformAdapter>,
     _core: &Arc<twinvpn_core::Core>,
     _lock: InstanceLock,
+    _stop: tokio::sync::watch::Receiver<bool>,
+    _on_ready: &mut dyn FnMut(),
 ) -> Result<(), StartupRefusal> {
     Err(StartupRefusal::platform(
         "MGMT.UNAVAILABLE",

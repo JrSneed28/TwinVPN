@@ -24,6 +24,7 @@
 //! | [`start`] | which steps completed, and which are fatal | — |
 //! | [`privilege`] | [`privilege::Posture::verify`] over a `TokenPrivileges` value | `OpenProcessToken` / `GetTokenInformation` |
 //! | [`scm`] | [`scm::on_control`], a pure transition | `SetServiceStatus` |
+//! | [`supervisor`] | [`supervisor::classify_control`], [`supervisor::stopped_for`] | `RegisterServiceCtrlHandlerExW`, the handler |
 //! | [`power`] | [`power::classify`] and [`power::ResumeSequence`] | `SERVICE_CONTROL_POWEREVENT` |
 //! | [`peer`] | [`peer::Principal::scopes`] | `GetNamedPipeClientProcessId`, the token SIDs, WTS |
 //! | [`server`] | the whole frame loop, over any `AsyncRead + AsyncWrite` | the pipe itself |
@@ -48,6 +49,7 @@ pub mod scm;
 #[cfg(feature = "core-host")]
 pub mod server;
 pub mod start;
+pub mod supervisor;
 
 pub use start::{StartSequence, StartupRefusal, Substitution, SUBSTITUTIONS};
 
