@@ -1649,6 +1649,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "twinpeer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "twinvpn-core",
+ "twinvpn-crypto",
+ "twinvpn-env",
+ "twinvpn-platform",
+ "twinvpn-platform-windows",
+ "twinvpn-types",
+]
+
+[[package]]
 name = "twinsim"
 version = "0.1.0"
 dependencies = [
@@ -1666,6 +1686,34 @@ dependencies = [
  "twinvpn-cp-client",
  "twinvpn-crypto",
  "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-core"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "prost",
+ "thiserror",
+ "tracing",
+ "twinvpn-cp-client",
+ "twinvpn-crypto",
+ "twinvpn-diag",
+ "twinvpn-dns",
+ "twinvpn-enforce",
+ "twinvpn-env",
+ "twinvpn-gateway",
+ "twinvpn-mgmt",
+ "twinvpn-path",
+ "twinvpn-platform",
+ "twinvpn-relay-client",
+ "twinvpn-route",
+ "twinvpn-schema",
+ "twinvpn-session",
+ "twinvpn-store",
+ "twinvpn-trust",
+ "twinvpn-tunnel",
  "twinvpn-types",
 ]
 
@@ -1714,12 +1762,76 @@ dependencies = [
 ]
 
 [[package]]
+name = "twinvpn-diag"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "serde_json",
+ "thiserror",
+ "twinvpn-env",
+ "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-dns"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "thiserror",
+ "twinvpn-env",
+ "twinvpn-platform",
+ "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-enforce"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "twinvpn-crypto",
+ "twinvpn-dns",
+ "twinvpn-env",
+ "twinvpn-platform",
+ "twinvpn-route",
+ "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
 name = "twinvpn-env"
 version = "0.1.0"
 dependencies = [
  "futures-core",
  "thiserror",
  "tokio",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-gateway"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "twinvpn-env",
+ "twinvpn-platform",
+ "twinvpn-route",
+ "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-mgmt"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "twinvpn-diag",
+ "twinvpn-env",
+ "twinvpn-schema",
  "twinvpn-types",
 ]
 
@@ -1748,6 +1860,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "twinvpn-platform-windows"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "twinvpn-env",
+ "twinvpn-platform",
+ "twinvpn-types",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
 name = "twinvpn-relay-client"
 version = "0.1.0"
 dependencies = [
@@ -1756,6 +1884,17 @@ dependencies = [
  "twinvpn-crypto",
  "twinvpn-env",
  "twinvpn-path",
+ "twinvpn-platform",
+ "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-route"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "twinvpn-env",
  "twinvpn-platform",
  "twinvpn-schema",
  "twinvpn-types",

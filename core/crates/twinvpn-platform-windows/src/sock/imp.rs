@@ -30,10 +30,34 @@
 //!   addresses a datagram arrived on, which is what `docs/networking.md` §3.4's
 //!   disco probe needs to attribute a reflexive candidate correctly.
 //!
-//! # The seven `unsafe` blocks
+//! # Winsock is initialised here, and that is not optional
+//!
+//! Every Winsock entry point except `WSAGetLastError` refuses with
+//! `WSANOTINITIALISED` (10093) until the **process** has called `WSAStartup`.
+//! Rust's standard library does it lazily, from inside `std::net`, and `tokio`'s
+//! runtime does not do it at all — creating an IOCP is not a Winsock call. So a
+//! process that reaches this crate's `bind_udp` without having touched
+//! `std::net` first opens no socket, and the failure reads as
+//! `PLATFORM.ADAPTER_UNAVAILABLE` at `WSASocketW`: an adapter that looks broken
+//! rather than a process that never initialised the stack.
+//!
+//! That is not a hypothetical ordering. `twinvpnsvc` speaks to its shell over a
+//! **named pipe**, which is not Winsock, so the first Winsock call in the
+//! service is the L-DATA socket the handshake needs — and it was failing on a
+//! live host at `WSASocketW` with 10093 (observed 2026-09-03 from `twinpeer`,
+//! which has the identical shape). [`ensure_winsock`] closes it at the one place
+//! every socket in this crate is born.
+//!
+//! There is no matching `WSACleanup`. The initialisation is refcounted and the
+//! process holds it for its lifetime, which is what `std` does for the same
+//! reason: a cleanup racing another thread's socket is worse than a reference
+//! released at exit by the kernel.
+//!
+//! # The eight `unsafe` blocks
 //!
 //! | Where | What |
 //! |---|---|
+//! | [`ensure_winsock`] | `WSAStartup`, once per process, into a local `WSADATA` |
 //! | [`create_socket`] | `WSASocketW` — returns a fresh owned handle |
 //! | [`set_option`] | the single `setsockopt` call site |
 //! | [`bind_socket`] | `bind` over a live buffer of its declared length |
@@ -89,8 +113,41 @@ fn last_error(call: &'static str) -> PlatformError {
     oserr::from_status(Win32Error::from_i32(status), call, Context::Socket)
 }
 
+/// `WSAStartup`, once per process. See the module documentation.
+///
+/// Version 2.2 — the version every supported Windows carries and the one `std`
+/// requests. The negotiated `WSADATA` is deliberately dropped: this crate asks
+/// for a version rather than adapting to whatever it is given, because a
+/// downgrade would silently change which of the calls below exist.
+fn ensure_winsock() -> Result<(), PlatformError> {
+    /// `Ok(())` or the `WSAStartup` status, remembered so a failure is reported
+    /// identically to every later caller rather than retried per socket.
+    static STARTED: std::sync::OnceLock<Result<(), i32>> = std::sync::OnceLock::new();
+    let outcome = STARTED.get_or_init(|| {
+        let mut data = ws::WSADATA::default();
+        // SAFETY: `data` is a live, correctly-typed `WSADATA` this call fills
+        // and does not retain; the version word is a plain integer. Calling
+        // `WSAStartup` more than once per process is permitted and refcounted,
+        // and the `OnceLock` means it happens at most once anyway.
+        let status = unsafe { ws::WSAStartup(0x0202, &raw mut data) };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(status)
+        }
+    });
+    // `WSAStartup` returns the status directly rather than through
+    // `WSAGetLastError` — which is the one call that cannot be used before it.
+    outcome.map_err(|status| {
+        oserr::from_status(Win32Error::from_i32(status), "WSAStartup", Context::Socket)
+    })
+}
+
 /// Opens one raw datagram socket.
 fn create_socket(family: SocketFamily) -> Result<ws::SOCKET, PlatformError> {
+    // The single gate: every socket this crate owns is born here, and every
+    // other Winsock call it makes is on one of them.
+    ensure_winsock()?;
     let af = match family {
         SocketFamily::V4 => i32::from(ws::AF_INET),
         SocketFamily::V6Only | SocketFamily::V6DualStack => i32::from(ws::AF_INET6),
