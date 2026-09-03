@@ -39,16 +39,44 @@
 
     * switch A is the guest's own link. The guest holds 10.77.0.10 and
       fd77:7717:d0c::10 and routes everything else through this host.
-    * switch B carries the oracle (10.78.0.1, fd78:7717:d0c::1), the sentinel's
-      egress identity (…0.2, …::2) and the unprotected resolver (…0.53, …::53).
-      The guest has NO route to that segment except its default route, which is
-      the property that matters: TwinVPN's class-4 filter PERMITS the guest's
-      on-link prefixes and its class-9 filter PERMITS link-local, so an observer
-      on either would be reachable while armed and the SILENCE phase would fail
-      for a reason that is not a leak. 100.64.0.0/10 and fd7c:9e5d:2a10::/48 are
-      avoided for the opposite reason: they sit in the Tier-1 baseline deny
-      floor and are blocked in BOTH postures, so a TUNNELLED leg addressed there
-      could never arrive.
+    * switch B carries the oracle's authoritative DNS (10.78.0.1,
+      fd78:7717:d0c::1), the sentinel's egress identity (…0.2, …::2), the
+      unprotected resolver (…0.53, …::53) and the PROTECTED relay's source
+      (…0.54, …::54). The guest has NO route to that segment except its default
+      route, which is the property that matters: TwinVPN's class-4 filter
+      PERMITS the guest's on-link prefixes and its class-9 filter PERMITS
+      link-local, so an observer on either would be reachable while armed and
+      the SILENCE phase would fail for a reason that is not a leak.
+
+  ## The beacon target is INSIDE the overlay, and that reverses an old rule
+
+  `lab/twinoracle/README.md` §3.1 tells a listener to AVOID 100.64.0.0/10 and
+  fd7c:9e5d:2a10::/48, on the ground that they are the Tier-1 baseline deny
+  floor and a beacon addressed there could never arrive. This lane departs from
+  that rule deliberately, and the departure is what makes the criterion
+  measurable at all:
+
+    * In `RoutingMode::TwinnetOnly` the Tier-1 PROTECTED scope is that floor
+      plus the authorized peers' /32 and /128 host routes and nothing else
+      (`twinvpn-core/src/enforce.rs:508-518`,
+      `twinvpn-platform-windows/src/wfp/filters.rs:598-608`). A beacon aimed at
+      10.78.0.1 is therefore OUT of scope: an armed host permits it, and the
+      ARMED SILENCE phase fails BY DESIGN rather than by defect.
+    * BASELINE still reaches the same address, because BASELINE runs before the
+      service is ever started AND this lane registers the service with
+      `sc.exe create` rather than with the MSI, so the KS-19 boot-time filter
+      set is never installed. No TwinVPN filter exists at that moment and the
+      guest's default route carries the beacon to this host, which holds the
+      address on the `twinpeer` adapter.
+    * The two postures differ by exactly the Tier-2 overlay permit, which is
+      INTERFACE-scoped (`wfp/filters.rs:920-950`), so the same destination is
+      permitted through the tunnel and denied off it.
+
+  One destination, two paths, disjoint sources — the stronger form of the
+  evidence, because nothing about the target can explain the difference. IF THIS
+  LANE EVER INSTALLS THE MSI the boot artifact makes filters live during
+  BASELINE, the second bullet reverses, and the beacon must move back off the
+  overlay; `lab/twinoracle/README.md` §3.1 carries the same warning.
 
   The residual weakness, stated rather than hidden and recorded in
   `sentinel_host`: a same-host sentinel proves the oracle was alive and its
@@ -124,6 +152,18 @@ $NicGuest = "vEthernet ($SwGuest)"; $NicOracle = "vEthernet ($SwOracle)"
 $L1GuestV4 = '10.77.0.1'; $L1GuestV6 = 'fd77:7717:d0c::1'
 $OracleV4 = '10.78.0.1'; $SentinelV4 = '10.78.0.2'; $ResolverV4 = '10.78.0.53'
 $OracleV6 = 'fd78:7717:d0c::1'; $SentinelV6 = 'fd78:7717:d0c::2'; $ResolverV6 = 'fd78:7717:d0c::53'
+# THE LAB PEER'S OVERLAY ADDRESSES, and therefore the beacon target and the
+# protected resolver's listener. See the header: the target must be inside the
+# Tier-1 protected scope or an armed host permits it. AP-2 reserves
+# 100.64.0.0/24 and fd7c:9e5d:2a10:ffff::/64, so this lane allocates from
+# 100.64.1.0/24 and fd7c:9e5d:2a10:1::/64; the guest's own overlay is …1.1.
+$PeerOverlayV4 = '100.64.1.2'; $PeerOverlayV6 = 'fd7c:9e5d:2a10:1::2'
+$PeerAdapter = 'twinpeer'; $PeerEndpointPort = 51820
+# The PROTECTED relay's SOURCE, which is the identity the oracle derives `:p`
+# from. It is NOT the address that relay listens on: the listener is on the peer
+# overlay, reachable only through the tunnel, while the source is on switch B
+# beside the unprotected relay's, so the two DNS identities are disjoint.
+$ProtResolverSrcV4 = '10.78.0.54'; $ProtResolverSrcV6 = 'fd78:7717:d0c::54'
 
 function Assert-Elevated {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -197,8 +237,8 @@ function New-Fabric {
     }
     $plan = @(
         @{ Nic = $NicGuest;  V4 = @($L1GuestV4); V6 = @($L1GuestV6) },
-        @{ Nic = $NicOracle; V4 = @($OracleV4, $SentinelV4, $ResolverV4)
-           V6 = @($OracleV6, $SentinelV6, $ResolverV6) })
+        @{ Nic = $NicOracle; V4 = @($OracleV4, $SentinelV4, $ResolverV4, $ProtResolverSrcV4)
+           V6 = @($OracleV6, $SentinelV6, $ResolverV6, $ProtResolverSrcV6) })
     foreach ($p in $plan) {
         # The host vNIC appears when the switch does, but not always in the same
         # instant. Waited for, so a race reads as a race rather than as "the
@@ -233,10 +273,18 @@ function New-Fabric {
     # it. ICMP echo is allowed on the lab addresses so the guest's own
     # reachability diagnostics can tell a dead listener from a dead link.
     New-NetFirewallRule -DisplayName $FwRule -Direction Inbound -Action Allow `
-        -Protocol TCP -LocalPort $OraclePort -LocalAddress @($OracleV4, $OracleV6) | Out-Null
+        -Protocol TCP -LocalPort $OraclePort `
+        -LocalAddress @($OracleV4, $OracleV6, $PeerOverlayV4, $PeerOverlayV6) | Out-Null
     New-NetFirewallRule -DisplayName $FwRule -Direction Inbound -Action Allow `
         -Protocol UDP -LocalPort 53 `
-        -LocalAddress @($OracleV4, $OracleV6, $ResolverV4, $ResolverV6) | Out-Null
+        -LocalAddress @($OracleV4, $OracleV6, $ResolverV4, $ResolverV6,
+                        $PeerOverlayV4, $PeerOverlayV6,
+                        $ProtResolverSrcV4, $ProtResolverSrcV6) | Out-Null
+    # THE TUNNEL ITSELF. The guest's Noise initiation is a UDP datagram to this
+    # host's switch-A address; without this the handshake never reaches the peer
+    # and `net up` refuses for a reason that is about the lab, not the product.
+    New-NetFirewallRule -DisplayName $FwRule -Direction Inbound -Action Allow `
+        -Protocol UDP -LocalPort $PeerEndpointPort -LocalAddress @($L1GuestV4) | Out-Null
     New-NetFirewallRule -DisplayName $FwRule -Direction Inbound -Action Allow `
         -Protocol ICMPv4 -IcmpType 8 `
         -LocalAddress @($L1GuestV4, $OracleV4, $SentinelV4, $ResolverV4) | Out-Null
@@ -269,6 +317,8 @@ function Start-Observers([string] $Repo) {
 
     $oracle = Join-Path $Repo 'lab\target\release\twinoracle.exe'
     if (-not (Test-Path $oracle)) { throw "twinoracle.exe was not built at $oracle" }
+    $peer = Join-Path $Repo 'lab\target\release\twinpeer.exe'
+    if (-not (Test-Path $peer)) { throw "twinpeer.exe was not built at $peer" }
     $pids = @()
 
     # WHO ELSE IS ON THESE PORTS, recorded before any bind so a refusal names
@@ -289,6 +339,91 @@ function Start-Observers([string] $Repo) {
         Where-Object { $_.LocalPort -eq 53 } |
         Format-Table LocalAddress, LocalPort, OwningProcess -AutoSize | Out-String | Write-Host
 
+    # ------------------------------------------------------------------
+    # THE LAB PEER, AND IT GOES FIRST.
+    #
+    # It owns the overlay addresses the oracle binds, so starting the oracle
+    # first would be a bind to an address that does not exist yet -- which fails
+    # and reads as "the oracle is not listening" three functions later.
+    #
+    # It stays up for the WHOLE run, including across the guest's `taskkill`.
+    # The oracle's HTTP and protected-DNS listeners live on these addresses; if
+    # the peer tore its adapter down when the guest's session dropped, those
+    # sockets would die inside the ARMED window, sentinel continuity would break
+    # and the session would grade INCONCLUSIVE instead of PASS.
+    # ------------------------------------------------------------------
+    $wintunDir = Join-Path $Repo 'build\ci\.cache'
+    if (-not (Test-Path (Join-Path $wintunDir 'wintun.dll'))) {
+        throw ("the pinned Wintun driver is not staged at $wintunDir\wintun.dll. " +
+               "build/ci/fetch-wintun.sh puts it there and the workflow runs it " +
+               "before -Action run; the peer cannot create its adapter without it.")
+    }
+    # ONE SEED PER RUN, generated here and never committed. The guest half is
+    # copied into the guest by `ci-windows-killswitch.sh`; the peer half never
+    # leaves this host. Both are keys for a lab tunnel and nothing else.
+    $guestSeed = Join-Path $RunDir 'guest.json'
+    $peerSeed  = Join-Path $RunDir 'peer.json'
+    & $peer seed --guest-out $guestSeed --peer-out $peerSeed `
+                 --peer-endpoint "$($L1GuestV4):$PeerEndpointPort" | Write-Host
+    if ($LASTEXITCODE -ne 0) { throw "twinpeer seed exited $LASTEXITCODE" }
+    foreach ($f in @($guestSeed, $peerSeed)) {
+        if (-not (Test-Path $f)) { throw "twinpeer seed exited 0 but wrote no $f" }
+    }
+    $peerOut = Join-Path $RunDir 'twinpeer.out'
+    $pids += (Start-Process -FilePath $peer -PassThru -NoNewWindow `
+        -ArgumentList @('serve', '--seed', $peerSeed, '--wintun-dll', $wintunDir,
+                        '--adapter-name', $PeerAdapter) `
+        -RedirectStandardOutput $peerOut `
+        -RedirectStandardError  (Join-Path $RunDir 'twinpeer.err')).Id
+
+    # WAITED FOR ON THE PEER'S OWN STDOUT, not slept on. It prints
+    # TWINPEER_ADAPTER_READY <luid> once the Wintun adapter exists and then
+    # binds its UDP endpoint; the ADDRESSES are this script's to assign, because
+    # the peer holds no address plan and the plan lives in one place (above).
+    $peerLuid = $null
+    $deadline = (Get-Date).AddSeconds(60)
+    while (-not $peerLuid -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 2
+        $hit = Select-String -Path $peerOut -Pattern '^TWINPEER_ADAPTER_READY (\S+)' `
+               -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($hit) { $peerLuid = $hit.Matches[0].Groups[1].Value }
+    }
+    if (-not $peerLuid) {
+        foreach ($f in 'twinpeer.out', 'twinpeer.err') {
+            $path = Join-Path $RunDir $f
+            Write-Host "---- $f ----"
+            if (Test-Path $path) { Get-Content -LiteralPath $path -Tail 40 | Write-Host } else { Write-Host '(absent)' }
+        }
+        throw "the lab peer never printed TWINPEER_ADAPTER_READY within 60 s; its output is above"
+    }
+    $deadline = (Get-Date).AddSeconds(30)
+    while (-not (Get-NetAdapter -Name $PeerAdapter -ErrorAction SilentlyContinue) -and
+           (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+    $peerNic = Get-NetAdapter -Name $PeerAdapter -ErrorAction SilentlyContinue
+    if (-not $peerNic) {
+        throw "the peer reported adapter LUID $peerLuid ready, but Windows has no adapter named $PeerAdapter"
+    }
+    New-NetIPAddress -InterfaceIndex $peerNic.ifIndex -IPAddress $PeerOverlayV4 -PrefixLength 24 | Out-Null
+    New-NetIPAddress -InterfaceIndex $peerNic.ifIndex -IPAddress $PeerOverlayV6 -PrefixLength 64 | Out-Null
+    foreach ($fam in @('IPv4', 'IPv6')) {
+        # The same reason New-Fabric gives for the two lab vNICs, and it is the
+        # BASELINE leg that needs it: the guest's beacon arrives on switch A
+        # addressed to an address this host holds on THIS adapter, and the
+        # reply's source is likewise. Strong host -- the Windows default --
+        # drops both, and the SILENCE phase would then pass for a reason that is
+        # not the product.
+        Set-NetIPInterface -InterfaceIndex $peerNic.ifIndex -AddressFamily $fam `
+            -Forwarding Enabled -WeakHostReceive Enabled -WeakHostSend Enabled
+    }
+    # The TUNNELLED and RESTORED beacons arrive INBOUND on this adapter, so it
+    # needs the interface-scoped allow the two lab vNICs already have. Added
+    # here rather than in New-Fabric because the adapter does not exist until
+    # the peer creates it; the display name is the same, so `-Action destroy`
+    # removes it with the rest.
+    New-NetFirewallRule -DisplayName $FwRule -Direction Inbound -Action Allow `
+        -InterfaceAlias $PeerAdapter | Out-Null
+    Write-Host "lab peer up: adapter $PeerAdapter (luid $peerLuid) holds $PeerOverlayV4 and $PeerOverlayV6; endpoint $($L1GuestV4):$PeerEndpointPort"
+
     # THE ORACLE. The control plane is on LOOPBACK, not on the beacon surface:
     # its own module docs say to bind it to a management address, and here the
     # only client is this host. The guest therefore cannot reach the control
@@ -301,19 +436,32 @@ function Start-Observers([string] $Repo) {
     # the controller. Port 53 has no such owner once ICS is stopped (below).
     $oracleArgs = @(
         'serve', '--control', '127.0.0.1:8443', '--control-token-file', $controlToken,
-        '--http4', "$($OracleV4):$OraclePort", '--http6', "[$OracleV6]:$OraclePort",
+        # THE HTTP LISTENERS ARE ON THE PEER'S OVERLAY ADDRESSES, and the
+        # advertised addresses with them, so the beacon target sits inside the
+        # Tier-1 protected scope. See the header. The DNS listeners STAY on
+        # switch B: both relays are on this host and forward to them, and
+        # nothing the device sends reaches them directly.
+        '--http4', "$($PeerOverlayV4):$OraclePort", '--http6', "[$PeerOverlayV6]:$OraclePort",
         '--advertise-port', "$OraclePort",
         '--dns4',  "$($OracleV4):53", '--dns6',  "[$OracleV6]:53",
-        '--zone', $Zone, '--advertise-v4', $OracleV4, '--advertise-v6', $OracleV6,
+        '--zone', $Zone, '--advertise-v4', $PeerOverlayV4, '--advertise-v6', $PeerOverlayV6,
         '--sentinel-max-gap-ms', '15000', '--sentinel-token-file', $sentinelToken,
         # The UNPROTECTED resolver, by the address the forwarder presents.
         '--resolver', "$ResolverV4=lab-recursive:u",
-        '--resolver', "$ResolverV6=lab-recursive:u"
-        # THE PROTECTED RESOLVER HAS NO ADDRESS TO NAME. `twinvpn-dns` opens no
-        # socket and nothing in the product binds port 53, so there is no
-        # `--resolver <addr>=twinvpn-dns:p` to add here. When one exists, this is
-        # the line it goes on, and `dns_protected_resolver` in the evidence stops
-        # reading `absent-in-product`.
+        '--resolver', "$ResolverV6=lab-recursive:u",
+        # The PROTECTED resolver, likewise by the address its forwarder
+        # presents -- which is NOT the address it listens on. The listener is on
+        # the peer overlay and reachable only through the tunnel; the source is
+        # on switch B, so the two DNS identities are disjoint and `:p` and `:u`
+        # can never collide.
+        #
+        # This is a LAB action standing in for a product resolver that does not
+        # exist: `enforce.rs:265-289` assembles `denied_dns_policy()` with empty
+        # stub addresses, so nothing in TwinVPN binds port 53. The product's job
+        # in this criterion is to BLOCK the resolver once armed, not to
+        # configure it, and `dns_protected_resolver` in the evidence says so.
+        '--resolver', "$ProtResolverSrcV4=twinvpn-dns:p",
+        '--resolver', "$ProtResolverSrcV6=twinvpn-dns:p"
     )
     $pids += (Start-Process -FilePath $oracle -ArgumentList $oracleArgs -PassThru -NoNewWindow `
         -RedirectStandardOutput (Join-Path $RunDir 'oracle.out') `
@@ -322,21 +470,35 @@ function Start-Observers([string] $Repo) {
     # THE RESOLVER, one stateless relay per family. It must not cache, retry or
     # health-check: any of those manufactures a DNS arrival during SILENCE,
     # which the oracle records as a leak against the product.
+    #
+    # FOUR of them now, not two: an unprotected pair on switch B, which is where
+    # the guest's stub points at BASELINE, and a PROTECTED pair listening on the
+    # peer's overlay addresses, which the guest can reach only through the
+    # tunnel. `--source` is a separate column because the protected pair must
+    # present a switch-B address the oracle maps `twinvpn-dns:p` rather than the
+    # overlay address it listens on.
     $fwd = Join-Path $Repo 'build\ci\dns-forward.py'
-    foreach ($f in @(@($ResolverV4, $OracleV4, 'v4'), @($ResolverV6, $OracleV6, 'v6'))) {
-        $listen   = if ($f[2] -eq 'v6') { "[$($f[0])]:53" } else { "$($f[0]):53" }
-        $upstream = if ($f[2] -eq 'v6') { "[$($f[1])]:53" } else { "$($f[1]):53" }
+    foreach ($f in @(@($ResolverV4,    $OracleV4, 'v4', $ResolverV4),
+                     @($ResolverV6,    $OracleV6, 'v6', $ResolverV6),
+                     @($PeerOverlayV4, $OracleV4, 'p4', $ProtResolverSrcV4),
+                     @($PeerOverlayV6, $OracleV6, 'p6', $ProtResolverSrcV6))) {
+        # By the address, not by a tag: an IPv6 literal is the one that carries
+        # a colon, and the tag is now only the log file's name.
+        $isV6     = $f[0].Contains(':')
+        $listen   = if ($isV6) { "[$($f[0])]:53" } else { "$($f[0]):53" }
+        $upstream = if ($isV6) { "[$($f[1])]:53" } else { "$($f[1]):53" }
         $pids += (Start-Process -FilePath 'python' `
-            -ArgumentList @($fwd, '--listen', $listen, '--upstream', $upstream, '--source', $f[0]) `
+            -ArgumentList @($fwd, '--listen', $listen, '--upstream', $upstream, '--source', $f[3]) `
             -PassThru -NoNewWindow `
             -RedirectStandardOutput (Join-Path $RunDir "forwarder-$($f[2]).out") `
             -RedirectStandardError  (Join-Path $RunDir "forwarder-$($f[2]).err")).Id
     }
 
     Start-Sleep -Seconds 3
-    if (-not (Test-NetConnection -ComputerName $OracleV4 -Port $OraclePort -InformationLevel Quiet -WarningAction SilentlyContinue)) {
+    if (-not (Test-NetConnection -ComputerName $PeerOverlayV4 -Port $OraclePort -InformationLevel Quiet -WarningAction SilentlyContinue)) {
         Write-Host '---- oracle.err ----'; Get-Content -LiteralPath (Join-Path $RunDir 'oracle.err') -ErrorAction SilentlyContinue | Write-Host
-        throw "the oracle is not listening on $($OracleV4):$OraclePort. See $RunDir\oracle.err."
+        Write-Host '---- twinpeer.err ----'; Get-Content -LiteralPath (Join-Path $RunDir 'twinpeer.err') -ErrorAction SilentlyContinue | Write-Host
+        throw "the oracle is not listening on $($PeerOverlayV4):$OraclePort. See $RunDir\oracle.err and $RunDir\twinpeer.err."
     }
 
     # THE SENTINEL, from the SECOND identities on switch B. `--source` pins them
@@ -347,7 +509,7 @@ function Start-Observers([string] $Repo) {
     $sentinelLog = Join-Path $RunDir 'sentinel.log'
     $cmd = ("cd '$(ConvertTo-BashPath $Repo)' && build/ci/leak-probe.sh sentinel " +
             "--token-file '$(ConvertTo-BashPath $sentinelToken)' " +
-            "--beacon-v4 'http://$($OracleV4):$OraclePort/b' --beacon-v6 'http://[$OracleV6]:$OraclePort/b' " +
+            "--beacon-v4 'http://$($PeerOverlayV4):$OraclePort/b' --beacon-v6 'http://[$PeerOverlayV6]:$OraclePort/b' " +
             "--zone $Zone --source $SentinelV4 --source $SentinelV6 " +
             "--dns-server $ResolverV4 --interval-ms 2000")
     # THROUGH A SCRIPT FILE, NOT `-lc "<command>"`. Start-Process joins its
@@ -375,7 +537,8 @@ function Start-Observers([string] $Repo) {
         if ($hit) { $identity = $hit.Matches[0].Groups[1].Value }
     }
     if (-not $identity) {
-        foreach ($f in 'sentinel.log', 'sentinel.err', 'oracle.err', 'forwarder-v4.err', 'forwarder-v6.err') {
+        foreach ($f in 'sentinel.log', 'sentinel.err', 'oracle.err', 'twinpeer.err',
+                       'forwarder-v4.err', 'forwarder-v6.err', 'forwarder-p4.err', 'forwarder-p6.err') {
             $path = Join-Path $RunDir $f
             Write-Host "---- $f ----"
             if (Test-Path $path) { Get-Content -LiteralPath $path -Tail 40 | Write-Host } else { Write-Host '(absent)' }
@@ -391,8 +554,11 @@ function Stop-Observers {
     foreach ($line in Get-Content $PidFile) {
         if ($line -match '^\d+$') { Stop-Process -Id ([int]$line) -Force -ErrorAction SilentlyContinue }
     }
-    # By name as well as by pid, in case one was restarted by hand.
-    Get-Process -Name twinoracle -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    # By name as well as by pid, in case one was restarted by hand. The peer
+    # holds a Wintun adapter, which goes away with the process that created it.
+    foreach ($n in 'twinoracle', 'twinpeer') {
+        Get-Process -Name $n -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
 }
 

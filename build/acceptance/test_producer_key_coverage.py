@@ -165,8 +165,33 @@ PRODUCER_PINS: dict[str, tuple[str, ...]] = {
     # The two keys the in-box topology added to every egress criterion. The
     # kill-switch lane is the one that can measure them: it builds the oracle
     # and the sentinel it is attesting.
+    #
+    # AND THE FOUR MEASUREMENTS ITS OWN VERDICT DEPENDS ON, which no derivation
+    # can see because they are conjuncts of a bash `if`, not entries in
+    # `PREREQUISITES`. Each one is a way a run could read as a pass while having
+    # measured nothing:
+    #
+    #   * `restore_net_up_exit_code` -- step 9's claim is that traffic RESUMES.
+    #     The guest has printed TWINVPN_RESTORE_NET_UP_EXIT since the restore
+    #     step existed and NOTHING read it, so a restore whose `net up` refused
+    #     could still produce a well-formed RESTORED window and a PASS.
+    #   * `ATTEMPT_FLOOR` -- `oracle_adjudication` refuses a family under 60
+    #     self-reported attempts, and by the time it does the only symptom is an
+    #     INCONCLUSIVE that reads like a leak-detection failure rather than like
+    #     a beacon loop the blocking slowed down. The lane counts what it posted
+    #     and refuses the shortfall by name.
+    #   * `dns-protected` -- without the stub resolver on the tunnel, filter
+    #     class 6 blocks port 53 on every non-overlay interface and the
+    #     TUNNELLED window records zero DNS arrivals: INCONCLUSIVE for `dns`,
+    #     for a reason that is the lane's and not the product's.
+    #   * `lab-seed` -- `enforce::arm` needs an overlay allocation and a peer
+    #     with a verified tunnel-key binding, and neither has a production
+    #     writer. The lane builds the service with the feature that reads
+    #     twinpeer's seed; without it every phase after BASELINE is silent.
     "build/ci/ci-windows-killswitch.sh": (
         "oracle_topology", "sentinel_egress_identity",
+        "restore_net_up_exit_code", "ATTEMPT_FLOOR",
+        "dns-protected", "lab-seed",
     ),
 }
 
