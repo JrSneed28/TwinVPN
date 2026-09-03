@@ -585,7 +585,11 @@ const fn compensation_of(ok: bool) -> Compensation {
 /// still produces a set that denies the overlay space in both families, because
 /// [`wfp::baseline_protected`] is a floor beneath every render — which is
 /// `desktop-linux`'s R-6 finding, and the reason a blank contract is safe here.
-fn blank_contract() -> NetworkContract {
+/// The contract in force before any session exists: no addresses, no routes,
+/// no resolvers, `Blocked`. What step 5 of the service's start sequence renders
+/// and what a caller probing the engine with the runtime set should render too.
+#[must_use]
+pub fn blank_contract() -> NetworkContract {
     NetworkContract {
         generation: ContractGeneration(0),
         addresses: PerFamily::new(Vec::new(), Vec::new()),

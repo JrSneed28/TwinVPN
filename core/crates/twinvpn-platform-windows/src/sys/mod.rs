@@ -81,6 +81,21 @@ pub trait FilterEngine: Send + Sync {
     /// [`crate::wfp::boot::is_boot_filter`] is the predicate.
     fn commit(&self, set: &FilterSet) -> Result<(), PlatformError>;
 
+    /// Stages `set` exactly as [`Self::commit`] would and then ABORTS the
+    /// transaction, so the engine's own validation of every filter runs and
+    /// nothing is left behind.
+    ///
+    /// This is the measurement the hosted kill-switch lane lacked: its
+    /// precondition probe committed only the KS-19 boot set, and the first
+    /// time the runtime set met a real engine was inside the service, where
+    /// `FwpmFilterAdd0` refused the bootstrap exemption's security descriptor
+    /// (1338) and the refusal surfaced three layers up as `ARM_FAILED`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the engine refused, named by call.
+    fn dry_run(&self, set: &FilterSet) -> Result<(), PlatformError>;
+
     /// Enumerates what the engine holds.
     ///
     /// **The W-24 read-back.** Never cached, and a failure is an error rather

@@ -180,3 +180,49 @@ fn twinvpns_own_filters_are_installed_right_now() {
     fact("twinvpn_owned_filters", installed.owned_filters);
     fact("twinvpn_posture", format!("{:?}", installed.posture));
 }
+
+/// The RUNTIME set — what the service commits at start step 5 — is accepted by
+/// the engine, filter by filter, inside a transaction that is then aborted.
+///
+/// The boot-set probe above proves the engine takes writes; it says nothing
+/// about the runtime set, whose class-7 bootstrap exemption carries an
+/// `ALE_APP_ID` blob and an `ALE_USER_ID` security descriptor the boot set
+/// does not. Run 33718660524 found that out inside the service:
+/// `FwpmFilterAdd0` 1338 (`ERROR_INVALID_SECURITY_DESCR`), surfaced as
+/// `POLICY.KILLSWITCH.ARM_FAILED`. This is the same set, rendered with this
+/// process's own app id and a well-known SID, validated by the engine and
+/// never committed.
+#[test]
+fn the_runtime_ruleset_is_accepted_by_the_engine_without_being_committed() {
+    if !enabled("TWINVPN_WINDOWS_TEST") {
+        panic!("TWINVPN_WINDOWS_TEST=1 is required: this probe opens the real engine");
+    }
+    let exe = std::env::current_exe().expect("this test has a path");
+    let app_id = twinvpn_platform_windows::sys::win::wfp::app_id_for(&exe)
+        .expect("the engine resolves this binary's app id");
+    let config = wfp::EnforcementConfig {
+        overlay_luid: 0,
+        service_app_id: Box::leak(app_id.into_boxed_str()),
+        // LocalSystem, resolvable on every host without a lookup. The dry run
+        // validates the descriptor's shape, not who it names.
+        service_sid: "S-1-5-18",
+        local_network_access: true,
+        on_link_prefixes: Vec::new(),
+        updater_app_id: None,
+        update_origins: Vec::new(),
+        portal_grant: Vec::new(),
+        doh_endpoints: Vec::new(),
+    };
+    let set = wfp::filters::render(
+        &twinvpn_platform_windows::netcfg::blank_contract(),
+        wfp::Ruleset::Blocked,
+        &config,
+    );
+    let engine = system();
+    engine
+        .filters()
+        .dry_run(&set)
+        .expect("the engine must accept every filter of the runtime Blocked set");
+    fact("wfp_runtime_set_accepted", true);
+    fact("wfp_runtime_set_filters", set.filters.len());
+}

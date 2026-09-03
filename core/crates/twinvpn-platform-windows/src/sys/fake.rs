@@ -222,6 +222,13 @@ impl FakeSystem {
 }
 
 impl FilterEngine for FakeSystem {
+    fn dry_run(&self, set: &FilterSet) -> Result<(), PlatformError> {
+        // The fake has no engine to validate against; the set's own invariants
+        // are the whole of what it can check.
+        set.validate()
+            .map_err(|_| oserr::unavailable("FilterSet::validate"))
+    }
+
     fn commit(&self, set: &FilterSet) -> Result<(), PlatformError> {
         let mut state = self.lock();
         if let Some(fault) = state.faults.filter_commit {

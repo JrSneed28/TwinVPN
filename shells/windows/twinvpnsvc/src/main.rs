@@ -557,7 +557,7 @@ fn build_adapter() -> Result<twinvpn_platform_windows::WindowsPlatformAdapter, S
     // degradation. ADR-0012 §8 is the other half — arming must never fail open,
     // so a service that could not open the engine must not reach `ready`.
     twinvpn_platform_windows::WindowsPlatformAdapter::new(WindowsAdapterParts {
-        enforcement: enforcement_config(),
+        enforcement: enforcement_config()?,
         stub: stub_addresses(),
         store_root: store_root(),
         restore_point_path: store_root().join("resolver.restore"),
@@ -600,16 +600,75 @@ fn store_root() -> std::path::PathBuf {
 }
 
 /// The enforcement facts the seam does not carry.
+///
+/// Two of them are THIS PROCESS's own identity, and they are measured rather
+/// than configured: KS-9(1)'s bootstrap exemption is `ALE_APP_ID` (the
+/// service binary's NT device path, which only `FwpmGetAppIdFromFileName0`
+/// produces) plus `ALE_USER_ID` (the `NT SERVICE\TwinVPNService` SID, which
+/// `SERVICE_SID_TYPE_UNRESTRICTED` puts in this token). Both used to be `""`,
+/// and the hosted kill-switch lane measured what the engine makes of that:
+/// `FwpmFilterAdd0` 1338 and a service that never arms.
+///
+/// # Errors
+///
+/// A refusal naming the lookup that failed. Either failing means the
+/// exemption cannot be scoped to this process, and PS-18 forbids arming a set
+/// that would then either refuse or permit the wrong process.
 #[cfg(windows)]
-fn enforcement_config() -> twinvpn_platform_windows::wfp::EnforcementConfig {
-    twinvpn_platform_windows::wfp::EnforcementConfig {
+fn enforcement_config() -> Result<twinvpn_platform_windows::wfp::EnforcementConfig, StartupRefusal>
+{
+    let exe = std::env::current_exe().map_err(|error| {
+        StartupRefusal::platform(
+            "PLATFORM.ADAPTER_UNAVAILABLE",
+            "PLATFORM.ADAPTER_UNAVAILABLE",
+            format!("this process's own path could not be read: {error}"),
+        )
+    })?;
+    let service_app_id =
+        twinvpn_platform_windows::sys::win::wfp::app_id_for(&exe).map_err(|error| {
+            StartupRefusal::platform(
+                "PLATFORM.ADAPTER_UNAVAILABLE",
+                "PLATFORM.ADAPTER_UNAVAILABLE",
+                format!(
+                    "the app id of {} could not be derived: {error}",
+                    exe.display()
+                ),
+            )
+        })?;
+    let service_sid = twinvpnsvc::win32::endpoint::account_sid(&format!(
+        r"NT SERVICE\{}",
+        twinvpnsvc::SERVICE_NAME
+    ))
+    .map_err(|refusal| {
+        StartupRefusal::platform(
+            refusal.reason_code(),
+            refusal.reason_code(),
+            format!(
+                "the service SID could not be resolved: {}",
+                refusal.detail()
+            ),
+        )
+    })?;
+    tracing::info!(
+        target: "twinvpn.service",
+        service_app_id = %service_app_id,
+        service_sid = %service_sid,
+        "KS-9(1)'s bootstrap predicate, measured from this process"
+    );
+    // `EnforcementConfig` holds `&'static str` (CD-2: injected once, never
+    // rediscovered), and this process derives the two values exactly once for
+    // its own lifetime, so leaking them is the honest lifetime rather than a
+    // shortcut.
+    let service_app_id: &'static str = Box::leak(service_app_id.into_boxed_str());
+    let service_sid: &'static str = Box::leak(service_sid.into_boxed_str());
+    Ok(twinvpn_platform_windows::wfp::EnforcementConfig {
         // Zero until the tunnel device is created: the Tier-2 permit is
         // interface-scoped and the interface does not exist yet, so a
         // pre-arming render carries no overlay permit at all — which is
         // `RULESET_BLOCKED` by construction and the correct posture for step 5.
         overlay_luid: 0,
-        service_app_id: "",
-        service_sid: "",
+        service_app_id,
+        service_sid,
         // ADR-0012 KS-4: `ALLOW` is the default in all three routing modes. The
         // setting itself is S-24's and reaches the adapter through a later
         // `apply`; this is the pre-arming value.
@@ -619,7 +678,7 @@ fn enforcement_config() -> twinvpn_platform_windows::wfp::EnforcementConfig {
         update_origins: Vec::new(),
         portal_grant: Vec::new(),
         doh_endpoints: doh_endpoints(),
-    }
+    })
 }
 
 /// ADR-0011 §11.9's known-encrypted-resolver endpoints, from the one shared
