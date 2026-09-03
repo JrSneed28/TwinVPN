@@ -448,10 +448,36 @@ switch ($Step) {
     # Windows query both, a `p`-tagged phase would collect an arrival the oracle
     # maps `u`, and that disagreement is an inconclusive reason.
     'dns-protected' {
+        # BOTH interfaces, not only the underlay. Run 33748188192 set the
+        # protected resolver on the underlay adapter alone and the oracle saw
+        # zero DNS while tunnelled, with the beacon's lookups returning at
+        # once: once twin0 exists the product programs its resolver list to
+        # nothing, Windows nslookup takes its "default server" from the
+        # lowest-metric interface, and an interface with no server fails the
+        # lookup without sending a packet. The overlay interface is the one the
+        # route to the beacon target selects, so it gets the same servers.
         $idx = Get-UnderlayInterfaceIndex
-        Set-DnsClientServerAddress -InterfaceIndex $idx `
-            -ServerAddresses @($ProtResolverV4, $ProtResolverV6) | Out-Null
-        Say "dns servers on if${idx}: $ProtResolverV4, $ProtResolverV6 (protected; reachable only through the tunnel)"
+        $route = Find-NetRoute -RemoteIPAddress $OracleV4 -ErrorAction SilentlyContinue |
+                 Where-Object { $_.PSObject.Properties['DestinationPrefix'] } | Select-Object -First 1
+        $targets = @($idx)
+        if ($route -and $route.InterfaceIndex -ne $idx) { $targets += $route.InterfaceIndex }
+        foreach ($i in $targets) {
+            Set-DnsClientServerAddress -InterfaceIndex $i `
+                -ServerAddresses @($ProtResolverV4, $ProtResolverV6) | Out-Null
+            Say "dns servers on if${i}: $ProtResolverV4, $ProtResolverV6 (protected; reachable only through the tunnel)"
+        }
+        # What the resolver path looks like from here, printed rather than
+        # assumed: every interface's server list, and one lookup of a name in
+        # the beacon zone through nslookup exactly as leak-probe.sh issues it.
+        # The oracle answers REFUSED for a name without a probe token, which
+        # is itself the proof that the query reached it.
+        Get-DnsClientServerAddress -AddressFamily IPv4, IPv6 -ErrorAction SilentlyContinue |
+            Where-Object { $_.ServerAddresses.Count -gt 0 } |
+            ForEach-Object { Say ("TWINVPN_DNS_SERVERS if{0} {1}: {2}" -f $_.InterfaceIndex, $_.InterfaceAlias, ($_.ServerAddresses -join ',')) }
+        $probe = Invoke-Native { & nslookup.exe -timeout=2 -retry=1 "diag.leak.oracle.twinvpn.test" }
+        Say "TWINVPN_DNS_DIAG_BEGIN"
+        Say ($probe.Trim() -replace "`r", '')
+        Say "TWINVPN_DNS_DIAG_END"
     }
 
     # The BASELINE configuration, restorable for a diagnosis. It is deliberately
@@ -495,6 +521,11 @@ switch ($Step) {
         $env:TWINVPN_DISPOSABLE_GUEST     = '1'
         $env:TWINVPN_ORACLE_CONTROL_BY    = 'controller'
         $env:TWINVPN_ORACLE_TOPOLOGY      = 'in-box'
+        # One second per probe: everything here is one hop away, and during
+        # the ARMED window every probe is blocked and waits its whole timeout.
+        # Run 33748188192 measured 11 attempts in a 120 s window at the 3 s
+        # default and fell short of the oracle's 60-per-family floor.
+        $env:TWINVPN_PROBE_TIMEOUT_S      = '1'
         Invoke-Native {
             & $Bash -lc "cd /c/twinvpn && build/ci/leak-probe.sh beacon --seconds $Arg1 --counts-file /c/twinvpn/counts.env"
         } | Write-Output

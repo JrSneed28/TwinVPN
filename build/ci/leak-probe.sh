@@ -310,11 +310,15 @@ resolve_once() {
 ($server) and this host has no nslookup to send the query with. Falling back to \
 the system resolver would silently ask a different server and report a gap the \
 network never had."
-    nslookup "$name" "$server" >/dev/null 2>&1 || true
+    nslookup "-timeout=${TWINVPN_PROBE_TIMEOUT_S:-3}" -retry=1 "$name" "$server" >/dev/null 2>&1 || true
     return 0
   fi
   if command -v nslookup >/dev/null 2>&1; then
-    nslookup "$name" >/dev/null 2>&1 || true
+    # `-timeout`/`-retry` are accepted by both Windows nslookup and BIND's.
+    # The default matches curl's --max-time below; a lab whose every hop is
+    # local sets TWINVPN_PROBE_TIMEOUT_S lower so a blocked window still
+    # produces the attempt counts the oracle's floor needs.
+    nslookup "-timeout=${TWINVPN_PROBE_TIMEOUT_S:-3}" -retry=1 "$name" >/dev/null 2>&1 || true
   elif command -v getent >/dev/null 2>&1; then
     getent ahosts "$name" >/dev/null 2>&1 || true
   else
@@ -407,11 +411,11 @@ enumerated, so the beacon target cannot be checked against them."
     # blocked is exactly the attempt the denominator is about.
     if [ -n "$TWINVPN_ORACLE_BEACON_V4" ]; then
       n4=$((n4 + 1))
-      curl -4 -sS --max-time 3 -o /dev/null "$TWINVPN_ORACLE_BEACON_V4/$seq" 2>/dev/null || true
+      curl -4 -sS --max-time "${TWINVPN_PROBE_TIMEOUT_S:-3}" -o /dev/null "$TWINVPN_ORACLE_BEACON_V4/$seq" 2>/dev/null || true
     fi
     if [ -n "$TWINVPN_ORACLE_BEACON_V6" ]; then
       n6=$((n6 + 1))
-      curl -6 -sS --max-time 3 -o /dev/null "$TWINVPN_ORACLE_BEACON_V6/$seq" 2>/dev/null || true
+      curl -6 -sS --max-time "${TWINVPN_PROBE_TIMEOUT_S:-3}" -o /dev/null "$TWINVPN_ORACLE_BEACON_V6/$seq" 2>/dev/null || true
     fi
     ndns=$((ndns + 1))
     resolve_once "$seq.$TWINVPN_ORACLE_PROBE_TOKEN.$tag.$TWINVPN_ORACLE_ZONE"

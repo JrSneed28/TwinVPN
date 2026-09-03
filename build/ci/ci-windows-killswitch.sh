@@ -107,7 +107,7 @@ ARMED_LOG="$LOGDIR/wfp-armed.log"
 # shortfall then surfaces as an oracle INCONCLUSIVE that nobody attributes to
 # the loop having been slowed by the blocking it was measuring. The floor is
 # also asserted outright below, so a shortfall names itself.
-ARMED_SECONDS="${TWINVPN_ARMED_SECONDS:-120}"
+ARMED_SECONDS="${TWINVPN_ARMED_SECONDS:-180}"
 CRITERION="WINDOWS-WFP-KILLSWITCH"
 GUEST_ROOT='C:\twinvpn'
 mkdir -p "$(dirname "$EVIDENCE")" "$LOGDIR" "$ORACLE_DIR"
