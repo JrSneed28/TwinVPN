@@ -1654,5 +1654,10 @@ after the merge is what binds an evidence set to a commit that exists on a
 branch. The `DIRTY` stamp had one traced cause — the workflow `rm -f`s the
 tracked `build/acceptance/first-wave-acceptance.{json,md}` before regenerating
 them, and a deleted tracked file is a dirty tree — and those two files are
-untracked and ignored since c11f418 (merged 9451a81); the first gate run on or
-after that merge says whether it was the only cause.
+untracked and ignored since c11f418 (merged 9451a81). It was not the only
+cause: run 33860583528 on 9451a81 was still stamped DIRTY, because the
+`first-wave-acceptance` job stages every lane's `evidence-*` artifact under
+`build/ci/evidence-download/`, which nothing ignored, so the staging tree
+showed as untracked. `build/ci/.gitignore` now covers it beside `evidence/`
+and `logs/`, and `report.py` records `worktree_dirty_paths` and prints them
+under the stamp, so the next DIRTY names itself.

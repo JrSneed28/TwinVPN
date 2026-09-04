@@ -1030,14 +1030,19 @@ def main() -> int:
 
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO,
                             capture_output=True, text=True).stdout.strip()
-    dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=REPO,
-                                capture_output=True, text=True).stdout.strip())
+    # The stamp names its cause: a DIRTY report that could not say which paths
+    # made it dirty cost three runs to trace (a deleted tracked report, then an
+    # unignored artifact staging tree -- ownership.md §12.8).
+    dirty_paths = subprocess.run(["git", "status", "--porcelain"], cwd=REPO,
+                                 capture_output=True, text=True).stdout.strip().splitlines()
+    dirty = bool(dirty_paths)
 
     doc = {
         "schema_version": 1,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "commit": commit,
         "worktree_dirty": dirty,
+        "worktree_dirty_paths": dirty_paths,
         "probes_executed": args.run,
         "rows": rows,
         "required_total": len(required),
@@ -1051,6 +1056,12 @@ def main() -> int:
     lines = ["# First Implementation Wave — acceptance report", "",
              f"Commit `{commit}`{' (DIRTY WORKTREE — not release evidence)' if dirty else ''}",
              f"Probes executed: **{args.run}**", ""]
+    if dirty:
+        lines += ["Dirty paths (`git status --porcelain`):", ""]
+        lines += [f"    {line}" for line in dirty_paths[:40]]
+        if len(dirty_paths) > 40:
+            lines += [f"    … and {len(dirty_paths) - 40} more"]
+        lines += [""]
     section = None
     for r in rows:
         if r["section"] != section:

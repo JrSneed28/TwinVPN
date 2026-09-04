@@ -10,3 +10,8 @@
 # produced.
 evidence/
 logs/
+# first-wave-acceptance stages every lane's `evidence-*` artifact here before
+# copying it into evidence/. Same nature, same rule: untracked, ignored -- an
+# unignored staging tree is what stamped runs 33786997948 through 33860583528
+# "DIRTY WORKTREE" after the tracked report was gone (ownership.md §12.8).
+evidence-download/
