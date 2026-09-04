@@ -421,13 +421,17 @@ class JobOutcome(GateCase):
         self.assertIn("ios-acceptance", detail)
 
     def test_a_skipped_job_is_red_and_says_so(self):
-        # The dangerous one: an unregistered self-hosted runner makes the job
-        # skip, and a skip is the absence that looks most like routine absence.
-        verdict, detail, _ = self.probe("windows-killswitch",
-                                        "WINDOWS-WFP-KILLSWITCH", None, None,
-                                        {"windows-killswitch": "skipped"})
+        # The dangerous one: `macos-signature` skips while
+        # `TWINVPN_NOTARIZED_APP_URL` is unset, and a skip is the absence that
+        # looks most like routine absence. The row has to name the variable,
+        # not a runner: since 2026-09-02 no job in the gate waits on one.
+        verdict, detail, _ = self.probe("macos-signature",
+                                        "MACOS-PRODUCTION-SIGNATURE", None, None,
+                                        {"macos-signature": "skipped"})
         self.assertEqual(verdict, report.NOT_EXECUTED)
         self.assertIn("SKIPPED", detail)
+        self.assertIn("TWINVPN_NOTARIZED_APP_URL", detail)
+        self.assertNotIn("runner", detail)
 
     def test_a_cancelled_job_is_red_and_says_so(self):
         _, detail, _ = self.probe("macos-sysext", "MACOS-SYSEXT-LIFECYCLE",

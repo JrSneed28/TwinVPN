@@ -475,26 +475,36 @@ JOB_FOR_STEM = {
     "ios-profile-removal": "ios-acceptance",
 }
 
-# Criteria for which NO EXECUTOR EXISTS, and the one sentence that says which
-# capability is missing. These rows have no job in the workflow at all, so they
-# read NOT-EXECUTED; that is the truthful verdict and it counts against Phase 5
+# Criteria for which NO EXECUTOR EXISTS, and the sentence that says what is
+# missing. These rows have no job in the workflow at all, so they read
+# NOT-EXECUTED; that is the truthful verdict and it counts against Phase 5
 # eligibility exactly as a FAIL does. This table does not soften a row -- it
 # only replaces "never scheduled" with the reason nobody scheduled it, which is
-# the difference between a rig somebody forgot to provision and a capability
-# nobody can buy.
+# the difference between a rig somebody forgot to provision and an executor
+# nobody has funded and built. Both reasons were re-verified on 2026-09-04:
+# neither is a capability that cannot be bought, and whether the rows stay
+# required or are deferred is the wave owner's decision, recorded in
+# docs/implementation/ownership.md and not here.
 NO_EXECUTOR = {
     "MACOS-SYSEXT-LIFECYCLE":
         "There is no executor for this criterion: activating the production "
-        "system extension needs Apple's packet-tunnel-provider-systemextension "
-        "entitlement grant and then a Mac where a human at the keyboard or an "
-        "MDM enrolment approves the activation, and no hosted, virtualised or "
-        "scriptable macOS runner can supply either.",
+        "system extension needs a paid Apple Developer Program team (the "
+        "Network Extension and System Extension capabilities are self-service "
+        "there; there is no grant to apply for), a Developer-ID-signed build, "
+        "and a Mac on which a person or a Device-Enrollment MDM approves the "
+        "activation. No GitHub-hosted runner is MDM-enrolled, and the tree has "
+        "no signing pipeline, no macOS lab seed and no reachable peer or oracle "
+        "to run the lifecycle against.",
     "IOS-NE-FAIL-CLOSED":
         "There is no executor for this criterion: the packet tunnel provider "
-        "does not run in the iOS simulator, so it needs a provisioned physical "
-        "iPhone running an IPA that still carries the packet-tunnel-provider "
-        "entitlement, and every commercial device farm re-signs the archive and "
-        "strips it.",
+        "does not run in the iOS simulator, so it needs a physical iPhone "
+        "running an IPA that still carries the packet-tunnel-provider "
+        "entitlement. Firebase Test Lab re-signs the IPA and Xcode Cloud tests "
+        "only on simulators; a private-device farm (AWS Device Farm private "
+        "devices with skipAppResign, Sauce Labs private devices, BrowserStack "
+        "Custom Device Lab) keeps the entitlement, but also needs device "
+        "signing in CI, an iOS lab seed and a peer and oracle the phone can "
+        "reach, none of which exists.",
 }
 
 
@@ -620,15 +630,16 @@ def probe_criterion(stem: str, criterion: str, require_privileged: bool = False)
     # WHY THE JOB'S OWN OUTCOME IS READ AT ALL, when this script grades files.
     #
     # Because four different problems produce the same absent file, and one of
-    # them -- a SKIP, because a self-hosted runner is not registered -- is the
-    # one that most resembles routine absence and is the least routine thing in
-    # the list. "No evidence" is true of all four and useful about none of them.
+    # them -- a SKIP, because the one variable-gated job (`macos-signature`)
+    # found `TWINVPN_NOTARIZED_APP_URL` unset -- is the one that most resembles
+    # routine absence and is the least routine thing in the list. "No evidence"
+    # is true of all four and useful about none of them.
     results = job_results.load(EVIDENCE_DIR)
     job_problem = job_results.problem(JOB_FOR_STEM.get(stem, stem), criterion, results)
     if not path.is_file():
         why = job_problem or (
             "no job outcome was recorded either, so nothing says whether it "
-            "failed, was cancelled, was skipped for want of a runner, or never "
+            "failed, was cancelled, was skipped on an unset variable, or never "
             "existed")
         return (NOT_EXECUTED,
                 f"no evidence at build/ci/evidence/{stem}.json -- {why}", {})
@@ -929,8 +940,9 @@ def build_rows(run: bool):
     # that other claim. `MACOS-PF-BOOT-ANCHOR` is the third -- the part of the
     # lifecycle row a hosted runner can honestly carry, which is the boot
     # anchor being loaded, referenced by the main ruleset and enforced. What is
-    # left in the lifecycle row after that split is what needs an entitlement
-    # grant and an approval, and it has no executor at all.
+    # left in the lifecycle row after that split is what needs a paid Apple
+    # team, a Developer-ID build and an approval only a person or an MDM can
+    # give, and it has no executor at all.
     #
     # TWO ROWS HAVE NO LANE, and they still print. `NO_EXECUTOR` above names
     # the missing capability for each; the row reads NOT-EXECUTED, counts
@@ -950,8 +962,8 @@ def build_rows(run: bool):
          "(hosted macos-26, root)"),
         ("macos-sysext", "MACOS-SYSEXT-LIFECYCLE",
          "macOS system-extension lifecycle with external leak observation (no "
-         "executor available: needs Apple's packet-tunnel-provider-"
-         "systemextension grant and an approval a CI job cannot give — see docs)"),
+         "executor available: needs a paid Apple team, a Developer-ID build "
+         "and an MDM-enrolled Mac — see docs)"),
         ("macos-signature", "MACOS-PRODUCTION-SIGNATURE",
          "macOS production signature, notarization and stapling"),
         ("ios-failclosed-configuration", "IOS-FAILCLOSED-CONFIGURATION",
@@ -966,11 +978,11 @@ def build_rows(run: bool):
     ):
         v, d, ev = probe_criterion(stem, criterion)
         # WHY A ROW WITH NO LANE STILL NAMES ITS BLOCKER. Two criteria have no
-        # job in the workflow, because no machine that can discharge them
-        # exists to run one on -- which `job_results` correctly reports as
-        # "never scheduled". True, and not the useful sentence: a reader has to
-        # know WHICH capability is missing before they can tell an
-        # unprovisioned rig from an unbuildable one. The row stays NOT-EXECUTED
+        # job in the workflow, because nothing that can discharge them has been
+        # funded or built to run one on -- which `job_results` correctly
+        # reports as "never scheduled". True, and not the useful sentence: a
+        # reader has to know WHICH capability is missing before they can tell
+        # an unprovisioned rig from an unfunded one. The row stays NOT-EXECUTED
         # either way and still counts against eligibility.
         if v == NOT_EXECUTED and criterion in NO_EXECUTOR:
             d += "  " + NO_EXECUTOR[criterion]
