@@ -16,10 +16,14 @@
 > documented interfaces; **not one has been executed, and no artifact described
 > here has ever been produced.** A reader must treat every claim as untested.
 >
-> The dependency that gates all of it is ADR-0016 **P-06**: *"Apple grants the
-> NetworkExtension entitlement for `packet-tunnel-provider-systemextension`."*
-> Until that grant exists there is nothing to sign, and ADR-0016 §14(2) makes
-> the grant a falsifiable schedule trigger with MX-3 as the fallback.
+> The dependency that gates all of it is enrolment in the paid Apple Developer
+> Program with the Network Extensions and System Extension capabilities enabled
+> (ADR-0016 **P-06** as amended 2026-09-04). No Apple approval step exists: the
+> `packet-tunnel-provider-systemextension` value is self-service for a paid team
+> (the request process ended 2016-11-10; TN3134 gates only `family-controls` and
+> HotspotHelper), and the free tier lacks it. Until a Team ID exists there is
+> nothing to sign, and ADR-0016 §14(2) (as amended) makes a Developer ID profile
+> that cannot be generated the trigger for the MX-3 fallback.
 
 ---
 
@@ -72,11 +76,21 @@ container the moment the nested code is signed.
 1. the CLI, twinvpn-ksd, twinvpn-unblock    (plain Mach-O)
 2. the .systemextension bundle
 3. TwinVPN.app                             (--deep is NOT used; see below)
-4. productbuild the .pkg
-5. sign the .pkg with Developer ID Installer
-6. notarize the .pkg
-7. staple the .pkg
+4. zip TwinVPN.app for submission and notarize the zip
+5. staple TwinVPN.app                      (the ticket goes on the bundle)
+6. zip the STAPLED TwinVPN.app as TwinVPN.zip — the artifact the gate verifies
+7. productbuild the .pkg from the stapled app; sign it with Developer ID Installer
+8. notarize and staple the .pkg
 ```
+
+**Steps 4–6 are what the acceptance gate checks.** `MACOS-PRODUCTION-SIGNATURE`
+fetches `TwinVPN.zip` from `TWINVPN_NOTARIZED_APP_URL`, unpacks it with
+`ditto -x -k`, and hands `TwinVPN.app` to `build/ci/ci-macos-signature.sh`
+(`.github/workflows/first-implementation-wave-gate.yml:1350-1360`), whose
+`stapled` check is `xcrun stapler validate -v TwinVPN.app`
+(`ci-macos-signature.sh:218`). A procedure that staples only the `.pkg` fails
+that check; until 2026-09-04 this file stapled the `.pkg` and produced no zip
+at all.
 
 **`--deep` is deliberately not used.** Apple has deprecated it and it applies the
 *outer* bundle's entitlements to nested code — which here would give the app's
@@ -120,15 +134,13 @@ codesign --force --sign "$APP_ID" \
          --entitlements packaging/TwinVPNApp.entitlements \
          "TwinVPN.app"
 
-# ---- 4/5. the installer package ------------------------------------------
-productbuild --component "TwinVPN.app" /Applications \
-             --sign "$PKG_ID" \
-             TwinVPN.pkg
-
-# ---- 6. notarization ------------------------------------------------------
+# ---- 4. notarization of the app ------------------------------------------
+# notarytool takes a zip, a dmg or a pkg, never a bare bundle; `ditto -c -k
+# --keepParent` is the archive form Apple documents for submission.
 # `--wait` blocks until Apple returns a verdict, so a failure is a non-zero exit
 # in CI rather than a silent success that Gatekeeper rejects on a user's Mac.
-xcrun notarytool submit TwinVPN.pkg \
+ditto -c -k --keepParent "TwinVPN.app" TwinVPN-submit.zip
+xcrun notarytool submit TwinVPN-submit.zip \
       --keychain-profile "twinvpn-notary" \
       --wait
 
@@ -136,10 +148,31 @@ xcrun notarytool submit TwinVPN.pkg \
 # way to see why:
 xcrun notarytool log <submission-id> --keychain-profile "twinvpn-notary"
 
-# ---- 7. stapling ----------------------------------------------------------
-# Staples the notarization ticket INTO the artifact, so a Mac with no network
+# ---- 5. stapling the app --------------------------------------------------
+# Staples the notarization ticket INTO the bundle, so a Mac with no network
 # can still verify it. An unstapled artifact works online and fails offline,
-# which is the worst failure mode to discover in the field.
+# which is the worst failure mode to discover in the field. A ticket cannot be
+# stapled to a zip: staple the .app, then archive it.
+xcrun stapler staple "TwinVPN.app"
+xcrun stapler validate -v "TwinVPN.app"
+
+# ---- 6. the artifact the gate verifies -----------------------------------
+# This zip, its URL and its SHA-256 are what TWINVPN_NOTARIZED_APP_URL and
+# TWINVPN_NOTARIZED_APP_SHA256 point the macos-signature job at. The submission
+# zip above is NOT reusable here: it predates the staple.
+ditto -c -k --keepParent "TwinVPN.app" TwinVPN.zip
+shasum -a 256 TwinVPN.zip
+
+# ---- 7/8. the installer package -------------------------------------------
+# Built from the STAPLED app, so the bundle inside the package carries its
+# ticket. The package gets a ticket of its own; a .pkg-only staple would never
+# reach the bundle the gate unpacks.
+productbuild --component "TwinVPN.app" /Applications \
+             --sign "$PKG_ID" \
+             TwinVPN.pkg
+xcrun notarytool submit TwinVPN.pkg \
+      --keychain-profile "twinvpn-notary" \
+      --wait
 xcrun stapler staple TwinVPN.pkg
 xcrun stapler validate TwinVPN.pkg
 ```
