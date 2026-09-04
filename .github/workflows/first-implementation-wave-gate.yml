@@ -104,6 +104,9 @@ name: First Implementation Wave — acceptance gate
 # device can only reach by emitting a packet that left it, and
 # `first-wave-acceptance` fetches its verdict FROM THE ORACLE rather than from
 # anything a platform job uploaded.
+# (Since 2026-09-02 the only oracle in this workflow is the kill-switch lane's
+# in-box one, and that lane uploads its report itself; see the dated addendum
+# on the `fetch the leak-oracle reports for this run's sessions` step.)
 # ===========================================================================
 
 on:
@@ -1715,16 +1718,22 @@ jobs:
       # ANY STALE REPORT IS DELETED FIRST, AND THAT IS THE POINT.
       #
       # `build/acceptance/first-wave-acceptance.{json,md}` were TRACKED until
-      # 2026-09-04 (CF-7 untracked and gitignored them), so a copy from
+      # 2026-09-04, when they were untracked and gitignored, so a copy from
       # whenever someone last ran the report locally sat in every checkout, and
       # the upload below globs that path. In run 33352434440 the make target
       # died before `report.py` ran, and the artifact went out carrying a
       # report from commit c896d823 that even says "DIRTY WORKTREE -- not
       # release evidence" -- presented, by its filename and its artifact name,
       # as this run's answer. Deleting a tracked file also put a ` D` line into
-      # the `git status --porcelain` sample report.py stamps its own report
-      # with, which is how run 33786997948's report came to carry that same
-      # DIRTY WORKTREE mark on a clean checkout; untracking removes that source.
+      # the `git status --porcelain` sample `report.py` reads to set
+      # `worktree_dirty` (report.py:1021, any non-empty output), which is one
+      # of the two lines that gave run 33786997948's report that same DIRTY
+      # WORKTREE mark on a clean checkout. Untracking removes that line, not
+      # the mark: the download step above writes `build/ci/evidence-download/`,
+      # and `build/ci/.gitignore` ignores only `evidence/` and `logs/`, so on
+      # every run that downloads anything (33786997948 did) that directory is a
+      # second `??` line in the same sample. The DIRTY mark stays until
+      # `evidence-download/` is gitignored or removed before `report.py` runs.
       #
       # The `rm -f` stays: on a clean checkout it removes nothing, and it still
       # covers a hand-copied or cache-restored file. Stale evidence offered as
