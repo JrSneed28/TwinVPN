@@ -996,4 +996,31 @@ mod tests {
         }
         assert_eq!(total_entries(), expected);
     }
+
+    #[test]
+    fn em42_next_action_names_an_operation_the_management_catalogue_has() {
+        // ADR-0023 EM-42's rendered example is `POLICY.KILLSWITCH.ENGAGED`, and
+        // ownership.md G-24 records that its next action was authored nowhere.
+        // The ADR's example names `peer disconnect`, which is not a
+        // twinvpn-mgmt `CoreCommand`, so a CLI generated from the catalogue
+        // (ADR-0017 MI-C1) would refuse it with exit 2. `session.disconnect`
+        // is the operation that injects `EV_DISCONNECT_REQUESTED`, and MI-K1 is
+        // why the sentence says it does not unblock traffic.
+        let r = render("POLICY.KILLSWITCH.ENGAGED", &[], "en", &neutral());
+        assert_eq!(
+            r.summary,
+            "Protected traffic is blocked because no authorized secure path exists."
+        );
+        let action = r
+            .next_action
+            .expect("POLICY.KILLSWITCH.ENGAGED is user_actionable");
+        assert!(
+            action.contains("'twinvpn session disconnect'"),
+            "EM-42's next action names no installed command: {action}"
+        );
+        assert!(
+            !action.contains("peer disconnect"),
+            "EM-42's next action names a verb the catalogue lacks: {action}"
+        );
+    }
 }
