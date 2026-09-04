@@ -99,11 +99,13 @@ Corrected on 2026-09-04:
   `-systemextension` value for Developer ID profiles, and Apple dropped the
   request process on 2016-11-10 (TN3134 gates only family-controls and
   HotspotHelper). The free tier lacks both capabilities, so the US$99/yr
-  membership is the actual prerequisite. The approval half stands: neither
-  SIP-disabled nor `systemextensionsctl developer on` bypasses the System
-  Settings toggle, and the System Extensions MDM payload needs Device
-  Enrollment or ADE. "No scriptable macOS runner" is wrong for bare-metal EC2
-  Mac — `aws-samples/amazon-ec2-mac-mdm-enrollment-automation` GUI-scripts
+  membership is the actual prerequisite. The approval half stands: Apple
+  documents no bypass of the System Settings toggle for either SIP-disabled or
+  `systemextensionsctl developer on` (developer mode relaxes only the
+  location/version check); the question stays unmeasured, see "Elsewhere"
+  below. The System Extensions MDM payload needs Device Enrollment or ADE. "No
+  scriptable macOS runner" is wrong for bare-metal EC2 Mac —
+  `aws-samples/amazon-ec2-mac-mdm-enrollment-automation` GUI-scripts
   user-approved Device Enrollment into Jamf, Addigy, Kandji or Fleet after a
   one-time Screen-Sharing AMI setup, and documents pushing a System Extensions
   payload with user approval disabled — and right for hosted `macos-26`: no
@@ -140,7 +142,7 @@ Corrected on 2026-09-04:
   AWS Device Farm private iPhone (≥ US$200/month) or a Sauce private device,
   its UDID registered in a Development or ad-hoc profile. Prerequisites the
   price omits: device signing in CI (`.p12` and profile in secrets;
-  `build/ci/ci-ios.sh:328`'s `-allowProvisioningUpdates` needs an App Store
+  `build/ci/ci-ios.sh:333`'s `-allowProvisioningUpdates` needs an App Store
   Connect key on the runner); an iOS `lab-seed` (none exists — `lab-seed` is
   `shells/windows/twinvpnsvc` only, `Cargo.toml:82` — so walls 1–2 refuse
   `net.up` on any production iOS build); a far end and oracle the phone can

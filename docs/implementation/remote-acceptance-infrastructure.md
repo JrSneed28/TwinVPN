@@ -304,7 +304,9 @@ request process ended 2016-11-10; TN3134 gates only family-controls and
 HotspotHelper), the free tier lacks both, and
 `shells/macos/packaging/TwinVPNTunnel.entitlements` requests
 `packet-tunnel-provider-systemextension` for a team that is not enrolled — its
-header's "Apple has not granted it" is that fact under the wrong name.
+header's "Until they do, this file describes a build that cannot be signed"
+(`:25-26`, and `:33`'s "THE ONE THAT APPLE MUST GRANT") is that fact under the
+wrong name.
 **And there is no non-NetworkExtension tunnel path:**
 `core/crates/twinvpn-platform-macos/src/utun.rs:436` returns `ENOSYS` for a
 self-created utun, with `tests/darwin.rs` asserting that refusal by name. Nested
