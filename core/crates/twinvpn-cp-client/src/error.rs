@@ -76,10 +76,10 @@ pub enum CpError {
         observed_publisher: &'static str,
     },
 
-    /// A `trust_epoch`, `policy_version`, `generation` or other monotone counter
-    /// was offered below our durable high-water mark. Refused, never applied
-    /// (ADR-0008 §7.1, ADR-0009 R-5/R-6).
-    #[error("monotone rollback: offered {offered_epoch}, high water {high_water_epoch}")]
+    /// A trust floor — `trust_epoch`, `generation`, `tk_generation` — offered
+    /// below our durable mark. Refused, never applied (ADR-0007 N-26). A document
+    /// is [`CpError::VersionRollbackRejected`], a cursor [`CpError::ReplicaBehindCursor`] (W-11).
+    #[error("trust-epoch rollback: offered {offered_epoch}, high water {high_water_epoch}")]
     TrustEpochRollback {
         /// What the control plane offered.
         offered_epoch: u64,
@@ -87,12 +87,31 @@ pub enum CpError {
         high_water_epoch: u64,
     },
 
-    /// Two different contents at one version — the client-side detector for
-    /// E-1(c) (ADR-0009 R-4).
+    /// Two different trust records at one epoch, or a broken `prev_entry_hash`
+    /// (ADR-0007 N-26, S-32). Nothing in this crate produces it today; a forked
+    /// *document* history is [`CpError::ForkedHistoryDetected`].
     #[error("forked trust history at epoch {epoch}")]
     TrustHistoryForked {
         /// The epoch at which the fork was seen.
         epoch: u64,
+    },
+
+    /// A document offered below its stored `doc_version` high-water mark
+    /// (ADR-0009 R-5). Refused, never applied; a security event.
+    #[error("version rollback: offered {offered_version}, high water {high_water_version}")]
+    VersionRollbackRejected {
+        /// What was offered.
+        offered_version: u64,
+        /// What we already hold.
+        high_water_version: u64,
+    },
+
+    /// Two different contents at one `doc_version` — the client-side detector
+    /// for E-1(c) (ADR-0009 R-4). A security event.
+    #[error("forked history at version {version}")]
+    ForkedHistoryDetected {
+        /// The version at which the fork was seen.
+        version: u64,
     },
 
     /// `RegisterDeviceResponse.device_id_echo` disagreed with our own derivation.
@@ -283,6 +302,12 @@ impl CpError {
             CpError::EventWrongPublisher { .. } => codes::CONTROL_EVENT_WRONG_PUBLISHER,
             CpError::TrustEpochRollback { .. } => codes::AUTH_TRUST_EPOCH_ROLLBACK,
             CpError::TrustHistoryForked { .. } => codes::AUTH_TRUST_HISTORY_FORKED,
+            CpError::VersionRollbackRejected { .. } => {
+                codes::CONTROL_CONSISTENCY_VERSION_ROLLBACK_REJECTED
+            }
+            CpError::ForkedHistoryDetected { .. } => {
+                codes::CONTROL_CONSISTENCY_FORKED_HISTORY_DETECTED
+            }
             CpError::IdentityMismatch => codes::AUTH_IDENTITY_MISMATCH,
             CpError::StatementExpired { .. } => codes::AUTH_STATEMENT_EXPIRED,
             CpError::StatementUnverified { .. } => codes::AUTH_BINDING_INVALID,
@@ -310,10 +335,9 @@ impl CpError {
     /// one rather than as a parse or connection error.
     ///
     /// The three the corpus names explicitly are channel-binding mismatch
-    /// (ADR-0002 N-2), wrong publisher (S-4), and a monotone rollback
-    /// (ADR-0008 §7.1). Each is `FATAL`/`CRITICAL` or `POLICY`/`ERROR` in the
-    /// registry, and each means an authenticated peer said something it must not
-    /// have been able to say.
+    /// (ADR-0002 N-2), wrong publisher (S-4), and a monotone rollback (ADR-0008
+    /// §7.1); ADR-0009 R-4 and R-5 add the document fork and rollback. Each
+    /// means an authenticated peer said something it must not have been able to say.
     #[must_use]
     pub const fn is_security_event(&self) -> bool {
         matches!(
@@ -322,6 +346,8 @@ impl CpError {
                 | CpError::EventWrongPublisher { .. }
                 | CpError::TrustEpochRollback { .. }
                 | CpError::TrustHistoryForked { .. }
+                | CpError::VersionRollbackRejected { .. }
+                | CpError::ForkedHistoryDetected { .. }
                 | CpError::IdentityMismatch
                 | CpError::StatementUnverified { .. }
         )
@@ -330,11 +356,11 @@ impl CpError {
     /// Whether a control-plane outage of this shape still permits the data plane
     /// to re-establish a session with an already-known `TrustedPeer`.
     ///
-    /// Everything this crate can produce answers `true` except a rollback and a
-    /// forged statement, which are *authoritative instructions that trust has
-    /// ended* rather than unavailability (`architecture.md` §4.5(2)). That
-    /// distinction is the whole of I5: an outage never withdraws baseline
-    /// reachability (`reliability.md` §9.2).
+    /// Everything this crate can produce answers `true` except a trust-epoch
+    /// rollback and a forged statement, which are *authoritative instructions
+    /// that trust has ended* rather than unavailability (`architecture.md`
+    /// §4.5(2)); that distinction is the whole of I5 (`reliability.md` §9.2).
+    /// A refused *document* (R-4/R-5) is neither: the device keeps its version.
     #[must_use]
     pub const fn permits_offline_reconnect(&self) -> bool {
         !matches!(
@@ -365,6 +391,8 @@ impl CpError {
             | CpError::IdentityMismatch
             | CpError::StatementUnverified { .. }
             | CpError::KeyUnavailable
+            | CpError::VersionRollbackRejected { .. }
+            | CpError::ForkedHistoryDetected { .. }
             | CpError::EventRateExceeded
             | CpError::WriteLeaderUnavailable
             | CpError::QuorumUnavailable

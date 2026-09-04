@@ -358,11 +358,13 @@ pub fn admit(event: &v1::ControlEvent, cursor: u64) -> Result<Admitted, CpError>
     }
 
     // 3. Monotone position. A durable event at or below the cursor is a replay
-    //    or a rebuilt log; either way it is refused rather than applied.
+    //    or a rebuilt log; either way it is refused rather than applied. The
+    //    replica served below our cursor, which is E-1(c)'s condition and its
+    //    code — not a trust-epoch rollback (W-11).
     if class.durability == Durability::Durable && net_seq <= cursor {
-        return Err(CpError::TrustEpochRollback {
-            offered_epoch: net_seq,
-            high_water_epoch: cursor,
+        return Err(CpError::ReplicaBehindCursor {
+            min_net_seq: cursor,
+            replica_net_seq: net_seq,
         });
     }
 
@@ -454,7 +456,11 @@ mod tests {
     #[test]
     fn a_regressed_position_is_rejected() {
         let e = event(revoked(), 5);
-        assert!(admit(&e, 9).is_err(), "net_seq 5 behind cursor 9");
+        let err = admit(&e, 9).expect_err("net_seq 5 behind cursor 9");
+        assert_eq!(
+            err.reason_code().as_str(),
+            "CONTROL.CONSISTENCY.REPLICA_BEHIND_CURSOR"
+        );
         assert!(admit(&e, 5).is_err(), "net_seq 5 at cursor 5 is a replay");
         assert!(admit(&e, 4).is_ok());
     }

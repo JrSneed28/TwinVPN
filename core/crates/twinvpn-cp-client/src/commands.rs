@@ -197,14 +197,16 @@ impl DesiredSet {
     ///
     /// # Errors
     ///
-    /// [`CpError::TrustEpochRollback`] on a repeated or lower epoch. An
+    /// [`CpError::VersionRollbackRejected`] on a repeated or lower epoch. An
     /// advertisement that reuses an epoch is a delta in disguise: the receiver
-    /// would have no way to order it against the set already in force.
+    /// would have no way to order it against the set already in force. The
+    /// epoch is this document's version (ADR-0008 N-1/N-3), not a trust floor,
+    /// so the refusal is ADR-0009 R-5's code and not ADR-0007 N-26's.
     pub const fn check_epoch(&self, last_sent: u64) -> Result<(), CpError> {
         if self.epoch <= last_sent {
-            return Err(CpError::TrustEpochRollback {
-                offered_epoch: self.epoch,
-                high_water_epoch: last_sent,
+            return Err(CpError::VersionRollbackRejected {
+                offered_version: self.epoch,
+                high_water_version: last_sent,
             });
         }
         Ok(())
@@ -369,7 +371,11 @@ mod tests {
         };
         assert!(set.is_withdrawal(), "a withdrawal is an empty set");
         assert!(set.check_epoch(4).is_ok());
-        assert!(set.check_epoch(5).is_err(), "reusing an epoch is a delta");
+        let err = set.check_epoch(5).expect_err("reusing an epoch is a delta");
+        assert_eq!(
+            err.reason_code().as_str(),
+            "CONTROL.CONSISTENCY.VERSION_ROLLBACK_REJECTED"
+        );
         assert!(set.check_epoch(6).is_err());
     }
 

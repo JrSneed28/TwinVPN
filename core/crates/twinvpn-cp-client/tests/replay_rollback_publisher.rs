@@ -3,7 +3,7 @@
 //! | Scenario | Property |
 //! |---|---|
 //! | **Replay** | A retry with the same `idempotency_key` returns the original outcome, marked `idempotent_replay` (ADR-0008 N-5) |
-//! | **Rollback** | A regressed monotone version is refused, not applied (ADR-0008 §7.1, ADR-0009 R-5/R-6) |
+//! | **Rollback** | A regressed monotone version is refused, not applied (ADR-0008 §7.1, ADR-0009 R-5/R-6) — and under the code its own rule names: only a trust floor is `AUTH.TRUST_EPOCH_ROLLBACK` (ADR-0007 N-26); a document or a cursor is `CONTROL.CONSISTENCY.*` (W-11) |
 //! | **Wrong publisher** | An event from a principal that is not its sole publisher is a **security event** (ADR-0002 S-4) |
 //! | **Compaction** | A deliberate gap is surfaced with its position, never swallowed (ADR-0002 N-8) |
 //!
@@ -14,8 +14,9 @@ use std::sync::Arc;
 use prost::Message as _;
 use twinvpn_cp_client::testing::{test_env, RecordingTransport};
 use twinvpn_cp_client::{
-    decode_event, Admitted, ClientParts, Command, ControlPlaneClient, CpError, Cursor, Durability,
-    MonotoneVersion, Mutation, Publisher, ReceivedOctets, ResumeOutcome, TrustEpoch,
+    decode_event, Admitted, ClientParts, Command, ControlPlaneClient, CpError, Cursor, DesiredSet,
+    Durability, MonotoneMark, MonotoneVersion, Mutation, Publisher, ReceivedOctets, ResumeOutcome,
+    StoreFailure, TrustEpoch,
 };
 use twinvpn_schema::v1;
 use twinvpn_schema::v1::control_event::Event as EventBody;
@@ -137,7 +138,13 @@ fn a_duplicate_durable_event_is_refused_rather_than_applied_twice() {
     );
     let event = decode_event(&octets).expect("decodes");
     let err = c.admit_event(&event).expect_err("already applied");
-    assert_eq!(err.reason_code().as_str(), "AUTH.TRUST_EPOCH_ROLLBACK");
+    // The replica served at our cursor: E-1(c)'s transient code, not a
+    // terminal AUTH one — a normal duplicate is not a security incident.
+    assert_eq!(
+        err.reason_code().as_str(),
+        "CONTROL.CONSISTENCY.REPLICA_BEHIND_CURSOR"
+    );
+    assert!(!err.reason_code().terminal());
 }
 
 // ---------------------------------------------------------------------------
@@ -155,20 +162,35 @@ fn a_regressed_monotone_version_is_rejected() {
     epoch.commit(4);
     assert_eq!(epoch.get(), 17, "commit is monotone too");
 
-    // 2. The policy version. A lower value is a POLICY ROLLBACK ATTACK.
+    // 2. The policy version. A lower value is a POLICY ROLLBACK ATTACK — and a
+    //    consistency failure, reported as one (ADR-0009 R-5), not as an AUTH
+    //    failure an older client would misdiagnose (W-11).
     let policy = MonotoneVersion::restored(88, [0x1a; 32]);
-    assert!(policy.admit(87, [0x1a; 32]).is_err());
+    let rollback = policy.admit(87, [0x1a; 32]).expect_err("rollback");
+    assert_eq!(
+        rollback.reason_code().as_str(),
+        "CONTROL.CONSISTENCY.VERSION_ROLLBACK_REJECTED"
+    );
+    assert!(rollback.is_security_event());
     assert!(policy.admit(89, [0x1b; 32]).is_ok());
 
     // 3. Same version, different content: a forked history, and the client-side
-    //    detector for E-1(c).
+    //    detector for E-1(c) (ADR-0009 R-4).
     let fork = policy.admit(88, [0x99; 32]).expect_err("fork");
-    assert_eq!(fork.reason_code().as_str(), "AUTH.TRUST_HISTORY_FORKED");
+    assert_eq!(
+        fork.reason_code().as_str(),
+        "CONTROL.CONSISTENCY.FORKED_HISTORY_DETECTED"
+    );
+    assert!(fork.is_security_event());
 
     // 4. The C2 cursor. A server offering a position below ours is behind or
-    //    hostile; either way we do not go backwards.
+    //    hostile; either way we do not go backwards — under E-1(c)'s code.
     let cursor = Cursor::restored(5_000);
-    assert!(cursor.accept_server_position(4_999).is_err());
+    let behind = cursor.accept_server_position(4_999).expect_err("behind");
+    assert_eq!(
+        behind.reason_code().as_str(),
+        "CONTROL.CONSISTENCY.REPLICA_BEHIND_CURSOR"
+    );
     assert!(cursor.accept_server_position(5_000).is_ok());
 
     // 5. And no recovery path resets a monotone mark — which is why restoring an
@@ -435,6 +457,11 @@ fn every_error_this_crate_exposes_is_a_registered_code() {
             high_water_epoch: 2,
         },
         CpError::TrustHistoryForked { epoch: 3 },
+        CpError::VersionRollbackRejected {
+            offered_version: 1,
+            high_water_version: 2,
+        },
+        CpError::ForkedHistoryDetected { version: 3 },
         CpError::IdentityMismatch,
         CpError::KeyUnavailable,
         CpError::StreamCompacted { up_to_net_seq: 4 },
@@ -489,4 +516,113 @@ fn every_error_this_crate_exposes_is_a_registered_code() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// THE W-11 TRIPWIRE
+// ---------------------------------------------------------------------------
+
+/// Every monotone refusal this crate emits, and the code it is emitted under.
+///
+/// `twinvpn-store`'s G-2 shape, inverted from the absence tripwires the other
+/// domains carry: each code must be **registered**, and each must be produced
+/// by a function outside `#[cfg(test)]`. A registry that lost one, or a
+/// refactor that folded a document rollback back onto the trust-epoch code,
+/// fails here rather than degrading a diagnosis on the `AUTH` prefix — which is
+/// how W-11's second half stayed open for three amendments.
+const INTENDED: &[(&str, &str)] = &[
+    (
+        "a trust_epoch below the mark (ADR-0007 N-26)",
+        "AUTH.TRUST_EPOCH_ROLLBACK",
+    ),
+    (
+        "a doc_version below the mark (ADR-0009 R-5)",
+        "CONTROL.CONSISTENCY.VERSION_ROLLBACK_REJECTED",
+    ),
+    (
+        "equal doc_version, different content (ADR-0009 R-4)",
+        "CONTROL.CONSISTENCY.FORKED_HISTORY_DETECTED",
+    ),
+    (
+        "a position at or below the local cursor (S-27, E-1(c))",
+        "CONTROL.CONSISTENCY.REPLICA_BEHIND_CURSOR",
+    ),
+];
+
+/// The non-test producer for each `INTENDED` row, called as a caller would.
+fn emitted(condition: &str) -> CpError {
+    let digest = [0x5a; 32];
+    match condition {
+        c if c.starts_with("a trust_epoch") => TrustEpoch::restored(9).admit(8).expect_err(c),
+        c if c.starts_with("a doc_version") => MonotoneVersion::restored(9, digest)
+            .admit(8, digest)
+            .expect_err(c),
+        c if c.starts_with("equal doc_version") => MonotoneVersion::restored(9, digest)
+            .admit(9, [0xa5; 32])
+            .expect_err(c),
+        c => Cursor::restored(9).accept_server_position(8).expect_err(c),
+    }
+}
+
+#[test]
+fn every_intended_code_is_registered_and_has_a_non_test_emitter() {
+    for (condition, code) in INTENDED {
+        assert!(
+            twinvpn_types::ReasonCode::lookup(code).is_some(),
+            "{condition} emits {code}, which the frozen registry does not carry"
+        );
+        let err = emitted(condition);
+        assert_eq!(
+            err.reason_code().as_str(),
+            *code,
+            "{condition} is emitted under the wrong code"
+        );
+    }
+}
+
+#[test]
+fn only_a_trust_floor_emits_the_trust_epoch_code() {
+    // The positive control is the first INTENDED row. Everything else that
+    // refuses a lower value is a consistency condition, and none of it may
+    // borrow ADR-0007 N-26's code again.
+    let cursor_or_document = [
+        emitted("a doc_version below the mark (ADR-0009 R-5)"),
+        emitted("equal doc_version, different content (ADR-0009 R-4)"),
+        emitted("a position at or below the local cursor (S-27, E-1(c))"),
+        Cursor::restored(9).advance_to(9).expect_err("a replay"),
+        DesiredSet {
+            epoch: 3,
+            prefixes: Vec::new(),
+        }
+        .check_epoch(3)
+        .expect_err("a reused advertisement epoch"),
+    ];
+    for err in cursor_or_document {
+        assert_ne!(err.reason_code().as_str(), "AUTH.TRUST_EPOCH_ROLLBACK");
+        assert_ne!(err.reason_code().as_str(), "AUTH.TRUST_HISTORY_FORKED");
+        assert_eq!(err.reason_code().domain().as_str(), "CONTROL");
+        assert!(
+            err.permits_offline_reconnect(),
+            "I5: a refused document or cursor is not a revocation"
+        );
+    }
+
+    // And the store's refusals make the same split as the in-memory checks,
+    // so the code does not depend on which side of the port the floor lives.
+    for (mark, condition) in [
+        (MonotoneMark::TrustEpoch, INTENDED[0].0),
+        (MonotoneMark::DocumentVersion, INTENDED[1].0),
+        (MonotoneMark::Cursor, INTENDED[3].0),
+    ] {
+        let refused = StoreFailure::RollbackRefused {
+            mark,
+            offered: 8,
+            floor: 9,
+        };
+        assert_eq!(refused.reason_code(), emitted(condition).reason_code());
+    }
+    assert_eq!(
+        StoreFailure::Forked { version: 9 }.reason_code(),
+        emitted(INTENDED[2].0).reason_code()
+    );
 }
