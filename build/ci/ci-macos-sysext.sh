@@ -35,27 +35,44 @@
 # status: disabled". The pre-flight below would pass on `macos-26` today.
 #
 # So SIP was never the blocker. Three others are, each sufficient on its own,
-# on ANY Mac, hosted or owned:
+# on any Mac that has no MDM enrolment and no paid Apple Developer team behind
+# it — which is every hosted runner (corrected 2026-09-04):
 #
-#   1. TWO GUI APPROVALS. The System Settings toggle under General > Login
-#      Items & Extensions > Network Extensions, and then the VPN configuration
-#      consent dialog `NETunnelProviderManager.saveToPreferences` raises. Apple
-#      documents developer mode as relaxing the extension's LOCATION check and
-#      SIP-disabled as relaxing the NOTARIZATION check; neither is documented
-#      as relaxing APPROVAL, and the only supported non-interactive route is an
-#      MDM `com.apple.system-extension-policy` payload. `security
-#      authorizationdb write <right> allow` — the one scripted route to the
-#      admin authentication behind the toggle — fails with -60005 on macos-15
-#      and later (`runner-images` #11893).
-#   2. THE ENTITLEMENT IS NOT GRANTED. `packaging/TwinVPNTunnel.entitlements`
-#      requests `packet-tunnel-provider-systemextension` and its own header
-#      says Apple has not granted it. There is no build to activate.
+#   1. THE GUI APPROVAL. The System Settings toggle under General > Login
+#      Items & Extensions > Network Extensions. Apple documents developer mode
+#      as relaxing the extension's LOCATION check and SIP-disabled as relaxing
+#      the NOTARIZATION check; neither is documented as relaxing APPROVAL, and
+#      the only supported non-interactive route is an MDM
+#      `com.apple.system-extension-policy` payload, which needs Device
+#      Enrollment — no hosted runner has an MDM or a static UDID. The scripted
+#      route, `security authorizationdb write <right> allow`, is UNMEASURED for
+#      the system-extension right: `runner-images` #11893 (closed 2025-05-19)
+#      tested `com.apple.trust-settings.admin`, not
+#      `com.apple.system-extensions.admin`, and at most it removes the password
+#      prompt behind the toggle, never the toggle. The VPN-configuration consent
+#      (`NETunnelProviderManager.saveToPreferences`) is NOT a second wall in this
+#      tree: nothing here creates a VPN configuration at all —
+#      `shells/macos/TwinVPNApp/SystemExtensionInstaller.swift` only submits
+#      the activation request — so the `net up` below presupposes a
+#      configuration nothing installs. An MDM `com.apple.vpn.managed` payload
+#      (ProviderBundleIdentifier + ProviderDesignatedRequirement) delivers one
+#      without that dialog.
+#   2. NO SIGNED BUILD. `packaging/TwinVPNTunnel.entitlements` requests
+#      `packet-tunnel-provider-systemextension`, which is SELF-SERVICE for a
+#      paid Apple Developer team (ADR-0016 P-06 as amended 2026-09-04) — there
+#      is no Apple grant to wait for. What is missing is the team, a Developer
+#      ID profile carrying the value, and a signing job: `ci-macos.sh` builds
+#      with CODE_SIGNING_ALLOWED=NO and no workflow signs or notarizes. There
+#      is no build to activate.
 #   3. THERE IS NO NON-NETWORKEXTENSION TUNNEL PATH.
 #      `core/crates/twinvpn-platform-macos/src/utun.rs:436` returns `ENOSYS`.
 #
-# None is an infrastructure problem and none is bought with a Mac. The lane
-# reads NOT-EXECUTED, which is the truthful state; its job is to be CORRECT
-# WHEN IT RUNS rather than to be runnable.
+# None is bought with a hosted Mac. An MDM-enrolled Mac, a paid team and a
+# signing pipeline together would clear 1 and 2 (3 is product work); whether
+# that is funded or the row is deferred is the wave owner's open decision in
+# docs/implementation/ownership.md §12. The lane reads NOT-EXECUTED, which is
+# the truthful state; its job is to be CORRECT WHEN IT RUNS rather than to be
+# runnable.
 #
 # The part a hosted runner CAN carry is a different criterion:
 # `build/ci/ci-macos-pf-anchor.sh` (`MACOS-PF-BOOT-ANCHOR`) installs the KS-19
@@ -168,9 +185,9 @@ case "$sip_config" in
   *"status: enabled."*)
     echo "::error::SIP is fully enabled, so systemextensionsctl developer mode is \
 unavailable and no extension can be activated on this host. This is the FIRST \
-of this lane's obstacles and not the largest: the two GUI approvals and the \
-ungranted packet-tunnel-provider-systemextension entitlement remain after it is \
-cleared. See this script's header." >&2
+of this lane's obstacles and not the largest: the System Settings approval and \
+the absence of a Developer-ID-signed build remain after it is cleared. See this \
+script's header." >&2
     exit 1 ;;
 esac
 

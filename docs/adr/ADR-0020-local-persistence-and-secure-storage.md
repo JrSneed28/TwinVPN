@@ -923,9 +923,21 @@ iOS/iPadOS no host identifier is needed — a restored vault without a usable SE
 | macOS (system extension / daemon) | `/Library/Application Support/TwinVPN/` | `root:wheel`, `0700` | The system extension / `launchd` daemon only |
 | macOS (App Store) | App Group container | App sandbox | The NE app extension only |
 | Android | CE app storage (`Context.createCredentialProtectedStorageContext()` is **not** used; the default CE context is) | App UID, `0700` | The `VpnService` process only |
-| Windows | `%ProgramData%\TwinVPN\store\` | `SYSTEM:F`, `Administrators:F`, **`Users` denied**; inheritance disabled | The `LocalSystem` service only |
+| Windows | `%ProgramData%\TwinVPN\store\` | `SYSTEM` and `Administrators` GenericAll, inheritable (OI)(CI); inheritance from `%ProgramData%` disabled; **no deny ACE for `Users`** — see the amendment below | The `LocalSystem` service only |
 | Linux | `/var/lib/twinvpn/` | `twinvpn:twinvpn`, `0700` | The `systemd` service only |
 | OpenWrt / routers / headless | `/etc/twinvpn/` (**never `/var`** — tmpfs) | `root:root`, `0700` | The `procd` service only |
+
+> **AMENDED 2026-09-04 — the Windows row.** It previously read "`SYSTEM:F`, `Administrators:F`,
+> **`Users` denied**; inheritance disabled". Measured on Windows 11 as `NT AUTHORITY\SYSTEM` in the
+> hosted kill-switch lane (run 33740622733): the LocalSystem token is a member of `BUILTIN\Users`,
+> so the deny ACE denied the service's own file creates while still allowing directory creation —
+> the tier-1 directory appeared, `net up` failed writing `resolver.restore`, and the row reported
+> `AUTH.KEY_STORE_UNAVAILABLE`. Commit 84bfa77 removed the deny from
+> `shells/windows/packaging/TwinVPN.wxs` (the `StoreDirectory` component, whose comment records the
+> measurement) and from the lane's guest script. With `util:PermissionEx` replacing the inherited
+> set and inheritance disabled, an absent ACE already denies every principal not named; the two
+> grants are inheritable so the items the service creates carry the same two principals. ST-30's
+> single-opener property is unchanged.
 
 **Rule ST-30 (single opener).** Exactly **one** process opens the vault, for read or for write: the
 privileged daemon/extension of H2. The UI, the CLI, and any local automation MUST NOT open the
