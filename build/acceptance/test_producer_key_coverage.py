@@ -56,10 +56,10 @@ THE PRODUCER THAT DOES NOT EXIST YET
 ===========================================================================
 Derivation cannot see a lane nobody has written. `UNPRODUCED` says a criterion
 has no writer; `PRODUCER_PINS` says WHICH FILE is supposed to become one, and
-fails once, by path, until it does. It is also the only place a digest key is
-checked as text, because `test_evidence_writers.render()` builds the digest map
-out of the adjudicator's own names and therefore cannot see a lane that spells
-one differently.
+fails once, by path, until it does. It was the only place a digest key was
+checked as text until 2026-09-04: `test_evidence_writers.render()` builds the
+digest map out of the adjudicator's own names, and the per-script key pins that
+file now carries are what catch a lane that spells one differently.
 
 ===========================================================================
 THE INDIRECT PRODUCER
@@ -373,7 +373,8 @@ class ProducerKeyCoverage(unittest.TestCase):
         # yet is invisible to all of it -- `UNPRODUCED` records that a criterion
         # has no writer, and nothing records WHICH file was supposed to be one.
         #
-        # It is also the only check that can see a misspelled digest key:
+        # It was the only check that could see a misspelled digest key until
+        # `test_evidence_writers.py` gained per-script key pins (2026-09-04):
         # `render()` builds the digest map from `ARTIFACT_DIGEST_REQUIRED`
         # itself, so a lane writing `TwinVPN.app/TwinVPNApp` would render as if
         # it agreed with the adjudicator. Text, therefore, and one failure per
