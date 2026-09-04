@@ -1008,7 +1008,7 @@ test-first-wave-gate:
 # before this target no longer dirties the checkout: a deleted tracked file is
 # a dirty tree to report.py's `git status --porcelain` sample, and runs
 # 33786997948 and 33853609809 were stamped "DIRTY WORKTREE -- not release
-# evidence" with exactly that deletion in place (CF-7). Nothing reads the
+# evidence" with exactly that deletion in place. Nothing reads the
 # committed copy: report.py and build/ci/require-job-results.py read the file
 # this target writes.
 #
