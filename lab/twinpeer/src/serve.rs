@@ -12,9 +12,9 @@
 //! engine handle because the adapter is one object, but nothing here calls
 //! `apply`, `set_ruleset`, `reclaim` or `commit`, so **no filter is ever
 //! installed on the lab host**. It holds no vault, presents
-//! [`custody::AbsentElement`] and reports `Tier1Backend::Absent`, because a peer
-//! that signed nothing needs no identity element and inventing one would be a
-//! claim about custody that is not true.
+//! [`twinvpn_platform_windows::custody::AbsentElement`] and reports
+//! `Tier1Backend::Absent`, because a peer that signed nothing needs no identity
+//! element and inventing one would be a claim about custody that is not true.
 //!
 //! # Re-handshake, and why it needs a wrapper
 //!
