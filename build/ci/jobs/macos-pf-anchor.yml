@@ -1,0 +1,151 @@
+# build/ci/jobs/macos-pf-anchor.yml
+#
+# A JOB BODY, not a workflow. Paste it under a workflow's `jobs:` key at this
+# indentation, and add `macos-pf-anchor` to the `needs:` and to
+# `build/ci/require-job-results.py`'s expectations so a skipped or cancelled run
+# cannot read as a pass.
+#
+# ===========================================================================
+# WHAT THIS JOB IS FOR
+# ===========================================================================
+# `MACOS-PF-BOOT-ANCHOR`: the KS-19 boot artifact installed by the package, and
+# Apple's own pf parsing and EVALUATING the anchor this repository ships.
+# `shells/macos/README.md` §7 gap 2 records that this has never happened, and
+# `shells/macos/packaging/install.sh` says in its own header that it has never
+# been executed. This job is where both stop being true.
+#
+# It needs NOTHING that the sysext row is blocked on: no Team ID, no
+# Apple-granted entitlement, no System Settings approval, no MDM, no leak
+# oracle, no sentinel, no EC2 Mac. It needs root, which GitHub's hosted macOS
+# runners provide through passwordless sudo, and pf, which is in the image.
+#
+# THEREFORE NO `vars:` AND NO `secrets:`. A job with no configuration cannot be
+# half-configured, and this row's readiness is not an operator's to arrange.
+#
+# ===========================================================================
+# IT MUTATES THE RUNNER, AND GIVES IT BACK
+# ===========================================================================
+# The lane creates two groups and a service account, writes
+# /etc/twinvpn/pf.anchor, appends two lines to /etc/pf.conf, loads a
+# LaunchDaemon and enables pf. `--cleanup` runs under `if: always()`, empties
+# the anchor, restores /etc/pf.conf from the restore point `install.sh` itself
+# makes, boots the daemon out and then READS THE KERNEL BACK — going red if
+# TwinVPN enforcement is still installed. A teardown that swallows its own
+# failure is how a runner comes to inherit somebody's firewall.
+#
+# The script also refuses outright if any of the host's own addresses or
+# default gateways lies inside a covered prefix, because `100.64.0.0/10` is RFC
+# 6598 carrier space and a runner behind CGNAT would otherwise arm a rule
+# against its own underlay.
+#
+# ===========================================================================
+# WHAT IT DOES NOT CLAIM
+# ===========================================================================
+# Not a tunnel, not an exit, not an egress path. The bridge tests it runs as
+# root reach `enforcement_reclaim` and stop well short of `net.up`, which
+# refuses at `enforce::arm` with `AUTH.IDENTITY_MISSING` because the device has
+# no overlay allocation. The two prefixes the anchor denies are RFC 6598 and
+# ULA space that never reaches a public observer, so this criterion carries no
+# leak-oracle session and is deliberately NOT in `report.py`'s
+# `ORACLE_REQUIRED`.
+
+  macos-pf-anchor:
+    name: macos-pf-anchor
+    # PINNED, not `macos-latest`. Same image as `macos-link-run`, so the Xcode
+    # 26.6 pin in build/ci/ci-common-apple.sh is known to resolve on it.
+    runs-on: macos-26
+    # A universal-2 core build with `ring` compiled from C, an xcodegen run and
+    # an xcodebuild test, plus the install and the pf work. Rule C-1: a budget
+    # is raised by a reviewed change, not silently.
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    # The fork guard only. There is no variable to gate on, which is the point:
+    # nothing an operator has to configure stands between this row and a
+    # verdict. A fork's pull request is still excluded, because it runs on a
+    # runner this repository does not control the provisioning of.
+    if: >-
+      ${{ github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      # The pin lives in build/ci/ci-common-apple.sh and nowhere else. Resolved
+      # into a variable first so a missing Xcode fails with the resolver's own
+      # message rather than with `invalid developer directory ''`.
+      #
+      # `sudo xcode-select -s` is SYSTEM-WIDE, which is what lets the lane run
+      # `sudo xcodebuild` later without carrying `DEVELOPER_DIR` across the
+      # privilege boundary.
+      - name: select the pinned Xcode and print every toolchain version
+        run: |
+          XCODE_DEV_DIR="$(build/ci/ci-macos.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
+          xcodebuild -version
+          swift --version
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          sw_vers
+          csrutil status || true
+
+      - name: install xcodegen
+        # Both Apple shells keep an XcodeGen spec rather than a committed
+        # .xcodeproj, so the generator is a prerequisite and not a convenience.
+        run: brew install --quiet xcodegen
+
+      # The same cache key as `macos-link-run`: the two jobs build the same
+      # crates for the same targets on the same image, so a shared key is a hit
+      # rather than two copies of one download.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+          key: fwg-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      # A KNOWN-CLEAN START. The image should carry no TwinVPN enforcement, and
+      # if it somehow does, the run must not inherit it and then report on it.
+      # Non-fatal here: a host with nothing to remove is the expected case.
+      - name: reset to a known-clean state
+        run: build/ci/ci-macos-pf-anchor.sh --cleanup || true
+
+      - name: install the boot anchor and prove pf evaluates it
+        run: build/ci/ci-macos-pf-anchor.sh
+
+      # EVERY EXIT PATH, including a cancellation and a timeout. This one is
+      # NOT `|| true`: it reads the kernel back and fails the job when TwinVPN
+      # enforcement is still installed, which on a self-hosted Mac is the
+      # difference between a clean host and one that inherits our firewall.
+      - name: remove the boot anchor and return the runner's pf
+        if: always()
+        run: build/ci/ci-macos-pf-anchor.sh --cleanup
+
+      # The gate's input. `warn`, not `error`: the row already reads
+      # NOT-EXECUTED when the file is absent, and a second red would bury the
+      # first — the failure mode `macos-link-run`'s header records from run
+      # 33283744937.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-macos-pf-anchor
+          path: build/ci/evidence/macos-pf-anchor.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      # The measurements themselves, always — not only on failure. This lane's
+      # whole subject is what pf said, and a GREEN row whose pfctl output nobody
+      # kept is a row that cannot be re-read later. ENUMERATED, never `path: .`.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diagnostics-macos-pf-anchor
+          path: |
+            build/ci/logs/macos/pf-anchor-install.log
+            build/ci/logs/macos/ksd-apply.log
+            build/ci/logs/macos/ksd-status.log
+            build/ci/logs/macos/pf-*.txt
+            build/ci/logs/macos/xctest-root.log
+          if-no-files-found: ignore
+          retention-days: 14

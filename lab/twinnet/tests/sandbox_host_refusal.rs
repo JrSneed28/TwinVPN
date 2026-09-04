@@ -32,6 +32,21 @@ const REFUSAL: &str =
     "denying setgroups in the new user namespace: Permission denied (os error 13)";
 
 /// Writes an executable stand-in for the agent and returns its path.
+/// The three tests below each write a script and exec it, on parallel threads.
+/// `Command::spawn` forks; between another thread's fork and its exec the child
+/// still holds this thread's freshly written script open for writing (the
+/// `O_CLOEXEC` close happens at exec, not at fork), and exec of a file that is
+/// open for writing fails with `ETXTBSY`. Run 33699881367's `lab` job hit it
+/// twice: "could not start: Text file busy (os error 26)". One lock around
+/// write-then-spawn removes the race without touching the sandbox.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn fake_agent(name: &str, script: &str) -> PathBuf {
     let path = twinnet::rigs::scratch(name).join("twinnet");
     std::fs::write(&path, script).expect("a scratch directory is writable");
@@ -42,6 +57,7 @@ fn fake_agent(name: &str, script: &str) -> PathBuf {
 
 #[test]
 fn a_refused_agent_reaches_the_test_as_the_errno_that_refused_it() {
+    let _serial = serial();
     // `head -n 1` consumes the probe request the sandbox always sends first,
     // which makes this exchange an exchange rather than a race with our exit.
     let agent = fake_agent(
@@ -69,6 +85,7 @@ fn a_refused_agent_reaches_the_test_as_the_errno_that_refused_it() {
 
 #[test]
 fn an_agent_that_dies_before_it_speaks_is_still_the_host() {
+    let _serial = serial();
     // No output at all: the case where the agent is killed, or loses the race
     // to say anything. The exit code is the whole evidence, and `twinnet`
     // reserves 3 for `NetError::Unavailable`.
@@ -85,6 +102,7 @@ fn an_agent_that_dies_before_it_speaks_is_still_the_host() {
 
 #[test]
 fn an_agent_that_dies_of_a_defect_is_never_a_skip() {
+    let _serial = serial();
     // The fail-closed half. A rig that is broken must keep panicking the suite:
     // a defect that buys itself a skip is a suite that goes quiet, which is the
     // failure `common::or_skip` exists to prevent.

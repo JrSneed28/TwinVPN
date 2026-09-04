@@ -9,7 +9,7 @@
 # THIS MANIFEST IS OWNED BY THE INTEGRATION LEAD.
 [workspace]
 resolver = "2"
-members = ["twinlab", "twinlab-scenarios", "twinnet", "twinoracle", "twinsim"]
+members = ["twinlab", "twinlab-scenarios", "twinnet", "twinoracle", "twinpeer", "twinsim"]
 
 [workspace.package]
 version      = "0.1.0"
@@ -45,8 +45,17 @@ twinvpn-session   = { version = "0.1.0", path = "../core/crates/twinvpn-session"
 # than by path in the member so that `lab/` has ONE place that says where a core
 # crate lives -- which is the property the workspace-dependency table exists for.
 twinvpn-cp-client = { version = "0.1.0", path = "../core/crates/twinvpn-cp-client" }
+# The Windows adapter, for `twinpeer`: the lab peer holds a real Wintun adapter
+# and a real UDP socket, because `docs/testing-strategy.md` §3.1 forbids a peer
+# the system under test could tell apart from a device. It compiles on every
+# host -- the syscall shim is `#[cfg(windows)]` and its siblings refuse -- so
+# naming it here does not make this workspace Windows-only.
+twinvpn-platform-windows = { version = "0.1.0", path = "../core/crates/twinvpn-platform-windows" }
 
 thiserror  = "2.0"
+# `twinvpn_platform::socket::UdpSocket` returns `BoxFuture`, so an implementor
+# outside the core workspace has to name the same crate the seam does.
+futures-core = "0.3"
 anyhow     = "1.0"
 tokio      = { version = "1.48", features = ["full"] }
 tracing    = "0.1"

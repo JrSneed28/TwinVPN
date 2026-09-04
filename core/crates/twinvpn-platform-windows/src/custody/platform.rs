@@ -31,14 +31,17 @@
 //!    a `twinvpn-platform-*` crate. That reading of CD-I2 is a judgement, and it
 //!    is flagged as one.
 
+use windows_sys::core::PCWSTR;
 use windows_sys::Win32::Foundation::{HWND, NTSTATUS};
 use windows_sys::Win32::Security::Cryptography::{
-    BCryptHash, NCryptCloseProtectionDescriptor, NCryptCreateProtectionDescriptor, NCryptExportKey,
-    NCryptFreeBuffer, NCryptFreeObject, NCryptOpenKey, NCryptOpenStorageProvider,
-    NCryptProtectSecret, NCryptSignHash, NCryptUnprotectSecret, BCRYPT_ALG_HANDLE,
-    BCRYPT_ECCPUBLIC_BLOB, BCRYPT_SHA256_ALGORITHM, MS_KEY_STORAGE_PROVIDER,
-    MS_PLATFORM_KEY_STORAGE_PROVIDER, NCRYPT_KEY_HANDLE, NCRYPT_MACHINE_KEY_FLAG,
-    NCRYPT_PROV_HANDLE, NCRYPT_SILENT_FLAG,
+    BCryptHash, NCryptCloseProtectionDescriptor, NCryptCreatePersistedKey,
+    NCryptCreateProtectionDescriptor, NCryptExportKey, NCryptFinalizeKey, NCryptFreeBuffer,
+    NCryptFreeObject, NCryptOpenKey, NCryptOpenStorageProvider, NCryptProtectSecret,
+    NCryptSetProperty, NCryptSignHash, NCryptUnprotectSecret, BCRYPT_ALG_HANDLE,
+    BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDSA_P256_ALGORITHM, BCRYPT_ECDSA_PUBLIC_P256_MAGIC,
+    MS_KEY_STORAGE_PROVIDER, MS_PLATFORM_KEY_STORAGE_PROVIDER, NCRYPT_ALLOW_SIGNING_FLAG,
+    NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_KEY_HANDLE, NCRYPT_KEY_USAGE_PROPERTY,
+    NCRYPT_MACHINE_KEY_FLAG, NCRYPT_PERSIST_FLAG, NCRYPT_PROV_HANDLE, NCRYPT_SILENT_FLAG,
 };
 use windows_sys::Win32::Security::NCRYPT_DESCRIPTOR_HANDLE;
 
@@ -48,9 +51,19 @@ use twinvpn_platform::{
 use twinvpn_types::{DeviceId, IdentityId};
 
 use super::{
-    protection_descriptor, SecretProtector, SigningElement, Tier1Backend, IDENTITY_KEY_CONTAINER,
+    protection_descriptor, spki_from_ecc_public_blob, SecretProtector, SigningElement,
+    Tier1Backend, ECDSA_PUBLIC_P256_MAGIC, IDENTITY_KEY_CONTAINER,
 };
 use crate::oserr::{self, Context, Win32Error};
+
+/// The one place the target-free blob decoder and the SDK can disagree.
+///
+/// [`super::spki_from_ecc_public_blob`] is ordinary Rust so that it runs its
+/// tests on the Linux host this crate was written on, which means it carries
+/// its own copy of the magic. This is the check that the copy is right, made at
+/// compile time and on the only target where both values exist — the same shape
+/// `sys::win` uses for the `oserr` literals.
+const _: () = assert!(ECDSA_PUBLIC_P256_MAGIC == BCRYPT_ECDSA_PUBLIC_P256_MAGIC);
 
 /// The digest width `identity_sign` requires. See the module documentation.
 ///
@@ -144,8 +157,15 @@ fn open_provider(backend: Tier1Backend) -> Result<Provider, PlatformError> {
 /// `NCRYPT_MACHINE_KEY_FLAG` is not a preference: ADR-0020 C-4 records that "the
 /// service starts before any interactive logon", so a user-scope key would be
 /// unavailable at exactly the moment ADR-0022 LC-4 needs it.
-fn open_identity_key(provider: &Provider) -> Result<Key, PlatformError> {
-    let name = wide(IDENTITY_KEY_CONTAINER);
+///
+/// Returns the raw [`Win32Error`] rather than a mapped [`PlatformError`],
+/// because [`CngElement::provision`] must distinguish `NTE_BAD_KEYSET` — no
+/// container of that name — from every other CNG status, and the mapping is
+/// deliberately coarse enough to lose that distinction (`oserr`'s CNG arm puts
+/// `NTE_DEVICE_NOT_READY` on the same variant). Callers that only want to
+/// report map it with [`status`].
+fn open_identity_key(provider: &Provider, container: &str) -> Result<Key, Win32Error> {
+    let name = wide(container);
     let mut key: NCRYPT_KEY_HANDLE = 0;
     // SAFETY: `provider.0` is an open provider handle for the whole call;
     // `name` is a live NUL-terminated UTF-16 buffer that outlives the call;
@@ -160,9 +180,136 @@ fn open_identity_key(provider: &Provider) -> Result<Key, PlatformError> {
         )
     };
     if rc != 0 {
-        return Err(status(rc, "NCryptOpenKey", Context::Identity));
+        return Err(Win32Error::from_i32(rc));
     }
     Ok(Key(key))
+}
+
+/// Sets one `DWORD` property on a key that has been created and not finalized.
+///
+/// `NCRYPT_PERSIST_FLAG` so the value survives the handle, and
+/// `NCRYPT_SILENT_FLAG` because a service has no desktop and a UI prompt would
+/// hang whatever thread is provisioning. Both handle types are `usize` in
+/// `windows-sys`, so `NCRYPT_KEY_HANDLE` reaches the `NCRYPT_HANDLE` parameter
+/// with no cast.
+fn set_persisted_property(
+    key: &Key,
+    property: PCWSTR,
+    value: u32,
+    call: &'static str,
+) -> Result<(), PlatformError> {
+    // SAFETY: `key.0` is an open key handle; `property` is one of
+    // `windows-sys`' own static wide literals; the input pointer addresses
+    // exactly the four bytes of a live `u32` whose length is what is passed.
+    // The call copies the value and retains no pointer.
+    let rc = unsafe {
+        NCryptSetProperty(
+            key.0,
+            property,
+            (&raw const value).cast::<u8>(),
+            4, // a DWORD
+            NCRYPT_PERSIST_FLAG | NCRYPT_SILENT_FLAG,
+        )
+    };
+    if rc != 0 {
+        return Err(status(rc, call, Context::Identity));
+    }
+    Ok(())
+}
+
+/// Creates the machine-scope identity key. ADR-0020 §11.3's Windows rows.
+///
+/// The flags and properties are each a requirement rather than a taste:
+///
+/// | ADR-0020 §11.3 | here |
+/// |---|---|
+/// | `ECDSA_P256` | `BCRYPT_ECDSA_P256_ALGORITHM` — the curve fixes the length, so `NCRYPT_LENGTH_PROPERTY` is **not** set |
+/// | `NCRYPT_MACHINE_KEY_FLAG` | the one create flag, and nothing else — see below |
+/// | `NCRYPT_ALLOW_EXPORT_FLAG` **not** set | `NCRYPT_EXPORT_POLICY_PROPERTY = 0`, stated positively rather than left to a provider default. This is what discharges SI-1 and threat-model I4 |
+/// | signing key | `NCRYPT_KEY_USAGE_PROPERTY = NCRYPT_ALLOW_SIGNING_FLAG`, which makes [`CngElement::agree`]'s refusal a property of the key rather than of a code path |
+///
+/// **`NCRYPT_OVERWRITE_KEY_FLAG` is not passed, and must never be.** It
+/// destroys an existing device identity silently, which is the one outcome
+/// ADR-0007 §7.3 says is indistinguishable from a compromise.
+///
+/// `NCRYPT_USE_VIRTUAL_ISOLATION_FLAG` is **omitted**, and the omission is
+/// recorded rather than hidden: §11.3 asks for it "where VBS is on", nothing in
+/// this build measures whether VBS is on, and passing it blind fails a
+/// first-run create with `NTE_BAD_FLAGS`. It is a follow-up that needs a probe.
+///
+/// The provider is the caller's — the one the open just used. Creating in a
+/// different one would change the device's custody class behind ADR-0007 N-24's
+/// back, which is a `STORE.CUSTODY_DEGRADED` transition and not a provisioning
+/// decision.
+///
+/// A failure between the create and [`NCryptFinalizeKey`] drops the handle
+/// through [`Key`], and an unfinalized persisted key is not written to storage
+/// — so a partial provision leaves the host exactly as it was.
+fn create_identity_key(provider: &Provider, container: &str) -> Result<Key, PlatformError> {
+    let name = wide(container);
+    let mut key: NCRYPT_KEY_HANDLE = 0;
+    // SAFETY: `provider.0` is an open provider handle for the whole call;
+    // `name` is a live NUL-terminated UTF-16 buffer that outlives it and
+    // `BCRYPT_ECDSA_P256_ALGORITHM` is one of `windows-sys`' own static wide
+    // literals; `key` is a live out-parameter. The call retains no pointer.
+    let rc = unsafe {
+        NCryptCreatePersistedKey(
+            provider.0,
+            &raw mut key,
+            BCRYPT_ECDSA_P256_ALGORITHM,
+            name.as_ptr(),
+            0, // dwLegacyKeySpec: CNG-only, so not AT_SIGNATURE
+            NCRYPT_MACHINE_KEY_FLAG,
+        )
+    };
+    if rc != 0 {
+        return Err(status(rc, "NCryptCreatePersistedKey", Context::Identity));
+    }
+    let key = Key(key);
+
+    // "After you create a key by using this function, you can use the
+    // NCryptSetProperty function to set its properties; however, the key cannot
+    // be used until the NCryptFinalizeKey function is called."
+    set_persisted_property(
+        &key,
+        NCRYPT_EXPORT_POLICY_PROPERTY,
+        0,
+        "NCryptSetProperty(Export Policy)",
+    )?;
+    set_persisted_property(
+        &key,
+        NCRYPT_KEY_USAGE_PROPERTY,
+        NCRYPT_ALLOW_SIGNING_FLAG,
+        "NCryptSetProperty(Key Usage)",
+    )?;
+
+    // SAFETY: `key.0` is the handle the create returned and has not been
+    // closed. Silent for the reason the property sets are.
+    let rc = unsafe { NCryptFinalizeKey(key.0, NCRYPT_SILENT_FLAG) };
+    if rc != 0 {
+        return Err(status(rc, "NCryptFinalizeKey", Context::Identity));
+    }
+    Ok(key)
+}
+
+/// `BCRYPT_SHA256_ALG_HANDLE`, the one-shot pseudo-handle `BCryptHash` takes.
+///
+/// **Recorded here because `windows-sys` 0.61.2 does not export it.** The value
+/// is `bcrypt.h`'s, Windows SDK 10.0.26100.0 line 1022:
+/// `#define BCRYPT_SHA256_ALG_HANDLE ((BCRYPT_ALG_HANDLE) 0x00000041)`. It is
+/// a sentinel the OS recognises and never a pointer to anything, which is what
+/// [`core::ptr::without_provenance_mut`] says in the type system.
+///
+/// This replaces a cast of `BCRYPT_SHA256_ALGORITHM` — the algorithm *string* —
+/// to a handle, which is not the pseudo-handle form and which the first real
+/// execution of this module refused with `STATUS_INVALID_HANDLE` (0xC0000008).
+/// That is exactly the class of defect the module header warns about: "`make
+/// cross-check` type-checks it against the real `windows-sys` and proves
+/// nothing about its behaviour". A wrong value here cannot be silent — the
+/// width is checked by the call, and `provisioning_creates_a_signing_key_…`
+/// exercises it on a Windows host.
+fn sha256_pseudo_handle() -> BCRYPT_ALG_HANDLE {
+    core::ptr::without_provenance_mut::<core::ffi::c_void>(0x0000_0041)
 }
 
 /// SHA-256, through the platform's own hash rather than a crate.
@@ -173,9 +320,7 @@ fn open_identity_key(provider: &Provider) -> Result<Key, PlatformError> {
 /// designate for platform primitives.
 fn sha256(input: &[u8]) -> Result<[u8; 32], PlatformError> {
     let mut out = [0u8; 32];
-    let algorithm: BCRYPT_ALG_HANDLE = BCRYPT_SHA256_ALGORITHM
-        .cast::<core::ffi::c_void>()
-        .cast_mut();
+    let algorithm: BCRYPT_ALG_HANDLE = sha256_pseudo_handle();
     // SAFETY: `input` and `out` are live slices whose true byte lengths are
     // passed; `BCryptHash` with a pseudo-handle algorithm identifier writes at
     // most `out.len()` bytes and retains no pointer. The pseudo-handle form is
@@ -207,13 +352,65 @@ fn sha256(input: &[u8]) -> Result<[u8; 32], PlatformError> {
 #[derive(Debug, Clone, Copy)]
 pub struct CngElement {
     backend: Tier1Backend,
+    /// The key container this element operates on.
+    ///
+    /// Always [`IDENTITY_KEY_CONTAINER`] in a shipped build — the only other
+    /// constructor is behind `test-support`. It is a field so that a Windows
+    /// host can exercise the real create, export, sign and delete path against
+    /// a container that is **not** the device's identity: a test that
+    /// provisioned `TwinVPN.DeviceIdentity` would mint an identity on the
+    /// machine running it.
+    container: &'static str,
 }
 
 impl CngElement {
     /// Binds an element to a probed backend.
     #[must_use]
     pub const fn new(backend: Tier1Backend) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            container: IDENTITY_KEY_CONTAINER,
+        }
+    }
+
+    /// TEST ONLY: the same, against a caller-named container.
+    ///
+    /// See [`Self::container`]. Behind `test-support`, so no production build
+    /// can reach it and no code path can be talked into naming a container the
+    /// device does not own.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub const fn new_for_test(backend: Tier1Backend, container: &'static str) -> Self {
+        Self { backend, container }
+    }
+
+    /// TEST ONLY: deletes this element's container.
+    ///
+    /// The counterpart to [`Self::new_for_test`], and the reason a host test
+    /// can be run twice. There is deliberately no production caller: ADR-0007
+    /// N-7 makes a destroyed identity a re-enrolment, never something the agent
+    /// does to itself.
+    ///
+    /// # Errors
+    ///
+    /// The OS status, named. A container that is already absent still reports
+    /// its own status rather than being smoothed into success — a delete that
+    /// cannot say whether it deleted anything is not a cleanup a test can rely
+    /// on.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn delete_identity_key_for_test(&self) -> Result<(), PlatformError> {
+        let provider = open_provider(self.backend)?;
+        let key = open_identity_key(&provider, self.container)
+            .map_err(|e| oserr::from_status(e, "NCryptOpenKey", Context::Identity))?;
+        // SAFETY: `key.0` is an open key handle this scope uniquely owns.
+        let rc = unsafe { windows_sys::Win32::Security::Cryptography::NCryptDeleteKey(key.0, 0) };
+        if rc != 0 {
+            return Err(status(rc, "NCryptDeleteKey", Context::Identity));
+        }
+        // `NCryptDeleteKey` closes the handle itself on success, so the guard
+        // must not close it a second time.
+        core::mem::forget(key);
+        Ok(())
     }
 
     /// ST-9's live probe: which backing this host actually has.
@@ -253,9 +450,43 @@ impl SigningElement for CngElement {
         self.backend
     }
 
+    fn provision(&self) -> Result<(), PlatformError> {
+        let provider = open_provider(self.backend)?;
+        // A successful open means the container is already there, and this is a
+        // no-op. Idempotent by design: the caller reached here from a refusal,
+        // and between that refusal and this open another thread may have
+        // finished creating it.
+        let Err(refusal) = open_identity_key(&provider, self.container) else {
+            return Ok(());
+        };
+        // **Only** "no container of that name" is a first run. Every other CNG
+        // status — a busy TPM (`NTE_DEVICE_NOT_READY`), a denied provider, an
+        // unreadable key — is consistent with the identity still existing, and
+        // creating on one of those would replace it. ADR-0007 §7.3.
+        if refusal.get() != oserr::NTE_BAD_KEYSET {
+            return Err(oserr::from_status(
+                refusal,
+                "NCryptOpenKey",
+                Context::Identity,
+            ));
+        }
+        match create_identity_key(&provider, self.container) {
+            Ok(_) => Ok(()),
+            // The race the open above cannot close: another thread created the
+            // container in between. Take it, never overwrite it.
+            Err(error)
+                if error.os_detail().map(|d| d.code) == Some(i64::from(oserr::NTE_EXISTS)) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn public_identity(&self) -> Result<IdentityPublic, PlatformError> {
         let provider = open_provider(self.backend)?;
-        let key = open_identity_key(&provider)?;
+        let key = open_identity_key(&provider, self.container)
+            .map_err(|e| oserr::from_status(e, "NCryptOpenKey", Context::Identity))?;
 
         // Two calls: the first sizes the blob, the second fills it. The size is
         // the OS's and is bounded before the allocation (`ownership.md` §6
@@ -305,18 +536,39 @@ impl SigningElement for CngElement {
         }
         blob.truncate(written as usize);
 
+        // X.509 `SubjectPublicKeyInfo`, which is an encoding the core can
+        // already read — see `super::spki_from_ecc_public_blob` for why the raw
+        // CNG blob is not.
+        let spki = spki_from_ecc_public_blob(&blob)?;
+
+        // **A placeholder, and named as one.** ADR-0007 N-2 defines
+        // `identity_id` as
+        // `SHA-256("TwinVPN/DeviceIdentity/v1" || 0x00 || dCBOR(COSE_Key))`,
+        // and this is a bare digest of the SPKI: no domain separator, no COSE,
+        // no dCBOR. So `pairing::enrol::ik_pub_cose_for` will now *parse* what
+        // this element vends and will still refuse to accept that it names this
+        // device, which is `ownership.md` G-17 and is deliberately still open.
+        //
+        // The derivation is not done here because there would then be two
+        // implementations of N-2 in the workspace — `twinvpn_crypto`'s and this
+        // one — and a normative identifier with two implementations has two
+        // values the day they drift. Android's element says the same thing in
+        // its own words ("computing them here would put an identity derivation
+        // in a shell") and reads the ids back from Tier 1 instead. Closing
+        // G-17 means deciding *who* derives, and that decision is the core's.
+        //
         // The generation-0 digest IS the `device_id`; the current generation's
         // digest is the `identity_id`. This build holds one generation, so the
         // two coincide — and that is a fact about this build, not about the
         // model: ADR-0007 rotation creates a new `DeviceIdentity` at
         // `generation + 1` while `device_id` is unchanged, and a build that
         // rotates must keep the generation-0 digest rather than recomputing.
-        let digest = sha256(&blob)?;
+        let digest = sha256(&spki)?;
         Ok(IdentityPublic {
             device_id: DeviceId::from_array(digest),
             identity_id: IdentityId::from_array(digest),
             generation: 0,
-            public_key: blob,
+            public_key: spki,
         })
     }
 
@@ -341,7 +593,8 @@ impl SigningElement for CngElement {
         }
 
         let provider = open_provider(self.backend)?;
-        let key = open_identity_key(&provider)?;
+        let key = open_identity_key(&provider, self.container)
+            .map_err(|e| oserr::from_status(e, "NCryptOpenKey", Context::Identity))?;
 
         let mut needed: u32 = 0;
         // SAFETY: `message` is a live slice of the passed length; the signature

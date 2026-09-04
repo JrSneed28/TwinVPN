@@ -64,6 +64,23 @@ service = [
 # default, so a real build is unchanged; separable, so the line above can run.
 core-host = ["service", "dep:twinvpn-core"]
 
+# **The disposable lab guest's seed. NEVER in `default`, and never shipped.**
+#
+# The kill-switch lane's guest has no control plane and no pairing ceremony, so
+# the two facts `enforce::arm` needs and the key material `session.connect`
+# needs have no source there. Under this feature — and only when
+# `TWINVPN_LAB_SEED_FILE` names a file — `crate::lab_seed` supplies them through
+# the core's own public API at every start.
+#
+# It turns on `twinvpn-crypto/test-support` because `VerifiedTunnelKey` has no
+# public constructor by design (ADR-0007 N-4/N-5): the only way to hold one is to
+# verify a signed `TunnelKeyBinding`, and `testkit::verified_tunnel_key` is the
+# fixture that does the whole ceremony rather than short-circuiting it. That
+# feature is one `core/README.md` §3 records as never shipping, which is exactly
+# the claim this feature makes about itself — and the service says so at WARN on
+# every start that seeds.
+lab-seed = ["core-host", "dep:twinvpn-crypto", "twinvpn-crypto/test-support"]
+
 [dependencies]
 twinvpn-mgmt  = { workspace = true }
 twinvpn-types = { workspace = true }
@@ -81,6 +98,8 @@ twinvpn-platform-windows = { workspace = true, optional = true }
 # injected (CD-2); this shell reads it from the one shared consumer.
 twinvpn-enforce          = { workspace = true, optional = true }
 twinvpn-env              = { workspace = true, optional = true }
+# `lab-seed` only. See that feature.
+twinvpn-crypto           = { workspace = true, optional = true }
 tracing-subscriber       = { workspace = true, optional = true }
 clap                     = { workspace = true, optional = true }
 

@@ -209,20 +209,35 @@ impl WindowsPlatformAdapter {
         let element_name = parts.identity_element.name();
         let tier1_backend = parts.tier1_backend;
         let store_root = parts.store_root.clone();
+        // The network configuration owns the overlay LUID, and the tunnel device
+        // is the only thing that learns it. Built in this order so there is ONE
+        // cell: the device publishes what it created, and every filter, route and
+        // NRPT rule keys on that instead of on the `0` a shell has to inject
+        // before the adapter exists.
+        let network = netcfg::WindowsNetworkConfig::new(netcfg::NetworkConfigParts {
+            system,
+            enforcement: parts.enforcement,
+            stub: parts.stub,
+            restore_point_path: parts.restore_point_path,
+            shutdown: shutdown.clone(),
+        });
         Self {
             sockets: sock::WindowsSocketProvider::new(shutdown.clone()),
-            tunnel: wintun::WindowsTunnelDevice::new(parts.tunnel_driver, shutdown.clone()),
-            network: netcfg::WindowsNetworkConfig::new(netcfg::NetworkConfigParts {
-                system,
-                enforcement: parts.enforcement,
-                stub: parts.stub,
-                restore_point_path: parts.restore_point_path,
-                shutdown: shutdown.clone(),
-            }),
+            tunnel: wintun::WindowsTunnelDevice::new(
+                parts.tunnel_driver,
+                shutdown.clone(),
+                network.overlay_luid(),
+            ),
+            network,
             interfaces: iface::WindowsInterfaceProvider::new(shutdown.clone()),
+            // The vault root reaches identity custody as well as the store: the
+            // ADR-0020 ST-28 guard is a question about Tier 1, not about CNG,
+            // and `WindowsAdapterParts` already carries the one injected path
+            // (CB-7) so no shell learns a second one.
             identity: custody::WindowsIdentityCustody::new(
                 parts.identity_element,
                 shutdown.clone(),
+                store_root.clone(),
             ),
             store: custody::WindowsSecureStore::new(
                 parts.store_root,

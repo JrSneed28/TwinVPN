@@ -21,9 +21,10 @@ without anyone having remembered to mirror the change into a fixture.
 ===========================================================================
 HOW THE HEREDOC IS RENDERED, AND WHAT IS AND IS NOT REAL ABOUT IT
 ===========================================================================
-The writers are the last hundred lines of scripts that need an emulator, an EC2
-Mac or a Corellium instance to reach, so the script cannot be run. What CAN be
-run is the heredoc itself: it is extracted verbatim, `cat > "$FILE"` is turned
+The writers are the last hundred lines of scripts that need an emulator, a
+simulator, a nested guest or a provisioned device to reach, so the script cannot
+be run. What CAN be run is the heredoc itself: it is extracted verbatim,
+`cat > "$FILE"` is turned
 into `cat`, and it is evaluated with `digest.sh` sourced -- so
 `twinvpn_repository_json` and `twinvpn_run_attempt_json` are the real ones and
 `GITHUB_*` come from the environment exactly as they do in Actions.
@@ -44,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -92,6 +94,66 @@ HEREDOC = re.compile(r"^[ \t]*cat > (?P<dest>\S+) <<JSON\n(?P<body>.*?)^JSON$",
 # See the case at the bottom of this file for why that is worth extracting.
 CHECK_RUNNER = re.compile(r"^run_check\(\) \{\n.*?^\}$", re.MULTILINE | re.DOTALL)
 VARREF = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+
+# THE `artifact_digests` KEYS, PINNED AS EACH WRITER SPELLS THEM.
+#
+# `render()` stubs `ARTIFACT_DIGESTS` from `ARTIFACT_DIGEST_REQUIRED`, so every
+# case below grades a writer against the ADJUDICATOR'S spelling of its keys: a
+# lane that wrote `wintun-x64.dll` where the adjudicator asks for `wintun.dll`
+# would render as if it agreed and fail its run binding on the next real run.
+# ownership.md G-33 recorded that as the drift the render cannot see. So the
+# keys are pinned here as TEXT, per script, exactly as the script's own digest
+# call spells them -- `$var` and all -- and compared for EQUALITY with what
+# `spelled_digest_keys` reads back out of that call. A key renamed, added or
+# dropped in a lane fails the equality; a key renamed in `adjudication.py`
+# fails the subset check in the case that uses `RENDERED`.
+PRODUCER_DIGEST_KEYS: dict[str, tuple[str, ...]] = {
+    # Two calls: the earlier one pins the default inline, the 16 KiB path sets
+    # `apk_variant=release` first. Both spell the one key the adjudicator asks.
+    "ci-android.sh": ("app-${apk_variant:-release}.apk", "app-$apk_variant.apk",
+                      "app-androidTest-$apk_variant.apk"),
+    "ci-ios-acceptance.sh": ("TwinVPN.app/TwinVPN",),
+    "ci-macos-pf-anchor.sh": ("twinvpn-ksd",),
+    "ci-macos-signature.sh": ("TwinVPN.app/Contents/MacOS/TwinVPN",
+                              "TwinVPN.app.zip"),
+    # `ext_bundle_id` is `${TWINVPN_EXTENSION_BUNDLE_ID:-…}`, and
+    # `test_producer_key_coverage.py` pins that default to project.yml.
+    "ci-macos-sysext.sh": ("TwinVPN.app/Contents/MacOS/TwinVPN",
+                           "$ext_bundle_id.systemextension"),
+    "ci-windows-killswitch.sh": ("twinvpnsvc.exe", "twinvpnctl.exe",
+                                 "wfp_preconditions.exe", "wintun.dll"),
+}
+# What a `$var`-bearing spelling renders to under the lane's own default. A
+# spelling absent here renders to itself.
+RENDERED = {
+    "app-${apk_variant:-release}.apk": "app-release.apk",
+    "app-$apk_variant.apk": "app-release.apk",
+    "app-androidTest-$apk_variant.apk": "app-androidTest-release.apk",
+    "$ext_bundle_id.systemextension": "com.twinvpn.app.sysext.systemextension",
+}
+# `ARTIFACT_DIGESTS="$(twinvpn_digest_json NAME PATH NAME PATH ...)"`, the one
+# form every shell-built map takes; the arguments are split with shlex so a
+# `$var` stays text.
+DIGEST_CALL = re.compile(r'\$\(twinvpn_digest_json\s(.*?)\)"', re.DOTALL)
+# `ci-macos-signature.sh` builds its map in Python, because the archive digest
+# is the operator's pin and not a file it can hash: the executable key is the
+# dict literal and the archive key is the `NAME:digest` pair handed to it. The
+# `)` exclusion is what stops the empty `archive_digest_args=()` initialiser
+# one line above the real one from matching through to the next colon.
+PY_DIGEST_KEYS = (re.compile(r'\{"([^"]+)": sys\.argv\[1\]\}'),
+                  re.compile(r"archive_digest_args=\(([^:)]+):"))
+SHELL_VAR = re.compile(r"\$\{[^}]*\}|\$\w+")
+
+
+def spelled_digest_keys(text: str) -> set[str]:
+    """The `artifact_digests` names a script binds, exactly as it spells them."""
+    names: set[str] = set()
+    for m in DIGEST_CALL.finditer(text):
+        names.update(shlex.split(m.group(1).replace("\\\n", " "))[0::2])
+    for pattern in PY_DIGEST_KEYS:
+        names.update(pattern.findall(text))
+    return names
+
 
 # `test_report_prerequisites.py` star-imports this module to keep ONE command
 # running every case; only the TestCase should cross that import.
@@ -182,9 +244,14 @@ class EvidenceWriters(unittest.TestCase):
 
     def test_every_writer_is_discovered(self):
         # If the heredoc form ever changes, every case below would silently
-        # grade an empty list. Nine writers, in nine scripts that ship one each.
+        # grade an empty list. A FLOOR rather than an equality: the lane set
+        # grows as criteria are reconciled, and a count that has to be bumped by
+        # whoever adds a lane fails for the wrong reason. Nine is the set after
+        # the 2026-09-02 reconciliation (the Corellium lane gone, the hosted
+        # simulator lane `ci-ios-acceptance.sh` added), and a discovery that
+        # finds fewer has broken.
         found = writers()
-        self.assertEqual(len(found), 9, [str(p) for p, _, _ in found])
+        self.assertGreaterEqual(len(found), 9, [str(p) for p, _, _ in found])
 
     def test_rendered_evidence_is_valid_json(self):
         for script, body, criteria in writers():
@@ -286,6 +353,50 @@ class EvidenceWriters(unittest.TestCase):
         ev = json.loads(render(body, "MACOS-SYSEXT-LIFECYCLE",
                                {"GITHUB_REPOSITORY": ""}))
         self.assertIsNone(ev["repository"])
+
+    def test_the_digest_keys_are_pinned_as_each_writer_spells_them(self):
+        # THE PRODUCER DIRECTION OF G-33's RESIDUAL. What the script's own
+        # digest call names, compared for equality with the pin, so a key
+        # renamed, added or dropped in a lane fails here and not on the next
+        # real run. A writer that interpolates `$ARTIFACT_DIGESTS` and has no
+        # entry is the same failure one step earlier; a writer that emits the
+        # literal `{}` binds no key and owes no entry.
+        interpolating = {s.name for s, body, _ in writers()
+                         if "ARTIFACT_DIGESTS" in VARREF.findall(body)}
+        self.assertEqual(interpolating, set(PRODUCER_DIGEST_KEYS),
+                         "every writer that interpolates a digest map is "
+                         "pinned, and nothing else is")
+        for name, spelled in sorted(PRODUCER_DIGEST_KEYS.items()):
+            with self.subTest(script=name):
+                self.assertEqual(spelled_digest_keys((CI / name).read_text()),
+                                 set(spelled),
+                                 f"{name} binds a different set of "
+                                 f"`artifact_digests` keys than the pin says; "
+                                 f"update the pin only if the adjudicator "
+                                 f"still names what the lane writes")
+
+    def test_the_adjudicator_asks_only_for_keys_a_writer_pins(self):
+        # THE ADJUDICATOR DIRECTION. Every name `ARTIFACT_DIGEST_REQUIRED`
+        # demands of a criterion must be what one of that criterion's writers
+        # renders, so a key renamed in adjudication.py fails here too. The pin
+        # is checked for honesty first: a rendered name must fit its spelling
+        # with each `$var` segment free, which for a spelling without one is
+        # plain equality. Otherwise `RENDERED` could say anything.
+        for name, spelled in sorted(PRODUCER_DIGEST_KEYS.items()):
+            for s in spelled:
+                pattern = "^" + ".+".join(map(re.escape, SHELL_VAR.split(s))) + "$"
+                with self.subTest(script=name, spelled=s):
+                    self.assertRegex(RENDERED.get(s, s), pattern)
+        for script, _, criteria in writers():
+            rendered = {RENDERED.get(s, s)
+                        for s in PRODUCER_DIGEST_KEYS.get(script.name, ())}
+            for criterion in criteria:
+                with self.subTest(script=script.name, criterion=criterion):
+                    self.assertLessEqual(
+                        set(ARTIFACT_DIGEST_REQUIRED.get(criterion, ())),
+                        rendered,
+                        f"the adjudicator requires a digest key of "
+                        f"{criterion} that {script.name} does not write")
 
 
 if __name__ == "__main__":

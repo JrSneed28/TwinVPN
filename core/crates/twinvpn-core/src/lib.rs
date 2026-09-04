@@ -100,6 +100,11 @@ pub mod resume;
 #[cfg(feature = "full")]
 pub mod session_loop;
 
+// `lab/twinpeer`'s surface, and the ONE place a lab binary may reach into the
+// composition root. Never in `default` and never in `full`.
+#[cfg(feature = "lab-peer")]
+pub mod lab;
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 

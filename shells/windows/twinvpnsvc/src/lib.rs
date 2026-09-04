@@ -57,6 +57,9 @@
 
 pub mod mi;
 
+#[cfg(feature = "lab-seed")]
+pub mod lab_seed;
+
 #[cfg(feature = "service")]
 pub mod service;
 

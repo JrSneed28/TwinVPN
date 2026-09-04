@@ -26,12 +26,24 @@
 //! every signature, every struct layout and every constant name is right. It is
 //! **not** a proof that any of it does what it says: none of this has run.
 
+// The endpoint and the accept loop are two modules and not one, and the split is
+// a verification decision rather than a taste one: `ring`'s build script refuses
+// a GNU compiler for `x86_64-pc-windows-msvc`, so anything linking the core
+// cannot be type-checked for Windows on this host at all. `endpoint` names no
+// core type, so `--features service` checks every `unsafe` block in it;
+// `listener` does, and is first compiled on a Windows runner. See this crate's
+// `Cargo.toml` and `shells/windows/README.md` §7.19.
+pub mod endpoint;
 pub mod instance;
+#[cfg(feature = "core-host")]
+pub mod listener;
 pub mod pipe;
 pub mod scm;
 pub mod token;
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows_sys::Win32::Security::PSID;
 
 /// A Windows call that refused, carrying the status it refused with.
 ///
@@ -78,6 +90,52 @@ pub fn last_error() -> twinvpn_platform_windows::oserr::Win32Error {
     // SAFETY: `GetLastError` reads this thread's own last-error slot. It takes
     // no arguments, dereferences nothing, and is safe to call at any time.
     twinvpn_platform_windows::oserr::Win32Error(unsafe { GetLastError() })
+}
+
+/// A SID in its `S-1-…` form.
+///
+/// The string form rather than the binary one, because that is what the DACL
+/// ([`crate::mi::dacl`]) and the decision layer ([`crate::service::peer`]) both
+/// speak — and because a [`PSID`] is a pointer into a buffer whose lifetime this
+/// function cannot express.
+///
+/// # Recorded rather than left to be discovered
+///
+/// [`token`] carries a private twin of this function, written when reading a
+/// token was the only place a SID had to be rendered. The two are the same three
+/// calls and should be one; collapsing them is a deletion in `token.rs`, which
+/// belongs to another change in flight at the time this landed.
+///
+/// # Safety
+///
+/// `sid` must be null or point at a valid `SID` structure that stays live for
+/// the duration of the call.
+#[must_use]
+pub unsafe fn sid_to_string(sid: PSID) -> Option<String> {
+    if sid.is_null() {
+        return None;
+    }
+    let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: the caller guarantees `sid` points at a live `SID`; `raw` is a
+    // live out-parameter this frame owns.
+    let ok = unsafe { ConvertSidToStringSidW(sid, &raw mut raw) };
+    if ok == 0 || raw.is_null() {
+        return None;
+    }
+    let mut length = 0usize;
+    // SAFETY: `raw` is a NUL-terminated buffer the OS allocated; the walk stops
+    // at the terminator it guarantees.
+    while unsafe { *raw.add(length) } != 0 {
+        length += 1;
+    }
+    // SAFETY: `length` units were just walked and found to be inside the buffer.
+    let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(raw, length) });
+    // SAFETY: `raw` was allocated by `ConvertSidToStringSidW`, which documents
+    // `LocalFree` as its release, and nothing else holds it.
+    unsafe {
+        windows_sys::Win32::Foundation::LocalFree(raw.cast());
+    }
+    Some(text)
 }
 
 /// An owned handle that closes itself.

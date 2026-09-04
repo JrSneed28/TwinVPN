@@ -49,6 +49,7 @@ windows-sys = { workspace = true, features = [
   "Win32_System_Threading",               # the Wintun session's wait event
   "Win32_System_IO",                      # OVERLAPPED, for the notify callbacks
   "Win32_Security",                       # SECURITY_ATTRIBUTES, the SID types
+  "Win32_Security_Authorization",         # SDDL -> self-relative SD, for FWPM_CONDITION_ALE_USER_ID
   "Win32_Security_Cryptography",          # BCryptGenRandom, NCrypt*, DPAPI-NG
   "Win32_System_Memory",                  # VirtualLock, for CB-5's locked pages
 ] }

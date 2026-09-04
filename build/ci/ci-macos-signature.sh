@@ -61,6 +61,37 @@
 # does not touch the extension slot. It reads a built product. That is
 # deliberate: the two criteria must be able to run on the same machine without
 # either one's state reaching the other's evidence.
+#
+# ===========================================================================
+# WHERE IT RUNS: A GITHUB-HOSTED `macos-26` RUNNER, AND IT ALWAYS COULD HAVE
+# ===========================================================================
+# This criterion never needed a Mac anybody owns. It is pure artifact
+# inspection: `codesign`, `spctl` and `stapler` all ship with macOS and Xcode,
+# Gatekeeper assessments are ENABLED on the hosted images (`spctl --status`
+# prints "assessments enabled" there), and `--check-notarization` forces an
+# online ticket lookup that a hosted runner has the network for. None of the
+# `environment` keys below describes the machine's capabilities, because the
+# subject of the claim is the ARTIFACT.
+#
+# It sat on the EC2 Mac only because that is where the Mac was, and the two
+# jobs then shared a long-lived host with a SIP-disabled volume and an
+# activated developer-mode extension on the same disk. An ephemeral hosted
+# runner is the STRONGER host for this row, not a concession: freshly
+# provisioned, nothing inherited from the previous run, nothing to clean up
+# after but the download.
+#
+# The host is still RECORDED -- `sip_config` and `gatekeeper_assessments`
+# below -- so a reader can see this was not a stock consumer Mac. Those are
+# recorded facts and deliberately NOT prerequisites: they describe the host,
+# and grading them would turn a fleet property nobody controls into a
+# condition on a claim about a file.
+#
+# WHAT THE RUNNER CHOICE DOES NOT SUPPLY. `TWINVPN_TEAM_ID`,
+# `TWINVPN_NOTARIZED_APP_URL` and `TWINVPN_NOTARIZED_APP_SHA256` are APPLE
+# DEVELOPER PROGRAM facts and release-pipeline outputs, not infrastructure.
+# No runner, hosted or self-hosted, can produce them, and this row reads
+# NOT-EXECUTED until an operator configures them. That is the truthful state
+# and it is not a hardware problem.
 
 set -euo pipefail
 
@@ -96,6 +127,32 @@ cannot do that without the expected Team ID to compare against" >&2
 
 echo "=== $CRITERION on $APP ==="
 macos_version="$(sw_vers -productVersion)"
+
+# THE HOST, RECORDED AND NEVER ASSUMED.
+#
+# Both are MEASURED strings, verbatim from the tool, with newlines folded so a
+# multi-line answer cannot break the JSON below. Neither is a prerequisite:
+# `csrutil status` says what a reader needs to know about the host (a hosted
+# image ships SIP DISABLED, which is a fleet property GitHub says is not
+# job-controllable), and `spctl --status` says whether the machine that just
+# answered the Gatekeeper question was even asking it -- "assessments disabled"
+# would make `gatekeeper_accepted` meaningless, and a reader can now see that.
+sip_config="$(csrutil status 2>&1 | tr -d '\n' | tr -s ' ')"
+gatekeeper_assessments="$(spctl --status 2>&1 | tr -d '\n' | tr -s ' ')"
+echo "SIP:        $sip_config"
+echo "Gatekeeper: $gatekeeper_assessments"
+
+# THE RUNNER, FROM THE RUNNER. `RUNNER_ENVIRONMENT` is GitHub's own answer and
+# its vocabulary is exactly the schema's -- `github-hosted` or `self-hosted` --
+# so a job moved between fleets tells the truth without anyone editing this
+# file. `TWINVPN_RUNNER_KIND` overrides it for a host that is neither, and the
+# `github-hosted` floor is this criterion's job (`runs-on: macos-26`) rather
+# than an assumption about the machine: `RUNNER_ENVIRONMENT` is always set
+# under Actions, so the floor is only reached on a developer's Mac.
+#
+# It was the constant `"self-hosted"`, with `runner` defaulting to `ec2-mac`.
+# Both described a machine this row has no reason to run on any more.
+runner_kind="${TWINVPN_RUNNER_KIND:-${RUNNER_ENVIRONMENT:-github-hosted}}"
 
 # WHICH BYTES WERE INSPECTED.
 #
@@ -252,8 +309,8 @@ cat > "$EVIDENCE" <<JSON
   "platform": "macos",
   "criterion": "$CRITERION",
   "job_name": "${GITHUB_JOB:-macos-production-signature}",
-  "runner": "${RUNNER_NAME:-ec2-mac}",
-  "runner_kind": "self-hosted",
+  "runner": "${RUNNER_NAME:-github-hosted}",
+  "runner_kind": "$runner_kind",
   "privileged": false,
   "github_run_id": $([ -n "${GITHUB_RUN_ID:-}" ] && echo "\"$GITHUB_RUN_ID\"" || echo null),
   "github_run_attempt": $(twinvpn_run_attempt_json),
@@ -268,6 +325,8 @@ cat > "$EVIDENCE" <<JSON
   },
   "environment": {
     "macos_version": "$macos_version",
+    "sip_config": "$sip_config",
+    "gatekeeper_assessments": "$gatekeeper_assessments",
     "team_id": "$team_id",
     "observed_team_identifier": "${observed_team:-}",
     "signing_authority": "${signing_authority:-}",

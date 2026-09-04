@@ -163,6 +163,21 @@ apple_toolchain_banner() {
 }
 
 # ---------------------------------------------------------------------------
+# One-line tool versions, for the evidence JSON and the Swift pin check.
+#
+# NOT `xcodebuild -version | head -1`. head exits as soon as it has its line;
+# xcodebuild ignores SIGPIPE, and when its second line ("Build version ...")
+# then hits the closed pipe NSFileHandle raises NSFileHandleOperationException
+# ("Broken pipe"), which aborts the process: exit 134, and under
+# `set -euo pipefail` the job with it. It is a race, so most runs are fine
+# (ios-acceptance died this way on run 33750757726 after two green ones).
+# swift has the same shape with a plain SIGPIPE, exit 141. sed reads to EOF,
+# so the writer always finishes.
+# ---------------------------------------------------------------------------
+apple_xcodebuild_version() { xcodebuild -version 2>/dev/null | sed -n 1p; }
+apple_swift_version()      { swift --version 2>&1 | sed -n 1p; }
+
+# ---------------------------------------------------------------------------
 # ADR-0018 §11.3, mechanically: the compiler in the selected Xcode must be the
 # one this repository's Xcode pin ships.
 #
@@ -193,7 +208,7 @@ apple_require_pinned_swift() {
   # sometimes prefixed by "swift-driver version: 1.x ". The number is EXTRACTED
   # and compared for equality rather than substring-matched, so "6.3" cannot
   # satisfy an assertion that wants "6.3.3".
-  reported="$(swift --version 2>&1 | head -1)"
+  reported="$(apple_swift_version)"
   detected="$(printf '%s' "$reported" | sed -n 's/.*Swift version \([0-9][0-9.]*\).*/\1/p')"
 
   if [ "$detected" = "$want" ]; then
@@ -243,6 +258,104 @@ apple_require_xcodegen() {
     echo "  is no project to build."
   } >&2
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# The macOS teardown: remove TwinVPN's enforcement, and CHECK that it is gone.
+#
+#   apple_remove_twinvpn_anchor <logdir>
+#
+# Returns 0 when the kernel holds no TwinVPN enforcement afterwards and 1 when
+# it still does. Every caller is an `if: always()` teardown, so it prints what
+# it did rather than dying — but its STATUS is the answer and must be read.
+#
+# ===========================================================================
+# THE TEARDOWN THAT HAD NEVER WORKED
+# ===========================================================================
+# `ci-macos.sh` called `sudo -n twinvpn-unblock --yes` behind a
+# `|| echo "(twinvpn-unblock reported a failure…)"`. There is no `--yes` flag
+# and there must not be one: `shells/macos/twinvpn-unblock/src/main.rs` states
+# ADR-0017 MI-13(2) in its own header — "a `--yes`-style non-interactive flag
+# MUST NOT exist, and none does" — so every invocation exited 2 on usage, the
+# `|| echo` swallowed it, and the owner-tagged anchor was never removed. On a
+# long-lived self-hosted Mac each run inherited the previous run's firewall.
+#
+# THE REAL CONTRACT, and why CI cannot satisfy it. `--confirm-unprotected`
+# (ADR-0012 KS-21(3), a flag rather than a prompt per ADR-0023 EM-38) AND a
+# terminal on standard input, because MI-13(1) makes this "a local interactive
+# act" that "will not run from cron, a timer, a service unit or any other
+# automation" (EM-72). A CI teardown IS automation, so exit 4 —
+# `MGMT.DISARM_NO_LOCAL_AUTHORITY` — is the CORRECT answer and not a defect.
+# It is invoked once anyway, so the refusal is recorded rather than assumed,
+# and no pty is forged: that would defeat the one control separating a human
+# from a scheduler.
+#
+# So the removal CI can honestly perform is the package's own:
+#   * `pfctl -a twinvpn -f /dev/null` — the same single transaction
+#     `netcfg::remove_owner_tagged_anchor` performs, touching no rule outside
+#     the anchor. pf is NEVER flushed wholesale: ADR-0012 §11.11 and CB-6, a
+#     host's own firewall is not ours to remove.
+#   * /etc/pf.conf restored from `install.sh`'s own restore point, which
+#     ADR-0016 R-27 requires the uninstall path to use.
+#   * the KS-19 LaunchDaemon booted out, because leaving it re-arms the host at
+#     the next boot — the residual `twinvpn-unblock` itself warns about.
+#   * and then a READ-BACK, W-24's discipline applied to removal: the anchor
+#     must be gone from what `pfctl` says, never from the fact that a flush
+#     returned zero.
+# ---------------------------------------------------------------------------
+apple_remove_twinvpn_anchor() {
+  local logdir="${1:-.}"
+  local unblock="/usr/local/sbin/twinvpn-unblock"
+  local pf_conf="/etc/pf.conf" pf_orig="/etc/pf.conf.twinvpn-orig"
+  local label="com.twinvpn.ksd"
+  local rc=0 unblock_rc=0
+
+  mkdir -p "$logdir"
+
+  if [ -x "$unblock" ]; then
+    sudo -n "$unblock" --status || echo "(twinvpn-unblock --status failed)"
+    sudo -n "$unblock" --confirm-unprotected < /dev/null || unblock_rc=$?
+    echo "twinvpn-unblock exit $unblock_rc (4 = MGMT.DISARM_NO_LOCAL_AUTHORITY,\
+ the documented refusal of automation; the package removal below is what CI can do)"
+  else
+    echo "(twinvpn-unblock is not installed on this host)"
+  fi
+
+  sudo -n pfctl -a twinvpn -f /dev/null 2>&1 \
+    || echo "(emptying the twinvpn anchor failed)"
+
+  if [ -f "$pf_orig" ]; then
+    sudo -n cp -p "$pf_orig" "$pf_conf" && echo "restored $pf_conf from $pf_orig"
+    sudo -n rm -f "$pf_orig"
+    sudo -n pfctl -f "$pf_conf" 2>&1 || echo "(pf refused the restored $pf_conf)"
+  else
+    echo "(no $pf_orig, so nothing on this host spliced $pf_conf)"
+  fi
+
+  sudo -n launchctl bootout "system/$label" 2>/dev/null \
+    || echo "(the $label job was not loaded)"
+  sudo -n rm -f "/Library/LaunchDaemons/$label.plist"
+
+  sudo -n pfctl -s rules 2>&1 | tee "$logdir/pf-rules-after-cleanup.txt" || true
+  sudo -n pfctl -a twinvpn -s rules 2>&1 \
+    | tee "$logdir/pf-anchor-rules-after-cleanup.txt" || true
+  # `awk` and not `grep`, for the reason the header below gives.
+  if awk '/anchor/ && /twinvpn/ { f = 1 } END { exit !f }' \
+       "$logdir/pf-rules-after-cleanup.txt"; then
+    echo "::error::/etc/pf.conf still references the twinvpn anchor" >&2
+    rc=1
+  fi
+  if awk '/^[[:space:]]*(block|pass)[[:space:]]/ { f = 1 } END { exit !f }' \
+       "$logdir/pf-anchor-rules-after-cleanup.txt"; then
+    echo "::error::the twinvpn pf anchor still holds rules" >&2
+    rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::TwinVPN enforcement is STILL INSTALLED on this host, so the \
+next job on it inherits our firewall. The sanctioned removal is \
+\`sudo twinvpn-unblock --confirm-unprotected\` from a terminal (ADR-0012 KS-20a)." >&2
+  fi
+  return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -386,4 +499,93 @@ apple_transitions_from() {
     | awk '/^TWINVPN_LIFECYCLE_TRANSITION [A-Z_]+->[A-Z_]+$/ { print $2 }' \
     | sort -u \
     | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))'
+}
+
+# ---------------------------------------------------------------------------
+# Select and boot an iOS simulator, and print its UDID on stdout.
+#
+#   SIM_UDID="$(apple_boot_ios_simulator "$LOGDIR/simulators.log")"
+#
+# ONE DEFINITION, because two lanes now need it. `ci-ios.sh` (link/run) and
+# `ci-ios-acceptance.sh` both boot a simulator under the same product
+# constraint, and two copies of the selection rule are two things that can
+# drift — which on this rule would show up as one lane silently testing a
+# runtime the product does not support.
+#
+# WHAT IS PINNED AND WHAT DELIBERATELY IS NOT.
+#
+#   * The iOS VERSION floor IS asserted, because it is a product constraint:
+#     ADR-0018 §11.9 row 1 fixes the minimum at iOS 15, and a runtime below it
+#     would be testing a configuration this product does not support.
+#   * The DEVICE MODEL is NOT pinned. §11.9 rows 1 and 2 make iPadOS a distinct
+#     FARM entry rather than a distinct binary, and no simulator model can
+#     discharge either row — so pinning one here would imply a coverage claim
+#     the simulator cannot support.
+#
+# Everything a human reads goes to STDERR, because stdout is the UDID and a
+# caller captures it. A banner on stdout would become part of the identifier —
+# the defect `run_check` in ci-macos-signature.sh already shipped once.
+# ---------------------------------------------------------------------------
+apple_boot_ios_simulator() {
+  local list_log="$1" udid
+
+  mkdir -p "$(dirname "$list_log")"
+  xcrun simctl list devices available > "$list_log" 2>&1
+  cat "$list_log" >&2
+
+  udid="$(xcrun simctl list devices available --json \
+    | python3 -c '
+import json, sys
+data = json.load(sys.stdin)["devices"]
+best = None
+for runtime, devices in data.items():
+    if "iOS" not in runtime:
+        continue
+    # com.apple.CoreSimulator.SimRuntime.iOS-18-2 -> (18, 2)
+    tail = runtime.rsplit(".", 1)[-1].removeprefix("iOS-")
+    try:
+        version = tuple(int(part) for part in tail.split("-"))
+    except ValueError:
+        continue
+    if version < (15,):
+        continue          # ADR-0018 §11.9 row 1: iOS 15 is the floor
+    for device in devices:
+        if device.get("isAvailable") and "iPhone" in device.get("name", ""):
+            if best is None or version > best[0]:
+                best = (version, device["udid"])
+if best is None:
+    sys.exit("no available iPhone simulator at iOS 15 or newer")
+print(best[1])
+')" || return 1
+
+  echo "simulator: $udid" >&2
+  xcrun simctl boot "$udid" >&2
+  xcrun simctl bootstatus "$udid" -b >&2
+  printf '%s' "$udid"
+}
+
+# ---------------------------------------------------------------------------
+# The RUNTIME a booted simulator is running, as a human string ("iOS 26.5").
+#
+# Read off the device the run actually used rather than from configuration, so
+# the attestation names the runtime that executed the suite. Prints `unknown`
+# rather than failing: an unreadable runtime is a thinner attestation, not a
+# reason to destroy a run's evidence.
+# ---------------------------------------------------------------------------
+apple_ios_simulator_runtime() {
+  local udid="$1"
+
+  xcrun simctl list devices available --json \
+    | python3 -c '
+import json, sys
+udid = sys.argv[1]
+data = json.load(sys.stdin)["devices"]
+for runtime, devices in data.items():
+    for device in devices:
+        if device.get("udid") == udid:
+            tail = runtime.rsplit(".", 1)[-1]
+            print("iOS " + tail.removeprefix("iOS-").replace("-", "."))
+            raise SystemExit(0)
+print("unknown")
+' "$udid" 2>/dev/null || echo unknown
 }

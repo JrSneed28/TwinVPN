@@ -50,9 +50,22 @@
 # MUST NOT rewrite it as a runtime action", made structural: the authority has
 # no reason to open this file and does not.
 #
-# The `/*` form is the recursive one: it evaluates the anchor AND any
-# sub-anchors beneath it, which is what lets the authority nest a per-generation
-# ruleset under `twinvpn/gen` without editing /etc/pf.conf again.
+# NO WILDCARD, AND THIS WAS A DEFECT UNTIL 2026-09-02. This file used to carry
+# `anchor "twinvpn/*"` on the belief that the `/*` form evaluates the anchor
+# and its sub-anchors. It does not. pf.conf(5) ANCHORS: an anchor name ending
+# in `*` "will evaluate each rule in each anchor attached to the ... anchor"
+# and "will only evaluate anchors that are directly attached" — the anchor's
+# OWN rules are not in any anchor attached to it, and xnu's
+# `pf_step_into_anchor` (bsd/net/pf.c) selects a child's ruleset in the
+# wildcard branch and the anchor's ruleset only in the plain branch. Apple's
+# stock `anchor "com.apple/*"` works because /etc/pf.anchors/com.apple holds
+# only nested anchor declarations and the real rules live in children.
+# TwinVPN loads its rules into `twinvpn` itself, so the wildcard reference
+# evaluated nothing: the anchor was loaded, listed and referenced, and the
+# kernel never considered one of its rules. MACOS-PF-BOOT-ANCHOR found it
+# because the deny-label counters stayed at zero across a covered connect.
+# A per-generation child under `twinvpn/gen` would need its own reference
+# line added here; nothing nests one today.
 #
 # ------------------------------------------------------------ THE RESIDUAL
 #
@@ -66,5 +79,5 @@
 # be read as if it does.
 #
 
-anchor "twinvpn/*"
+anchor "twinvpn"
 load anchor "twinvpn" from "/etc/twinvpn/pf.anchor"

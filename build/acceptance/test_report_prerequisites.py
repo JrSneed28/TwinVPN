@@ -42,6 +42,12 @@ from test_environment_attestation import *  # noqa: E402,F401,F403
 # which is exactly why a writer that stopped emitting a required key went
 # unnoticed. `test_evidence_writers` renders the real writers and grades those.
 from test_evidence_writers import *  # noqa: E402,F401,F403
+# And the half that decides what two of those writers WRITE. The iOS acceptance
+# lane derives its test count and its five honesty booleans from an `.xcresult`,
+# so a bug in that parser is a bug in what `IOS-PROFILE-REMOVAL-HONESTY` means --
+# and `xcodebuild test` exits 0 for a bundle in which nothing ran, which is the
+# vacuous pass the count exists to refuse.
+from test_xcresult_summary import *  # noqa: E402,F401,F403
 
 
 class PositiveControls(GateCase):
@@ -62,9 +68,18 @@ class PositiveControls(GateCase):
         self.assertGreen("macos-signature", "MACOS-PRODUCTION-SIGNATURE",
                          fx.macos_signature())
 
+    def test_macos_pf_boot_anchor_passes(self):
+        self.assertGreen("macos-pf-anchor", "MACOS-PF-BOOT-ANCHOR",
+                         fx.macos_pf_anchor())
+
     def test_ios_fail_closed_passes(self):
-        self.assertGreen("ios-corellium", "IOS-NE-FAIL-CLOSED", fx.ios_ne(),
+        self.assertGreen("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED", fx.ios_ne(),
                          fx.oracle("sess-ios", "IOS-NE-FAIL-CLOSED"))
+
+    def test_ios_failclosed_configuration_passes(self):
+        self.assertGreen("ios-failclosed-configuration",
+                         "IOS-FAILCLOSED-CONFIGURATION",
+                         fx.ios_failclosed_configuration())
 
     def test_ios_profile_removal_passes(self):
         self.assertGreen("ios-profile-removal", "IOS-PROFILE-REMOVAL-HONESTY",
@@ -181,7 +196,7 @@ class PathIdentity(GateCase):
         # virtual iPhone. Every oracle number is then about the controller's
         # egress while staying internally consistent -- sentinel held, attempts
         # high, identities distinct -- and the device may have leaked.
-        detail = self.assertRefused("ios-corellium", "IOS-NE-FAIL-CLOSED",
+        detail = self.assertRefused("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED",
                                     fx.ios_ne(probe_host="controller"),
                                     fx.oracle("sess-ios", "IOS-NE-FAIL-CLOSED"))
         self.assertIn("probe_host", detail)
@@ -189,8 +204,68 @@ class PathIdentity(GateCase):
     def test_an_unmeasured_path_identity_is_refused(self):
         ev = fx.ios_ne()
         del ev["environment"]["protected_path_identity"]
-        self.assertRefused("ios-corellium", "IOS-NE-FAIL-CLOSED", ev,
+        self.assertRefused("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED", ev,
                            fx.oracle("sess-ios", "IOS-NE-FAIL-CLOSED"))
+
+
+class SentinelIndependence(GateCase):
+    """The heartbeat came from somewhere the device is not.
+
+    A SILENCE phase is creditable only when an independent observer proves the
+    oracle was still listening. `sentinel_host` cannot carry that -- it is a
+    free string, surfaced and gated on by nothing, and the case below keeps it
+    that way. `sentinel_egress_identity` is the measured version, and two equal
+    strings are not two hosts.
+    """
+
+    def test_a_sentinel_egressing_as_either_path_is_refused(self):
+        for key in ("protected_path_identity", "unprotected_path_identity"):
+            with self.subTest(shared_with=key):
+                shared = fx.windows()["environment"][key]
+                detail = self.assertRefused(
+                    "windows-killswitch", "WINDOWS-WFP-KILLSWITCH",
+                    fx.windows(sentinel_egress_identity=shared), fx.oracle())
+                self.assertIn("sentinel_egress_identity", detail)
+
+    def test_an_unmeasured_sentinel_identity_is_refused(self):
+        # Absence is what a lane that never measured it produces, and it must
+        # be as red as a sentinel sharing the device's address.
+        ev = fx.windows()
+        del ev["environment"]["sentinel_egress_identity"]
+        detail = self.assertRefused("windows-killswitch",
+                                    "WINDOWS-WFP-KILLSWITCH", ev, fx.oracle())
+        self.assertIn("sentinel_egress_identity", detail)
+        self.assertRefused("windows-killswitch", "WINDOWS-WFP-KILLSWITCH",
+                           fx.windows(sentinel_egress_identity=""), fx.oracle())
+
+    def test_a_distinct_sentinel_identity_is_green_in_both_topologies(self):
+        # The positive control, and the proof that the rule is a COMPARISON
+        # rather than a preference for one deployment: an in-box fabric and an
+        # external host are both green while the three addresses are three.
+        for topology in ("in-box", "external"):
+            with self.subTest(oracle_topology=topology):
+                self.assertGreen("windows-killswitch", "WINDOWS-WFP-KILLSWITCH",
+                                 fx.windows(oracle_topology=topology),
+                                 fx.oracle())
+
+    def test_an_unlisted_oracle_topology_is_refused(self):
+        # `in-box` and `external` are the two things a lane can measure. A
+        # third value is what a lane that guessed writes.
+        detail = self.assertRefused(
+            "windows-killswitch", "WINDOWS-WFP-KILLSWITCH",
+            fx.windows(oracle_topology="cloud"), fx.oracle())
+        self.assertIn("oracle_topology", detail)
+
+    def test_the_rule_reaches_every_egress_criterion(self):
+        # Driven off the `PATH_IDENTITY_PREREQUISITES` merge rather than the
+        # Windows row alone: a criterion added to `ORACLE_REQUIRED` inherits
+        # this without anyone remembering to write a case for it.
+        self.assertGreater(len(report.ORACLE_REQUIRED), 0)
+        for criterion in sorted(report.ORACLE_REQUIRED):
+            with self.subTest(criterion=criterion):
+                self.assertIn("sentinel_egress_identity",
+                              report.PREREQUISITES[criterion])
+                self.assertIn("oracle_topology", report.PREREQUISITES[criterion])
 
 
 class OracleAdjudication(GateCase):
@@ -327,14 +402,36 @@ class OracleAdjudication(GateCase):
 class JobOutcome(GateCase):
     """`failure`, `cancelled`, `skipped`, missing and NOT-EXECUTED are each their own red."""
 
+    def test_the_ios_rows_are_graded_on_the_ios_acceptance_job(self):
+        # Both simulator stems come from one job. Run 33685840037 (2026-09-02)
+        # had both evidence files present, `ios-acceptance: success`, and read
+        # both rows as "never scheduled" because the lookup used the stem.
+        self.assertGreen("ios-failclosed-configuration",
+                         "IOS-FAILCLOSED-CONFIGURATION",
+                         fx.ios_failclosed_configuration(),
+                         jobs={"ios-acceptance": "success"})
+        self.assertGreen("ios-profile-removal", "IOS-PROFILE-REMOVAL-HONESTY",
+                         fx.ios_profile_removal(),
+                         jobs={"ios-acceptance": "success"})
+        verdict, detail, _ = self.probe("ios-profile-removal",
+                                        "IOS-PROFILE-REMOVAL-HONESTY",
+                                        fx.ios_profile_removal(), None,
+                                        {"ios-acceptance": "failure"})
+        self.assertNotEqual(verdict, report.PASS)
+        self.assertIn("ios-acceptance", detail)
+
     def test_a_skipped_job_is_red_and_says_so(self):
-        # The dangerous one: an unregistered self-hosted runner makes the job
-        # skip, and a skip is the absence that looks most like routine absence.
-        verdict, detail, _ = self.probe("windows-killswitch",
-                                        "WINDOWS-WFP-KILLSWITCH", None, None,
-                                        {"windows-killswitch": "skipped"})
+        # The dangerous one: `macos-signature` skips while
+        # `TWINVPN_NOTARIZED_APP_URL` is unset, and a skip is the absence that
+        # looks most like routine absence. The row has to name the variable,
+        # not a runner: since 2026-09-02 no job in the gate waits on one.
+        verdict, detail, _ = self.probe("macos-signature",
+                                        "MACOS-PRODUCTION-SIGNATURE", None, None,
+                                        {"macos-signature": "skipped"})
         self.assertEqual(verdict, report.NOT_EXECUTED)
         self.assertIn("SKIPPED", detail)
+        self.assertIn("TWINVPN_NOTARIZED_APP_URL", detail)
+        self.assertNotIn("runner", detail)
 
     def test_a_cancelled_job_is_red_and_says_so(self):
         _, detail, _ = self.probe("macos-sysext", "MACOS-SYSEXT-LIFECYCLE",
@@ -342,8 +439,8 @@ class JobOutcome(GateCase):
         self.assertIn("CANCELLED", detail)
 
     def test_a_failed_job_is_red_and_says_so(self):
-        _, detail, _ = self.probe("ios-corellium", "IOS-NE-FAIL-CLOSED", None,
-                                  None, {"ios-corellium": "failure"})
+        _, detail, _ = self.probe("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED", None,
+                                  None, {"ios-ne-failclosed": "failure"})
         self.assertIn("FAILED", detail)
 
     def test_a_job_absent_from_the_run_is_red_and_says_so(self):

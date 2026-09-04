@@ -21,16 +21,19 @@
   depends on ("MUST NOT require writable-executable memory"). A reviewer should
   check this file for what is NOT here at least as carefully as for what is.
 
-  ADR-0016 P-06 is the standing risk: "Apple grants the NetworkExtension
-  entitlement for `packet-tunnel-provider-systemextension` (macOS)". Until they
-  do, this file describes a build that cannot be signed. Nothing here has been
-  signed, submitted, or validated by this domain.
+  ADR-0016 P-06 (as amended 2026-09-04) is the standing prerequisite: a paid
+  Apple Developer Program team with the Network Extensions and System Extension
+  capabilities enabled, and a Developer ID provisioning profile carrying
+  `packet-tunnel-provider-systemextension`. The value is self-service for a paid
+  team — there is no Apple grant to wait for — and the free tier lacks it. No
+  Team ID is configured, so this file describes a build that cannot yet be
+  signed. Nothing here has been signed, submitted, or validated by this domain.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <!--
-      THE ONE THAT APPLE MUST GRANT.
+      THE ONE THE PROVISIONING PROFILE MUST CARRY.
 
       `packet-tunnel-provider-systemextension` is the SYSTEM-extension value.
       The bare `packet-tunnel-provider` value is the iOS / app-extension one;
@@ -39,9 +42,9 @@
 
       Without it: systemextensionsd refuses the activation request and the
       provider never runs. There is no degraded mode — the tunnel simply does
-      not exist. ADR-0016 §14(2) makes the grant a falsifiable schedule trigger
-      and names MX-3 (a LaunchDaemon owning utun directly) as the fallback,
-      never MX-2.
+      not exist. ADR-0016 §14(2) (as amended 2026-09-04) makes a Developer ID
+      profile that cannot be generated the fallback trigger and names MX-3 (a
+      LaunchDaemon owning utun directly) as the fallback, never MX-2.
     -->
     <key>com.apple.developer.networking.networkextension</key>
     <array>

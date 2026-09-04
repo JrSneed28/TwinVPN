@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The disposable guest's answer file. `scripts/twinvpn-l1.ps1 -Action run`
+  substitutes the two placeholders below and writes the result to
+  \Windows\Panther\unattend.xml INSIDE THE PER-RUN DIFFERENCING DISK, never
+  into the base image: it carries the guest administrator's password in plain
+  text, which is what Windows Setup requires, and that must not outlive the run.
+
+  Two things this comment may not contain, both of which the first draft did
+  and both of which were caught before a guest was ever built. It may not spell
+  out a placeholder name: the controller refuses to boot a guest whose answer
+  file still contains one, the guard is a plain substring test, and a
+  placeholder named in prose would trip it on every run. And it may not contain
+  a double hyphen: XML forbids one inside a comment, so Windows Setup would
+  reject the whole answer file, the guest would sit in OOBE with no local
+  account, and the only symptom would be PowerShell Direct timing out twenty
+  minutes later.
+
+  oobeSystem only, and it does exactly three things:
+
+    * create one local administrator, which is all PowerShell Direct needs;
+    * log it in once, because PowerShell Direct additionally requires the guest
+      to have "at least one configured user profile" and a never-logged-in
+      account has none;
+    * skip the OOBE screens, so first boot reaches a desktop unattended.
+
+  There is no specialize pass and no FirstLogonCommands: the guest is driven
+  entirely over PowerShell Direct, so nothing has to be arranged in advance.
+  If a future Windows build stalls at the network screen instead of reaching
+  the desktop, the known remedy is a specialize-pass RunSynchronousCommand
+  setting HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE\BypassNRO=1.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>%TWINVPN_GUEST_USER%</Name>
+            <DisplayName>%TWINVPN_GUEST_USER%</DisplayName>
+            <Group>Administrators</Group>
+            <Password>
+              <Value>%TWINVPN_GUEST_PASSWORD%</Value>
+              <PlainText>true</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+      <AutoLogon>
+        <Username>%TWINVPN_GUEST_USER%</Username>
+        <Enabled>true</Enabled>
+        <LogonCount>1</LogonCount>
+        <Password>
+          <Value>%TWINVPN_GUEST_PASSWORD%</Value>
+          <PlainText>true</PlainText>
+        </Password>
+      </AutoLogon>
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <NetworkLocation>Work</NetworkLocation>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+      <TimeZone>UTC</TimeZone>
+    </component>
+  </settings>
+</unattend>

@@ -133,6 +133,14 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y -qq cmake
           fi
+          # Asserted with `command -v`, for the reason the android C toolchain
+          # step below spells out: this shell has no `pipefail`, so a missing
+          # cmake at the head of the version pipe would leave `head`'s zero as
+          # the step's status and the install above would fail silently.
+          command -v cmake >/dev/null || {
+            echo "::error title=native build dependencies::cmake is still missing after 'apt-get install cmake'. This is an ENVIRONMENT failure in this job, not a code failure."
+            exit 1
+          }
           cmake --version | head -1
 
       # ------------------------------------------------------------------
@@ -429,7 +437,7 @@ jobs:
             shells/android/jni/target
           key: >-
             twinvpn-cargo-${{ runner.os }}-${{ runner.arch }}-crosscheck-${{
-            hashFiles('rust-toolchain.toml') }}-${{
+            hashFiles('rust-toolchain.toml', '.cargo/config.toml') }}-${{
             hashFiles('core/Cargo.lock', 'shells/windows/Cargo.lock',
             'shells/macos/Cargo.lock', 'shells/android/jni/Cargo.lock') }}-${{
             hashFiles('core/Cargo.toml', 'shells/windows/Cargo.toml',

@@ -62,6 +62,8 @@ pub const fn may_retry(command: Command, err: &CpError) -> Retry {
         // failure. Retrying re-offers a value the store has already refused.
         CpError::TrustEpochRollback { .. }
         | CpError::TrustHistoryForked { .. }
+        | CpError::VersionRollbackRejected { .. }
+        | CpError::ForkedHistoryDetected { .. }
         | CpError::IdentityMismatch
         | CpError::ChannelBindingMismatch
         | CpError::EventWrongPublisher { .. } => Retry::Never,

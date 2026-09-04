@@ -1,0 +1,174 @@
+# build/ci/jobs/macos-signature-hosted.yml
+#
+# A JOB BODY, not a workflow. Paste it under a workflow's `jobs:` key at this
+# indentation, REPLACING the current `macos-signature` job in
+# `.github/workflows/first-implementation-wave-gate.yml`.
+#
+# ===========================================================================
+# WHAT CHANGED, AND WHAT DID NOT
+# ===========================================================================
+# CHANGED: `runs-on`. This row moves from the AWS EC2 Mac self-hosted runner to
+# a GitHub-hosted `macos-26`, and the `TWINVPN_EC2_MAC_REGISTERED` gate and the
+# `twinvpn-ec2-mac` concurrency group go with it.
+#
+# NOT CHANGED: the criterion, the script, the checks, or what any of them mean.
+# `MACOS-PRODUCTION-SIGNATURE` is pure artifact inspection — `codesign`, `spctl`
+# and `stapler` all ship with macOS and Xcode, Gatekeeper assessments are
+# ENABLED on the hosted images, and `--check-notarization` forces an online
+# ticket lookup that a hosted runner has the network for. None of the evidence's
+# `environment` keys describes the machine, because the subject is the ARTIFACT.
+#
+# This row was on the EC2 Mac only because that is where the Mac was. An
+# ephemeral hosted runner is the STRONGER host for it: freshly provisioned,
+# nothing inherited from the previous run, and not a disk shared with the job
+# that activates a developer-mode system extension.
+#
+# ===========================================================================
+# WHAT A RUNNER CANNOT SUPPLY, AND WHY THE `if:` IS THERE
+# ===========================================================================
+# `TWINVPN_TEAM_ID`, `TWINVPN_NOTARIZED_APP_URL` and
+# `TWINVPN_NOTARIZED_APP_SHA256` are APPLE DEVELOPER PROGRAM facts and release
+# pipeline outputs. No runner choice produces them, and until an operator
+# configures them this criterion cannot be discharged on any hardware.
+#
+# So the job is SKIPPED BY NAME when the URL variable is empty, rather than
+# started and failed. Both outcomes leave the row NOT-EXECUTED —
+# `build/acceptance/report.py` re-derives that from the absent evidence file
+# either way — but a skip says so in seconds instead of after a checkout, an
+# Xcode selection and a failed download, and it does not spend a hosted macOS
+# minute (billed at 10x) to reach the same conclusion. The `::error::` inside
+# `ci-macos-signature.sh` and the two guards below remain for the case where
+# the URL IS configured and something else about it is wrong; the skip must
+# never be read as a pass, and it is not, because `require-job-results.py` and
+# the report both grade a missing evidence file as failing.
+#
+# The fork guard stays: a pull request from a fork cannot read repository
+# variables or secrets, so it would fetch nothing and inspect nothing.
+#
+# ===========================================================================
+# WHAT IS UPLOADED, AND WHAT MUST NEVER BE
+# ===========================================================================
+# The evidence file, always; the `sig-*.log` capture of each check, on failure.
+# NEVER a signing identity, a private key, a keychain, an authentication token
+# or the downloaded product itself. `$RUNNER_TEMP/product` is removed on every
+# path — on an ephemeral runner that is belt and braces, and it stays because
+# the step is also the documented behaviour for anyone running this on a Mac
+# they own.
+
+  macos-signature:
+    name: macos-signature
+    # PINNED, not `macos-latest`: R-32's failure mode is "it does not build for
+    # that target any more", arriving one silent runner-image update at a time.
+    # `macos-26` is the image `macos-link-run` and `ios-link-run` already use,
+    # so the Xcode 26.6 pin in build/ci/ci-common-apple.sh is known to resolve.
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    # Two conditions, and they are different refusals. The first is "this row
+    # has nothing to inspect" — see the header. The second is the fork guard:
+    # a fork's pull request cannot read `vars` or `secrets` at all.
+    if: >-
+      ${{ vars.TWINVPN_NOTARIZED_APP_URL != ''
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository) }}
+    env:
+      TWINVPN_TEAM_ID: ${{ vars.TWINVPN_TEAM_ID }}
+      # MEASURED WHERE IT CAN BE, DECLARED WHERE IT CANNOT. The script reads
+      # `RUNNER_ENVIRONMENT` — GitHub's own answer, whose vocabulary is exactly
+      # the evidence schema's — and this variable exists only to override it on
+      # a host that is neither hosted nor self-hosted. It is deliberately unset
+      # here so the runner speaks for itself.
+      TWINVPN_RUNNER_KIND: ${{ vars.TWINVPN_RUNNER_KIND }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      # The pin lives in build/ci/ci-common-apple.sh and nowhere else.
+      # RESOLVED FIRST, into a variable: inlining the substitution into
+      # `xcode-select -s "$(...)"` discards the resolver's exit status and hands
+      # `xcode-select` an empty string, so the job dies with "invalid developer
+      # directory ''" instead of with the resolver's own message.
+      #
+      # `stapler` ships with Xcode, so this step is what pins the tool this
+      # criterion's stapling check actually runs.
+      - name: select the pinned Xcode
+        run: |
+          XCODE_DEV_DIR="$(build/ci/ci-macos.sh --print-xcode-path)"
+          sudo xcode-select -s "$XCODE_DEV_DIR"
+          xcodebuild -version
+          sw_vers
+          # RECORDED, not gated. The evidence carries both; the criterion's
+          # subject is the artifact, not the host.
+          csrutil status || true
+          spctl --status || true
+
+      # The SIGNED, NOTARIZED product, published by the release pipeline. NOT a
+      # CI build: a build produced here would be signed by whatever identity the
+      # runner holds and notarized by nobody, and checking its signature would
+      # tell us about the runner rather than about the product.
+      - name: fetch the notarized product and verify it against its pinned digest
+        env:
+          APP_URL: ${{ vars.TWINVPN_NOTARIZED_APP_URL }}
+          APP_TOKEN: ${{ secrets.TWINVPN_NOTARIZED_APP_TOKEN }}
+          APP_SHA256: ${{ vars.TWINVPN_NOTARIZED_APP_SHA256 }}
+        run: |
+          if [ -z "$APP_URL" ]; then
+            echo "::error::TWINVPN_NOTARIZED_APP_URL is not configured; MACOS-PRODUCTION-SIGNATURE is about the artifact users download and must not be handed a CI build"
+            exit 1
+          fi
+          # This criterion's entire subject is "the bytes a user would
+          # download", so a run that cannot name those bytes has not made the
+          # claim. A truncated transfer also fails `codesign --verify` for a
+          # reason that has nothing to do with signing, which is the confusing
+          # red this turns into a legible one.
+          if [ -z "$APP_SHA256" ]; then
+            echo "::error::TWINVPN_NOTARIZED_APP_SHA256 is not configured. MACOS-PRODUCTION-SIGNATURE is a claim about a specific published artifact; without a pinned SHA-256 the row would be about whatever that URL served today."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/product"
+          curl -sSL --fail-with-body \
+            ${APP_TOKEN:+-H "Authorization: Bearer $APP_TOKEN"} \
+            -o "$RUNNER_TEMP/product/TwinVPN.zip" "$APP_URL"
+          . build/ci/digest.sh
+          twinvpn_verify_digest "$RUNNER_TEMP/product/TwinVPN.zip" "$APP_SHA256" TwinVPN.app.zip
+          # Handed to the script so the EVIDENCE records the digest that was
+          # actually gated on, rather than one recomputed later from a file that
+          # by then has been expanded, quarantined and re-signed by nothing.
+          echo "TWINVPN_ARCHIVE_SHA256=$APP_SHA256" >> "$GITHUB_ENV"
+          ditto -x -k "$RUNNER_TEMP/product/TwinVPN.zip" "$RUNNER_TEMP/product"
+
+      - name: signature, notarization and stapling
+        run: build/ci/ci-macos-signature.sh "$RUNNER_TEMP/product/TwinVPN.app"
+
+      # A hosted runner is destroyed after the job, so this is no longer the
+      # load-bearing step it was on a long-lived shared Mac. It stays because it
+      # is also what a developer reproducing this on their own machine should
+      # do, and because "the runner is ephemeral" is a property of the fleet
+      # rather than of this job.
+      - name: remove the downloaded product
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/product"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-macos-signature
+          path: build/ci/evidence/macos-signature.json
+          # `warn`, not `ignore`: a criterion job that finished without writing
+          # its evidence file did not reach its own write, and that is worth
+          # seeing. Non-fatal, because the row already reads NOT-EXECUTED and a
+          # second red would bury the first.
+          if-no-files-found: warn
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-macos-signature
+          # ENUMERATED, never `path: .`. NEVER ~/Library/Keychains and never
+          # ~/Library/MobileDevice.
+          path: build/ci/logs/macos/sig-*.log
+          if-no-files-found: ignore
+          retention-days: 14

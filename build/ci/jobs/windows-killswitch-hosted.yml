@@ -1,0 +1,64 @@
+# build/ci/jobs/windows-killswitch-hosted.yml
+#
+# THIS IS NO LONGER A PASTEABLE FRAGMENT (2026-09-04), AND IT PARSES AS AN
+# EMPTY YAML DOCUMENT ON PURPOSE.
+#
+# Until 2026-09-04 this file carried a copy of the `windows-killswitch:` job
+# body with the instruction to paste it over the job in
+# `.github/workflows/first-implementation-wave-gate.yml`, so that the job and
+# the scripts it calls could be reviewed together. The copy drifted: at 6d51118
+# it built only twinoracle and lacked the live job's twinpeer build, the
+# `--features lab-seed` build of the service, the wfp_preconditions
+# `cargo test --no-run`, the background ISO prefetch, the fetch-wintun.sh
+# staging and the cache restore/save split. Pasting it would have regressed a
+# lane that PASSES (runs 33750757726, 33786997948 and 33853609809). A second
+# copy of a job is a second thing to keep in step, and this one was not kept.
+#
+# THE AUTHORITATIVE JOB IS `windows-killswitch:` IN
+# `.github/workflows/first-implementation-wave-gate.yml` (lines 792-985 after
+# this change, 774-962 at 84cda77; find it by name, the numbers move). Each step
+# there carries its own comment. This file keeps only the rationale those
+# comments do not repeat, and there is deliberately no YAML body here to paste.
+#
+# WHAT CHANGED, AND WHY THE JOB GOT SHORTER
+#
+# The old job needed four things nobody has: a self-hosted Azure VM registered
+# under `[self-hosted, Windows, twinvpn-azure-l1]`, a golden VHDX at
+# `vars.TWINVPN_GOLDEN_VHD`, an externally hosted leak oracle at
+# `vars.TWINVPN_ORACLE_URL` with `secrets.TWINVPN_ORACLE_TOKEN`, and a standing
+# sentinel process on a third machine named by `vars.TWINVPN_SENTINEL_HOST`. It
+# was gated on `vars.TWINVPN_AZURE_L1_REGISTERED`, so with none of them present
+# it SKIPPED and the row read NOT-EXECUTED.
+#
+# All four now happen inside the job on a hosted runner:
+#
+#   * the hosted `windows-2025` image ships the Hyper-V role, Hyper-V-PowerShell,
+#     HypervisorPlatform and VirtualMachinePlatform, installed at image-build
+#     time with `bcdedit /set hypervisorschedulertype root`, so a nested guest
+#     needs no feature install and no reboot;
+#   * `-Action build-image` builds the guest from a Microsoft evaluation ISO
+#     pinned by SHA-256, with in-box tooling only;
+#   * `-Action run` stands up two internal switches, the leak oracle, a
+#     stateless DNS relay, the sentinel and (since 2026-09-03) the lab tunnel
+#     peer on this host, with an address plan that keeps every observer
+#     OFF-LINK for the guest: the oracle's control and DNS surfaces on a routed
+#     segment, its beacon listeners on the peer's overlay addresses;
+#   * no repository variable gates the job, so it cannot silently skip. If the
+#     hypervisor is missing the job FAILS, by name, in `preflight`.
+#
+# WHAT STANDS IN FOR THE MISSING PRODUCT WRITERS. `enforce::arm` needs an
+# overlay allocation and a verified peer, neither of which has a production
+# writer, so the service is built `--features lab-seed` (never default) and fed
+# a seed `twinpeer seed` generates on L1; `twinpeer serve` is the tunnel's far
+# end. The row PASSES on that basis and the evidence names the seed as lab, not
+# product.
+#
+# NESTED VIRTUALIZATION ON HOSTED RUNNERS IS EXPLICITLY UNSUPPORTED BY GITHUB
+# ("experimental and done at your own risk"). That is why every failure path
+# in the job produces a named error instead of a green row, and why the
+# destroy step runs under `if: always()`.
+#
+# THE DIAGNOSTICS ARTIFACT (the guest transcript, the oracle's stdout and
+# stderr, the sentinel's log and the precondition output) is uploaded on
+# success as well as failure, because the guest transcript is the only record
+# of what the product did inside a guest that no longer exists.

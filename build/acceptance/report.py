@@ -58,6 +58,14 @@ drops it in `build/ci/evidence/oracle/`. `check_oracle` reads that -- never the
 `verdict_claimed` the job under test wrote -- and names any disagreement between
 the two.
 
+OFF-DEVICE DOES NOT MEAN OFF-SITE. The oracle may stand outside the run
+entirely or on a fabric the run builds for itself, with no NAT between the
+device and the observer; both are honest, and only one of them needs a standing
+host. Which one it was is MEASURED -- `oracle_topology` in the evidence -- and
+so is the sentinel's own egress identity, which must be neither of the two paths
+the session compares. A heartbeat emitted from the traffic being adjudicated
+proves nothing about the observer.
+
 An oracle verdict of INCONCLUSIVE is NOT a pass. It is what the oracle returns
 when the sequence never proved it could observe the device at all, which is the
 state in which zero observations during the armed window mean nothing.
@@ -86,11 +94,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import job_results  # noqa: E402
 from adjudication import (  # noqa: E402
+    IOS_SIMULATOR_PREREQUISITES,
     PATH_IDENTITY_PREREQUISITES,
     REQUIRED,
     android_environment_problems,
     check_run_binding,
     path_identity_problems,
+    positive_count_problems,
+    sentinel_independence_problems,
 )
 from oracle_adjudication import (  # noqa: E402
     check_oracle_adjudication,
@@ -259,7 +270,10 @@ PREREQUISITES = {
         "twinvpn_filters_installed": (True,),
         # The kill switch installs persistent filters that survive the process by
         # design (CB-6). A run on anything but a throwaway guest either cut the
-        # CI controller off the network or did not really arm.
+        # CI controller off the network or did not really arm. The guest is now
+        # built in CI on a hosted `windows-2025` runner rather than on a
+        # standing self-hosted host, and the value is unchanged because the fact
+        # is unchanged: it is still a nested Hyper-V guest and still disposable.
         "guest_kind": ("nested-hyperv-guest",),
         "guest_disposable": (True,),
     },
@@ -285,6 +299,12 @@ PREREQUISITES = {
         "kernel_release": REQUIRED,
         "system_image_revision": REQUIRED,
     },
+    # WHAT IS LEFT OF THE SYSTEM-EXTENSION ROW ONCE THE HOSTED PART IS SPLIT
+    # OUT into `MACOS-PF-BOOT-ANCHOR` below: the PRODUCTION extension reaching
+    # `activated enabled`, driving a tunnel through `NEPacketTunnelFlow` and
+    # holding under injected failure. `NO_EXECUTOR` names why nothing can run
+    # it. The prerequisites are unchanged because the claim is unchanged, and
+    # relaxing them would turn a blocked row into a green row about the anchor.
     "MACOS-SYSEXT-LIFECYCLE": {
         "macos_version": REQUIRED,
         "sip_config": REQUIRED,
@@ -292,6 +312,44 @@ PREREQUISITES = {
         "extension_bundle_id": REQUIRED,
         "systemextensionsctl_state": ("activated enabled",),
     },
+    # THE HOSTED HALF, and deliberately NOT in `ORACLE_REQUIRED`: it makes no
+    # egress claim an external oracle can adjudicate. The KS-19 boot anchor
+    # denies `100.64.0.0/10` and `fd7c:9e5d:2a10::/48`, which is RFC 6598 and
+    # ULA space that never reaches a public oracle, so the honest instrument is
+    # the LOCAL pf read-back and a connect attempt into the covered prefix.
+    #
+    # `pf_enabled` alone is not the criterion. An anchor can be loaded and never
+    # evaluated, so `anchor_referenced_in_main_ruleset` asserts `pfctl -s rules`
+    # still carries the exact `anchor "twinvpn"` line -- not the wildcard form,
+    # which evaluates only child anchors and left the boot anchor inert until
+    # 2026-09-02 (ownership.md G-35) -- `anchor_rule_count` asserts
+    # the anchor is not empty (see POSITIVE_COUNTS: a loaded anchor with zero
+    # rules forbids nothing), and the two connect booleans are the behavioural
+    # check -- refused into the covered prefix, and, as its own control,
+    # succeeded against a destination the anchor does not cover. Without the
+    # second, a host with no network at all passes the first.
+    #
+    # `bridge_tests_as_root` and `bridge_test_count` record that
+    # `TwinVPNBridgeTests` ran as root, which is what exercises `tvb_ext_start`
+    # and `enforcement_reclaim` -- Apple's own pf parsing the rendered anchor
+    # rather than this lane asserting that it would.
+    "MACOS-PF-BOOT-ANCHOR": {
+        "macos_version": REQUIRED,
+        "sip_config": REQUIRED,
+        "pf_enabled": (True,),
+        "anchor_referenced_in_main_ruleset": (True,),
+        "anchor_rule_count": REQUIRED,
+        "read_back_tables": REQUIRED,
+        "covered_prefix_connect_refused": (True,),
+        "control_connect_succeeded": (True,),
+        "ksd_status_exit": (0,),
+        "bridge_tests_as_root": (True,),
+        "bridge_test_count": REQUIRED,
+    },
+    # Unchanged, and it now runs HOSTED: this criterion's subject is the
+    # notarized artifact the release pipeline published, not the machine that
+    # inspected it, and an ephemeral runner is a stronger host for that question
+    # than a long-lived one sharing a disk with a developer-mode activation.
     "MACOS-PRODUCTION-SIGNATURE": {
         "team_id": REQUIRED,
         "signing_authority": REQUIRED,
@@ -308,35 +366,52 @@ PREREQUISITES = {
         # can be put to nested code, and this is where its answer is required.
         "sysext_notarized": (True,),
     },
+    # THE DEVICE ROW, UNCHANGED AND STILL WITHOUT AN EXECUTOR -- `NO_EXECUTOR`
+    # names why. Relaxing `real_network_extension_invoked` to admit the
+    # simulator rows below would convert an honest blocked row into a green row
+    # about a different thing, which is the substitution this table exists to
+    # refuse.
     "IOS-NE-FAIL-CLOSED": {
         "real_network_extension_invoked": (True,),
         "device_kind": REQUIRED,
         "entitlement_packet_tunnel_provider": (True,),
         "product_mode": REQUIRED,
     },
+    # WHAT TwinVPN OWES APPLE'S DOCUMENTED ENFORCEMENT, checked in the one place
+    # it can be: Apple's promise that "when the VPN transitions away from the
+    # connected state, the system drops network traffic" is scoped to a VPN
+    # configuration that EXISTS and is ENABLED. Installing exactly that
+    # configuration is TwinVPN's half, it is entirely in-process object state,
+    # and it was tested nowhere. See handoff-ios §5 and §6.
+    "IOS-FAILCLOSED-CONFIGURATION": {**IOS_SIMULATOR_PREREQUISITES},
+    # THE SAME FIVE HONESTY CONDITIONS, NOW DRIVEN FROM AN INJECTED REMOVAL
+    # OBSERVATION RATHER THAN A DEVICE.
+    #
+    # This row is the one criterion whose claim is about what the app SAYS
+    # rather than about what leaves the device, and it carries no leak-oracle
+    # session because on consumer iOS removing the VPN configuration REVOKES
+    # TwinVPN's authority: egress afterwards is expected and correct, and a
+    # silence phase over that window would test a promise the product does not
+    # make. Every one of the five conditions is app-side logic and none of them
+    # needs a tunnel, so the row runs on a simulator against an injected "no
+    # configuration" observation -- and the simulator pins above are what stop
+    # a device file being read as this row, or this row as a device row.
+    #
+    # THE RESIDUAL DEVICE-ONLY CLAIM, stated so nobody has to reconstruct it:
+    # what is not exercised here is the USER'S SETTINGS JOURNEY -- a human
+    # deleting the profile in Settings rather than a test supplying the end
+    # state. That journey delivers the SAME observation this row injects: Apple
+    # documents `NEVPNStatus.invalid` for a configuration that no longer
+    # exists, and `loadAllFromPreferences` returns an empty array, which is
+    # exactly what is injected. The uncovered part is the UI path to that
+    # state, not the honesty logic the criterion is named for. See
+    # handoff-ios §5.
+    #
+    # The last condition is the subtle one: `blocked` is as wrong as
+    # `protected`, because both assert TwinVPN is still deciding what leaves
+    # the device when it no longer is.
     "IOS-PROFILE-REMOVAL-HONESTY": {
-        "real_network_extension_invoked": (True,),
-        "device_kind": REQUIRED,
-        # CONSUMER, explicitly. The supervised/managed criterion is stronger and
-        # separate, and a consumer-mode file must never be readable as it.
-        "product_mode": ("consumer",),
-        # THE FIVE THINGS THIS CRITERION ACTUALLY ASSERTS.
-        #
-        # This row is the one criterion in the table whose claim is about what
-        # the app SAYS rather than about what leaves the device, and it carries
-        # no leak-oracle session because on consumer iOS removing the VPN
-        # configuration REVOKES TwinVPN's authority: egress afterwards is
-        # expected and correct, and a silence phase over that window would test
-        # a promise the product does not make.
-        #
-        # Which left the row with nothing to check but "the NE was invoked and
-        # the device is a consumer device" -- both true of a build that responds
-        # to profile removal by continuing to display a green shield, which is
-        # the exact dishonesty the criterion is named for. So the five
-        # conditions of `ProfileRemovalAcceptanceTests.swift` are attested here,
-        # individually, and the last one is the subtle one: `blocked` is as
-        # wrong as `protected`, because both assert TwinVPN is still deciding
-        # what leaves the device when it no longer is.
+        **IOS_SIMULATOR_PREREQUISITES,
         "reported_not_protected": (True,),
         "green_shield_impossible": (True,),
         "connected_state_cleared": (True,),
@@ -362,8 +437,10 @@ PREREQUISITES = {
 # Which criteria make an EGRESS claim, and therefore require an external
 # leak-oracle report. The others do not, and requiring one of them would be
 # theatre: `ANDROID-16K-PAGE-SIZE` is about page size and the JNI/VpnService
-# boundary, and `IOS-PROFILE-REMOVAL-HONESTY` is about what the app SAYS after
-# its authority is revoked -- egress there is expected and correct.
+# boundary, `IOS-PROFILE-REMOVAL-HONESTY` is about what the app SAYS after its
+# authority is revoked -- egress there is expected and correct -- and
+# `MACOS-PF-BOOT-ANCHOR` denies only RFC 6598 and ULA prefixes that never reach
+# a public oracle, so its honest instrument is the local pf read-back.
 ORACLE_REQUIRED = {
     "WINDOWS-WFP-KILLSWITCH",
     "MACOS-SYSEXT-LIFECYCLE",
@@ -387,6 +464,48 @@ for _criterion in ORACLE_REQUIRED:
 # booleans are meaningless and are not required -- demanding `loaded: true` of a
 # signature check would only teach a job to write it untruthfully.
 ARTIFACT_ONLY = {"MACOS-PRODUCTION-SIGNATURE"}
+
+# WHICH JOB WROTE A STEM, where the two differ. Every other evidence file is
+# named after the job that wrote it; the hosted simulator job writes both iOS
+# rows from one xcodebuild session per row, so both stems are graded on the
+# `ios-acceptance` job's outcome. Without this the report asked for a job named
+# after the stem, found none, and read a green run as never scheduled.
+JOB_FOR_STEM = {
+    "ios-failclosed-configuration": "ios-acceptance",
+    "ios-profile-removal": "ios-acceptance",
+}
+
+# Criteria for which NO EXECUTOR EXISTS, and the sentence that says what is
+# missing. These rows have no job in the workflow at all, so they read
+# NOT-EXECUTED; that is the truthful verdict and it counts against Phase 5
+# eligibility exactly as a FAIL does. This table does not soften a row -- it
+# only replaces "never scheduled" with the reason nobody scheduled it, which is
+# the difference between a rig somebody forgot to provision and an executor
+# nobody has funded and built. Both reasons were re-verified on 2026-09-04:
+# neither is a capability that cannot be bought, and whether the rows stay
+# required or are deferred is the wave owner's decision, recorded in
+# docs/implementation/ownership.md and not here.
+NO_EXECUTOR = {
+    "MACOS-SYSEXT-LIFECYCLE":
+        "There is no executor for this criterion: activating the production "
+        "system extension needs a paid Apple Developer Program team (the "
+        "Network Extension and System Extension capabilities are self-service "
+        "there; there is no grant to apply for), a Developer-ID-signed build, "
+        "and a Mac on which a person or a Device-Enrollment MDM approves the "
+        "activation. No GitHub-hosted runner is MDM-enrolled, and the tree has "
+        "no signing pipeline, no macOS lab seed and no reachable peer or oracle "
+        "to run the lifecycle against.",
+    "IOS-NE-FAIL-CLOSED":
+        "There is no executor for this criterion: the packet tunnel provider "
+        "does not run in the iOS simulator, so it needs a physical iPhone "
+        "running an IPA that still carries the packet-tunnel-provider "
+        "entitlement. Firebase Test Lab re-signs the IPA and Xcode Cloud tests "
+        "only on simulators; a private-device farm (AWS Device Farm private "
+        "devices with skipAppResign, Sauce Labs private devices, BrowserStack "
+        "Custom Device Lab) keeps the entitlement, but also needs device "
+        "signing in CI, an iOS lab seed and a peer and oracle the phone can "
+        "reach, none of which exists.",
+}
 
 
 def expected_commit() -> str:
@@ -423,6 +542,12 @@ def check_environment(criterion: str, ev: dict) -> list[str]:
     # path identities pass every check above -- both present, both non-empty --
     # and mean the protected and unprotected legs are the same path.
     problems += path_identity_problems(criterion, env, ORACLE_REQUIRED)
+    # The same comparison for the third address: a sentinel that egresses as one
+    # of the two paths is not an independent observer of them.
+    problems += sentinel_independence_problems(criterion, env, ORACLE_REQUIRED)
+    # And the rows whose evidence is a count, where "present and non-empty" is
+    # not the rule that was meant.
+    problems += positive_count_problems(criterion, env)
     # Same reason, different shape: a nested per-ABI map and a substring, neither
     # of which "this key equals this value" can state.
     problems += android_environment_problems(criterion, env)
@@ -505,15 +630,16 @@ def probe_criterion(stem: str, criterion: str, require_privileged: bool = False)
     # WHY THE JOB'S OWN OUTCOME IS READ AT ALL, when this script grades files.
     #
     # Because four different problems produce the same absent file, and one of
-    # them -- a SKIP, because a self-hosted runner is not registered -- is the
-    # one that most resembles routine absence and is the least routine thing in
-    # the list. "No evidence" is true of all four and useful about none of them.
+    # them -- a SKIP, because the one variable-gated job (`macos-signature`)
+    # found `TWINVPN_NOTARIZED_APP_URL` unset -- is the one that most resembles
+    # routine absence and is the least routine thing in the list. "No evidence"
+    # is true of all four and useful about none of them.
     results = job_results.load(EVIDENCE_DIR)
-    job_problem = job_results.problem(stem, criterion, results)
+    job_problem = job_results.problem(JOB_FOR_STEM.get(stem, stem), criterion, results)
     if not path.is_file():
         why = job_problem or (
             "no job outcome was recorded either, so nothing says whether it "
-            "failed, was cancelled, was skipped for want of a runner, or never "
+            "failed, was cancelled, was skipped on an unset variable, or never "
             "existed")
         return (NOT_EXECUTED,
                 f"no evidence at build/ci/evidence/{stem}.json -- {why}", {})
@@ -792,42 +918,74 @@ def build_rows(run: bool):
     # Each is now a REMOTELY EXECUTABLE, ENVIRONMENT-ATTESTED probe, and each
     # is strictly harder to fake than the row it replaced:
     #
-    #   * the three that make an egress claim are adjudicated by an EXTERNAL
-    #     leak oracle that the device can only reach by emitting a packet that
-    #     left it. `privileged: true` never proved anything about egress; a
-    #     third party's observation does.
+    #   * the ones that make an egress claim are adjudicated by a leak oracle
+    #     the device can only reach by emitting a packet that left it, and the
+    #     TOPOLOGY of that oracle is now attested rather than assumed --
+    #     `oracle_topology` says whether it stood outside or on a fabric the
+    #     run built for itself, and `sentinel_egress_identity` says the
+    #     heartbeat came from neither of the two paths being compared.
+    #     `privileged: true` never proved anything about egress; a third
+    #     party's observation does.
     #   * every one carries an `environment` attestation whose keys
     #     `PREREQUISITES` above checks BEFORE any test result is read, so a
     #     machine that was never capable of the claim cannot produce a green
     #     row however well its tests ran.
     #   * every one is bound to this exact commit and this exact workflow run.
     #
-    # THE macOS ROW BECAME TWO, and that is the point of splitting it.
-    # `MACOS-SYSEXT-LIFECYCLE` runs in developer mode, which accepts an
-    # extension a customer's Mac would refuse. While there was one macOS row, a
-    # green developer-mode lifecycle read as "the signed, notarized product
-    # works". `MACOS-PRODUCTION-SIGNATURE` is that other claim, and it can now
-    # be red while the lifecycle is green -- which is the true state of affairs
-    # more often than not.
+    # THE macOS ROW BECAME THREE, and each split was a separation of claims
+    # rather than a relaxation of one. `MACOS-SYSEXT-LIFECYCLE` runs in
+    # developer mode, which accepts an extension a customer's Mac would refuse,
+    # so while there was one macOS row a green developer-mode lifecycle read as
+    # "the signed, notarized product works": `MACOS-PRODUCTION-SIGNATURE` is
+    # that other claim. `MACOS-PF-BOOT-ANCHOR` is the third -- the part of the
+    # lifecycle row a hosted runner can honestly carry, which is the boot
+    # anchor being loaded, referenced by the main ruleset and enforced. What is
+    # left in the lifecycle row after that split is what needs a paid Apple
+    # team, a Developer-ID build and an approval only a person or an MDM can
+    # give, and it has no executor at all.
     #
-    # No runner, no instance, or no oracle still means no file, means
-    # NOT-EXECUTED, means Phase 5 is not eligible. Absence of evidence is not
-    # evidence of absence of defects, and it never became cheaper to fake.
+    # TWO ROWS HAVE NO LANE, and they still print. `NO_EXECUTOR` above names
+    # the missing capability for each; the row reads NOT-EXECUTED, counts
+    # against eligibility exactly as a FAIL does, and is not deferred --
+    # nothing here makes a criterion nobody can run look discharged. No runner,
+    # no instance, or no oracle still means no file, means NOT-EXECUTED, means
+    # Phase 5 is not eligible. Absence of evidence is not evidence of absence
+    # of defects, and it never became cheaper to fake.
     for stem, criterion, label in (
         ("windows-killswitch", "WINDOWS-WFP-KILLSWITCH",
-         "Windows WFP kill switch (disposable nested guest, external oracle)"),
+         "Windows WFP kill switch (hosted windows-2025, disposable nested "
+         "guest, in-box oracle)"),
         ("android-16k", "ANDROID-16K-PAGE-SIZE",
          "Android 16 KiB page size (official 16 KB emulator image)"),
+        ("macos-pf-anchor", "MACOS-PF-BOOT-ANCHOR",
+         "macOS KS-19 boot anchor is loaded, referenced and enforced by pf "
+         "(hosted macos-26, root)"),
         ("macos-sysext", "MACOS-SYSEXT-LIFECYCLE",
-         "macOS system-extension lifecycle (EC2 Mac, external oracle)"),
+         "macOS system-extension lifecycle with external leak observation (no "
+         "executor available: needs a paid Apple team, a Developer-ID build "
+         "and an MDM-enrolled Mac — see docs)"),
         ("macos-signature", "MACOS-PRODUCTION-SIGNATURE",
          "macOS production signature, notarization and stapling"),
-        ("ios-corellium", "IOS-NE-FAIL-CLOSED",
-         "iOS NetworkExtension fail-closed under injected failure (Corellium)"),
+        ("ios-failclosed-configuration", "IOS-FAILCLOSED-CONFIGURATION",
+         "iOS installs the fail-closed configuration that earns the OS's "
+         "documented enforcement (simulator)"),
         ("ios-profile-removal", "IOS-PROFILE-REMOVAL-HONESTY",
-         "iOS consumer profile removal is reported honestly"),
+         "iOS consumer profile removal is reported honestly (simulator, "
+         "injected removal observation)"),
+        ("ios-ne-failclosed", "IOS-NE-FAIL-CLOSED",
+         "iOS NetworkExtension fail-closed under injected failure (real "
+         "device; no executor available — see docs)"),
     ):
         v, d, ev = probe_criterion(stem, criterion)
+        # WHY A ROW WITH NO LANE STILL NAMES ITS BLOCKER. Two criteria have no
+        # job in the workflow, because nothing that can discharge them has been
+        # funded or built to run one on -- which `job_results` correctly
+        # reports as "never scheduled". True, and not the useful sentence: a
+        # reader has to know WHICH capability is missing before they can tell
+        # an unprovisioned rig from an unfunded one. The row stays NOT-EXECUTED
+        # either way and still counts against eligibility.
+        if v == NOT_EXECUTED and criterion in NO_EXECUTOR:
+            d += "  " + NO_EXECUTOR[criterion]
         add("Platform criteria", label, v, d)
         rows[-1]["evidence"] = ev
         rows[-1]["criterion_id"] = criterion
@@ -872,14 +1030,19 @@ def main() -> int:
 
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO,
                             capture_output=True, text=True).stdout.strip()
-    dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=REPO,
-                                capture_output=True, text=True).stdout.strip())
+    # The stamp names its cause: a DIRTY report that could not say which paths
+    # made it dirty cost three runs to trace (a deleted tracked report, then an
+    # unignored artifact staging tree -- ownership.md §12.8).
+    dirty_paths = subprocess.run(["git", "status", "--porcelain"], cwd=REPO,
+                                 capture_output=True, text=True).stdout.strip().splitlines()
+    dirty = bool(dirty_paths)
 
     doc = {
         "schema_version": 1,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "commit": commit,
         "worktree_dirty": dirty,
+        "worktree_dirty_paths": dirty_paths,
         "probes_executed": args.run,
         "rows": rows,
         "required_total": len(required),
@@ -893,6 +1056,12 @@ def main() -> int:
     lines = ["# First Implementation Wave — acceptance report", "",
              f"Commit `{commit}`{' (DIRTY WORKTREE — not release evidence)' if dirty else ''}",
              f"Probes executed: **{args.run}**", ""]
+    if dirty:
+        lines += ["Dirty paths (`git status --porcelain`):", ""]
+        lines += [f"    {line}" for line in dirty_paths[:40]]
+        if len(dirty_paths) > 40:
+            lines += [f"    … and {len(dirty_paths) - 40} more"]
+        lines += [""]
     section = None
     for r in rows:
         if r["section"] != section:

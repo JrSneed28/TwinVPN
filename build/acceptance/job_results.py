@@ -7,11 +7,11 @@ THE HOLE THIS CLOSES
 one leaves nothing behind. That is correct and it is nearly silent: the row
 reads `no evidence at build/ci/evidence/<stem>.json`, which is true of a job
 that failed in setup, a job that was cancelled by its own timeout, a job that
-was SKIPPED because its self-hosted runner is not registered, and a job that
-does not exist in the workflow at all. Four different problems, one sentence,
-and the most dangerous of them -- the skip -- is the one that looks most like
-routine absence. A rig that quietly stopped existing should be as loud as a rig
-that failed, and under the old wording it was quieter.
+was SKIPPED because `TWINVPN_NOTARIZED_APP_URL` is unset, and a job that does
+not exist in the workflow at all. Four different problems, one sentence, and
+the most dangerous of them -- the skip -- is the one that looks most like
+routine absence. A variable nobody ever set should be as loud as a job that
+failed, and under the old wording it was quieter.
 
 So the acceptance job writes `build/ci/evidence/job-results.json`, a flat map of
 job name to the `needs.<job>.result` GitHub reports for it, and this module says
@@ -20,15 +20,19 @@ problem, and it is `success`.
 
 WHY A SKIP IS RED AND NOT A SHRUG
 =================================
-A self-hosted platform job is gated on a repository variable so that an
-unregistered runner makes it SKIP rather than queue for twenty-four hours. That
-is the right failure mode for the WORKFLOW -- a check that cannot go red is not
-a gate -- and it must not become the wrong failure mode for the REPORT. A
-skipped `windows-killswitch` means nobody tested the Windows kill switch, which
-is exactly as much evidence about the kill switch as a failed run: none. The
-skip is a fact about the fleet, not about the product, and the report says so in
-those words rather than printing the same "no evidence" line it prints for a
-crash.
+The `macos-signature` job is gated on a repository variable because it inspects
+a signed, notarized product that no job in this repository builds: the
+archive's URL, its pinned SHA-256 and the Team ID have to be supplied, and while
+`TWINVPN_NOTARIZED_APP_URL` is unset the job SKIPS by name rather than failing
+on a download it cannot attempt. That is the right failure mode for the
+WORKFLOW -- the job has nothing to inspect -- and it must not become the wrong
+failure mode for the REPORT. A skipped `macos-signature` means nobody inspected
+the signature, which is exactly as much evidence about the product as a failed
+run: none. The skip is a fact about the account's configuration, not about the
+product, and the report says so in those words rather than printing the same
+"no evidence" line it prints for a crash. The only other `if:` in the gate is
+the fork guard on the two Apple jobs, and a fork's pull request skips them for
+the same kind of reason: nothing about the product.
 
 `NOT-EXECUTED` is the verdict for all of these. It is not a softer `FAIL`: the
 eligibility conjunction counts it identically, and it exists only so a reader
@@ -54,10 +58,14 @@ JOB_RESULT_MEANING = {
     "cancelled": ("was CANCELLED -- which is also what a `timeout-minutes` "
                   "expiry produces, so the run most likely to have been cut off "
                   "mid-sequence is the one that reports this"),
-    "skipped": ("was SKIPPED: its specialized runner or its gating repository "
-                "variable is not configured, so nobody tested {criterion} in "
-                "this run. An absent rig is a fact about the fleet, not "
-                "evidence about the product"),
+    "skipped": ("was SKIPPED: its `if:` condition was false, so nobody tested "
+                "{criterion} in this run. The one variable-gated job is "
+                "`macos-signature`, which skips while "
+                "`TWINVPN_NOTARIZED_APP_URL` is unset (it, "
+                "`TWINVPN_NOTARIZED_APP_SHA256` and `TWINVPN_TEAM_ID` are "
+                "configured together); the only other skip is a fork's pull "
+                "request. An unset Apple variable is a fact about the account, "
+                "not evidence about the product"),
     "neutral": ("returned `neutral`, which is not a pass and is not a claim "
                 "about {criterion} either way"),
     "action_required": ("is waiting on a manual action and therefore has not "

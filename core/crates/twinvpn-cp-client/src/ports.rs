@@ -24,7 +24,7 @@
 //! a `Session` exists.
 
 use futures_core::future::BoxFuture;
-use twinvpn_types::{DeviceId, TwinnetId};
+use twinvpn_types::{codes, DeviceId, ReasonCode, TwinnetId};
 
 use crate::octets::ReceivedOctets;
 use crate::state::{CachedPeer, DocumentType, StoredDocumentMark};
@@ -284,14 +284,35 @@ pub trait ControlPlaneStore: Send + Sync {
     ) -> BoxFuture<'a, Result<(), StoreFailure>>;
 }
 
+/// Which durable floor refused a write.
+///
+/// Named because the three carry three registered codes, and a refusal that
+/// did not say which floor it came from could only be reported under one of
+/// them: the C2 cursor is S-27's `CONTROL.CONSISTENCY.REPLICA_BEHIND_CURSOR`,
+/// a document version is ADR-0009 R-5's
+/// `CONTROL.CONSISTENCY.VERSION_ROLLBACK_REJECTED`, and only the trust floor
+/// is ADR-0007 N-26's `AUTH.TRUST_EPOCH_ROLLBACK`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MonotoneMark {
+    /// The C2 `net_seq` high-water mark (S-27).
+    Cursor,
+    /// The `TwinNet`-wide `trust_epoch` (ADR-0007 N-26, ADR-0009 R-6).
+    TrustEpoch,
+    /// A per-`doc_type` `doc_version` high-water mark (ADR-0009 R-5, R-7).
+    DocumentVersion,
+}
+
 /// Why a store operation failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum StoreFailure {
     /// A monotone floor refused the write. **This is a security control**, not
     /// an error to retry around (ADR-0008 §7.1).
-    #[error("monotone floor refused: offered {offered}, floor {floor}")]
+    #[error("{mark:?} floor refused: offered {offered}, floor {floor}")]
     RollbackRefused {
+        /// Which floor refused.
+        mark: MonotoneMark,
         /// What was offered.
         offered: u64,
         /// The durable floor.
@@ -306,6 +327,36 @@ pub enum StoreFailure {
     /// The vault is not available: a locked device, a corrupt record.
     #[error("the store is unavailable")]
     Unavailable,
+}
+
+impl StoreFailure {
+    /// The registered `reason_code` — the same split [`crate::CpError`] makes
+    /// for the in-memory checks, so a refusal reads the same whether the floor
+    /// that refused it lives in this crate or behind the store.
+    ///
+    /// `Unavailable` takes `twinvpn-store`'s own coarsening of a Tier-1
+    /// refusal (`STORE.KEYSTORE_UNAVAILABLE`, `TRANSIENT`, wait); this variant
+    /// cannot tell a locked device from a corrupt record, so it reports the
+    /// non-accusatory of the two rather than guessing.
+    #[must_use]
+    pub const fn reason_code(&self) -> ReasonCode {
+        match self {
+            StoreFailure::RollbackRefused {
+                mark: MonotoneMark::TrustEpoch,
+                ..
+            } => codes::AUTH_TRUST_EPOCH_ROLLBACK,
+            StoreFailure::RollbackRefused {
+                mark: MonotoneMark::Cursor,
+                ..
+            } => codes::CONTROL_CONSISTENCY_REPLICA_BEHIND_CURSOR,
+            StoreFailure::RollbackRefused {
+                mark: MonotoneMark::DocumentVersion,
+                ..
+            } => codes::CONTROL_CONSISTENCY_VERSION_ROLLBACK_REJECTED,
+            StoreFailure::Forked { .. } => codes::CONTROL_CONSISTENCY_FORKED_HISTORY_DETECTED,
+            StoreFailure::Unavailable => codes::STORE_KEYSTORE_UNAVAILABLE,
+        }
+    }
 }
 
 #[cfg(test)]

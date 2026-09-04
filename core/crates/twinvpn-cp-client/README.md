@@ -105,9 +105,10 @@ CONTROL.EVENT_WRONG_PUBLISHER  event_type=device_revoked observed_publisher=orig
 ```
 
 There is no `Other(String)` and no `#[from] std::io::Error`: an unregistered
-failure has nowhere to go. `err.is_security_event()` distinguishes the three
+failure has nowhere to go. `err.is_security_event()` distinguishes the
 conditions the corpus requires be reported as security events rather than as
-parse or connection errors, and `err.permits_offline_reconnect()` distinguishes
+parse or connection errors (ADR-0002 N-2, S-4, ADR-0008 §7.1, ADR-0009
+R-4/R-5), and `err.permits_offline_reconnect()` distinguishes
 *unavailability* (which I5 protects against) from *an authoritative instruction
 that trust has ended* (which it does not).
 

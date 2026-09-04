@@ -643,28 +643,72 @@ fault is in another process entirely; on iOS/iPadOS, where the app process hosts
 `catch_unwind` and poison are what contain it. F-10's purity closes the remaining gap — a poisoned
 instance still renders diagnostics, so the UI can display the fault that poisoned it.
 
+> **Amended 2026-09-04 — reprinted from `twinvpn.h` at `TW_ABI_MINOR 3`.** The two listings
+> below are the header's declarations copied byte-for-byte with its comments elided; the header is
+> the ABI of record and this section is its mirror, not its source. As originally printed they
+> showed the pre-implementation shape: a one-line `tw_slice`, the instance functions without
+> `tw_core_submit_response`, and a vtable without `buf_bytes`/`buf_free`, `identity_agree`,
+> `secure_item_delete`, `record_aead_custody`, `elapsed_millis`/`boot_id` (two of W-26's four
+> additions) and `installed_ruleset`/`current_generation` (W-24, minor 1→2). The 2→3 bump —
+> `tw_core_submit_response`, and the MI frame's `idempotency_key` honoured where the catalogue
+> requires one — landed in 7df64d7 (2026-08-29) and is recorded here for the first time; the
+> header's changelog above `TW_ABI_MINOR` gives VR-1's reasoning for why each is a minor addition
+> and not an `abi_major` break. In the header the vtable precedes the instance functions; the
+> order below keeps this section's F-9 placement.
+
 ```c
-/* twinvpn.h — ABI major 1. Hand-written; this file is the ABI of record. */
-typedef struct tw_core tw_core;                                   /* opaque instance   */
-typedef struct tw_buf  tw_buf;                                    /* opaque core alloc */
-typedef struct { const uint8_t *ptr; size_t len; } tw_slice;
+#define TW_ABI_MAJOR 1u
 
-uint32_t  tw_abi_major(void);
-uint32_t  tw_abi_minor(void);
-tw_slice  tw_build_identity(void);        /* S-46; static storage, never freed        */
+#define TW_ABI_MINOR 3u
 
-tw_core  *tw_core_create(uint32_t abi_major_expected,
-                         const tw_host_vtable *host,
-                         tw_slice config, tw_buf **err_out);
-void      tw_core_destroy(tw_core *);
+typedef struct tw_core tw_core;
+typedef struct tw_buf  tw_buf;
 
-int32_t   tw_core_submit(tw_core *, tw_slice command, tw_buf **err_out);
-int32_t   tw_core_next_event(tw_core *, uint32_t timeout_ms,
-                             tw_buf **event_out, tw_buf **err_out);
-void      tw_core_wake(tw_core *);        /* callable from any thread                 */
+typedef struct {
+  const uint8_t *ptr;
+  size_t         len;
+} tw_slice;
 
-tw_slice  tw_buf_bytes(const tw_buf *);
-void      tw_buf_free(tw_buf *);
+#define TW_OK       0
+#define TW_ERR      1
+#define TW_TIMEOUT  2
+
+#define TW_RULESET_BLOCKED   0
+#define TW_RULESET_PROTECTED 1
+
+#define TW_LINK_DOWN 0
+#define TW_LINK_UP   1
+
+uint32_t tw_abi_major(void);
+
+uint32_t tw_abi_minor(void);
+
+tw_slice tw_build_identity(void);
+
+uint32_t tw_reason_registry_version(void);
+
+tw_buf *tw_render_diagnostic(tw_slice reason_code, tw_slice evidence,
+                             tw_slice locale_bcp47, tw_slice platform_ctx);
+
+tw_core *tw_core_create(uint32_t abi_major_expected,
+                        const tw_host_vtable *host,
+                        tw_slice config, tw_buf **err_out);
+
+void tw_core_destroy(tw_core *core);
+
+int32_t tw_core_submit(tw_core *core, tw_slice command, tw_buf **err_out);
+
+int32_t tw_core_submit_response(tw_core *core, tw_slice command,
+                                tw_buf **response_out, tw_buf **err_out);
+
+int32_t tw_core_next_event(tw_core *core, uint32_t timeout_ms,
+                           tw_buf **event_out, tw_buf **err_out);
+
+void tw_core_wake(tw_core *core);
+
+tw_slice tw_buf_bytes(const tw_buf *buf);
+
+void tw_buf_free(tw_buf *buf);
 ```
 
 **F-9 — the host vtable, and the inversion of `subscribe_network_change`.** The vtable carries
@@ -672,30 +716,64 @@ void      tw_buf_free(tw_buf *);
 `uint32_t size`, so entries may be added without an `abi_major` bump.
 
 ```c
-typedef struct {
-  uint32_t size;  void *ctx;
-  /* docs/networking.md §5.1 */
-  int32_t (*create_interface)(void*, tw_slice name, uint32_t mtu, uint64_t *h, tw_buf **err);
-  int32_t (*apply)(void*, uint64_t h, uint64_t contract_generation, tw_slice plan, tw_buf **err);
-  int32_t (*rollback)(void*, uint64_t h, uint64_t contract_generation, tw_buf **err);
-  int32_t (*set_link)(void*, uint64_t h, int32_t up, tw_buf **err);
-  int32_t (*set_ruleset)(void*, uint64_t h, int32_t ruleset, tw_buf **err); /* 0=BLOCKED 1=PROTECTED */
-  int32_t (*query_link_facts)(void*, tw_buf **facts, tw_buf **err);
-  int32_t (*destroy_interface)(void*, uint64_t h, tw_buf **err);
-  /* subscribe_network_change: see below — realized inbound, deliberately absent here */
-  /* CB-5 capabilities */
-  int32_t (*identity_public)(void*, tw_buf **spki, tw_buf **err);
-  int32_t (*identity_sign)(void*, tw_slice msg, tw_buf **sig, tw_buf **err);
-  int32_t (*identity_attestation)(void*, tw_buf **att, tw_buf **err); /* hardware_backed, truthfully */
-  /* Tier 1 ONLY — secure-storage-shaped items (SEK, K_bind, the S-53 anchor).
-     Whole-blob atomic replacement, which is the shape Keychain / Keystore / DPAPI / libsecret
-     actually have. NOT a general store: see CB-7. */
-  int32_t (*secure_item_read)(void*, tw_slice key, tw_buf **val, tw_buf **err);
-  int32_t (*secure_item_write_atomic)(void*, tw_slice key, tw_slice val, tw_buf **err);
-  /* Tier 2 — the shell vends the directory and stamps its platform attributes; the core does
-     the I/O beneath it. The path is INJECTED at construction, never discovered (CD-2). */
-  int32_t (*store_root)(void*, tw_buf **path_utf8, tw_buf **err);
-  int32_t (*os_csprng)(void*, uint8_t *out, size_t len);
+typedef struct tw_host_vtable {
+
+  uint32_t size;
+
+  void *ctx;
+
+  tw_slice (*buf_bytes)(void *ctx, const tw_buf *buf);
+
+  void (*buf_free)(void *ctx, tw_buf *buf);
+
+  int32_t (*create_interface)(void *ctx, tw_slice name, uint32_t mtu,
+                              uint64_t *h, tw_buf **err);
+
+  int32_t (*apply)(void *ctx, uint64_t h, uint64_t contract_generation,
+                   tw_slice plan, tw_buf **err);
+
+  int32_t (*rollback)(void *ctx, uint64_t h, uint64_t contract_generation,
+                      tw_buf **err);
+
+  int32_t (*set_link)(void *ctx, uint64_t h, int32_t up, tw_buf **err);
+
+  int32_t (*set_ruleset)(void *ctx, uint64_t h, int32_t ruleset, tw_buf **err);
+
+  int32_t (*query_link_facts)(void *ctx, tw_buf **facts, tw_buf **err);
+
+  int32_t (*destroy_interface)(void *ctx, uint64_t h, tw_buf **err);
+
+  int32_t (*identity_public)(void *ctx, tw_buf **spki, tw_buf **err);
+
+  int32_t (*identity_sign)(void *ctx, tw_slice msg, tw_buf **sig,
+                           tw_buf **err);
+
+  int32_t (*identity_agree)(void *ctx, tw_slice peer_public,
+                            tw_buf **shared, tw_buf **err);
+
+  int32_t (*identity_attestation)(void *ctx, tw_buf **att, tw_buf **err);
+
+  int32_t (*secure_item_read)(void *ctx, tw_slice key, tw_buf **val,
+                              tw_buf **err);
+  int32_t (*secure_item_write_atomic)(void *ctx, tw_slice key, tw_slice val,
+                                      tw_buf **err);
+  int32_t (*secure_item_delete)(void *ctx, tw_slice key, tw_buf **err);
+
+  int32_t (*store_root)(void *ctx, tw_buf **path_utf8, tw_buf **err);
+
+  int32_t (*record_aead_custody)(void *ctx);
+
+  int32_t (*os_csprng)(void *ctx, uint8_t *out, size_t len);
+
+  int32_t (*elapsed_millis)(void *ctx, uint64_t *out);
+
+  int32_t (*boot_id)(void *ctx, uint8_t out[16]);
+
+  int32_t (*installed_ruleset)(void *ctx, uint64_t h, int32_t *ruleset_out,
+                               int32_t *present_out, tw_buf **err);
+
+  int32_t (*current_generation)(void *ctx, uint64_t h, uint64_t *generation_out,
+                                int32_t *present_out, tw_buf **err);
 } tw_host_vtable;
 ```
 
@@ -859,7 +937,14 @@ section supplies the mechanism.
 each consumer, so adding a consumer cannot shift an existing consumer's stream.
 [ADR-0006](ADR-0006-relay-discovery-and-failover.md)'s HRW hash and its
 `uniform(0, T_REGION_SPREAD)` draw take their streams from `rng_for("relay/hrw")` and
-`rng_for("relay/region-spread")`, which is what makes them testable.
+`rng_for("relay/region-spread")`, which is what makes them testable. **W-1 split** — finding
+**W-1** in `docs/implementation/ownership.md` §8, recorded here on that row's disposition
+(2026-09-04): `twinvpn-env` declares `Env::rng_for` and the `StreamDerivation` trait and carries no
+cryptographic dependency; the HKDF-SHA-256 derivation is supplied by `twinvpn-crypto` — `HkdfSha256`
+in `core/crates/twinvpn-crypto/src/kdf.rs` implements `StreamDerivation` — through the binding, not
+by `Env` itself, because CD-I2 confines cryptographic dependencies to `twinvpn-crypto` and §11.7's
+arrow already points from `twinvpn-crypto` to `twinvpn-env`, so a derivation inside `Env` would be
+a cycle. The derivation's substance above is unchanged; only where it lives is.
 
 **CD-5 — the mock adapter is the payoff.** Because CB-2 puts every decision in the core, binding
 `twinvpn-platform`'s trait to a mock exercises 100% of the decision logic on a Linux CI runner with

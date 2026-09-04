@@ -43,9 +43,28 @@ use std::sync::Arc;
 use twinvpnsvc::service::{logging, privilege, runtime, start, StartSequence, StartupRefusal};
 
 fn main() -> std::process::ExitCode {
-    // PS-11: whether the SCM started us decides both the log format and whether
-    // this build may claim a restart guarantee. Read before the subscriber is
-    // installed, because it selects the subscriber.
+    // **The SCM handshake is attempted FIRST, before logging and before
+    // anything else.** ADR-0016 §11.6's supervision row and PS-11: a process the
+    // service control manager started has ~30 s to call
+    // `StartServiceCtrlDispatcherW`, and one that never calls it is killed with
+    // `ERROR_SERVICE_REQUEST_TIMEOUT` (1053) however correct the rest of its
+    // start sequence was. That is exactly what the hosted kill-switch lane
+    // measured, so the connection attempt cannot sit behind any other step.
+    //
+    // On success this blocks for the whole life of the service and returns
+    // after `service_main` has finished; the exit code is the one that recorded.
+    if dispatch_to_scm() {
+        return std::process::ExitCode::from(
+            SERVICE_EXIT.load(std::sync::atomic::Ordering::Acquire),
+        );
+    }
+
+    // ERROR_FAILED_SERVICE_CONTROLLER_CONNECT: run by hand, from a shell, or
+    // under a debugger. PS-11's foreground path, unchanged.
+    //
+    // `started_by_scm` is read rather than hard-coded `false`, and it is now a
+    // genuine read: `dispatch` has run and stored its answer, so the value the
+    // subscriber's JSON-vs-text choice sees is the dispatcher's own.
     let supervised = started_by_scm();
 
     // The shell installs the subscriber, because the core deliberately installs
@@ -66,21 +85,144 @@ fn main() -> std::process::ExitCode {
         );
     }
 
-    match run() {
+    // The sender is bound rather than dropped, and that is the whole of the
+    // foreground stop policy: a dropped sender closes the channel, which
+    // `serve` would see as a stop. Nothing flips it, so `serve` runs until the
+    // process is signalled — which is what running in the foreground means.
+    let (_stop, stop_rx) = tokio::sync::watch::channel(false);
+    let outcome = run(
+        stop_rx,
+        &mut || {
+            tracing::info!(
+                target: "twinvpn.service",
+                "the management endpoint is bound and accepting; §11.6 step 8 is reached. \
+                 There is no SCM to tell, so this is the only place it is said"
+            );
+        },
+        &mut |_adapter| {},
+    );
+
+    match outcome {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(refusal) => {
-            // Never a bare message: the registered code is the contract, and the
-            // sentence is for a human reading the Event Log.
-            tracing::error!(
-                target: "twinvpn.service",
-                reason_code = refusal.code,
-                specified_code = refusal.specified,
-                "the service cannot start"
-            );
-            eprintln!("twinvpnsvc: {}: {}", refusal.code, refusal.detail);
+            report_refusal(&refusal);
             std::process::ExitCode::from(refusal.exit)
         }
     }
+}
+
+/// The exit code `service_main` recorded, for `main` to exit with.
+///
+/// A `static` because the two are separated by `StartServiceCtrlDispatcherW`:
+/// the SCM calls `service_main` on a thread of its own and returns to `main`
+/// only afterwards, so there is no value to return and no channel to return it
+/// through.
+static SERVICE_EXIT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Hands this process to the SCM (ADR-0016 §11.6, PS-11).
+#[cfg(windows)]
+fn dispatch_to_scm() -> bool {
+    twinvpnsvc::win32::scm::dispatch(twinvpnsvc::SERVICE_NAME, Some(service_main))
+}
+
+/// The non-Windows answer: there is no dispatcher to connect to.
+#[cfg(not(windows))]
+fn dispatch_to_scm() -> bool {
+    false
+}
+
+/// The SCM's entry point, run on a thread the dispatcher creates.
+///
+/// Everything the SCM needs to hear happens here and in this order: the handler
+/// is registered before a status is reported, because a service that reported
+/// `START_PENDING` with no handler could not be told to stop; and
+/// `START_PENDING` is reported before §11.6's sequence begins, because the SCM's
+/// 30 s start timeout is already running.
+#[cfg(windows)]
+extern "system" fn service_main(_argc: u32, _argv: *mut twinvpnsvc::win32::scm::PWSTR) {
+    // PS-11, and this is the only honest place to say it: this function runs
+    // *because* the dispatcher connected. `dispatch` cannot record it, because
+    // `StartServiceCtrlDispatcherW` does not return until after this function
+    // has ended — see `win32::scm::mark_dispatched`.
+    twinvpnsvc::win32::scm::mark_dispatched();
+
+    // `supervised = true` as a fact rather than a query, for the same reason.
+    if let Err(reason) = logging::install(true) {
+        eprintln!("twinvpnsvc: {reason}");
+        SERVICE_EXIT.store(70, std::sync::atomic::Ordering::Release);
+        return;
+    }
+
+    let (stop, stop_rx) = tokio::sync::watch::channel(false);
+    let supervisor = match twinvpnsvc::service::supervisor::Supervisor::install(stop) {
+        Ok(supervisor) => supervisor,
+        Err(failure) => {
+            // Fatal, and reported as a start failure rather than a silent exit:
+            // a service with no control handler cannot be stopped and would
+            // hang every shutdown.
+            tracing::error!(
+                target: "twinvpn.service",
+                reason_code = "PLATFORM.ADAPTER_UNAVAILABLE",
+                call = failure.call,
+                status = format_args!("{:#010x}", failure.status.get()),
+                "the SCM refused the control handler registration"
+            );
+            SERVICE_EXIT.store(71, std::sync::atomic::Ordering::Release);
+            return;
+        }
+    };
+
+    // The 30 s start timeout is already counting; `START_WAIT_HINT_MS` is the
+    // budget this service declares against it, and the checkpoint is LC-37's
+    // liveness signal.
+    supervisor.report(twinvpnsvc::service::scm::ServiceState::StartPending {
+        checkpoint: twinvpnsvc::service::supervisor::FIRST_CHECKPOINT,
+    });
+
+    let outcome = run(
+        stop_rx,
+        // PS-18: `SERVICE_RUNNING` is reported from inside `serve`, after the
+        // pipe is bound with its DACL and before the first accept — never
+        // earlier. A service that reported running with no management endpoint
+        // would be reporting itself as running while being unmanageable.
+        &mut || supervisor.report(twinvpnsvc::service::scm::ServiceState::Running),
+        &mut |adapter| {
+            supervisor
+                .attach_adapter(Arc::clone(adapter) as Arc<dyn twinvpn_platform::PlatformAdapter>);
+        },
+    );
+
+    if let Err(refusal) = &outcome {
+        report_refusal(refusal);
+    }
+    supervisor.report(twinvpnsvc::service::scm::ServiceState::StopPending {
+        checkpoint: twinvpnsvc::service::supervisor::FIRST_CHECKPOINT,
+    });
+    supervisor.report(twinvpnsvc::service::supervisor::stopped_for(
+        outcome.as_ref().err(),
+    ));
+    SERVICE_EXIT.store(
+        twinvpnsvc::service::supervisor::process_exit_code(outcome.as_ref().err()),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
+/// A refusal, on both the log and the standard error stream.
+///
+/// Never a bare message: the registered code is the contract, and the sentence
+/// is for a human reading the Event Log.
+fn report_refusal(refusal: &StartupRefusal) {
+    // `detail` is on the log line as well as on stderr: under the SCM there
+    // is no stderr, and the hosted kill-switch lane measured a refusal whose
+    // code (POLICY.KILLSWITCH.ARM_FAILED) survived and whose reason did not.
+    tracing::error!(
+        target: "twinvpn.service",
+        reason_code = refusal.code,
+        specified_code = refusal.specified,
+        detail = %refusal.detail,
+        "the service cannot start"
+    );
+    eprintln!("twinvpnsvc: {}: {}", refusal.code, refusal.detail);
 }
 
 /// Whether the SCM started this process.
@@ -100,8 +242,25 @@ fn started_by_scm() -> bool {
 }
 
 /// §11.6's sequence.
+///
+/// The three parameters are the supervisor's seam, and none of them is a
+/// decision this function makes:
+///
+/// - `stop` flips to `true` at most once, when the SCM delivers
+///   `SERVICE_CONTROL_STOP` or `SERVICE_CONTROL_PRESHUTDOWN`. `serve` returns
+///   `Ok(())` within `STOP_WAIT_HINT_MS` of that.
+/// - `on_ready` is called by `serve` exactly once, after the pipe is bound with
+///   its DACL and before the first accept, and never if binding failed. PS-18
+///   is what puts it there and not here.
+/// - `on_adapter` hands the adapter to the supervisor as soon as step 4 has
+///   built one, so a stop arriving during steps 4b–8 can latch it. It is a
+///   callback rather than a return value because those steps have not finished.
 #[allow(clippy::too_many_lines)]
-fn run() -> Result<(), StartupRefusal> {
+fn run(
+    stop: tokio::sync::watch::Receiver<bool>,
+    on_ready: &mut dyn FnMut(),
+    on_adapter: &mut dyn FnMut(&Arc<twinvpn_platform_windows::WindowsPlatformAdapter>),
+) -> Result<(), StartupRefusal> {
     let mut sequence = StartSequence::default();
 
     // ---- 1. the single-instance lock (LC-5, PS-1) -------------------------
@@ -145,6 +304,11 @@ fn run() -> Result<(), StartupRefusal> {
 
     // ---- 4. the adapter, and the capability probe -------------------------
     let adapter = Arc::new(build_adapter()?);
+    // Handed over here and not later: from this line on there is enforcement
+    // state and an open WFP engine handle, so a stop delivered during 4b–8 has
+    // something to latch. ADR-0022 §11.4's 2 s budget is only reachable if an
+    // in-flight adapter call can be made to return at once.
+    on_adapter(&adapter);
     let adapter_posture = adapter.posture();
     tracing::info!(
         target: "twinvpn.service",
@@ -259,6 +423,12 @@ fn run() -> Result<(), StartupRefusal> {
     // through `Core::create`; there is no separate durable-store open here.
     sequence.state_rehydrated = true;
 
+    // The lab guest's stand-in for the control plane and the pairing ceremony.
+    // Absent from `default`, and a no-op even here unless `TWINVPN_LAB_SEED_FILE`
+    // names a file. See `twinvpnsvc::lab_seed`.
+    #[cfg(feature = "lab-seed")]
+    twinvpnsvc::lab_seed::seed_from_env(&core)?;
+
     if !sequence.ready() {
         return Err(StartupRefusal::internal(format!(
             "the §11.6 start sequence did not complete: {:?} outstanding",
@@ -270,42 +440,51 @@ fn run() -> Result<(), StartupRefusal> {
     // The guard is passed in rather than dropped early: LC-5's property is that
     // a LIVE authority holds it for as long as it is one, and passing it makes
     // the lifetime a thing the compiler enforces rather than a comment.
-    serve(&env, &tokio_runtime, &adapter, &core, lock)
+    serve(&env, &tokio_runtime, &adapter, &core, lock, stop, on_ready)
 }
 
 /// Steps 7 and 8: bind the pipe with its DACL, then accept.
 ///
-/// # The gap, named
+/// The whole of it is `twinvpnsvc::win32::listener::serve`, because every line of
+/// it names Windows and this crate confines that to one module. What is left here
+/// is the platform dispatch [`acquire_instance_lock`] and [`build_adapter`]
+/// already use.
 ///
-/// MI-A3 requires **the agent** to create the endpoint and write its DACL at
-/// every start, and [`twinvpnsvc::mi::dacl::pipe_sddl`] renders the descriptor.
-/// What is missing is the two calls between them:
-/// `ConvertStringSecurityDescriptorToSecurityDescriptorW`, and a
-/// `tokio::net::windows::named_pipe::ServerOptions` accept loop with
-/// `.first_pipe_instance(true)`, `.reject_remote_clients(true)` and
-/// `.pipe_mode(PipeMode::Message)`.
-///
-/// The server itself is written and tested —
-/// [`twinvpnsvc::service::server::serve`] is generic over the transport and its
-/// tests drive a real client against it through `tokio::io::duplex`. What has
-/// not been written is the listener that supplies a real pipe.
-///
-/// PS-18's shape applies: a service that reached `SERVICE_RUNNING` with no
-/// management endpoint would be reporting itself as running while being
-/// unmanageable, so this refuses by name.
+/// `stop` flips at most once, when the SCM asks this service to stop; in
+/// foreground mode it never flips. `on_ready` is called exactly once, after the
+/// first instance is bound with its DACL and before the first accept, and never
+/// if the bind failed (PS-18). `lock` is released on return (LC-5).
+#[cfg(windows)]
+fn serve(
+    env: &twinvpn_env::Env,
+    runtime: &Arc<twinvpn_env::binding::tokio_rt::TokioRuntime>,
+    adapter: &Arc<twinvpn_platform_windows::WindowsPlatformAdapter>,
+    core: &Arc<twinvpn_core::Core>,
+    lock: InstanceLock,
+    stop: tokio::sync::watch::Receiver<bool>,
+    on_ready: &mut dyn FnMut(),
+) -> Result<(), StartupRefusal> {
+    twinvpnsvc::win32::listener::serve(env, runtime, adapter, core, lock, stop, on_ready)
+}
+
+/// The non-Windows answer. **Never reached**: [`acquire_instance_lock`] refuses
+/// off Windows and `run` stops at step 1. Present for the same reason
+/// [`build_adapter`]'s twin is.
+#[cfg(not(windows))]
 fn serve(
     _env: &twinvpn_env::Env,
     _runtime: &Arc<twinvpn_env::binding::tokio_rt::TokioRuntime>,
     _adapter: &Arc<twinvpn_platform_windows::WindowsPlatformAdapter>,
     _core: &Arc<twinvpn_core::Core>,
     _lock: InstanceLock,
+    _stop: tokio::sync::watch::Receiver<bool>,
+    _on_ready: &mut dyn FnMut(),
 ) -> Result<(), StartupRefusal> {
     Err(StartupRefusal::platform(
-        "MGMT.UNAVAILABLE",
-        "MGMT.UNAVAILABLE",
-        "the named-pipe listener is not implemented: the DACL is rendered and the server \
-         is written, and nothing binds \\\\.\\pipe\\TwinVPN\\mgmt. Refusing rather than \
-         reporting a running service with no management endpoint (PS-18)."
+        "PLATFORM.OS_UNSUPPORTED",
+        "PLATFORM.OS_UNSUPPORTED",
+        "there is no named-pipe namespace here; ADR-0017 §11.2's Windows row is the only \
+         transport this binary serves"
             .to_owned(),
     ))
 }
@@ -384,7 +563,7 @@ fn build_adapter() -> Result<twinvpn_platform_windows::WindowsPlatformAdapter, S
     // degradation. ADR-0012 §8 is the other half — arming must never fail open,
     // so a service that could not open the engine must not reach `ready`.
     twinvpn_platform_windows::WindowsPlatformAdapter::new(WindowsAdapterParts {
-        enforcement: enforcement_config(),
+        enforcement: enforcement_config()?,
         stub: stub_addresses(),
         store_root: store_root(),
         restore_point_path: store_root().join("resolver.restore"),
@@ -427,16 +606,75 @@ fn store_root() -> std::path::PathBuf {
 }
 
 /// The enforcement facts the seam does not carry.
+///
+/// Two of them are THIS PROCESS's own identity, and they are measured rather
+/// than configured: KS-9(1)'s bootstrap exemption is `ALE_APP_ID` (the
+/// service binary's NT device path, which only `FwpmGetAppIdFromFileName0`
+/// produces) plus `ALE_USER_ID` (the `NT SERVICE\TwinVPNService` SID, which
+/// `SERVICE_SID_TYPE_UNRESTRICTED` puts in this token). Both used to be `""`,
+/// and the hosted kill-switch lane measured what the engine makes of that:
+/// `FwpmFilterAdd0` 1338 and a service that never arms.
+///
+/// # Errors
+///
+/// A refusal naming the lookup that failed. Either failing means the
+/// exemption cannot be scoped to this process, and PS-18 forbids arming a set
+/// that would then either refuse or permit the wrong process.
 #[cfg(windows)]
-fn enforcement_config() -> twinvpn_platform_windows::wfp::EnforcementConfig {
-    twinvpn_platform_windows::wfp::EnforcementConfig {
+fn enforcement_config() -> Result<twinvpn_platform_windows::wfp::EnforcementConfig, StartupRefusal>
+{
+    let exe = std::env::current_exe().map_err(|error| {
+        StartupRefusal::platform(
+            "PLATFORM.ADAPTER_UNAVAILABLE",
+            "PLATFORM.ADAPTER_UNAVAILABLE",
+            format!("this process's own path could not be read: {error}"),
+        )
+    })?;
+    let service_app_id =
+        twinvpn_platform_windows::sys::win::wfp::app_id_for(&exe).map_err(|error| {
+            StartupRefusal::platform(
+                "PLATFORM.ADAPTER_UNAVAILABLE",
+                "PLATFORM.ADAPTER_UNAVAILABLE",
+                format!(
+                    "the app id of {} could not be derived: {error}",
+                    exe.display()
+                ),
+            )
+        })?;
+    let service_sid = twinvpnsvc::win32::endpoint::account_sid(&format!(
+        r"NT SERVICE\{}",
+        twinvpnsvc::SERVICE_NAME
+    ))
+    .map_err(|refusal| {
+        StartupRefusal::platform(
+            refusal.reason_code(),
+            refusal.reason_code(),
+            format!(
+                "the service SID could not be resolved: {}",
+                refusal.detail()
+            ),
+        )
+    })?;
+    tracing::info!(
+        target: "twinvpn.service",
+        service_app_id = %service_app_id,
+        service_sid = %service_sid,
+        "KS-9(1)'s bootstrap predicate, measured from this process"
+    );
+    // `EnforcementConfig` holds `&'static str` (CD-2: injected once, never
+    // rediscovered), and this process derives the two values exactly once for
+    // its own lifetime, so leaking them is the honest lifetime rather than a
+    // shortcut.
+    let service_app_id: &'static str = Box::leak(service_app_id.into_boxed_str());
+    let service_sid: &'static str = Box::leak(service_sid.into_boxed_str());
+    Ok(twinvpn_platform_windows::wfp::EnforcementConfig {
         // Zero until the tunnel device is created: the Tier-2 permit is
         // interface-scoped and the interface does not exist yet, so a
         // pre-arming render carries no overlay permit at all — which is
         // `RULESET_BLOCKED` by construction and the correct posture for step 5.
         overlay_luid: 0,
-        service_app_id: "",
-        service_sid: "",
+        service_app_id,
+        service_sid,
         // ADR-0012 KS-4: `ALLOW` is the default in all three routing modes. The
         // setting itself is S-24's and reaches the adapter through a later
         // `apply`; this is the pre-arming value.
@@ -446,7 +684,7 @@ fn enforcement_config() -> twinvpn_platform_windows::wfp::EnforcementConfig {
         update_origins: Vec::new(),
         portal_grant: Vec::new(),
         doh_endpoints: doh_endpoints(),
-    }
+    })
 }
 
 /// ADR-0011 §11.9's known-encrypted-resolver endpoints, from the one shared

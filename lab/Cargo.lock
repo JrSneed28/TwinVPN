@@ -1639,12 +1639,33 @@ name = "twinoracle"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "getrandom 0.4.3",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "twinpeer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "twinvpn-core",
+ "twinvpn-crypto",
+ "twinvpn-env",
+ "twinvpn-platform",
+ "twinvpn-platform-windows",
+ "twinvpn-types",
 ]
 
 [[package]]
@@ -1665,6 +1686,34 @@ dependencies = [
  "twinvpn-cp-client",
  "twinvpn-crypto",
  "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-core"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "prost",
+ "thiserror",
+ "tracing",
+ "twinvpn-cp-client",
+ "twinvpn-crypto",
+ "twinvpn-diag",
+ "twinvpn-dns",
+ "twinvpn-enforce",
+ "twinvpn-env",
+ "twinvpn-gateway",
+ "twinvpn-mgmt",
+ "twinvpn-path",
+ "twinvpn-platform",
+ "twinvpn-relay-client",
+ "twinvpn-route",
+ "twinvpn-schema",
+ "twinvpn-session",
+ "twinvpn-store",
+ "twinvpn-trust",
+ "twinvpn-tunnel",
  "twinvpn-types",
 ]
 
@@ -1713,12 +1762,76 @@ dependencies = [
 ]
 
 [[package]]
+name = "twinvpn-diag"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "serde_json",
+ "thiserror",
+ "twinvpn-env",
+ "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-dns"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "thiserror",
+ "twinvpn-env",
+ "twinvpn-platform",
+ "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-enforce"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "twinvpn-crypto",
+ "twinvpn-dns",
+ "twinvpn-env",
+ "twinvpn-platform",
+ "twinvpn-route",
+ "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
 name = "twinvpn-env"
 version = "0.1.0"
 dependencies = [
  "futures-core",
  "thiserror",
  "tokio",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-gateway"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "twinvpn-env",
+ "twinvpn-platform",
+ "twinvpn-route",
+ "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-mgmt"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "twinvpn-diag",
+ "twinvpn-env",
+ "twinvpn-schema",
  "twinvpn-types",
 ]
 
@@ -1747,6 +1860,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "twinvpn-platform-windows"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "twinvpn-env",
+ "twinvpn-platform",
+ "twinvpn-types",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
 name = "twinvpn-relay-client"
 version = "0.1.0"
 dependencies = [
@@ -1755,6 +1884,17 @@ dependencies = [
  "twinvpn-crypto",
  "twinvpn-env",
  "twinvpn-path",
+ "twinvpn-platform",
+ "twinvpn-schema",
+ "twinvpn-types",
+]
+
+[[package]]
+name = "twinvpn-route"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "twinvpn-env",
  "twinvpn-platform",
  "twinvpn-schema",
  "twinvpn-types",
@@ -2064,13 +2204,14 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wnaf"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab12e7090f27e2ffd9322651492942d50c2926094af30601e1964337db39daf1"
+checksum = "795ca18b3fdb5e62bf982199278341ddcf7ebf7d32e25e212ad05d496e95f6fa"
 dependencies = [
  "ff",
  "group",
  "hybrid-array",
+ "primefield",
 ]
 
 [[package]]

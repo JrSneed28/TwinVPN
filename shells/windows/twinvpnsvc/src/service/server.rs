@@ -167,9 +167,7 @@ where
     let writer = Arc::new(tokio::sync::Mutex::new(writer));
 
     let outcome = match subscription {
-        None => {
-            request_loop(&context, &principal, &granted, None, &mut reader, &writer).await
-        }
+        None => request_loop(&context, &principal, &granted, None, &mut reader, &writer).await,
         // **`select!` over the two LOOPS, never over `read_frame` itself.**
         // Selecting on an individual read would drop bytes it had already
         // buffered every time the other arm fired, and the other arm fires on
@@ -663,7 +661,12 @@ pub fn catalogue_rows() -> Vec<CatalogueRow> {
         .collect()
 }
 
-fn envelope(as_of_ms: u64, body: Body) -> MgmtEnvelope {
+/// One envelope, with the fields a server-originated frame does not carry.
+///
+/// `pub(crate)` for [`crate::win32::listener`]: the accept path has to answer a
+/// client whose identity it could not read **before** this module's `serve` is
+/// reachable, and §11.7 forbids the silent close that would be the alternative.
+pub(crate) fn envelope(as_of_ms: u64, body: Body) -> MgmtEnvelope {
     MgmtEnvelope {
         mi_version: MI_VERSION,
         request_id: vec![0; 16],
@@ -683,7 +686,12 @@ fn envelope(as_of_ms: u64, body: Body) -> MgmtEnvelope {
 /// agent's own registry, which is what the rule actually asks for; the caller's
 /// arguments remain the fallback for a code the registry does not have (X-1: the
 /// registry carries 201 codes and the ADRs name roughly 490).
-fn diagnostic(reason_code: &str, class: &str, severity: &str, user_actionable: bool) -> Diagnostic {
+pub(crate) fn diagnostic(
+    reason_code: &str,
+    class: &str,
+    severity: &str,
+    user_actionable: bool,
+) -> Diagnostic {
     match twinvpn_types::ReasonCode::lookup(reason_code) {
         Some(code) => Diagnostic {
             // MI-15: the registry's i18n KEY, never a sentence.
@@ -836,8 +844,7 @@ mod tests {
     fn the_catalogue_needs_a_scope_and_is_refused_without_one() {
         let fanout = super::super::events::Fanout::new();
         let nothing = Scopes::empty();
-        let refused =
-            transport_op(&fanout, &nothing, None, "mi.catalogue.get").expect("answered");
+        let refused = transport_op(&fanout, &nothing, None, "mi.catalogue.get").expect("answered");
         assert!(!refused.ok);
         assert_eq!(
             refused.diagnostic.expect("named").reason_code,

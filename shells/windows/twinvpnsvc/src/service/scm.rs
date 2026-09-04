@@ -88,8 +88,20 @@ pub enum ServiceState {
     },
     /// `SERVICE_STOPPED`.
     Stopped {
-        /// `dwWin32ExitCode`. `NO_ERROR` for a clean stop.
+        /// `dwWin32ExitCode`. [`NO_ERROR`] for a clean stop, and
+        /// [`ERROR_SERVICE_SPECIFIC_ERROR`] when the service refused to start
+        /// for a reason of its own.
         exit_code: u32,
+        /// `dwServiceSpecificExitCode`, which `sc query` reports as
+        /// `SERVICE_EXIT_CODE` and reads **only** when `exit_code` is
+        /// [`ERROR_SERVICE_SPECIFIC_ERROR`].
+        ///
+        /// Carried as its own field because the two are one Win32 contract, and
+        /// because the alternative — mapping a [`super::StartupRefusal`] onto
+        /// whichever `WIN32_ERROR` is numerically nearest its sysexits code —
+        /// would put a wrong and confidently-rendered error name in front of an
+        /// operator. 71 is `EX_OSERR` here and `ERROR_REQ_NOT_ACCEP` there.
+        service_specific: u32,
     },
 }
 
@@ -137,6 +149,18 @@ pub const START_WAIT_HINT_MS: u32 = 30_000;
 
 /// `NO_ERROR`.
 pub const NO_ERROR: u32 = 0;
+
+/// `ERROR_SERVICE_SPECIFIC_ERROR`.
+///
+/// The `dwWin32ExitCode` a service reports when it failed for a reason of its
+/// own rather than for one the Win32 error table already names, and the only
+/// value that makes the SCM read `dwServiceSpecificExitCode` at all.
+/// [`super::supervisor::stopped_for`] is the one place that produces it.
+///
+/// Declared here rather than taken from `windows-sys` so the mapping is a value
+/// this Linux host can test; `supervisor`'s `#[cfg(windows)]` cross-check
+/// asserts it against the real constant.
+pub const ERROR_SERVICE_SPECIFIC_ERROR: u32 = 1_066;
 
 /// The `SERVICE_FAILURE_ACTIONS` ladder, as a value the installer consumes.
 ///
@@ -359,13 +383,15 @@ mod tests {
         let (state, actions) = on_control(
             ServiceState::Stopped {
                 exit_code: NO_ERROR,
+                service_specific: 0,
             },
             Control::Stop,
         );
         assert_eq!(
             state,
             ServiceState::Stopped {
-                exit_code: NO_ERROR
+                exit_code: NO_ERROR,
+                service_specific: 0,
             }
         );
         assert!(actions.is_empty());
@@ -379,6 +405,7 @@ mod tests {
             ServiceState::StopPending { checkpoint: 1 },
             ServiceState::Stopped {
                 exit_code: NO_ERROR,
+                service_specific: 0,
             },
         ] {
             let (after, actions) = on_control(state, Control::Interrogate);

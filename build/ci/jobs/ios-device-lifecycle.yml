@@ -30,7 +30,8 @@
 #   * the job runs in the SAME workflow as the aggregator, so evidence can no
 #     longer be imported from a different run.
 #
-# The script is `build/ci/ci-ios-corellium.sh`.
+# The Corellium lane script was removed on 2026-09-02: no executor exists for
+# this criterion (see docs/implementation/remote-acceptance-infrastructure.md).
 #
 # This file is kept as a pointer because several READMEs and source headers
 # name it; it is not a job fragment any more and nothing reads it as one.

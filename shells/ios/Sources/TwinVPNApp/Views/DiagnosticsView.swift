@@ -46,7 +46,11 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct DiagnosticsView: View {
+    /// The room's light, resolved at the root (DESIGN.md D1).
+    let tone: StateTone
+
     @EnvironmentObject private var management: ManagementClient
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var bundle: DiagnosticBundle?
     @State private var isExporting = false
     @State private var reasonCode: String?
@@ -55,32 +59,43 @@ struct DiagnosticsView: View {
         // `NavigationView` + `.stack`, not `NavigationStack`. See `StatusView`
         // for why: `NavigationStack` is iOS 16.0+ and §11.9 row 1 fixes the floor
         // at 15.0.
+        //
+        // A `ScrollView`, not a `List`, for the reason DESIGN.md's Floor
+        // paragraph gives: `.scrollContentBackground(.hidden)` is iOS 16.0, so a
+        // `List` would paint an opaque slab over §3's backdrop.
         NavigationView {
-            List {
-                Section {
-                    Button(String(localized: "diagnostics_assemble")) {
+            ScrollView {
+                VStack(spacing: Space.betweenPanels) {
+                    ActionRow(title: String(localized: "diagnostics_assemble"), tone: tone) {
                         Task { await assemble() }
                     }
-                }
 
-                if let bundle {
-                    // ADR-0019 §11.10 (g): "export writes only after the redaction
-                    // preview is confirmed". The preview is not a courtesy — it is
-                    // the user's opportunity to see what leaves the device, and
-                    // the export button does not exist until they have seen it.
-                    Section {
+                    if let bundle {
+                        // ADR-0019 §11.10 (g): "export writes only after the
+                        // redaction preview is confirmed". The preview is not a
+                        // courtesy — it is the user's opportunity to see what
+                        // leaves the device, and the export button does not exist
+                        // until they have seen it.
                         RedactionPreview(bundle: bundle)
-                    }
-                    Section {
-                        Button(String(localized: "diagnostics_export")) {
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .glassPanel(tone: tone)
+                            .panelTransition(reduceMotion: reduceMotion)
+
+                        ActionRow(title: String(localized: "diagnostics_export"), tone: tone) {
                             isExporting = true
                         }
+                        .panelTransition(reduceMotion: reduceMotion)
+                    }
+
+                    if let reasonCode {
+                        DiagnosticView(reasonCode: reasonCode, evidence: [:])
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .glassPanel(tone: tone)
+                            .panelTransition(reduceMotion: reduceMotion)
                     }
                 }
-
-                if let reasonCode {
-                    Section { DiagnosticView(reasonCode: reasonCode, evidence: [:]) }
-                }
+                .padding(.horizontal, Space.screenMargin)
+                .padding(.vertical, Space.xl)
             }
             .navigationTitle(String(localized: "diagnostics_title"))
             // ADR-0019 §11.8: "iOS/iPadOS: `.fileExporter` into Files, plus the
@@ -91,6 +106,8 @@ struct DiagnosticsView: View {
                 document: bundle.map(DiagnosticDocument.init),
                 contentType: .data,
                 defaultFilename: bundle?.suggestedFilename ?? "twinvpn-diagnostics") { _ in }
+            .animation(Motion.panelAppear, value: bundle?.suggestedFilename)
+            .animation(Motion.panelAppear, value: reasonCode)
         }
         .navigationViewStyle(.stack)
     }
@@ -126,6 +143,37 @@ struct DiagnosticsView: View {
     }
 }
 
+/// A full-width control on a glass panel.
+///
+/// DESIGN.md D1: "There is no accent colour on a button, no coloured icon, no
+/// state dot." SwiftUI's default `Button` label is tinted with the accent
+/// colour, so a plain `Button(_:action:)` would put the one thing this system
+/// does not have on the two most prominent controls in the app. §9 restates it:
+/// "No accent colour on a control."
+///
+/// The affordance is carried by the glass panel and by §5's `sectionTitle`
+/// weight instead — the same way the focal disc is a control without being
+/// tinted (D4).
+struct ActionRow: View {
+    let title: String
+    let tone: StateTone
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            StyledText(title, .sectionTitle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // A11Y-8's 44 × 44: §6's 20 pt panel padding around a 20 pt line
+                // clears it by construction, so there is no minimum to state.
+                .glassPanel(tone: tone)
+        }
+        // `.plain` is what removes the accent tint; `StyledText` supplies §2.2's
+        // `textPrimary` itself, so there is no `.foregroundColor` here to drift
+        // from it.
+        .buttonStyle(.plain)
+    }
+}
+
 /// Shows what will leave the device, before it does.
 ///
 /// ADR-0015 §11.4's pseudonymisation is already applied by the time this renders:
@@ -136,13 +184,16 @@ struct RedactionPreview: View {
     let bundle: DiagnosticBundle
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(String(localized: "diagnostics_redaction_preview"))
-                .font(.headline)
+        VStack(alignment: .leading, spacing: Space.panelStackGap) {
+            StyledText(String(localized: "diagnostics_redaction_preview"), .sectionTitle)
             ScrollView {
-                Text(bundle.preview)
-                    .font(.system(.caption, design: .monospaced))
+                // §5's monospaced role. The preview is compared by eye against
+                // what the user expected to leave the device, which is the same
+                // job A11Y-9 gives the fingerprint — so it gets the same +0.5
+                // tracking rather than a smaller, tighter caption.
+                StyledText(bundle.preview, .mono)
                     .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxHeight: 240)
         }

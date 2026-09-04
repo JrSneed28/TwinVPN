@@ -55,6 +55,14 @@ pub const LEVEL_ENV: &str = "TWINVPN_LOG_LEVEL";
 /// `text`.
 pub const FORMAT_ENV: &str = "TWINVPN_LOG_FORMAT";
 
+/// The variable that names a file to append the log to instead of standard
+/// output. Under the SCM a service has no console: everything written to
+/// stdout and stderr — the refusal that names why a start failed included —
+/// is discarded, and the only thing left to read is an exit code. The lane
+/// that drives the shipped service in a disposable guest sets this through
+/// the service's `Environment` registry value and reads the file back.
+pub const FILE_ENV: &str = "TWINVPN_LOG_FILE";
+
 /// The default level.
 pub const DEFAULT_LEVEL: &str = "info";
 
@@ -146,8 +154,23 @@ pub fn install(started_by_scm: bool) -> Result<(), String> {
         .map_or_else(|_| DEFAULT_LEVEL.to_owned(), |v| map_level(&v).to_owned());
     let filter = EnvFilter::try_new(&level).map_err(|_| format!("bad log level: {level}"))?;
 
+    // Standard output unless `FILE_ENV` names a file; a file that cannot be
+    // opened is reported rather than silently falling back to a stream nobody
+    // reads. Unbuffered: `File` writes straight through, so a line written
+    // before a crash or a `TerminateProcess` is on disk.
+    let writer: Box<dyn std::io::Write + Send> = match std::env::var_os(FILE_ENV) {
+        Some(path) => Box::new(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| format!("{FILE_ENV}={}: {e}", path.to_string_lossy()))?,
+        ),
+        None => Box::new(std::io::stdout()),
+    };
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_writer(std::sync::Mutex::new(writer))
         // No ANSI in a service log: the Event Log and a file sink store the
         // escape sequences and a search then does not match. The CLI's own
         // colour rules are ADR-0023 EM-43's and are a different surface.

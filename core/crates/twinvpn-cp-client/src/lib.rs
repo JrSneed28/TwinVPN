@@ -134,8 +134,8 @@ pub use idempotency::{Ceremony, Command, OperationClass};
 pub use metadata::{Causality, InboundMetadata, MetadataFactory};
 pub use octets::ReceivedOctets;
 pub use ports::{
-    ControlPlaneStore, SigningAuthority, StatementKind, StatementVerifier, StoreFailure,
-    VerifiedStatement, VerifyFailure,
+    ControlPlaneStore, MonotoneMark, SigningAuthority, StatementKind, StatementVerifier,
+    StoreFailure, VerifiedStatement, VerifyFailure,
 };
 pub use quic::{
     ControlEndpoint, DeviceIdentity, Nat64Prefix, QuicConnection, QuicControlTransport,

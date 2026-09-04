@@ -15,6 +15,7 @@
 //! | [`checks::cd_i5`] | CD-I5 | no data-plane crate reaches `twinvpn-cp-client`, directly or **transitively**; the reverse edge is equally denied; only the composition root names both |
 //! | [`checks::cb3`] | CD-CB3 | no `#[cfg(target_os = …)]` outside a `twinvpn-platform-*` crate |
 //! | [`checks::u22_updater_unlinked`] | U-22 | no data-plane, state-machine or platform-adapter crate links the updater, directly or **transitively** (ADR-0021 §11.9) |
+//! | [`secret_debug::r9`] | R-9 | no `#[derive(Debug)]` on a type that derives `Zeroize`/`ZeroizeOnDrop` or is marked `// twinvpn: secret`; the opt-out is a redacting `impl Debug` (`ownership.md` R-9) |
 //!
 //! Each check is a pure function over data, so `tests/lints_fire.rs` plants a
 //! deliberate violation and asserts it fires. A lint that has never been seen to
@@ -27,6 +28,7 @@
 
 pub mod checks;
 pub mod manifest;
+pub mod secret_debug;
 pub mod source;
 
 use std::path::{Path, PathBuf};
@@ -62,6 +64,7 @@ pub fn run(manifest_path: &Path) -> Result<Vec<Violation>, String> {
             let file = ScannedFile::new(relative, &contents);
             violations.extend(checks::cd3(&file, &package.name));
             violations.extend(checks::cb3(&file, &package.name));
+            violations.extend(secret_debug::r9(&file));
         }
     }
 

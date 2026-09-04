@@ -61,7 +61,7 @@ use twinvpn_platform::{
 };
 
 use crate::oserr::{self, Context, Win32Error};
-use crate::route::InterfaceLuid;
+use crate::route::{InterfaceLuid, OverlayLuid};
 use crate::shutdown::ShutdownLatch;
 
 /// The DLL the installer places beside the service binary.
@@ -233,6 +233,10 @@ pub struct WindowsTunnelDevice {
     shutdown: ShutdownLatch,
     open: Mutex<Vec<(u64, Open)>>,
     next: AtomicU64,
+    /// Where the overlay's LUID is published, so [`crate::netcfg`] programs the
+    /// interface that exists rather than the `0` a shell had to inject before it
+    /// did.
+    overlay: OverlayLuid,
 }
 
 impl WindowsTunnelDevice {
@@ -241,13 +245,23 @@ impl WindowsTunnelDevice {
     /// CD-2: the driver is taken at construction. There is no ambient loader and
     /// no lazy global — a `OnceCell<WintunDriver>` would make "which DLL is
     /// loaded" a process-wide fact nothing could re-derive after an update.
+    ///
+    /// `overlay` is the cell [`crate::netcfg::WindowsNetworkConfig`] reads. It is
+    /// taken here rather than discovered there, because this is the only object
+    /// that knows the LUID and it knows it exactly once — at
+    /// `create_interface`.
     #[must_use]
-    pub fn new(driver: Arc<dyn TunnelDriver>, shutdown: ShutdownLatch) -> Self {
+    pub fn new(
+        driver: Arc<dyn TunnelDriver>,
+        shutdown: ShutdownLatch,
+        overlay: OverlayLuid,
+    ) -> Self {
         Self {
             driver,
             shutdown,
             open: Mutex::new(Vec::new()),
             next: AtomicU64::new(1),
+            overlay,
         }
     }
 
@@ -367,6 +381,14 @@ impl TunnelDevice for WindowsTunnelDevice {
                     name,
                 },
             ));
+            // Published only once the adapter is recorded, so nothing can read a
+            // LUID for a handle this device does not hold. It is published on the
+            // created-DOWN adapter rather than at `set_link`, because the
+            // enforcement layer has to be able to name the interface **before**
+            // traffic can reach it — the other order is `docs/networking.md`
+            // §2.3's partial-application window with the filters on the wrong
+            // side of it.
+            self.overlay.set(luid);
             Ok(handle)
         })
     }
@@ -441,6 +463,12 @@ impl TunnelDevice for WindowsTunnelDevice {
                     self.driver.end_session(session);
                 }
                 self.driver.close_adapter(entry.adapter);
+                // Only if this was the adapter the enforcement layer is keyed
+                // on. Windows reassigns nothing about a LUID, but a second
+                // interface's destroy must not un-publish the live one's.
+                if self.overlay.get() == entry.luid {
+                    self.overlay.clear();
+                }
             }
             Ok(())
         })
@@ -719,7 +747,12 @@ mod tests {
     }
 
     fn device(driver: Arc<FakeDriver>) -> WindowsTunnelDevice {
-        WindowsTunnelDevice::new(driver, ShutdownLatch::new())
+        WindowsTunnelDevice::new(driver, ShutdownLatch::new(), unpublished())
+    }
+
+    /// The cell a shell starts with: `0`, because the adapter does not exist.
+    fn unpublished() -> OverlayLuid {
+        OverlayLuid::new(InterfaceLuid(0))
     }
 
     fn name() -> InterfaceName {
@@ -750,6 +783,120 @@ mod tests {
         );
         assert_eq!(driver.live_adapters(), 1);
         assert!(device.luid_of(handle).is_some());
+    }
+
+    /// The enforcement facts a shell injects **before** the adapter exists.
+    ///
+    /// `overlay_luid: 0` is what `shells/windows/twinvpnsvc` really passes, and
+    /// the whole point of this test is that the rendered set must not keep it.
+    fn preadapter_enforcement() -> crate::wfp::EnforcementConfig {
+        crate::wfp::EnforcementConfig {
+            overlay_luid: 0,
+            service_app_id: r"\device\harddiskvolume3\program files\twinvpn\twinvpnsvc.exe",
+            service_sid: "S-1-5-80-0",
+            local_network_access: true,
+            on_link_prefixes: Vec::new(),
+            updater_app_id: None,
+            update_origins: Vec::new(),
+            portal_grant: Vec::new(),
+            doh_endpoints: Vec::new(),
+        }
+    }
+
+    fn stub_addresses() -> crate::dns::StubAddresses {
+        let mut anycast6 = [0u8; 16];
+        anycast6[..6].copy_from_slice(&[0xfd, 0x7c, 0x9e, 0x5d, 0x2a, 0x10]);
+        anycast6[6] = 0xff;
+        anycast6[7] = 0xff;
+        anycast6[15] = 0x53;
+        let mut loop6 = [0u8; 16];
+        loop6[15] = 1;
+        crate::dns::StubAddresses {
+            loopback_v4: twinvpn_types::IpAddr::V4(twinvpn_types::V4Addr::from_octets([
+                127, 0, 0, 53,
+            ])),
+            loopback_v6: twinvpn_types::IpAddr::V6(
+                twinvpn_types::V6Addr::new(loop6, None).expect("::1"),
+            ),
+            anycast_v4: twinvpn_types::IpAddr::V4(twinvpn_types::V4Addr::from_octets([
+                100, 127, 255, 53,
+            ])),
+            anycast_v6: twinvpn_types::IpAddr::V6(
+                twinvpn_types::V6Addr::new(anycast6, None).expect("the service anycast"),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_created_adapters_luid_reaches_the_filter_render() {
+        // ADR-0012 §11.1: Tier 2 is interface-scoped, and the overlay permit is
+        // the ONLY difference between `Protected` and `Blocked`. The shell has
+        // to inject `overlay_luid: 0` because the adapter does not exist at
+        // construction, so before this propagation existed the permit matched no
+        // interface — a `Protected` posture that permitted nothing — and every
+        // `NotLocalInterface(0)` complement was true on the overlay too.
+        let system = Arc::new(crate::sys::fake::FakeSystem::new(InterfaceLuid(0)));
+        let network = crate::netcfg::WindowsNetworkConfig::new(crate::netcfg::NetworkConfigParts {
+            system,
+            enforcement: preadapter_enforcement(),
+            stub: stub_addresses(),
+            restore_point_path: std::path::PathBuf::from("unused-by-render"),
+            shutdown: ShutdownLatch::new(),
+        });
+        assert_eq!(
+            network.overlay(),
+            InterfaceLuid(0),
+            "before the adapter exists the injected value is the honest one"
+        );
+
+        // `adapter_luid` in `FakeDriver` answers the adapter handle, so the LUID
+        // is whatever the driver assigned rather than a number this test chose.
+        let driver = Arc::new(FakeDriver::default());
+        let device = WindowsTunnelDevice::new(driver, ShutdownLatch::new(), network.overlay_luid());
+        let handle = device
+            .create_interface(&name(), 1420)
+            .await
+            .expect("creates");
+        let luid = device.luid_of(handle).expect("the device knows its LUID");
+        assert_ne!(luid, InterfaceLuid(0), "the fake must assign a real LUID");
+        assert_eq!(network.overlay(), luid, "the device publishes what it made");
+
+        let contract = crate::netcfg::prearming_contract();
+        let set = network.render(&contract, twinvpn_platform::Ruleset::Protected);
+
+        let overlay_permits: Vec<_> = set
+            .filters
+            .iter()
+            .filter(|f| f.class == crate::wfp::TrafficClass::OverlayEgress)
+            .collect();
+        assert_eq!(overlay_permits.len(), 2, "one per layer, v4 and v6");
+        for filter in overlay_permits {
+            assert_eq!(
+                filter.conditions,
+                vec![crate::wfp::Condition::LocalInterface(luid.0)],
+                "the Tier-2 permit must name the interface that exists"
+            );
+        }
+
+        let containment: Vec<_> = set
+            .filters
+            .iter()
+            .filter(|f| f.class == crate::wfp::TrafficClass::DnsContainment)
+            .collect();
+        assert!(!containment.is_empty(), "class 6 is unconditional");
+        for filter in containment {
+            assert!(
+                filter
+                    .conditions
+                    .contains(&crate::wfp::Condition::NotLocalInterface(luid.0)),
+                "DNS containment must exempt the overlay by its real LUID, not by 0"
+            );
+        }
+
+        // Destroying it puts the injected value back, so a torn-down overlay
+        // never leaves the enforcement layer keyed on a LUID nothing holds.
+        device.destroy_interface(handle).await.expect("destroys");
+        assert_eq!(network.overlay(), InterfaceLuid(0));
     }
 
     #[tokio::test]
@@ -855,7 +1002,7 @@ mod tests {
     async fn destroy_works_after_shutdown_because_teardown_is_part_of_shutdown() {
         let latch = ShutdownLatch::new();
         let driver = Arc::new(FakeDriver::default());
-        let device = WindowsTunnelDevice::new(driver.clone(), latch.clone());
+        let device = WindowsTunnelDevice::new(driver.clone(), latch.clone(), unpublished());
         let handle = device
             .create_interface(&name(), 1420)
             .await
@@ -936,7 +1083,11 @@ mod tests {
     #[tokio::test]
     async fn the_device_refuses_new_work_after_shutdown() {
         let latch = ShutdownLatch::new();
-        let device = WindowsTunnelDevice::new(Arc::new(FakeDriver::default()), latch.clone());
+        let device = WindowsTunnelDevice::new(
+            Arc::new(FakeDriver::default()),
+            latch.clone(),
+            unpublished(),
+        );
         latch.begin();
         match device.create_interface(&name(), 1420).await {
             Err(PlatformError::ShuttingDown) => {}

@@ -58,9 +58,10 @@ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, FWPM_PROVIDER0, FWPM_SUBLAYER0,
     FWPM_SUBLAYER_FLAG_PERSISTENT, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB,
     FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0,
-    FWP_FILTER_ENUM_FULLY_CONTAINED, FWP_IP_VERSION_V4, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ANY_SET,
-    FWP_MATCH_NOT_EQUAL, FWP_UINT16, FWP_UINT32, FWP_UINT64, FWP_UINT8, FWP_V4_ADDR_AND_MASK,
-    FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
+    FWP_FILTER_ENUM_FLAG_INCLUDE_BOOTTIME, FWP_FILTER_ENUM_FULLY_CONTAINED, FWP_IP_VERSION_V4,
+    FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ANY_SET, FWP_MATCH_NOT_EQUAL, FWP_UINT16, FWP_UINT32,
+    FWP_UINT64, FWP_UINT8, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK,
+    FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
 };
 use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 
@@ -250,6 +251,10 @@ impl FilterEngine for LazyEngine {
         self.get()?.commit(set)
     }
 
+    fn dry_run(&self, set: &FilterSet) -> Result<(), PlatformError> {
+        self.get()?.dry_run(set)
+    }
+
     fn read(&self) -> Result<EngineState, PlatformError> {
         self.get()?.read()
     }
@@ -370,7 +375,12 @@ struct FilterArena {
     conditions: Vec<FWPM_FILTER_CONDITION0>,
     name: Vec<u16>,
     app_ids: Vec<Vec<u16>>,
-    sids: Vec<Vec<u16>>,
+    /// Self-relative security descriptors, one per `Condition::UserSid`. NOT
+    /// the SID string: `FWPM_CONDITION_ALE_USER_ID` is
+    /// `FWP_SECURITY_DESCRIPTOR_TYPE`, and the engine answers a string with
+    /// `ERROR_INVALID_SECURITY_DESCR` (1338) — measured, in the hosted
+    /// kill-switch lane, as the service's `POLICY.KILLSWITCH.ARM_FAILED`.
+    sids: Vec<Vec<u8>>,
     v4: Vec<FWP_V4_ADDR_AND_MASK>,
     v6: Vec<FWP_V6_ADDR_AND_MASK>,
     u64s: Vec<u64>,
@@ -396,7 +406,7 @@ impl FilterArena {
 /// stylistic: a `Vec` that grows reallocates, and a pointer taken before a push
 /// would dangle. Every vector is sized before any pointer is taken.
 #[allow(clippy::too_many_lines)]
-fn build_conditions(spec: &FilterSpec, arena: &mut FilterArena) {
+fn build_conditions(spec: &FilterSpec, arena: &mut FilterArena) -> Result<(), PlatformError> {
     // Pass one: own every value the conditions will point at, with the vectors
     // sized up front so no later push can reallocate them.
     let app_ids = spec
@@ -438,7 +448,7 @@ fn build_conditions(spec: &FilterSpec, arena: &mut FilterArena) {
     for condition in &spec.conditions {
         match condition {
             Condition::AppId(path) => arena.app_ids.push(wide(path)),
-            Condition::UserSid(sddl) => arena.sids.push(wide(sddl)),
+            Condition::UserSid(sid) => arena.sids.push(match_filter_descriptor(sid)?),
             Condition::LocalInterface(luid) | Condition::NotLocalInterface(luid) => {
                 arena.u64s.push(*luid);
             }
@@ -596,6 +606,7 @@ fn build_conditions(spec: &FilterSpec, arena: &mut FilterArena) {
         };
         arena.conditions.push(built);
     }
+    Ok(())
 }
 
 const fn protocol_number(protocol: IpProtocol) -> u8 {
@@ -617,6 +628,114 @@ impl BlobArena {
             blobs: Vec::with_capacity(count),
         }
     }
+}
+
+/// The SDDL of a descriptor whose DACL grants `FWP_ACTRL_MATCH_FILTER` to
+/// exactly one SID. `CC` is the SDDL spelling of access bit 0x1, which is what
+/// `FWP_ACTRL_MATCH_FILTER` is; the engine evaluates the condition as "does this
+/// DACL grant that right to the caller's token" (`Permitting and Blocking
+/// Applications and Users`, Microsoft Learn).
+#[must_use]
+pub fn match_filter_sddl(sid: &str) -> String {
+    format!("D:(A;;CC;;;{sid})")
+}
+
+/// The self-relative security descriptor `FWPM_CONDITION_ALE_USER_ID` takes,
+/// for one SID.
+///
+/// # Errors
+///
+/// `ConvertStringSecurityDescriptorToSecurityDescriptorW`'s refusal, which is
+/// what an empty or malformed SID produces — reported here, before the engine,
+/// so the failure names the SID rather than the filter.
+pub fn match_filter_descriptor(sid: &str) -> Result<Vec<u8>, PlatformError> {
+    use windows_sys::Win32::Foundation::{GetLastError, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{GetSecurityDescriptorLength, PSECURITY_DESCRIPTOR};
+
+    if sid.is_empty() {
+        return Err(oserr::unavailable(
+            "match_filter_descriptor: the SID is empty",
+        ));
+    }
+    let sddl = wide(&match_filter_sddl(sid));
+    let mut descriptor: PSECURITY_DESCRIPTOR = core::ptr::null_mut();
+    let mut size: u32 = 0;
+    // SAFETY: `sddl` is a live NUL-terminated wide string; `descriptor` and
+    // `size` are live out-parameters. On success `descriptor` is LocalAlloc'd
+    // memory the caller owns and frees below.
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &raw mut descriptor,
+            &raw mut size,
+        )
+    };
+    if ok == 0 || descriptor.is_null() {
+        // SAFETY: plain thread-local read.
+        let status = unsafe { GetLastError() };
+        return Err(oserr::from_status(
+            Win32Error(status),
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+            Context::Enforcement,
+        ));
+    }
+    // SAFETY: `descriptor` is a valid self-relative descriptor of `length`
+    // bytes, which is copied out before the buffer is freed exactly once.
+    let bytes = unsafe {
+        let length = GetSecurityDescriptorLength(descriptor) as usize;
+        let length = if length == 0 { size as usize } else { length };
+        let copy = core::slice::from_raw_parts(descriptor.cast::<u8>(), length).to_vec();
+        LocalFree(descriptor);
+        copy
+    };
+    Ok(bytes)
+}
+
+/// The `FWPM_CONDITION_ALE_APP_ID` value for an executable: its lower-case NT
+/// device path (`\device\harddiskvolumeN\...`), from
+/// `FwpmGetAppIdFromFileName0`. A Win32 path in that condition matches
+/// nothing, and an empty one is refused; the service derives its own from
+/// `current_exe` at start.
+///
+/// # Errors
+///
+/// The engine's refusal — the file must exist on this machine.
+pub fn app_id_for(path: &std::path::Path) -> Result<String, PlatformError> {
+    use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+        FwpmFreeMemory0, FwpmGetAppIdFromFileName0,
+    };
+
+    let name = wide(&path.to_string_lossy());
+    let mut blob: *mut FWP_BYTE_BLOB = core::ptr::null_mut();
+    // SAFETY: `name` is a live NUL-terminated wide string; `blob` is a live
+    // out-parameter the engine fills with memory it owns until freed below.
+    let status = unsafe { FwpmGetAppIdFromFileName0(name.as_ptr(), &raw mut blob) };
+    if status != 0 || blob.is_null() {
+        return Err(oserr::from_status(
+            Win32Error(status),
+            "FwpmGetAppIdFromFileName0",
+            Context::Enforcement,
+        ));
+    }
+    // SAFETY: the blob is a UTF-16 string of `size` bytes (NUL included) that
+    // the engine allocated; it is read once and freed exactly once.
+    let app_id = unsafe {
+        // Byte-wise, then paired: the engine's buffer carries no alignment
+        // promise a `*const u16` could rely on.
+        let bytes = core::slice::from_raw_parts((*blob).data, (*blob).size as usize);
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let text = super::wide_from_utf16(&units);
+        FwpmFreeMemory0((&raw mut blob).cast::<*mut core::ffi::c_void>());
+        text
+    };
+    Ok(app_id)
 }
 
 /// Fills in the app-id and SID condition pointers, now that both arenas exist.
@@ -641,8 +760,8 @@ fn link_blobs(spec: &FilterSpec, arena: &mut FilterArena, blobs: &mut BlobArena)
                 let bytes = &mut arena.sids[sid];
                 blobs.blobs.push(FWP_BYTE_BLOB {
                     #[allow(clippy::cast_possible_truncation)]
-                    size: (bytes.len() * 2) as u32,
-                    data: bytes.as_mut_ptr().cast::<u8>(),
+                    size: bytes.len() as u32,
+                    data: bytes.as_mut_ptr(),
                 });
                 let slot = blobs.blobs.len() - 1;
                 arena.conditions[index].conditionValue.Anonymous.sd =
@@ -658,7 +777,7 @@ impl WfpEngine {
     /// Adds one filter inside an open transaction.
     fn add_filter(&self, spec: &FilterSpec, provider: &mut GUID) -> Result<(), PlatformError> {
         let mut arena = FilterArena::new(spec);
-        build_conditions(spec, &mut arena);
+        build_conditions(spec, &mut arena)?;
         let blob_count = spec
             .conditions
             .iter()
@@ -829,12 +948,31 @@ impl WfpEngine {
     /// `provider_owned: false`, which is what lets `readback` refuse to count
     /// them and what lets a diagnostic bundle say who else is filtering.
     fn enumerate(&self) -> Result<Vec<InstalledFilter>, PlatformError> {
+        let mut out = Vec::new();
+        for layer in Layer::BOTH {
+            self.enumerate_layer(layer, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    /// One layer's filter rows, appended to `out`.
+    ///
+    /// The template names the layer because the engine requires one: a null
+    /// `layerKey` is `FWP_E_LAYER_NOT_FOUND`, not "every layer". It asks for
+    /// boot-time filters explicitly because the engine omits them by default,
+    /// and the KS-19 boot artifact is exactly what `read` must count and
+    /// `purge` must remove.
+    fn enumerate_layer(
+        &self,
+        layer: Layer,
+        out: &mut Vec<InstalledFilter>,
+    ) -> Result<(), PlatformError> {
         let mut enum_handle: HANDLE = core::ptr::null_mut();
         let template = FWPM_FILTER_ENUM_TEMPLATE0 {
             providerKey: core::ptr::null_mut(),
-            layerKey: GUID::from_u128(0),
+            layerKey: layer_guid(layer),
             enumType: FWP_FILTER_ENUM_FULLY_CONTAINED,
-            flags: 0,
+            flags: FWP_FILTER_ENUM_FLAG_INCLUDE_BOOTTIME,
             providerContextTemplate: core::ptr::null_mut(),
             numFilterConditions: 0,
             filterCondition: core::ptr::null_mut(),
@@ -860,7 +998,6 @@ impl WfpEngine {
         };
 
         let ours = guid(PROVIDER_KEY);
-        let mut out = Vec::new();
         loop {
             let mut entries: *mut *mut FWPM_FILTER0 = core::ptr::null_mut();
             let mut returned: u32 = 0;
@@ -892,16 +1029,12 @@ impl WfpEngine {
                 let provider_owned = !filter.providerKey.is_null()
                     // SAFETY: checked non-null immediately above.
                     && guid_eq(unsafe { *filter.providerKey }, ours);
-                let layer = if guid_eq(filter.layerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V4) {
-                    Layer::AleAuthConnectV4
-                } else if guid_eq(filter.layerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V6) {
-                    Layer::AleAuthConnectV6
-                } else {
-                    // A layer this crate does not install into. Skipped rather
-                    // than mapped: reporting somebody else's ALE_BIND filter as
-                    // one of ours would make the read-back lie.
+                // The template already restricts the rows to `layer`; a row
+                // from anywhere else is skipped rather than mapped, because
+                // reporting it as ours would make the read-back lie.
+                if !guid_eq(filter.layerKey, layer_guid(layer)) {
                     continue;
-                };
+                }
                 out.push(InstalledFilter {
                     key: ours_key(filter.filterKey),
                     layer,
@@ -922,7 +1055,7 @@ impl WfpEngine {
                 break;
             }
         }
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -960,8 +1093,12 @@ impl Drop for EnumGuard {
     }
 }
 
-impl FilterEngine for WfpEngine {
-    fn commit(&self, set: &FilterSet) -> Result<(), PlatformError> {
+impl WfpEngine {
+    /// Everything [`FilterEngine::commit`] does up to the commit itself: the
+    /// transaction is returned open, and the caller commits it or drops it,
+    /// which aborts. One body for the real swap and for the dry run, so the
+    /// dry run cannot validate a different set of calls than the swap makes.
+    fn stage(&self, set: &FilterSet) -> Result<Transaction<'_>, PlatformError> {
         // A set that fails its own validation never reaches the engine. The
         // caller checks this too; checking again here is what keeps the shim
         // honest if a second caller ever appears.
@@ -978,6 +1115,13 @@ impl FilterEngine for WfpEngine {
         // an intermediate state (KS-17) and the swap is a swap rather than a
         // remove-then-add (KS-23).
         for key in self.owned_keys()? {
+            // The trait's one exception: the KS-19 boot artifact survives a
+            // runtime commit. A boot key the incoming set also carries is
+            // replaced inside this transaction instead, because
+            // `FwpmFilterAdd0` refuses a duplicate key rather than overwriting.
+            if crate::wfp::boot::is_boot_filter(key) && !set.filters.iter().any(|f| f.key == key) {
+                continue;
+            }
             let key = guid(key);
             // SAFETY: `key` is live for the call.
             let status = unsafe { FwpmFilterDeleteByKey0(self.handle(), &raw const key) };
@@ -993,7 +1137,19 @@ impl FilterEngine for WfpEngine {
         for spec in &set.filters {
             self.add_filter(spec, &mut provider)?;
         }
-        txn.commit()
+        Ok(txn)
+    }
+}
+
+impl FilterEngine for WfpEngine {
+    fn commit(&self, set: &FilterSet) -> Result<(), PlatformError> {
+        self.stage(set)?.commit()
+    }
+
+    fn dry_run(&self, set: &FilterSet) -> Result<(), PlatformError> {
+        // Dropping the open transaction is the abort (see `Drop for
+        // Transaction`); every `FwpmFilterAdd0` has already run its validation.
+        self.stage(set).map(drop)
     }
 
     fn read(&self) -> Result<EngineState, PlatformError> {
@@ -1237,5 +1393,55 @@ impl WfpEngine {
         // SAFETY: engine-allocated and not yet freed.
         unsafe { FwpmFreeMemory0((&raw mut filter).cast()) };
         Some(ours(key))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_match_filter_sddl_grants_access_bit_one_to_the_sid_alone() {
+        // 0x1 is FWP_ACTRL_MATCH_FILTER, spelled `CC` in SDDL.
+        assert_eq!(match_filter_sddl("S-1-5-80-0"), "D:(A;;CC;;;S-1-5-80-0)");
+    }
+
+    #[test]
+    fn a_real_sid_becomes_a_self_relative_descriptor_and_an_empty_one_is_refused() {
+        // LocalSystem: a SID every Windows host resolves without a lookup.
+        let bytes = match_filter_descriptor("S-1-5-18").expect("a well-known SID converts");
+        // SECURITY_DESCRIPTOR_RELATIVE: revision 1, then Sbz1, then Control
+        // with SE_SELF_RELATIVE (0x8000) set; the DACL follows the header.
+        assert_eq!(bytes[0], 1, "revision");
+        assert_ne!(
+            u16::from_le_bytes([bytes[2], bytes[3]]) & 0x8000,
+            0,
+            "self-relative"
+        );
+        assert!(
+            bytes.len() > 20,
+            "a header plus a one-ACE DACL: {}",
+            bytes.len()
+        );
+        assert!(
+            match_filter_descriptor("").is_err(),
+            "an empty SID must be refused, not sent"
+        );
+        assert!(match_filter_descriptor("not a sid").is_err());
+    }
+
+    #[test]
+    fn the_app_id_of_this_test_binary_is_its_lower_case_device_path() {
+        let exe = std::env::current_exe().expect("this test has a path");
+        let app_id = app_id_for(&exe).expect("the engine resolves an existing file");
+        assert!(app_id.starts_with("\\device\\"), "{app_id}");
+        assert_eq!(app_id, app_id.to_lowercase(), "{app_id}");
+        assert!(
+            std::path::Path::new(&app_id)
+                .extension()
+                .is_some_and(|e| e == "exe"),
+            "{app_id}"
+        );
+        assert!(app_id_for(std::path::Path::new(r"C:\no\such\file.exe")).is_err());
     }
 }

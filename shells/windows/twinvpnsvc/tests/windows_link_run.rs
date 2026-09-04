@@ -30,13 +30,17 @@
 //!
 //! # Two things this file does NOT claim, stated before anyone infers them
 //!
-//! 1. **The pipe is created by this test, not by the service binary.**
-//!    `src/main.rs::serve` still refuses with `MGMT.UNAVAILABLE` because
-//!    nothing binds `\\.\pipe\TwinVPN\mgmt` with MI-A3's DACL. What is proven
-//!    here is that the production server and the production client speak to each
-//!    other **across the kernel's named-pipe driver** and that the principal on
-//!    the far side is the one the kernel attests. The listener and its DACL
-//!    remain owed, and this test does not paper over that.
+//! 1. **The pipe is created by this test, not by the service binary.** It uses a
+//!    default descriptor and a name of its own, so what is proven here is that
+//!    the production server and the production client speak to each other
+//!    **across the kernel's named-pipe driver** and that the principal on the far
+//!    side is the one the kernel attests.
+//!
+//!    The **listener** — `src/main.rs::serve` -> `twinvpnsvc::win32::listener`,
+//!    which binds `\\.\pipe\TwinVPN\mgmt` with MI-A3's DACL — is exercised by
+//!    `tests/mgmt_listener.rs` instead. That file is **not** run by
+//!    `build/ci/ci-windows.sh`'s `TEST_CMD` until it is named there, and a test
+//!    nobody runs proves nothing.
 //! 2. **The adapter under the core is the mock, unless the host opts in.** The
 //!    real [`twinvpn_platform_windows::WindowsPlatformAdapter`] needs
 //!    `wintun.dll` beside the binary *and* a writable Base Filtering Engine

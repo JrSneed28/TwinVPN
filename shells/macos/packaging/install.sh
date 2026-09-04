@@ -10,12 +10,19 @@
 # rows (store root, backup exclusion).
 #
 # =============================================================================
-# THIS SCRIPT HAS NEVER BEEN EXECUTED.
+# THIS SCRIPT HAS NEVER BEEN EXECUTED — but there is now a lane that runs it.
 #
-# It is written on a Linux host with no macOS, no `pfctl`, no `launchctl`, no
+# It was written on a Linux host with no macOS, no `pfctl`, no `launchctl`, no
 # `dscl`, no `tmutil` and no way to run it. Every command is written from the
-# documented interface; none has been observed to work. Treat a green read of
-# this file as a review, never as a test.
+# documented interface; as of this writing none has been observed to work, so a
+# green read of this file is a review and never a test.
+#
+# `build/ci/ci-macos-pf-anchor.sh` (`MACOS-PF-BOOT-ANCHOR`) executes it as root
+# on a GitHub-hosted `macos-26` runner and then asserts, against pf itself, that
+# the anchor is loaded AND evaluated. That lane is where the first real
+# execution happens and where corrections to this file will come from. Nothing
+# in it skips a validation step here: the `pfctl -n -f` gates and the `pfctl -E`
+# arm below are the point of running it at all.
 # =============================================================================
 #
 # Idempotent by construction: running it twice must leave the host in the same
@@ -40,7 +47,13 @@ readonly OP_GROUP="_twinvpn_op"
 # The two lines spliced into /etc/pf.conf. Kept identical to
 # `packaging/pf.conf.include`, whose header explains WHERE in the file they must
 # land and why the wrong section is a total-loss failure.
-readonly PF_ANCHOR_LINE='anchor "twinvpn/*"'
+# NO WILDCARD. `anchor "twinvpn/*"` evaluates only the CHILD anchors attached
+# under `twinvpn` and never the rules loaded into `twinvpn` itself (pf.conf(5)
+# ANCHORS; xnu bsd/net/pf.c pf_step_into_anchor). The rules are loaded into the
+# bare anchor by the line below and by the daemon, so the wildcard form was a
+# no-op on every Mac -- found by MACOS-PF-BOOT-ANCHOR on 2026-09-02, when the
+# deny counters never moved. ADR-0012 section 11.6 names the anchor `twinvpn`.
+readonly PF_ANCHOR_LINE='anchor "twinvpn"'
 readonly PF_LOAD_LINE='load anchor "twinvpn" from "/etc/twinvpn/pf.anchor"'
 
 here() { cd "$(dirname "${BASH_SOURCE[0]}")" && pwd; }
@@ -175,6 +188,15 @@ install -o root -g wheel -m 0755 \
 # ADR-0023 EM-11/EM-42 all use — with `twinvpnctl` kept beside it as a
 # compatibility alias. `ln -sfn` rather than a second copy: one file to sign,
 # one file to replace on upgrade, and no way for the two names to drift apart.
+#
+# CREATED ONLY IF ABSENT, unlike /usr/local/sbin above. macOS does not ship
+# /usr/local at all, so on a clean host or a CI runner this directory may not
+# exist and `install` would fail with ENOENT. Where it DOES exist it is left
+# exactly as found: on many machines Homebrew owns it, and an `install -d`
+# that chowned it to root:wheel would break every later `brew` call — an
+# installer that "normalizes" somebody else's directory is the same class of
+# defect as one that normalizes their /etc/pf.conf.
+[[ -d /usr/local/bin ]] || install -d -o root -g wheel -m 0755 /usr/local/bin
 install -o root -g wheel -m 0755 \
     "${SRC}/../target/release/twinvpnctl" "/usr/local/bin/twinvpn"
 ln -sfn twinvpn "/usr/local/bin/twinvpnctl"
@@ -218,7 +240,12 @@ mv -f "${anchor_tmp}" "${ANCHOR_FILE}"
 #    firewall" does not remove us and we do not remove them.
 # ---------------------------------------------------------------------------
 say "/etc/pf.conf"
-if grep -qF "${PF_LOAD_LINE}" "${PF_CONF}"; then
+# BOTH lines are the sentinel. A host installed before 2026-09-02 carries the
+# load line beside an inert `anchor "twinvpn/*"`; testing the load line alone
+# would leave it unprotected while reporting success. Only the MISSING line is
+# appended: a second `load anchor` would load the file twice and double the
+# rule count.
+if grep -qF "${PF_ANCHOR_LINE}" "${PF_CONF}" && grep -qF "${PF_LOAD_LINE}" "${PF_CONF}"; then
     say "the anchor reference is already present; leaving ${PF_CONF} untouched"
 else
     # Keep a restore point. ADR-0016 R-27 requires uninstall to "restore every
@@ -232,8 +259,8 @@ else
     {
         printf '\n# --- TwinVPN (ADR-0012 KS-19). Installed by the TwinVPN package.\n'
         printf '# Removing these two lines disarms boot-window leak protection.\n'
-        printf '%s\n' "${PF_ANCHOR_LINE}"
-        printf '%s\n' "${PF_LOAD_LINE}"
+        grep -qF "${PF_ANCHOR_LINE}" "${PF_CONF}" || printf '%s\n' "${PF_ANCHOR_LINE}"
+        grep -qF "${PF_LOAD_LINE}" "${PF_CONF}" || printf '%s\n' "${PF_LOAD_LINE}"
     } >> "${pf_tmp}"
 
     # Validate the WHOLE file, not just our lines. An anchor statement in the

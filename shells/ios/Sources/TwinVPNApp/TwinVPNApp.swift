@@ -43,7 +43,16 @@ struct TwinVPNApp: App {
                 .environmentObject(permission)
                 .environmentObject(management)
                 .task {
-                    await permission.reload()
+                    await resume()
+                    // ADR-0018 §11.16 (m)'s split: the EXTENSION fetches, this
+                    // process parses and verifies. It refuses on this build with
+                    // `MGMT.OP_UNKNOWN` — §11.14 (a)'s operation does not exist —
+                    // and the refusal is deliberately NOT surfaced: LC-17a says
+                    // "staleness is not a reason to stop", and the extension is
+                    // already running on the last verified generation it holds.
+                    // Called anyway, because the log line is the only place a
+                    // support case can see that the app tried.
+                    await ContractCourier(management: management).refreshSignedDocuments()
                 }
         }
         // `onChange(of:perform:)` — ONE closure parameter, the new value. The
@@ -65,14 +74,34 @@ struct TwinVPNApp: App {
             // degraded".
             switch phase {
             case .active:
-                management.beginPolling()
-                Task { await permission.reload() }
+                // `reload` → `attach` → `beginPolling`, in that order and not the
+                // other one. Polling before the channel is bound spends a whole
+                // interval asking a `nil` session, and — since the profile may
+                // have been REMOVED while the app was away (ADR-0012 §11.10's
+                // "the only unblock mechanism is removing the VPN profile in
+                // Settings") — the reload is also what tells `attach` there is
+                // nothing left to bind to.
+                Task { await resume() }
             case .background, .inactive:
                 management.endPolling()
             @unknown default:
                 management.endPolling()
             }
         }
+    }
+
+    /// Re-reads the profile, re-binds the channel to it, and starts polling.
+    ///
+    /// One function because the three steps are ordered and every caller needs
+    /// all three. `attach(to:)` takes the manager `VPNPermission` just loaded
+    /// rather than loading its own: two `loadAllFromPreferences` results are two
+    /// manager objects for one profile, and PS-24 condition 2's one-writer rule
+    /// is about exactly that kind of second copy.
+    @MainActor
+    private func resume() async {
+        await permission.reload()
+        management.attach(to: permission.manager)
+        management.beginPolling()
     }
 }
 
@@ -86,6 +115,30 @@ struct TwinVPNApp: App {
 /// So `permission.state` gates exactly one tab, and no other.
 struct RootView: View {
     @EnvironmentObject private var permission: VPNPermission
+    @EnvironmentObject private var management: ManagementClient
+
+    /// The one derivation, made once, at the root.
+    ///
+    /// DESIGN.md D1 makes the backdrop "a single large field of soft light whose
+    /// colour and geometry are the connection state", and §3 makes it "one
+    /// layer, drawn behind everything". One layer means one derivation: if each
+    /// tab resolved its own tone, switching tabs could switch the room's light
+    /// while the state behind it had not moved.
+    ///
+    /// It is a computed property and not `@Published` state because §2.4 is
+    /// explicit that the mapping "introduces no new read, no new `@Published`
+    /// property and no new management operation". All three inputs are already
+    /// observed; this is a projection of them.
+    /// `@MainActor` because `VPNPermission` and `ManagementClient` are, and a
+    /// computed property that is not `body` does not inherit SwiftUI's
+    /// main-actor isolation.
+    @MainActor
+    private var visual: StateVisual {
+        StateVisual.resolve(
+            profile: permission.state,
+            isLive: management.isLive,
+            protection: management.snapshot?.protection)
+    }
 
     var body: some View {
         // Chrome, so the SHELL owns it: `Resources/Localizable.xcstrings`, the
@@ -100,15 +153,30 @@ struct RootView: View {
         // degraded to `Domain::Internal`, and every tab was labelled with the
         // INTERNAL fallback: "TwinVPN hit a defect in itself." Do not rebuild
         // it; see the string catalogue's header for what belongs where.
-        TabView {
-            StatusView()
-                .tabItem { Label(String(localized: "nav_status"), systemImage: "shield") }
-            PairingView()
-                .tabItem { Label(String(localized: "nav_pairing"), systemImage: "qrcode") }
-            DiagnosticsView()
-                .tabItem {
-                    Label(String(localized: "nav_diagnostics"), systemImage: "stethoscope")
-                }
+        //
+        // DESIGN.md §3's backdrop is the BOTTOM of this stack and nothing else
+        // in the app paints one. A SwiftUI view is transparent by default, so
+        // the only thing that would otherwise show through is the window's
+        // `systemBackground` — which is `#FFFFFF`/`#000000`, the two values §2.1
+        // rejects because "pure extremes give the glass no light to refract and
+        // the material renders dead flat".
+        //
+        // It sits OUTSIDE the `TabView` rather than inside each tab so that the
+        // field does not restart its breathing loop, or re-run its 0.42 s tone
+        // transition, every time the user changes tab.
+        ZStack {
+            Backdrop(visual: visual, isLive: management.isLive)
+
+            TabView {
+                StatusView(visual: visual)
+                    .tabItem { Label(String(localized: "nav_status"), systemImage: "shield") }
+                PairingView(tone: visual.tone)
+                    .tabItem { Label(String(localized: "nav_pairing"), systemImage: "qrcode") }
+                DiagnosticsView(tone: visual.tone)
+                    .tabItem {
+                        Label(String(localized: "nav_diagnostics"), systemImage: "stethoscope")
+                    }
+            }
         }
     }
 }

@@ -15,7 +15,7 @@
 //! and for what W-12 resolved to.
 
 use futures_core::future::BoxFuture;
-use twinvpn_cp_client::ports::{ControlPlaneStore, StoreFailure};
+use twinvpn_cp_client::ports::{ControlPlaneStore, MonotoneMark, StoreFailure};
 use twinvpn_cp_client::state::{CachedPeer, DocumentType, StoredDocumentMark};
 use twinvpn_cp_client::ReceivedOctets;
 use twinvpn_types::{DeviceId, TwinnetId};
@@ -91,8 +91,11 @@ impl ControlPlaneStore for ControlPlaneBinding {
                 Ok(())
             } else {
                 // "A server-offered cursor below the local high-water MUST be
-                // rejected." Reported as the typed refusal, never absorbed.
+                // rejected." Reported as the typed refusal, never absorbed —
+                // and named as the cursor's, so it carries E-1(c)'s code and
+                // not the trust epoch's.
                 Err(StoreFailure::RollbackRefused {
+                    mark: MonotoneMark::Cursor,
                     offered: net_seq,
                     floor,
                 })
@@ -116,7 +119,9 @@ impl ControlPlaneStore for ControlPlaneBinding {
             if accepted {
                 Ok(())
             } else {
+                // The one refusal that IS ADR-0007 N-26's trust-epoch rollback.
                 Err(StoreFailure::RollbackRefused {
+                    mark: MonotoneMark::TrustEpoch,
                     offered: epoch,
                     floor,
                 })
@@ -166,6 +171,7 @@ impl ControlPlaneStore for ControlPlaneBinding {
             // ADR-0009 R-4's fork (never retry — refetch and refuse).
             match held {
                 Some(floor) if version < floor => Err(StoreFailure::RollbackRefused {
+                    mark: MonotoneMark::DocumentVersion,
                     offered: version,
                     floor,
                 }),
@@ -296,10 +302,64 @@ mod tests {
         assert!(matches!(
             err,
             StoreFailure::RollbackRefused {
+                mark: MonotoneMark::Cursor,
                 offered: 19,
                 floor: 20
             }
         ));
+        assert_eq!(
+            err.reason_code().as_str(),
+            "CONTROL.CONSISTENCY.REPLICA_BEHIND_CURSOR"
+        );
+    }
+
+    #[test]
+    fn each_floor_refuses_under_its_own_code() {
+        // W-11's second half: the three floors this binding guards are three
+        // registered conditions, and only the trust epoch's is an AUTH code.
+        let shared = new_shared();
+        let binding = ControlPlaneBinding::new(ControlPlanePort::new(shared));
+
+        block(binding.advance_trust_epoch(&twinnet(), 7)).expect("first epoch");
+        let epoch = block(binding.advance_trust_epoch(&twinnet(), 6)).expect_err("N-26");
+        assert!(matches!(
+            epoch,
+            StoreFailure::RollbackRefused {
+                mark: MonotoneMark::TrustEpoch,
+                offered: 6,
+                floor: 7
+            }
+        ));
+        assert_eq!(epoch.reason_code().as_str(), "AUTH.TRUST_EPOCH_ROLLBACK");
+
+        block(binding.put_document(
+            &twinnet(),
+            DocumentType::PolicyBundle,
+            9,
+            [1; 32],
+            &ReceivedOctets::from_wire(b"nine"),
+        ))
+        .expect("first write");
+        let rollback = block(binding.put_document(
+            &twinnet(),
+            DocumentType::PolicyBundle,
+            8,
+            [1; 32],
+            &ReceivedOctets::from_wire(b"eight"),
+        ))
+        .expect_err("R-5");
+        assert!(matches!(
+            rollback,
+            StoreFailure::RollbackRefused {
+                mark: MonotoneMark::DocumentVersion,
+                offered: 8,
+                floor: 9
+            }
+        ));
+        assert_eq!(
+            rollback.reason_code().as_str(),
+            "CONTROL.CONSISTENCY.VERSION_ROLLBACK_REJECTED"
+        );
     }
 
     #[test]
@@ -323,6 +383,10 @@ mod tests {
         ))
         .expect_err("a fork must be refused");
         assert!(matches!(err, StoreFailure::Forked { version: 4 }));
+        assert_eq!(
+            err.reason_code().as_str(),
+            "CONTROL.CONSISTENCY.FORKED_HISTORY_DETECTED"
+        );
     }
 
     #[test]

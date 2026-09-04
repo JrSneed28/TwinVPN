@@ -81,7 +81,10 @@ fn workspace_manifest() -> Result<PathBuf, String> {
 fn usage() {
     eprintln!("usage: cargo run -p xtask -- lint");
     eprintln!();
-    eprintln!("  lint   run the T1 checks: CD-3, CD-I2, CD-I5, CD-CB3 (ADR-0018), U-22 (ADR-0021)");
+    eprintln!(
+        "  lint   run the T1 checks: CD-3, CD-I2, CD-I5, CD-CB3 (ADR-0018), U-22 (ADR-0021), \
+         R-9 (ownership.md)"
+    );
 }
 
 fn lint() -> ExitCode {
@@ -102,7 +105,7 @@ fn lint() -> ExitCode {
     };
 
     if violations.is_empty() {
-        println!("xtask lint: CD-3, CD-I2, CD-I5, CD-CB3, U-22 — all clean");
+        println!("xtask lint: CD-3, CD-I2, CD-I5, CD-CB3, U-22, R-9 — all clean");
         return ExitCode::SUCCESS;
     }
 

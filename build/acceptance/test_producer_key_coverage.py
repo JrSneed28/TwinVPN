@@ -52,6 +52,16 @@ produces no evidence and lands NOT-EXECUTED, which is `job_results.py`'s
 problem.
 
 ===========================================================================
+THE PRODUCER THAT DOES NOT EXIST YET
+===========================================================================
+Derivation cannot see a lane nobody has written. `UNPRODUCED` says a criterion
+has no writer; `PRODUCER_PINS` says WHICH FILE is supposed to become one, and
+fails once, by path, until it does. It was the only place a digest key was
+checked as text until 2026-09-04: `test_evidence_writers.render()` builds the
+digest map out of the adjudicator's own names, and the per-script key pins that
+file now carries are what catch a lane that spells one differently.
+
+===========================================================================
 THE INDIRECT PRODUCER
 ===========================================================================
 `ci-windows-killswitch.sh` does not write its own environment inline: it
@@ -108,6 +118,81 @@ UNPRODUCED: dict[str, str] = {
     "IOS-SUPERVISED-ALWAYS-ON":
         "supervised/managed Always-On has no lane script; nothing writes "
         "build/ci/evidence/ios-supervised.json. Closed when that lane lands.",
+    "IOS-NE-FAIL-CLOSED":
+        "no executor exists: the packet tunnel provider does not run in the "
+        "simulator, Corellium could not perform three of the five injections, "
+        "and the Corellium lane script was removed on 2026-09-02. Nothing "
+        "writes build/ci/evidence/ios-ne-failclosed.json. Closed when a "
+        "provisioned device lane exists, not before.",
+}
+
+# THE LANE SCRIPTS THE RECONCILED CRITERIA ARE BEING WRITTEN TO, PINNED BY NAME.
+#
+# Everything else in this file is DERIVED -- keys off the real tables, emitted
+# keys off a real render -- and derivation cannot see a producer that does not
+# exist yet. `UNPRODUCED` above states that a criterion has no writer; it does
+# not say WHICH file is supposed to become one, so an entry could sit there
+# indefinitely while the row read NOT-EXECUTED and nobody could tell whether the
+# lane was late or abandoned.
+#
+# These entries name the file and the strings it must carry, which also covers
+# the blind spot at test_evidence_writers.py:150: `render()` stubs
+# `ARTIFACT_DIGESTS` from the ADJUDICATOR'S OWN key names, so a lane that spells
+# a digest key differently renders as if it agreed. Each digest key below is
+# therefore pinned as TEXT against the script that must write it -- the same
+# thing the macOS system-extension case at the bottom of this file does for
+# `com.twinvpn.app.sysext.systemextension`.
+#
+# A missing file fails ONCE, naming the path and everything it owes. That is
+# deliberate: thirty subtest failures for one absent script tell a reader less
+# than one failure that names the script.
+PRODUCER_PINS: dict[str, tuple[str, ...]] = {
+    # Both simulator rows come out of the existing iOS lane, which today is the
+    # version-1 link/run writer only.
+    "build/ci/ci-ios-acceptance.sh": (
+        "IOS-FAILCLOSED-CONFIGURATION", "IOS-PROFILE-REMOVAL-HONESTY",
+        "TwinVPN.app/TwinVPN", "execution", "assertion_source",
+        "simulator_runtime", "xcode_version", "test_count",
+        "os_enforcement_exercised",
+    ),
+    "build/ci/ci-macos-pf-anchor.sh": (
+        "MACOS-PF-BOOT-ANCHOR", "twinvpn-ksd", "pf_enabled",
+        "anchor_referenced_in_main_ruleset", "anchor_rule_count",
+        "read_back_tables", "covered_prefix_connect_refused",
+        "control_connect_succeeded", "ksd_status_exit",
+        "bridge_tests_as_root", "bridge_test_count",
+    ),
+    # The two keys the in-box topology added to every egress criterion. The
+    # kill-switch lane is the one that can measure them: it builds the oracle
+    # and the sentinel it is attesting.
+    #
+    # AND THE FOUR MEASUREMENTS ITS OWN VERDICT DEPENDS ON, which no derivation
+    # can see because they are conjuncts of a bash `if`, not entries in
+    # `PREREQUISITES`. Each one is a way a run could read as a pass while having
+    # measured nothing:
+    #
+    #   * `restore_net_up_exit_code` -- step 9's claim is that traffic RESUMES.
+    #     The guest has printed TWINVPN_RESTORE_NET_UP_EXIT since the restore
+    #     step existed and NOTHING read it, so a restore whose `net up` refused
+    #     could still produce a well-formed RESTORED window and a PASS.
+    #   * `ATTEMPT_FLOOR` -- `oracle_adjudication` refuses a family under 60
+    #     self-reported attempts, and by the time it does the only symptom is an
+    #     INCONCLUSIVE that reads like a leak-detection failure rather than like
+    #     a beacon loop the blocking slowed down. The lane counts what it posted
+    #     and refuses the shortfall by name.
+    #   * `dns-protected` -- without the stub resolver on the tunnel, filter
+    #     class 6 blocks port 53 on every non-overlay interface and the
+    #     TUNNELLED window records zero DNS arrivals: INCONCLUSIVE for `dns`,
+    #     for a reason that is the lane's and not the product's.
+    #   * `lab-seed` -- `enforce::arm` needs an overlay allocation and a peer
+    #     with a verified tunnel-key binding, and neither has a production
+    #     writer. The lane builds the service with the feature that reads
+    #     twinpeer's seed; without it every phase after BASELINE is silent.
+    "build/ci/ci-windows-killswitch.sh": (
+        "oracle_topology", "sentinel_egress_identity",
+        "restore_net_up_exit_code", "ATTEMPT_FLOOR",
+        "dns-protected", "lab-seed",
+    ),
 }
 
 # THE GAPS THAT ARE OPEN RIGHT NOW, each with what closes it.
@@ -118,16 +203,6 @@ UNPRODUCED: dict[str, str] = {
 # instruction to delete the entry. The list can only shrink, and it cannot rot
 # into a standing exemption.
 KNOWN_GAPS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "IOS-NE-FAIL-CLOSED": (
-        "the leak probe runs on the ubuntu controller, not on the virtual "
-        "iPhone, so ci-ios-corellium.sh has no honest value to write for "
-        "either leg's identity -- it would be attesting the CONTROLLER's "
-        "paths, which is the exact substitution `probe_host` exists to catch. "
-        "Closed by moving the probe onto the DUT. NOT closed by writing the "
-        "keys, and this entry is here rather than the keys for that reason.",
-        ("protected_path_established", "unprotected_path_established",
-         "protected_path_identity", "unprotected_path_identity"),
-    ),
 }
 
 _CACHE: dict[str, list[tuple[str, dict]]] | None = None
@@ -291,6 +366,41 @@ class ProducerKeyCoverage(unittest.TestCase):
             with self.subTest(criterion=criterion):
                 self.assertLessEqual(set(PATH_IDENTITY_PREREQUISITES),
                                      set(PREREQUISITES[criterion]))
+
+    def test_the_named_lane_scripts_exist_and_carry_what_they_owe(self):
+        # THE PIN THAT DERIVATION CANNOT PROVIDE. Everything above is computed
+        # from the tables and from a render, so a producer that does not exist
+        # yet is invisible to all of it -- `UNPRODUCED` records that a criterion
+        # has no writer, and nothing records WHICH file was supposed to be one.
+        #
+        # It was the only check that could see a misspelled digest key until
+        # `test_evidence_writers.py` gained per-script key pins (2026-09-04):
+        # `render()` builds the digest map from `ARTIFACT_DIGEST_REQUIRED`
+        # itself, so a lane writing `TwinVPN.app/TwinVPNApp` would render as if
+        # it agreed with the adjudicator. Text, therefore, and one failure per
+        # file naming everything that file owes.
+        self.assertTrue(PRODUCER_PINS, "the pin table is empty; nothing graded")
+        for rel, needles in sorted(PRODUCER_PINS.items()):
+            path = REPO / rel
+            with self.subTest(script=rel):
+                self.assertTrue(
+                    path.is_file(),
+                    f"{rel} does not exist. It is the producer for: "
+                    f"{', '.join(needles)}. Until it lands, every criterion "
+                    f"and key in that list is unproduced and its row reads "
+                    f"NOT-EXECUTED.")
+                text = path.read_text()
+                absent = [n for n in needles if n not in text]
+                self.assertEqual(
+                    absent, [],
+                    f"{rel} exists but never mentions {', '.join(absent)}. A "
+                    f"criterion name that is absent means the lane writes no "
+                    f"evidence for it; a KEY that is absent means the row fails "
+                    f"its environment check before its verdict is read; a "
+                    f"DIGEST name that is absent means the run binding fails, "
+                    f"and it is the one kind of drift the rendered writers "
+                    f"cannot see, because they stub the digest map from the "
+                    f"adjudicator's own names.")
 
     def test_the_extension_digest_key_names_the_extension_project_yml_builds(self):
         # THE DRIFT `render()` CANNOT SEE. It stubs `ARTIFACT_DIGESTS` from the

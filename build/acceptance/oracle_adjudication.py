@@ -244,6 +244,14 @@ def sentinel_note(path) -> str:
     `*_sentinel_continuous`, which IS gated on. DNS beats are exempt by
     construction: a DNS beat arrives from a resolver either way, so its address
     cannot separate the sentinel from the device.
+
+    THE SECOND HALF OF THE GUARANTEE IS NOT HERE EITHER, and it is also not a
+    string somebody chose: `sentinel_egress_identity` in the PLATFORM evidence
+    is the source identity the sentinel MEASURED on itself, and
+    `adjudication.sentinel_independence_problems` refuses it when it equals
+    either path identity. That is a different fact in a different file from
+    this one, and it leaves `sentinel_host` exactly as it is -- surfaced,
+    self-declared, gated on by nothing.
     """
     try:
         host = json.loads(path.read_text()).get("sentinel_host")

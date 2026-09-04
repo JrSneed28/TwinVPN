@@ -136,6 +136,30 @@ pub fn build_reply(query: &[u8], q: &Question, answer: Option<IpAddr>) -> Vec<u8
     out
 }
 
+/// Build a REFUSED reply (RCODE 5) for a query outside the beacon zone.
+///
+/// Answered rather than dropped, and the reason is time: Windows `nslookup`
+/// opens every lookup with a PTR query for the resolver's own address, and a
+/// query that gets no reply costs the caller its full timeout and retry budget
+/// (about ten seconds) before the beacon query is even sent. The lab's DNS
+/// relay also waits on each unanswered upstream query, so a silent oracle
+/// stalls every query behind it. Nothing is recorded for a refused query.
+pub fn build_refusal(query: &[u8], q: &Question) -> Vec<u8> {
+    let qsec = &query[12..12 + q.question_len];
+    let mut out = Vec::with_capacity(12 + qsec.len());
+    out.extend_from_slice(&q.id.to_be_bytes());
+    // QR=1, OPCODE=0, AA=0 (not our zone), TC=0, RD copied; RA=0, RCODE=5.
+    let rd = query[2] & 0x01;
+    out.push(0x80 | rd);
+    out.push(0x05);
+    out.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+    out.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT
+    out.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
+    out.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
+    out.extend_from_slice(qsec);
+    out
+}
+
 /// Split `<seq>.<token>.<path_tag>.<zone>` into `(token, seq, path_tag)` when
 /// `name` is inside `zone`. Returns `None` for anything else, which is how
 /// internet scan noise is kept out of the observation record.
@@ -176,6 +200,33 @@ mod tests {
     /// Wire-format round trip over a real query, because a hand-rolled parser
     /// that is wrong is worse than no parser: it would drop beacons and report
     /// silence.
+    #[test]
+    fn a_query_outside_the_zone_is_refused_rather_than_ignored() {
+        // id=0xbeef, RD set, QDCOUNT=1, the PTR query Windows nslookup opens
+        // every lookup with: the reverse name of the resolver it was handed.
+        let mut q = vec![0xbe, 0xef, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        for label in ["53", "0", "78", "10", "in-addr", "arpa"] {
+            q.push(label.len() as u8);
+            q.extend_from_slice(label.as_bytes());
+        }
+        q.push(0);
+        q.extend_from_slice(&12u16.to_be_bytes()); // PTR
+        q.extend_from_slice(&1u16.to_be_bytes());
+        let parsed = parse_query(&q).expect("parses");
+        assert_eq!(beacon_labels(&parsed.name, "leak.test"), None);
+        let reply = build_refusal(&q, &parsed);
+        assert_eq!(&reply[0..2], &[0xbe, 0xef], "the reply must echo the id");
+        assert_eq!(reply[2] & 0x80, 0x80, "QR must be set");
+        assert_eq!(reply[2] & 0x04, 0, "AA must be clear: this is not our zone");
+        assert_eq!(reply[3] & 0x0f, 5, "RCODE must be REFUSED");
+        assert_eq!(u16::from_be_bytes([reply[6], reply[7]]), 0, "ANCOUNT");
+        assert_eq!(
+            &reply[12..],
+            &q[12..12 + parsed.question_len],
+            "the question is echoed"
+        );
+    }
+
     #[test]
     fn a_real_query_parses_and_the_reply_echoes_it() {
         // id=0xbeef, standard query, RD set, QDCOUNT=1, QNAME=7.tok.leak.test

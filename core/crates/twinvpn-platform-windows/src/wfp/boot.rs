@@ -59,18 +59,33 @@ use super::{
     Ruleset, TrafficClass, FILTER_POSTURE_BLOCKED,
 };
 
-/// The flags every boot filter carries.
+/// The two halves of every boot rule, and the key band each half lives in.
 ///
-/// Both, and both are load-bearing. `boot_time` is what BFE applies before the
-/// network stack is usable; `persistent` is what survives the transition out of
-/// the boot phase, so there is no instant between "boot filters expire" and "the
-/// service installs its own" in which the host is open.
-const fn boot_flags() -> FilterFlags {
-    FilterFlags {
-        persistent: true,
-        boot_time: true,
-    }
-}
+/// Both are load-bearing, and the engine refuses one filter carrying both
+/// (`FWPM_FILTER0`: the persistent flag "cannot be set together with
+/// `FWPM_FILTER_FLAG_BOOTTIME`", `FWP_E_INVALID_FLAGS`), so each rule is
+/// installed twice. The boot-time half is what the TCP/IP driver enforces
+/// before BFE starts, and BFE drops it once it has initialised. The persistent
+/// half is what BFE reinstates at that moment and across every later restart,
+/// so there is no instant between "boot filters expire" and "the service
+/// installs its own" in which the host is open. ADR-0012 §11.6's Windows row
+/// names both: the BOOTTIME coarse deny plus the PERSISTENT set.
+const HALVES: [(u16, FilterFlags); 2] = [
+    (
+        BOOT_ORDINAL,
+        FilterFlags {
+            persistent: false,
+            boot_time: true,
+        },
+    ),
+    (
+        BOOT_PERSISTENT_ORDINAL,
+        FilterFlags {
+            persistent: true,
+            boot_time: false,
+        },
+    ),
+];
 
 /// The set the installer writes.
 ///
@@ -87,101 +102,104 @@ const fn boot_flags() -> FilterFlags {
 #[must_use]
 pub fn boot_set() -> FilterSet {
     let mut filters = Vec::new();
+    // One rule, both halves: the same layer, action, weight and conditions,
+    // under a key in each half's band.
+    let mut rule = |class: TrafficClass,
+                    layer: Layer,
+                    offset: u16,
+                    name: &'static str,
+                    action: Action,
+                    weight: u64,
+                    conditions: Vec<Condition>| {
+        for (band, flags) in HALVES {
+            filters.push(FilterSpec {
+                key: filter_key(class, layer, band + offset),
+                name,
+                layer,
+                action,
+                weight,
+                conditions: conditions.clone(),
+                class,
+                flags,
+            });
+        }
+    };
 
     // Loopback, so the stub's own listeners and every local IPC survive the
     // boot window. Weight above the deny; no ALE condition, so BFE can evaluate
     // it.
     for layer in Layer::BOTH {
-        filters.push(FilterSpec {
-            key: filter_key(TrafficClass::Loopback, layer, BOOT_ORDINAL),
-            name: "twinvpn-boot-loopback",
+        rule(
+            TrafficClass::Loopback,
             layer,
-            action: Action::Permit,
-            weight: 10_000,
-            conditions: vec![Condition::IsLoopback],
-            class: TrafficClass::Loopback,
-            flags: boot_flags(),
-        });
+            0,
+            "twinvpn-boot-loopback",
+            Action::Permit,
+            10_000,
+            vec![Condition::IsLoopback],
+        );
     }
 
     // DHCP and DHCPv6, so a host can acquire an address during the window. ND
     // and RA on v6 for the same reason. Without these the boot window is not
     // merely offline for TwinVPN, it is offline for the host, and KS-19 asks for
     // a coverage guarantee rather than for a disconnected machine.
-    filters.push(FilterSpec {
-        key: filter_key(
-            TrafficClass::UnderlayConfiguration,
-            Layer::AleAuthConnectV4,
-            BOOT_ORDINAL,
-        ),
-        name: "twinvpn-boot-dhcp4",
-        layer: Layer::AleAuthConnectV4,
-        action: Action::Permit,
-        weight: 8_000,
-        conditions: vec![
+    rule(
+        TrafficClass::UnderlayConfiguration,
+        Layer::AleAuthConnectV4,
+        0,
+        "twinvpn-boot-dhcp4",
+        Action::Permit,
+        8_000,
+        vec![
             Condition::Protocol(IpProtocol::Udp),
             Condition::RemotePort(67),
         ],
-        class: TrafficClass::UnderlayConfiguration,
-        flags: boot_flags(),
-    });
-    filters.push(FilterSpec {
-        key: filter_key(
-            TrafficClass::UnderlayConfiguration,
-            Layer::AleAuthConnectV6,
-            BOOT_ORDINAL,
-        ),
-        name: "twinvpn-boot-dhcp6",
-        layer: Layer::AleAuthConnectV6,
-        action: Action::Permit,
-        weight: 8_000,
-        conditions: vec![
+    );
+    rule(
+        TrafficClass::UnderlayConfiguration,
+        Layer::AleAuthConnectV6,
+        0,
+        "twinvpn-boot-dhcp6",
+        Action::Permit,
+        8_000,
+        vec![
             Condition::Protocol(IpProtocol::Udp),
             Condition::RemotePort(547),
             Condition::LinkLocalScope,
         ],
-        class: TrafficClass::UnderlayConfiguration,
-        flags: boot_flags(),
-    });
-    filters.push(FilterSpec {
-        key: filter_key(
-            TrafficClass::UnderlayConfiguration,
-            Layer::AleAuthConnectV6,
-            BOOT_ORDINAL + 1,
-        ),
-        name: "twinvpn-boot-nd-ra",
-        layer: Layer::AleAuthConnectV6,
-        action: Action::Permit,
-        weight: 8_000,
-        conditions: vec![
+    );
+    rule(
+        TrafficClass::UnderlayConfiguration,
+        Layer::AleAuthConnectV6,
+        1,
+        "twinvpn-boot-nd-ra",
+        Action::Permit,
+        8_000,
+        vec![
             Condition::Protocol(IpProtocol::IcmpV6),
             Condition::LinkLocalScope,
         ],
-        class: TrafficClass::UnderlayConfiguration,
-        flags: boot_flags(),
-    });
+    );
 
     // The coarse deny: the product's own address space, both families. One
     // filter per prefix per family, from the same constant the runtime floor
     // uses, so the two sets cannot disagree about what the overlay space is.
     for (ordinal, prefix) in baseline_protected().into_iter().enumerate() {
-        let layer = Layer::for_family(prefix.family());
-        filters.push(FilterSpec {
-            key: filter_key(
-                TrafficClass::ProtectedScopeDeny,
-                layer,
-                BOOT_ORDINAL + u16::try_from(ordinal).unwrap_or(0),
-            ),
-            name: "twinvpn-boot-scope-deny",
-            layer,
-            action: Action::Block,
-            weight: 100,
-            conditions: vec![Condition::RemotePrefix(prefix)],
-            class: TrafficClass::ProtectedScopeDeny,
-            flags: boot_flags(),
-        });
+        rule(
+            TrafficClass::ProtectedScopeDeny,
+            Layer::for_family(prefix.family()),
+            u16::try_from(ordinal).unwrap_or(0),
+            "twinvpn-boot-scope-deny",
+            Action::Block,
+            100,
+            vec![Condition::RemotePrefix(prefix)],
+        );
     }
 
+    // The posture marker is read, never enforced, and a set carries exactly
+    // one: the persistent half, which is the one still there when the service
+    // asks.
     filters.push(FilterSpec {
         key: FILTER_POSTURE_BLOCKED,
         name: "twinvpn-boot-posture",
@@ -190,7 +208,7 @@ pub fn boot_set() -> FilterSet {
         weight: 0,
         conditions: vec![Condition::LocalInterface(0)],
         class: TrafficClass::Marker,
-        flags: boot_flags(),
+        flags: HALVES[1].1,
     });
 
     FilterSet {
@@ -207,6 +225,15 @@ pub fn boot_set() -> FilterSet {
 /// separate class code keeps [`class_of`] able to decode a boot filter — which
 /// is what lets the service's step-(1) check reuse the runtime read-back.
 pub const BOOT_ORDINAL: u16 = 0xB0_00;
+
+/// The ordinal band of the boot set's persistent half.
+///
+/// The same rules as [`BOOT_ORDINAL`]'s, one band up, so the two halves of a
+/// rule never share a key and both are recognised as the artifact's.
+pub const BOOT_PERSISTENT_ORDINAL: u16 = 0xB1_00;
+
+/// Every band the artifact's keys lie in.
+const BOOT_BANDS: [u16; 2] = [BOOT_ORDINAL, BOOT_PERSISTENT_ORDINAL];
 
 /// What the service's ADR-0016 §11.6 step (1) check found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,12 +281,9 @@ pub fn verify(state: &EngineState) -> BootArtifact {
 
 /// Whether a key lies in the boot ordinal band.
 fn is_boot_key(key: super::Guid, layer: Layer) -> bool {
-    (0..8).any(|offset| {
-        filter_key(
-            TrafficClass::ProtectedScopeDeny,
-            layer,
-            BOOT_ORDINAL + offset,
-        ) == key
+    BOOT_BANDS.iter().any(|band| {
+        (0..8)
+            .any(|offset| filter_key(TrafficClass::ProtectedScopeDeny, layer, band + offset) == key)
     })
 }
 
@@ -289,9 +313,11 @@ pub fn is_boot_filter(key: super::Guid) -> bool {
     ];
     for layer in Layer::BOTH {
         for class in BOOT_CLASSES {
-            for offset in 0..8u16 {
-                if filter_key(class, layer, BOOT_ORDINAL + offset) == key {
-                    return true;
+            for band in BOOT_BANDS {
+                for offset in 0..8u16 {
+                    if filter_key(class, layer, band + offset) == key {
+                        return true;
+                    }
                 }
             }
         }
@@ -336,8 +362,11 @@ mod tests {
         // ADR-0012 §11.6's Windows limitation. The whole reason the bootstrap
         // exception is unavailable in the boot window.
         for filter in &boot_set().filters {
-            assert!(filter.flags.boot_time, "{}", filter.name);
-            assert!(filter.flags.persistent, "{}", filter.name);
+            assert!(
+                filter.flags.boot_time != filter.flags.persistent,
+                "{} must be exactly one of boot-time and persistent",
+                filter.name
+            );
             assert!(
                 !filter
                     .conditions
@@ -347,6 +376,48 @@ mod tests {
                 filter.name
             );
         }
+    }
+
+    #[test]
+    fn every_boot_time_rule_has_a_persistent_twin() {
+        // The KS-19 guarantee across the moment BFE drops its boot-time filters:
+        // whatever was enforced before BFE started is reinstated by it, as the
+        // same rule under the persistent flag.
+        let set = boot_set();
+        let boot_time: Vec<_> = set.filters.iter().filter(|f| f.flags.boot_time).collect();
+        assert!(!boot_time.is_empty());
+        for half in boot_time {
+            assert!(
+                set.filters.iter().any(|twin| {
+                    twin.flags.persistent
+                        && twin.key != half.key
+                        && is_boot_filter(twin.key)
+                        && twin.layer == half.layer
+                        && twin.action == half.action
+                        && twin.weight == half.weight
+                        && twin.conditions == half.conditions
+                        && twin.class == half.class
+                }),
+                "{} ({:?}) has no persistent twin",
+                half.name,
+                half.layer
+            );
+        }
+    }
+
+    #[test]
+    fn a_filter_carrying_both_flags_is_refused_rather_than_installed() {
+        // FWPM_FILTER0: the two flags cannot be set together. The engine says
+        // FWP_E_INVALID_FLAGS; this crate says so first.
+        let mut set = boot_set();
+        set.filters[0].flags = FilterFlags {
+            persistent: true,
+            boot_time: true,
+        };
+        assert!(matches!(
+            set.validate().expect_err("refused"),
+            SetDefect::BootTimeFilterIsPersistent(_)
+        ));
     }
 
     #[test]

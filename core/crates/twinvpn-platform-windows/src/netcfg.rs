@@ -54,7 +54,7 @@ use twinvpn_platform::{
 use twinvpn_types::{AddressFamily, PerFamily};
 
 use crate::dns::{self, InterfaceDns, NrptRule, RestorePoint, StubAddresses};
-use crate::route::{self, InstalledRoutes, InterfaceLuid};
+use crate::route::{self, InstalledRoutes, InterfaceLuid, OverlayLuid};
 use crate::shutdown::ShutdownLatch;
 use crate::sys::SystemOps;
 use crate::wfp::canary::{CanaryVerdict, CounterSnapshot};
@@ -187,6 +187,9 @@ pub struct NetworkConfigParts {
 pub struct WindowsNetworkConfig {
     system: Arc<dyn SystemOps>,
     enforcement: EnforcementConfig,
+    /// The overlay's LUID, which [`EnforcementConfig::overlay_luid`] can only
+    /// state as `0` because the adapter does not exist at construction.
+    overlay: OverlayLuid,
     stub: StubAddresses,
     restore_point_path: std::path::PathBuf,
     shutdown: ShutdownLatch,
@@ -204,6 +207,7 @@ impl WindowsNetworkConfig {
     #[must_use]
     pub fn new(parts: NetworkConfigParts) -> Self {
         Self {
+            overlay: OverlayLuid::new(InterfaceLuid(parts.enforcement.overlay_luid)),
             system: parts.system,
             enforcement: parts.enforcement,
             stub: parts.stub,
@@ -215,8 +219,19 @@ impl WindowsNetworkConfig {
 
     /// The overlay this configuration programs.
     #[must_use]
-    pub const fn overlay(&self) -> InterfaceLuid {
-        InterfaceLuid(self.enforcement.overlay_luid)
+    pub fn overlay(&self) -> InterfaceLuid {
+        self.overlay.get()
+    }
+
+    /// The writable handle on that LUID, for the tunnel device that creates the
+    /// adapter.
+    ///
+    /// Handed out at assembly time rather than injected, so there is exactly one
+    /// cell and the two halves cannot be wired to two: `WindowsPlatformAdapter`
+    /// builds this object first and gives the device the handle it returns.
+    #[must_use]
+    pub fn overlay_luid(&self) -> OverlayLuid {
+        self.overlay.clone()
     }
 
     fn ledger(&self) -> std::sync::MutexGuard<'_, Ledger> {
@@ -296,7 +311,7 @@ impl WindowsNetworkConfig {
         contract: Option<&NetworkContract>,
     ) -> Result<ProtectionAssertion, PlatformError> {
         self.shutdown.check()?;
-        let blocked = self.render(contract.unwrap_or(&blank_contract()), Ruleset::Blocked);
+        let blocked = self.render(contract.unwrap_or(&prearming_contract()), Ruleset::Blocked);
         let observed = self.assert_protection(Some(&blocked))?;
         // Reclaimed, not recreated (KS-20, PS-8): if the engine already holds a
         // fail-closed **runtime** set, leave it exactly where it is. KS-23
@@ -347,8 +362,23 @@ impl WindowsNetworkConfig {
         self.system.filters().purge()
     }
 
-    fn render(&self, contract: &NetworkContract, ruleset: Ruleset) -> FilterSet {
-        wfp::filters::render(contract, ruleset, &self.enforcement)
+    /// Renders the set at the **live** overlay LUID.
+    ///
+    /// `EnforcementConfig` is injected before the adapter exists, so its
+    /// `overlay_luid` is the shell's pre-arming value and is `0` on Windows. It
+    /// is substituted here rather than at each of the six call sites in
+    /// [`wfp::filters::render`], because one of those is the Tier-2 permit that
+    /// is the *only* difference between `Protected` and `Blocked` and five are
+    /// `NotLocalInterface` complements — so a render that used the stale value
+    /// in one place and the live one in another would be a posture nobody
+    /// intended.
+    ///
+    /// `pub(crate)` for the propagation test in [`crate::wintun`], which asserts
+    /// this substitution against a device that has actually created an adapter.
+    pub(crate) fn render(&self, contract: &NetworkContract, ruleset: Ruleset) -> FilterSet {
+        let mut enforcement = self.enforcement.clone();
+        enforcement.overlay_luid = self.overlay().0;
+        wfp::filters::render(contract, ruleset, &enforcement)
     }
 
     fn commit(&self, set: &FilterSet) -> Result<(), PlatformError> {
@@ -492,6 +522,16 @@ impl WindowsNetworkConfig {
             cause,
             compensation,
         };
+        // On the log as well as in the ledger: the ledger is read by nobody
+        // in the hosted lane, and run 33740622733 reported `net up` as
+        // AUTH.KEY_STORE_UNAVAILABLE with the failing step and its OS error
+        // recorded nowhere a reader could find them.
+        tracing::error!(
+            step = failure.step,
+            cause = %failure.cause,
+            reason_code = failure.cause.reason_code().as_str(),
+            "applying the network contract failed at a step; the compensation below was applied"
+        );
         self.ledger().last_failure = Some(failure.clone());
         failure
     }
@@ -585,11 +625,61 @@ const fn compensation_of(ok: bool) -> Compensation {
 /// still produces a set that denies the overlay space in both families, because
 /// [`wfp::baseline_protected`] is a floor beneath every render — which is
 /// `desktop-linux`'s R-6 finding, and the reason a blank contract is safe here.
-fn blank_contract() -> NetworkContract {
+/// The contract in force before any session exists: no addresses, no
+/// resolvers, `Blocked` — and a Tier-1 scope that is EVERYTHING.
+///
+/// The routes are the two `/1` covers per family that `twinvpn-route` uses for
+/// a full tunnel, so [`wfp::filters::scope_mode`] reads `Complement` and the
+/// scope deny covers every destination rather than only the overlay space.
+/// Without them the pre-contract `Blocked` posture was `Bounded`: DNS and the
+/// overlay space denied, everything else permitted — which the hosted
+/// kill-switch lane measured (run 33721689011: DNS 0 of 6 arrived while
+/// armed, HTTP 6 of 6). A host that reports `Blocked` before it has a contract
+/// must be closed, not closed-for-the-overlay-only; ADR-0012 §8 and PS-18 say
+/// so, and the KS-19 boot artifact that the package installs says the same
+/// thing about the interval before the service.
+///
+/// The routes are rendered into filters only. Nothing programs them: this
+/// contract is what `reclaim` and a posture swap with no superseded contract
+/// render, never what `apply` installs.
+///
+/// What step 5 of the service's start sequence renders, and what a caller
+/// probing the engine with the runtime set should render too.
+///
+/// # Panics
+///
+/// Never: the four covers are constants (`0.0.0.0/1`, `128.0.0.0/1`, `::/1`,
+/// `8000::/1`) that `IpPrefix::new` accepts, and the unit tests build them.
+#[must_use]
+pub fn prearming_contract() -> NetworkContract {
+    use twinvpn_platform::{InterfaceIndex, RouteEntry};
+    use twinvpn_types::{IpAddr, IpPrefix, V4Addr, V6Addr};
+    let v4 = |first: u8| {
+        IpPrefix::new(IpAddr::V4(V4Addr::from_octets([first, 0, 0, 0])), 1)
+            .expect("a /1 with no host bits is well formed")
+    };
+    let v6 = |first: u8| {
+        let mut octets = [0u8; 16];
+        octets[0] = first;
+        IpPrefix::new(
+            IpAddr::V6(V6Addr::prefix_base(octets).expect("a zoneless prefix base")),
+            1,
+        )
+        .expect("a /1 with no host bits is well formed")
+    };
+    let cover = |destination: IpPrefix| RouteEntry {
+        destination,
+        via: None,
+        interface: InterfaceIndex(0),
+        metric: None,
+    };
     NetworkContract {
         generation: ContractGeneration(0),
         addresses: PerFamily::new(Vec::new(), Vec::new()),
-        routes: PerFamily::new(Vec::new(), Vec::new()),
+        routes: PerFamily::new(
+            vec![cover(v4(0)), cover(v4(128))],
+            vec![cover(v6(0)), cover(v6(0x80))],
+        ),
         dns: twinvpn_platform::DnsConfig {
             resolvers: PerFamily::new(Vec::new(), Vec::new()),
             search_domains: Vec::new(),
@@ -651,7 +741,7 @@ impl NetworkConfig for WindowsNetworkConfig {
                     .find(|(g, _)| *g == generation)
                     .map(|(_, s)| s.contract.clone())
             };
-            let contract = contract.unwrap_or_else(blank_contract);
+            let contract = contract.unwrap_or_else(prearming_contract);
             self.commit(&self.render(&contract, ruleset))
         })
     }

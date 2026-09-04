@@ -78,6 +78,12 @@ struct Serve {
     advertise_v4: Option<std::net::Ipv4Addr>,
     #[arg(long)]
     advertise_v6: Option<std::net::Ipv6Addr>,
+    /// The TCP port the advertised beacon URLs carry. Defaults to 80, which is
+    /// what a public deployment binds; an in-box deployment on a host whose
+    /// port 80 is held by another service (Windows HTTP.sys is the known case)
+    /// binds `--http4`/`--http6` elsewhere and advertises that port here.
+    #[arg(long, default_value_t = 80)]
+    advertise_port: u16,
     /// The widest gap between sentinel beats that still counts as the oracle
     /// having been continuously listening. REQUIRED: this is a property of the
     /// sentinel's cadence, which is a property of THIS DEPLOYMENT — not of the
@@ -166,15 +172,21 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// 128 bits of urandom, hex. `/dev/urandom` rather than a crate: this host is
-/// Linux, the read is three lines, and a dependency here would be a dependency
-/// in the process whose simplicity is the point.
+/// 128 bits from the platform CSPRNG, hex.
+///
+/// This used to open `/dev/urandom` directly, on the stated assumption that the
+/// oracle host is Linux. It is not any more: the Windows kill-switch lane runs
+/// the oracle in-box on the CI runner that hosts the device under test, where
+/// that path does not exist and the process would panic on its first session.
+/// `getrandom` was already in `lab/Cargo.lock` as a transitive dependency, so
+/// naming it directly costs one edge and no new code in the tree.
+///
+/// These bytes are session ids, probe tokens and sentinel tokens: a probe token
+/// an observer could guess would let anything on the network write arrivals
+/// into somebody's session, so the CSPRNG is not decoration.
 fn random_id() -> String {
-    use std::io::Read;
     let mut buf = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .expect("/dev/urandom must be readable on the oracle host");
+    getrandom::fill(&mut buf).expect("the oracle host must have a working CSPRNG");
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -220,7 +232,9 @@ async fn main() -> std::io::Result<()> {
 
     {
         let (state, cfg, token) = (state.clone(), cfg.clone(), token.clone());
-        let listener = TcpListener::bind(cfg.control).await?;
+        let listener = TcpListener::bind(cfg.control)
+            .await
+            .map_err(|e| std::io::Error::new(e.kind(), format!("bind {}: {e}", cfg.control)))?;
         tracing::info!(addr = %cfg.control, "control plane listening");
         tasks.push(tokio::spawn(async move {
             loop {
@@ -242,7 +256,9 @@ async fn main() -> std::io::Result<()> {
         // guess. `TcpListener::bind` on a `[::]` address under tokio inherits
         // the OS default, so the deployment MUST set `net.ipv6.bindv6only=1`;
         // the mapped-address check below is the belt to that braces.
-        let listener = TcpListener::bind(addr).await?;
+        let listener = TcpListener::bind(addr)
+            .await
+            .map_err(|e| std::io::Error::new(e.kind(), format!("bind {}: {e}", addr)))?;
         tracing::info!(%addr, family = family.as_str(), "beacon listening");
         tasks.push(tokio::spawn(async move {
             loop {
@@ -259,7 +275,9 @@ async fn main() -> std::io::Result<()> {
         let Some(addr) = addr else { continue };
         let state = state.clone();
         let cfg = cfg.clone();
-        let sock = UdpSocket::bind(addr).await?;
+        let sock = UdpSocket::bind(addr)
+            .await
+            .map_err(|e| std::io::Error::new(e.kind(), format!("bind {}: {e}", addr)))?;
         tracing::info!(%addr, "dns listening");
         tasks.push(tokio::spawn(
             async move { dns_loop(sock, state, cfg).await },
@@ -406,6 +424,10 @@ async fn dns_loop(sock: UdpSocket, state: Shared, cfg: Arc<Serve>) {
             continue;
         };
         let Some((token, seq, path_tag)) = dns::beacon_labels(&q.name, &cfg.zone) else {
+            // REFUSED, at once, and nothing recorded. A dropped query is not
+            // free: the querier waits out its timeout and retries, and the
+            // lab's relay waits on the unanswered upstream. See `build_refusal`.
+            let _ = sock.send_to(&dns::build_refusal(packet, &q), peer).await;
             continue;
         };
         let source = normalise(peer.ip());
@@ -427,6 +449,22 @@ async fn dns_loop(sock: UdpSocket, state: Shared, cfg: Arc<Serve>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tokens this hands out are the only thing between an observer on the
+    /// network and the ability to write arrivals into somebody else's session,
+    /// so a `random_id` that returned a constant, a short value or the same
+    /// value twice would be a hole rather than a cosmetic defect. It is also
+    /// the function that has to work on every host the oracle now runs on --
+    /// including the Windows CI runner where the old `/dev/urandom` open would
+    /// have panicked on the first session.
+    #[test]
+    fn random_ids_are_full_width_and_do_not_repeat() {
+        let a = random_id();
+        let b = random_id();
+        assert_eq!(a.len(), 32, "128 bits as hex is 32 characters: {a}");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
+        assert_ne!(a, b, "two draws from the CSPRNG must not be equal");
+    }
 
     /// A mistyped `--resolver` must fail at startup, loudly. The alternative is
     /// an oracle that starts with a half-built map, silently cannot attribute

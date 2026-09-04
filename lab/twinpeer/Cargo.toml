@@ -1,0 +1,38 @@
+# twinpeer - the TwinLab L-DATA peer. ADR-0018 §11.12: "/lab/ TwinLab; never
+# shipped."
+#
+# docs/testing-strategy.md §3.1 REALIZATION PRINCIPLE: the far end of the tunnel
+# the Windows kill-switch lane measures has to be a REAL Noise_IKpsk2 peer, so
+# this binary runs the product's own handshake (`twinvpn_core::lab::drive`) and
+# the product's own pump (`twinvpn_core::lab::Pump`) over the product's own
+# Windows adapter. Nothing here reimplements a protocol.
+[package]
+name    = "twinpeer"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description = "the TwinLab L-DATA peer: a real Noise_IKpsk2 far end for the kill-switch lane"
+
+[dependencies]
+# `lab-peer` is what opens `twinvpn_core::lab`; it is in neither `default` nor
+# `full`, so naming it here is the only thing that turns it on anywhere.
+twinvpn-core      = { workspace = true, features = ["lab-peer"] }
+# `test-support` is what makes `testkit::verified_tunnel_key` reachable, and it
+# is the ONLY way to build a `VerifiedTunnelKey` — ADR-0007 N-4 expressed as a
+# type. A lab peer goes through the same gate a test does rather than around it.
+twinvpn-crypto    = { workspace = true, features = ["test-support"] }
+twinvpn-env       = { workspace = true }
+twinvpn-platform  = { workspace = true }
+twinvpn-platform-windows = { workspace = true }
+twinvpn-types     = { workspace = true }
+
+anyhow            = { workspace = true }
+clap              = { workspace = true }
+futures-core      = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+tokio             = { workspace = true }
+tracing           = { workspace = true }
+tracing-subscriber = { workspace = true }

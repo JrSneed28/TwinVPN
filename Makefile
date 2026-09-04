@@ -218,10 +218,16 @@ test-contracts: contracts-breaking
 build: contracts verify-bindings build-rust
 	@echo "==> build complete"
 
+# `--locked` on the three gate recipes (build, clippy, test) is M-11's other
+# half. Without it a resolver that finds a lockfile it would rewrite rewrites
+# it, and the gate then proves something about a dependency graph nobody
+# committed. With it, that run refuses instead. The android clippy lane and the
+# crypto/pairing integration proofs carried the flag first; `cargo fetch
+# --locked` succeeds in all five workspaces against the committed lockfiles.
 build-rust:
 	@for w in $(WORKSPACES); do \
 	  echo "==> build $$w"; \
-	  ( cd $$w && $(CARGO) build --workspace --all-targets ) || exit 1; \
+	  ( cd $$w && $(CARGO) build --locked --workspace --all-targets ) || exit 1; \
 	done
 
 # ---------------------------------------------------------------------------
@@ -245,7 +251,7 @@ lint-rust:
 	@for w in $(WORKSPACES); do \
 	  echo "==> fmt+clippy $$w"; \
 	  ( cd $$w && $(CARGO) fmt --all -- --check && \
-	              $(CARGO) clippy --workspace --all-targets -- -D warnings ) || exit 1; \
+	              $(CARGO) clippy --locked --workspace --all-targets -- -D warnings ) || exit 1; \
 	done
 
 # Broken intra-doc links, as a gate.
@@ -588,7 +594,12 @@ cross-check:
 	@echo "    -nostdlibinc cannot supply, and cc-rs needs xcrun for iOS"
 	@echo "    regardless of CC. Apple SDK, Apple hardware. ownership.md 11,"
 	@echo "    findings G-4, G-6, G-7 and G-18."
-	@echo "    Swift (shells/ios, shells/macos): PARSED, NOT TYPE-CHECKED."
+	@if [ -f build/toolchain/env.sh ]; then . build/toolchain/env.sh; fi; \
+	if command -v swiftc >/dev/null; then \
+	  echo "    Swift (shells/ios, shells/macos): PARSED, NOT TYPE-CHECKED."; \
+	else \
+	  echo "    Swift (shells/ios, shells/macos): NOT CHECKED (no swiftc on this host)."; \
+	fi
 	@echo "    swiftc -parse proves the syntax under the pinned compiler and"
 	@echo "    proves NOTHING about types: NetworkExtension, SystemExtensions,"
 	@echo "    SwiftUI, Security and Network are absent from a Linux Swift, so"
@@ -596,7 +607,11 @@ cross-check:
 	@echo "    Kotlin (shells/android): NOT COMPILED HERE AT ALL. 22 of its 24"
 	@echo "    .kt files import android.* / androidx.*, and the two that do not"
 	@echo "    (NativeBridge.kt, Rendered.kt) reference NativeHost, which does."
-	@echo "    kotlinc IS on this host; an android.jar is not. ownership.md 9.2."
+	@if command -v kotlinc >/dev/null; then \
+	  echo "    kotlinc IS on this host; this target hands it no android.jar. ownership.md 9.2."; \
+	else \
+	  echo "    kotlinc is NOT on this host. ownership.md 9.2."; \
+	fi
 	@echo "    Every NOT CHECKED above is a statement about THIS TARGET's"
 	@echo "    coverage, not about the machine. A native Windows or Darwin build"
 	@echo "    lane would change which of these lines is still true; until one"
@@ -785,7 +800,7 @@ test: test-contracts test-rust
 test-rust:
 	@for w in $(WORKSPACES); do \
 	  echo "==> test $$w"; \
-	  ( cd $$w && $(CARGO) test --workspace ) || exit 1; \
+	  ( cd $$w && $(CARGO) test --locked --workspace ) || exit 1; \
 	done
 
 # ---------------------------------------------------------------------------
@@ -861,7 +876,7 @@ proof: proof-register proof-oracles proof-mutants
 .PHONY: test-crypto-integration test-pairing-integration test-mutation \
         ci-linux ci-windows ci-macos ci-ios ci-android test-first-wave-gate \
         ci-windows-killswitch ci-android-16k ci-macos-sysext \
-        ci-macos-signature ci-ios-corellium test-acceptance-gate-logic \
+        ci-macos-signature test-acceptance-gate-logic \
         first-wave-report
 
 # F-1. The crypto core must be exercised by the real producer/consumer paths,
@@ -942,15 +957,31 @@ ci-macos-sysext:
 ci-macos-signature:
 	@build/ci/ci-macos-signature.sh
 
-ci-ios-corellium:
-	@build/ci/ci-ios-corellium.sh
 
 # The gate's own gate. `report.py`'s prerequisite table is the only thing
 # between the acceptance report and a green row produced on a 4 KiB emulator or
 # an unprivileged Windows host, so it has a test of its own that builds
 # evidence which is perfect except for one thing and asserts the row is refused.
+#
+# THE OTHER THREE WERE WRITTEN AND THEN NEVER RUN BY ANYTHING.
+#
+# `test_producer_key_coverage.py` is the file that catches a lane forgetting an
+# environment key the checker demands -- the exact drift that would have failed
+# every platform row on fully provisioned infrastructure -- and nothing invoked
+# it: `test_report_prerequisites.py` star-imports two sibling modules and not
+# this one, and no workflow named it. It passed today and nothing would have
+# noticed if it stopped.
+#
+# The two `--self-check` entry points are the runnable halves of rules with a
+# security consequence: whether a beacon target is off the device, and whether
+# the lab DNS relay ever sends a datagram nobody asked for (a retry inside a
+# SILENCE phase manufactures a leak and fails the row against the product).
+# Neither needs an oracle, a network or a device.
 test-acceptance-gate-logic:
 	@build/acceptance/test_report_prerequisites.py
+	@build/acceptance/test_producer_key_coverage.py
+	@build/ci/leak-probe.sh --self-check
+	@build/ci/dns-forward.py --self-check
 
 # The whole gate: every host-independent blocker, executed, plus verification
 # of the machine-readable platform CI evidence. Non-zero unless every required
@@ -970,6 +1001,16 @@ test-first-wave-gate:
 # upload glob shipped the stale committed report from an old dirty worktree in
 # its place. A deferred row must not be able to destroy the gate's only
 # machine-readable answer to "what is left".
+#
+# 2026-09-04: the committed report is gone. build/acceptance/first-wave-
+# acceptance.{json,md} are untracked and ignored (root .gitignore), so there is
+# no stale copy for an upload glob to ship, and the workflow's `rm -f` of them
+# before this target no longer dirties the checkout: a deleted tracked file is
+# a dirty tree to report.py's `git status --porcelain` sample, and runs
+# 33786997948 and 33853609809 were stamped "DIRTY WORKTREE -- not release
+# evidence" with exactly that deletion in place. Nothing reads the
+# committed copy: report.py and build/ci/require-job-results.py read the file
+# this target writes.
 #
 # Nothing is weakened. The mutation row still runs, still prints, and still
 # appears in the report with its real verdict; `report.py --run` below is what

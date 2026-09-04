@@ -856,6 +856,31 @@ mod tests {
     }
 
     #[test]
+    fn the_prearming_contract_denies_everything_not_only_the_overlay() {
+        // Run 33721689011 measured the Bounded pre-contract posture letting
+        // HTTP out while armed. The pre-arming contract must read as the
+        // complement form and render a scope deny for every destination.
+        let contract = crate::netcfg::prearming_contract();
+        assert_eq!(scope_mode(&contract), ScopeMode::Complement);
+        let set = render(&contract, Ruleset::Blocked, &config());
+        set.validate().expect("installable");
+        let denies: Vec<_> = set
+            .filters
+            .iter()
+            .filter(|f| f.class == TrafficClass::ProtectedScopeDeny)
+            .map(|f| match &f.conditions[0] {
+                Condition::RemotePrefix(p) => p.prefix_len(),
+                other => panic!("a scope deny carries a prefix, not {other:?}"),
+            })
+            .collect();
+        // Baseline overlay space (100.64.0.0/10, fd7c:9e5d:2a10::/48) plus the
+        // four /1 covers, so both halves of both families are denied.
+        assert_eq!(denies.iter().filter(|l| **l == 1).count(), 4, "{denies:?}");
+        assert_eq!(denies.len(), 6, "{denies:?}");
+        assert_eq!(set.families_covered(), (true, true));
+    }
+
+    #[test]
     fn both_postures_render_a_valid_set_from_an_empty_contract() {
         // R-6, as a Windows test: `set_ruleset(_, Blocked)` on a contract with
         // no routes must still deny. The baseline is what makes an empty-scope

@@ -114,6 +114,13 @@
       ]
     },
 
+    "reason.policy_killswitch_engaged.summary": {
+      "text": "Protected traffic is blocked because no authorized secure path exists."
+    },
+    "reason.policy_killswitch_engaged.next_action": {
+      "neutral": "Wait for reconnection, or disconnect deliberately by running 'twinvpn session disconnect'. Disconnecting leaves the kill switch armed and does not unblock traffic."
+    },
+
     "reason.platform_vpn_permission_denied.summary": {
       "text": "This device has not given TwinVPN permission to create a VPN connection."
     },
