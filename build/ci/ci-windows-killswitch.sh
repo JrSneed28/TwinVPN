@@ -56,12 +56,12 @@
 # ===========================================================================
 # STEP 2 USED TO REFUSE, AND WHAT NOW STANDS IN FOR THE MISSING WRITERS
 # ===========================================================================
-# `enforce::arm` (core/crates/twinvpn-core/src/enforce.rs:185) returns
-# AUTH.IDENTITY_MISSING unless the device has a local overlay allocation AND one
-# peer with a verified tunnel-key binding. Both live only in memory, both are
-# written only through `ControlPlanePort`, and NEITHER HAS A PRODUCTION WRITER
-# YET -- so `net up` refused, blocked the host on the way out, and `twinvpnctl`
-# exited non-zero on every run.
+# `enforce::arm` (core/crates/twinvpn-core/src/enforce.rs:185-198) returns
+# AUTH.IDENTITY_MISSING without a local overlay allocation and
+# AUTH.PEER_UNTRUSTED without one peer with a verified tunnel-key binding. Both
+# live only in memory, both are written only through `ControlPlanePort`, and
+# NEITHER HAS A PRODUCTION WRITER YET -- so `net up` refused, blocked the host
+# on the way out, and `twinvpnctl` exited non-zero on every run.
 #
 # What closes it here is a LAB SEED and nothing else: `twinpeer seed` on L1
 # generates one tunnel's key material, the guest half is pushed in below, and a
@@ -157,7 +157,8 @@ l1() {
   pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$L1PS" "$@" 2>&1 | tr -d '\r'
 }
 # Every guest step's output is teed into one log: the precondition facts, the
-# lifecycle markers and the `net up` refusal are all scraped back out of it.
+# lifecycle markers and the `net up` reply (a refusal, or the committed
+# contract) are all scraped back out of it.
 # Absent arguments are OMITTED rather than passed as empty strings, which
 # `powershell.exe -File` does not carry reliably across the shell boundary.
 guest() {
@@ -434,6 +435,10 @@ set -e
 # an aborted run with no evidence at all.
 NET_UP_EXIT="$(grep -E '^TWINVPN_NET_UP_EXIT ' "$GUESTLOG" | head -1 | awk '{print $2}' || true)"
 NET_UP_EXIT="${NET_UP_EXIT:-$net_up_step_exit}"
+# `net_up_refusal` IS A HISTORICAL NAME, kept. It holds whatever `net up`
+# printed between the OUTPUT markers: a refusal or an error before the lab
+# seed, the committed contract (`"ok":true`, run 33786997948) since. The
+# evidence key is not renamed because it is the schema a reader binds to.
 NET_UP_REFUSAL="$(awk '/^TWINVPN_NET_UP_OUTPUT_BEGIN$/{f=1;next} /^TWINVPN_NET_UP_OUTPUT_END$/{f=0} f' \
                    "$GUESTLOG" | twinvpn_python -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()[:2000]))')"
 echo "::endgroup::"

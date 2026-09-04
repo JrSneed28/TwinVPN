@@ -63,9 +63,11 @@ $SvcLog  = Join-Path $Root 'twinvpnsvc.log'
 # THE LAB SEED, read by a `lab-seed` build of the service and by nothing else.
 # `enforce::arm` needs a local overlay allocation and one peer with a verified
 # tunnel-key binding, both of which live only in memory and have no production
-# writer yet, so without this `net up` refuses AUTH.IDENTITY_MISSING and every
-# phase after BASELINE is silent. `ci-windows-killswitch.sh` pushes the file the
-# lab peer generated on L1; the service's `Environment` value below names it.
+# writer yet, so without this `net up` refuses AUTH.IDENTITY_MISSING (no
+# allocation; a seed carrying an allocation but no verified peer earns
+# AUTH.PEER_UNTRUSTED instead) and every phase after BASELINE is silent.
+# `ci-windows-killswitch.sh` pushes the file the lab peer generated on L1; the
+# service's `Environment` value below names it.
 $SeedFile = Join-Path $Root 'lab-seed.json'
 # ADR-0020 §11.9's Windows row and TwinVPN.wxs's `StoreDirectory`: the
 # installer creates the store root with its ACL; the service creates `tier1`

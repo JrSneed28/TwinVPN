@@ -30,13 +30,30 @@ name: First Implementation Wave — acceptance gate
 #   macos-pf-anchor        MACOS-PF-BOOT-ANCHOR, hosted macos-26 as root
 #   macos-signature        MACOS-PRODUCTION-SIGNATURE -- a DIFFERENT claim
 #
-#   Two criteria have NO EXECUTOR and no job: IOS-NE-FAIL-CLOSED (a packet
-#   tunnel provider cannot run in the simulator; every device farm strips the
-#   entitlement) and MACOS-SYSEXT-LIFECYCLE (activation needs Apple's
-#   packet-tunnel-provider-systemextension grant and an approval a CI job
-#   cannot give). Their rows read NOT-EXECUTED with that reason and count
-#   against eligibility; see docs/implementation/remote-acceptance-
-#   infrastructure.md.
+#   Two criteria have NO EXECUTOR IN THIS GATE and no job (reasons corrected
+#   2026-09-04: the earlier wording blamed an Apple entitlement grant and
+#   "every device farm", and neither holds).
+#
+#   IOS-NE-FAIL-CLOSED: the packet tunnel provider does not run in the iOS
+#   simulator, so it needs a physical iPhone whose UDID is in the development
+#   profile on a farm that installs the app unsigned-by-them (AWS Device Farm
+#   private devices, Sauce Labs private devices, BrowserStack Custom Device
+#   Lab; Firebase, Bitrise and Xcode Cloud always re-sign), plus an iOS lab
+#   seed and a reachable peer and oracle, none of which exist.
+#
+#   MACOS-SYSEXT-LIFECYCLE: activating the production system extension needs
+#   a paid Apple Developer Program team (the Network Extensions and System
+#   Extension capabilities are self-service; the free tier lacks them), a
+#   Developer-ID-signed build, and a Mac where a person or a Device-Enrollment
+#   MDM approves the activation. No GitHub-hosted runner has an MDM; an
+#   MDM-enrolled EC2 Mac could, and the 2026-09-02 rule in the next section
+#   excludes cloud Macs.
+#
+#   Their rows read NOT-EXECUTED with that reason and count against
+#   eligibility. Whether they stay required or are deferred (the `required`
+#   flag on each row in `build/acceptance/report.py`) is the owner's OD-1
+#   decision, not made as of 2026-09-04; see docs/implementation/
+#   remote-acceptance-infrastructure.md.
 #
 #   first-wave-acceptance  the conjunction, computed from evidence
 #
@@ -87,6 +104,9 @@ name: First Implementation Wave — acceptance gate
 # device can only reach by emitting a packet that left it, and
 # `first-wave-acceptance` fetches its verdict FROM THE ORACLE rather than from
 # anything a platform job uploaded.
+# (Since 2026-09-02 the only oracle in this workflow is the kill-switch lane's
+# in-box one, and that lane uploads its report itself; see the dated addendum
+# on the `fetch the leak-oracle reports for this run's sessions` step.)
 # ===========================================================================
 
 on:
@@ -753,15 +773,16 @@ jobs:
   # guarantee it otherwise. One workflow, one run, one `download-artifact`, and
   # that whole class of mistake is gone.
   #
-  # WHAT REPLACED `needs:` FOR THE TWO SELF-HOSTED JOBS. A `needs:` on a job
-  # whose runner label is not registered does not fail -- it QUEUES, for up to
-  # twenty-four hours, and the gate sits pending instead of returning a verdict.
-  # A check that cannot go red is not a gate. So each self-hosted job is gated
-  # on a REPOSITORY VARIABLE that says the rig exists. Unset, the job SKIPS;
-  # `first-wave-acceptance` runs under `always()` and its `needs:` are satisfied
-  # by a skip; no evidence file is produced; and `report.py` reads the row as
-  # NOT-EXECUTED, which counts against Phase 5 eligibility exactly as a failure
-  # does. Immediately, and by name.
+  # NO JOB HERE HAS A SELF-HOSTED LABEL (2026-09-02), so none can queue: a
+  # `needs:` on a job whose runner label is not registered does not fail, it
+  # QUEUES for up to twenty-four hours, and the repository-variable gates of
+  # the old self-hosted jobs existed only to avoid that. The one variable gate
+  # left is `macos-signature`'s `TWINVPN_NOTARIZED_APP_URL`, an Apple Developer
+  # Program fact: unset, that job SKIPS by name; `first-wave-acceptance` runs
+  # under `always()` and its `needs:` is satisfied by the skip; no evidence
+  # file is produced; and `report.py` reads the row as NOT-EXECUTED, which
+  # counts against Phase 5 eligibility exactly as a failure does. Immediately,
+  # and by name.
 
   # =========================================================================
   # WINDOWS-WFP-KILLSWITCH -- hosted windows-2025 as L1, the device under test
@@ -836,8 +857,13 @@ jobs:
       - name: prefetch the guest ISO in the background
         run: scripts\twinvpn-l1.ps1 -Action prefetch-iso
 
-      # The observer. It runs on this host, beside the guest, on a segment the
-      # guest reaches only through its default route.
+      # The observer. It runs on this host, beside the guest. Its control and
+      # DNS surfaces sit on a second, ROUTED segment the guest reaches only
+      # through its default route; its beacon listeners sit on the lab peer's
+      # overlay addresses (100.64.1.2 / fd7c:9e5d:2a10:1::2, Start-Observers in
+      # `scripts/twinvpn-l1.ps1`), reached through the default route during
+      # BASELINE and through the tunnel once it is up. Neither is on-link with
+      # the guest.
       - name: build the leak oracle
         run: cargo build --locked --release -p twinoracle
         working-directory: lab
@@ -954,8 +980,8 @@ jobs:
           # log and the precondition output. Source addresses of OUR OWN
           # beacons, timestamps and counts: no key, no pairing secret, no token,
           # no tunnel plaintext, no capture. Uploaded on success as well as
-          # failure, because a run that is blocked on product wiring is the
-          # normal outcome today and its logs are the point.
+          # failure, because the guest transcript is the only record of what
+          # the product did inside a guest that no longer exists.
           name: diagnostics-windows-killswitch
           path: build/ci/logs/windows/**
           if-no-files-found: ignore
@@ -1443,10 +1469,9 @@ jobs:
     #
     # `always()` means every entry in `needs:` above is satisfied by a job that
     # FAILED, was CANCELLED, or was SKIPPED. A skip is the ordinary outcome for
-    # the three self-hosted jobs -- they are gated on a repository variable
-    # precisely so that an unregistered runner skips instead of queueing for
-    # twenty-four hours -- so a run with no rigs provisioned at all reaches this
-    # job with every `needs:` "satisfied" and nothing having been proved.
+    # `macos-signature` when `TWINVPN_NOTARIZED_APP_URL` is unset, so a run
+    # with no Apple facts configured reaches this job with that `needs:`
+    # "satisfied" and the signature row unproved.
     #
     # That leaves the gate's redness resting entirely on
     # `build/acceptance/report.py`, which grades EVIDENCE FILES. It is a good
@@ -1568,8 +1593,9 @@ jobs:
       # report.py grades EVIDENCE FILES, and a job that never got as far as
       # writing one leaves nothing behind. Its row then says "no evidence",
       # which is equally true of a job that failed in setup, a job its own
-      # timeout cancelled, and a job that was SKIPPED because its self-hosted
-      # runner is not registered -- three different problems and one sentence,
+      # timeout cancelled, and a job that was SKIPPED because
+      # `TWINVPN_NOTARIZED_APP_URL` is unset -- three different problems and
+      # one sentence,
       # with the most dangerous of them, the skip, looking the most like routine
       # absence.
       #
@@ -1609,6 +1635,20 @@ jobs:
       # platform job -- because the platform job is the defendant. A job that
       # leaked could upload a report saying it did not; it cannot make the
       # oracle say so.
+      #
+      # THAT IS THE EXTERNAL-ORACLE PATH, AND SINCE 2026-09-02 NOTHING HERE
+      # TAKES IT: `TWINVPN_ORACLE_URL` reaches no job but this step. The
+      # kill-switch lane, the only lane in this workflow that runs an oracle
+      # session, keeps its oracle in-box, where it dies with the runner, so
+      # that lane uploads the oracle's own report bytes itself
+      # (`evidence-windows-killswitch`; the download step above copies them
+      # into `build/ci/evidence/oracle/`) and the script below exits 0 on the
+      # unconfigured case with a count of what arrived. What stands in for the
+      # aggregator's custody there is the token split: the L1 controller holds
+      # the oracle control token and the guest under test holds none
+      # (`scripts/twinvpn-l1.ps1`, "The control token stays on this machine"),
+      # so the defendant cannot open, declare or close a session, let alone
+      # tell the oracle what to say.
       #
       # `continue-on-error` IS GONE FROM THIS STEP, AND ITS ABSENCE IS THE
       # CHANGE.
@@ -1675,20 +1715,31 @@ jobs:
           PY
 
 
-      # THE COMMITTED REPORT IS DELETED FIRST, AND THAT IS THE POINT.
+      # ANY STALE REPORT IS DELETED FIRST, AND THAT IS THE POINT.
       #
-      # `build/acceptance/first-wave-acceptance.{json,md}` are tracked, so a copy
-      # from whenever someone last ran the report locally is sitting in the
-      # checkout. The upload below globs that path. In run 33352434440 the make
-      # target died before `report.py` ran, and the artifact went out carrying a
-      # report from commit c896d823 that even says "DIRTY WORKTREE -- not release
-      # evidence" -- presented, by its filename and its artifact name, as this
-      # run's answer.
+      # `build/acceptance/first-wave-acceptance.{json,md}` were TRACKED until
+      # 2026-09-04, when they were untracked and gitignored, so a copy from
+      # whenever someone last ran the report locally sat in every checkout, and
+      # the upload below globs that path. In run 33352434440 the make target
+      # died before `report.py` ran, and the artifact went out carrying a
+      # report from commit c896d823 that even says "DIRTY WORKTREE -- not
+      # release evidence" -- presented, by its filename and its artifact name,
+      # as this run's answer. Deleting a tracked file also put a ` D` line into
+      # the `git status --porcelain` sample `report.py` reads to set
+      # `worktree_dirty` (report.py:1021, any non-empty output), which is one
+      # of the two lines that gave run 33786997948's report that same DIRTY
+      # WORKTREE mark on a clean checkout. Untracking removes that line, not
+      # the mark: the download step above writes `build/ci/evidence-download/`,
+      # and `build/ci/.gitignore` ignores only `evidence/` and `logs/`, so on
+      # every run that downloads anything (33786997948 did) that directory is a
+      # second `??` line in the same sample. The DIRTY mark stays until
+      # `evidence-download/` is gitignored or removed before `report.py` runs.
       #
-      # Stale evidence offered as current is the exact failure this gate exists
-      # to prevent, so remove it and let `if-no-files-found: error` on the upload
-      # turn "no report was produced" into a loud, visible failure instead of a
-      # quiet substitution.
+      # The `rm -f` stays: on a clean checkout it removes nothing, and it still
+      # covers a hand-copied or cache-restored file. Stale evidence offered as
+      # current is the exact failure this gate exists to prevent, so remove it
+      # and let `if-no-files-found: error` on the upload turn "no report was
+      # produced" into a loud, visible failure instead of a quiet substitution.
       - name: make test-first-wave-gate
         run: |
           rm -f build/acceptance/first-wave-acceptance.json \
@@ -1716,15 +1767,16 @@ jobs:
       # gate's legibility for nothing: the job goes red either way.
       #
       # `if: always()` so it also runs when `make test-first-wave-gate` already
-      # failed. The job is red by then, but this step is what says WHICH runner
-      # or WHICH repository variable is missing, and that sentence is the only
-      # actionable output of a run with no rigs provisioned.
+      # failed. The job is red by then, but this step is what says WHICH job
+      # did not succeed and, for `macos-signature`, WHICH repository variable
+      # is missing, and that sentence is the only actionable output of a run
+      # with nothing configured.
       #
       # What it enforces, from `toJSON(needs)`, which nothing else in the run can
       # see: every required job returned `success`. Not `skipped` -- the ordinary
-      # result of an unregistered self-hosted label or a false
-      # `TWINVPN_*_ENABLED`. Not `cancelled` -- a timeout expiry or a superseding
-      # run. Not `failure`. Not absent from `needs:` at all, which is what
+      # result of an unset `TWINVPN_NOTARIZED_APP_URL`. Not `cancelled` -- a
+      # timeout expiry or a superseding run. Not `failure`. Not absent from
+      # `needs:` at all, which is what
       # happens when somebody edits the dependency list and a criterion silently
       # stops being required.
       #
