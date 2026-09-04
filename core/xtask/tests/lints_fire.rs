@@ -7,6 +7,7 @@
 
 use xtask::checks::{self, Violation};
 use xtask::manifest::{Package, Workspace};
+use xtask::secret_debug;
 use xtask::source::ScannedFile;
 
 fn dp(name: &str, deps: &[&str]) -> Package {
@@ -669,6 +670,71 @@ fn u22_is_silent_on_a_workspace_with_no_updater() {
         dp("twinvpn-session", &["twinvpn-store"]),
     ]);
     assert!(checks::u22_updater_unlinked(&workspace).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// R-9
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r9_fires_on_a_derived_debug_over_a_zeroizing_type() {
+    let planted = r"
+        /// The transport secret.
+        #[derive(Debug, zeroize::ZeroizeOnDrop)]
+        pub struct SessionKey([u8; 32]);
+    ";
+    let file = ScannedFile::new("crates/twinvpn-tunnel/src/keys.rs", planted);
+    let found = secret_debug::r9(&file);
+    assert_eq!(rules(&found), vec!["R-9"], "{found:?}");
+    assert!(found[0].location.contains("keys.rs:3"), "{:?}", found[0]);
+    assert!(found[0].detail.contains("SessionKey"), "{:?}", found[0]);
+}
+
+#[test]
+fn r9_fires_on_the_marker_and_reads_stacked_attributes_as_one() {
+    let cases = [
+        // The marker convention, for a type whose erasure is not a derive.
+        "/// The pre-shared key.\n// twinvpn: secret\n#[derive(Clone, Debug)]\npub(crate) struct Psk(Vec<u8>);",
+        // Stacked attributes: the derives are read as one cluster.
+        "#[derive(Debug)]\n#[derive(Zeroize)]\nenum KeySource { Pkcs8Der(Vec<u8>) }",
+        // A test-only Debug still renders the secret in test output.
+        "#[cfg_attr(test, derive(Debug))]\n#[derive(ZeroizeOnDrop)]\nstruct Ikm([u8; 32]);",
+    ];
+    for planted in cases {
+        let file = ScannedFile::new("crates/twinvpn-crypto/src/psk.rs", planted);
+        let found = secret_debug::r9(&file);
+        assert_eq!(
+            rules(&found),
+            vec!["R-9"],
+            "R-9 did not fire on {planted:?}"
+        );
+    }
+}
+
+#[test]
+fn r9_is_silent_on_a_redacting_impl_an_unmarked_type_and_prose() {
+    // The opt-out R-9 asked for is the redacting impl, and nothing else: a
+    // type that has one has no derive left to fire on. A type nothing marks
+    // may derive what it likes, and prose about the rule is not the rule.
+    let clean = r#"
+        //! R-9 refuses `#[derive(Debug)]` on a type marked `// twinvpn: secret`.
+        #[derive(ZeroizeOnDrop)]
+        pub struct SharedSecret(Vec<u8>);
+        impl core::fmt::Debug for SharedSecret {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.debug_struct("SharedSecret").field("len", &self.0.len()).finish()
+            }
+        }
+        /// Operational, not secret: a derived Debug is fine.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct Namespace(u8);
+        const WHY: &str = "// twinvpn: secret";
+        #[derive(Debug)]
+        pub struct Report { secret_len: usize }
+    "#;
+    let file = ScannedFile::new("crates/twinvpn-platform/src/custody.rs", clean);
+    let found = secret_debug::r9(&file);
+    assert!(found.is_empty(), "R-9 fired on clean source: {found:?}");
 }
 
 // ---------------------------------------------------------------------------
