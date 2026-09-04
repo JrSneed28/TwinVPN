@@ -240,21 +240,23 @@ impl MonotoneVersion {
     ///
     /// # Errors
     ///
-    /// [`CpError::TrustEpochRollback`] (R-5) below the mark, and
-    /// [`CpError::TrustHistoryForked`] (R-4) at the same version with different
-    /// content — the client-side detector for E-1(c).
+    /// [`CpError::VersionRollbackRejected`] (R-5) below the mark, and
+    /// [`CpError::ForkedHistoryDetected`] (R-4) at the same version with
+    /// different content — the client-side detector for E-1(c). Both are
+    /// `CONTROL.CONSISTENCY.*` codes: these are document versions, and the
+    /// `AUTH.*` codes belong to the trust floors alone (ADR-0007 N-26, W-11).
     pub fn admit(self, offered: u64, digest: [u8; 32]) -> Result<VersionAdmission, CpError> {
         if offered < self.version {
-            return Err(CpError::TrustEpochRollback {
-                offered_epoch: offered,
-                high_water_epoch: self.version,
+            return Err(CpError::VersionRollbackRejected {
+                offered_version: offered,
+                high_water_version: self.version,
             });
         }
         if offered == self.version {
             return if digest == self.content_digest {
                 Ok(VersionAdmission::NoOp)
             } else {
-                Err(CpError::TrustHistoryForked { epoch: offered })
+                Err(CpError::ForkedHistoryDetected { version: offered })
             };
         }
         Ok(VersionAdmission::Accept)
@@ -339,12 +341,26 @@ mod tests {
         assert!(stored.admit(41, [8u8; 32]).is_ok());
         assert!(stored.admit(40, [7u8; 32]).is_ok(), "R-3 idempotent no-op");
 
+        // R-5 and R-4 name their codes; a document is not a trust floor, and
+        // the AUTH prefix would tell an older client the wrong thing (W-11).
         let rollback = stored.admit(39, [7u8; 32]).expect_err("R-5");
-        assert_eq!(rollback.reason_code().as_str(), "AUTH.TRUST_EPOCH_ROLLBACK");
+        assert_eq!(
+            rollback.reason_code().as_str(),
+            "CONTROL.CONSISTENCY.VERSION_ROLLBACK_REJECTED"
+        );
+        assert!(rollback.is_security_event());
+        assert!(!rollback.reason_code().terminal());
 
         let fork = stored.admit(40, [9u8; 32]).expect_err("R-4");
-        assert_eq!(fork.reason_code().as_str(), "AUTH.TRUST_HISTORY_FORKED");
+        assert_eq!(
+            fork.reason_code().as_str(),
+            "CONTROL.CONSISTENCY.FORKED_HISTORY_DETECTED"
+        );
         assert!(fork.is_security_event());
+        // A refused document is not an instruction that trust has ended: the
+        // device keeps the version it holds and keeps its peers (I5).
+        assert!(rollback.permits_offline_reconnect());
+        assert!(fork.permits_offline_reconnect());
     }
 
     #[test]

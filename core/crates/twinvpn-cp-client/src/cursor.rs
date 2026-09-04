@@ -11,7 +11,11 @@
 //! 1. **The cursor is durable and local-authority.** S-27's conflict rule is
 //!    "local wins; a server-offered cursor below the local high-water MUST be
 //!    rejected". A control plane that offers us a lower position is either
-//!    behind or hostile, and either way we do not go backwards.
+//!    behind or hostile, and either way we do not go backwards. The refusal is
+//!    `CONTROL.CONSISTENCY.REPLICA_BEHIND_CURSOR` — E-1(c)'s code for a replica
+//!    whose position cannot satisfy our causality token, declaring exactly the
+//!    two `net_seq` values — and not `AUTH.TRUST_EPOCH_ROLLBACK`, which is
+//!    ADR-0007 N-26's code for a different fact (W-11).
 //! 2. **Resume, never reload.** Re-snapshotting on every reconnect converts a
 //!    reconnect storm into a bandwidth storm. A full re-snapshot happens only on
 //!    `CONTROL.CURSOR_TOO_OLD` or a rebuilt log.
@@ -60,14 +64,14 @@ impl Cursor {
     ///
     /// # Errors
     ///
-    /// [`CpError::TrustEpochRollback`] when the server offers a position below
+    /// [`CpError::ReplicaBehindCursor`] when the server offers a position below
     /// our durable mark. S-27: "a server-offered cursor below the local
     /// high-water MUST be rejected".
     pub const fn accept_server_position(self, offered: u64) -> Result<(), CpError> {
         if offered < self.high_water {
-            return Err(CpError::TrustEpochRollback {
-                offered_epoch: offered,
-                high_water_epoch: self.high_water,
+            return Err(CpError::ReplicaBehindCursor {
+                min_net_seq: self.high_water,
+                replica_net_seq: offered,
             });
         }
         Ok(())
@@ -77,13 +81,14 @@ impl Cursor {
     ///
     /// # Errors
     ///
-    /// [`CpError::TrustEpochRollback`] on a regression. The caller persists the
-    /// returned value, then calls [`Cursor::commit`] — ADR-0009 R-9's ordering.
+    /// [`CpError::ReplicaBehindCursor`] on a regression — the stream served at
+    /// or below our mark. The caller persists the returned value, then calls
+    /// [`Cursor::commit`] — ADR-0009 R-9's ordering.
     pub const fn advance_to(self, net_seq: u64) -> Result<u64, CpError> {
         if net_seq <= self.high_water {
-            return Err(CpError::TrustEpochRollback {
-                offered_epoch: net_seq,
-                high_water_epoch: self.high_water,
+            return Err(CpError::ReplicaBehindCursor {
+                min_net_seq: self.high_water,
+                replica_net_seq: net_seq,
             });
         }
         Ok(net_seq)
@@ -200,7 +205,24 @@ mod tests {
         let err = cursor
             .accept_server_position(899)
             .expect_err("S-27: local wins");
-        assert_eq!(err.reason_code().as_str(), "AUTH.TRUST_EPOCH_ROLLBACK");
+        // E-1(c)'s code, carrying its declared evidence — not the trust-epoch
+        // code, which would degrade to "authentication problem" (W-11).
+        assert_eq!(
+            err.reason_code().as_str(),
+            "CONTROL.CONSISTENCY.REPLICA_BEHIND_CURSOR"
+        );
+        assert!(!err.is_security_event());
+        assert!(
+            err.permits_offline_reconnect(),
+            "we keep running on the cache"
+        );
+        let evidence = err.diagnostic();
+        assert!(evidence.evidence().get("min_net_seq").is_some());
+        assert!(evidence.evidence().get("replica_net_seq").is_some());
+        assert_eq!(
+            cursor.advance_to(900).expect_err("a replay").reason_code(),
+            err.reason_code()
+        );
     }
 
     #[test]
